@@ -1,13 +1,15 @@
 // Catalogue des types. L'ordre est celui d'affichage sur le site.
 export const TYPES = {
-  generative: 'Génératif',
-  shader: 'Shaders',
   typography: 'Typographie',
-  color: 'Couleur',
+  system: 'Langages visuels',
+  shapes: 'Formes',
   pattern: 'Motifs',
-  image: 'Image',
-  animation: 'Animation',
-  audio: 'Audio',
-  '3d': '3D',
+  generative: 'Génératif',
+  motion: 'Motion & vidéo',
+  webgl: 'WebGL & 3D',
+  filter: 'Filtres & image',
+  gradient: 'Dégradés',
+  color: 'Couleur',
+  audio: 'Audio-réactif',
   utility: 'Utilitaires',
 };
