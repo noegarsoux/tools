@@ -32,6 +32,8 @@ jobs:
       CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
       GH_TOKEN: ${{ secrets.AGENT_GITHUB_TOKEN }}
       MAX_TOOLS: ${{ inputs.max_tools || '20' }}
+      # Modèles utilisés à tour de rôle, un outil chacun (voir la liste avec list_models).
+      MODELS: grok-4.7-xhigh-fast claude-opus-5-5-xhigh
     steps:
       - uses: actions/checkout@v4
         with:
@@ -61,10 +63,12 @@ jobs:
         if: ${{ !inputs.list_models }}
         run: |
           CLI=$(command -v cursor-agent || command -v agent)
+          read -ra models <<< "$MODELS"
           for i in $(seq 1 "$MAX_TOOLS"); do
-            echo "::group::Outil $i"
+            model=${models[$(( (i - 1) % ${#models[@]} ))]}
+            echo "::group::Outil $i ($model)"
             set +e
-            "$CLI" -p --force --output-format text \
+            "$CLI" -p --force --model "$model" --output-format text \
               "Lis AGENTS.md et réalise UNE itération complète de la boucle de travail (étapes 1 à 8) en tant qu'agent 'cursor'. Termine quand la PR est ouverte, ou supprime le dossier si l'outil ne peut pas être fini." \
               2>&1 | tee "run-$i.log"
             code=${PIPESTATUS[0]}
