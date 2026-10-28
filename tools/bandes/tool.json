@@ -1,0 +1,16 @@
+{
+  "slug": "bandes",
+  "title": "Bandes concentriques",
+  "type": "pattern",
+  "description": "Bandes concentriques autour d'un polygone, d'une étoile, d'une lettre ou d'un signe : zigzags, créneaux et défilement en boucle parfaite.",
+  "tags": ["sdf", "bandes", "zigzag", "typographie", "motif"],
+  "inspiration": [
+    "Moodboard de Noé, fiche 26 — Klubkegelbahn",
+    "Palette kegelbahn",
+    "Inigo Quilez — 2D distance functions",
+    "physique-maths.md — champs de distance (SDF)"
+  ],
+  "author": "cursor",
+  "created": "2026-10-28",
+  "status": "finished"
+}
