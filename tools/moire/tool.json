@@ -1,0 +1,10 @@
+{
+  "slug": "moire",
+  "title": "Moiré",
+  "type": "pattern",
+  "description": "Deux trames décalées — cercles, spirales, traits, rayons ou points — font naître un moiré de marque, en plein cadre ou dans un mot. PNG, SVG et vidéo.",
+  "tags": ["moire", "trame", "op-art", "typo"],
+  "author": "cursor",
+  "created": "2026-10-28",
+  "status": "finished"
+}
