@@ -13,9 +13,9 @@ Une idée est faite quand son dossier existe dans `tools/`. Les agents ne modifi
 - [ ] ★ **Caustiques** : la lumière sous l'eau en réseaux lumineux, calculée par déformation d'un maillage de rayons. Le logo est projeté au fond. → physique-maths.md (lumière)
 - [ ] ★ **Lignes de champ** : aimants et charges déplaçables, limaille et lignes de champ tracées en RK4. Le logo est fait d'aimants. → physique-maths.md (champs)
 - [ ] ★ **Harmonographe** : pendules amortis couplés, rapports de fréquences, rosaces en traits fins qui se dessinent. Export SVG. → physique-maths.md (Lissajous)
-- [ ] ★ **Pendulum wave** : une rangée de pendules aux périodes en progression, des vagues qui se forment et se défont. Ce sont des lettres ou des formes de marque qui pendent. → physique-maths.md (pendules)
+- [ ] ★ **Pendulum wave** : une rangée de pendules aux périodes en progression, des vagues qui se forment et se défont. Ce sont des formes de marque ou le logo qui pendent. → physique-maths.md (pendules)
 - [ ] ★ **Fluide d'encre** : Stable Fluids (Stam) en WebGL, encre de marque injectée au pointeur, vorticité, logo comme obstacle. → physique-maths.md (fluides)
-- [ ] ★ **Orbites** : les mots d'une marque sur de vraies orbites képlériennes. On attrape un mot pour changer son orbite. Palette `orbite`. → moodboard 18 ; physique-maths.md (gravitation)
+- [ ] ★ **Orbites** : des formes de marque (ou le logo) sur de vraies orbites képlériennes. On attrape un corps pour changer son orbite. Palette `orbite`. → moodboard 18 ; physique-maths.md (gravitation)
 - [ ] ★ **Couches minces** : iridescence de bulle de savon et d'huile sur l'eau, épaisseur animée par un fluide lent. → physique-maths.md (lumière)
 - [ ] **Réaction-diffusion typographique** : Gray-Scott avec la typo de marque comme graine et masque, carte de Pearson pour choisir le régime. → Karl Sims ; physique-maths.md
 - [ ] **DLA et givre** : croissance par diffusion à partir d'un logo, cristaux hexagonaux. → physique-maths.md (matière)
@@ -33,10 +33,10 @@ Une idée est faite quand son dossier existe dans `tools/`. Les agents ne modifi
 - [ ] **Hypercube** : projections de cubes 4D à 6D en rotation, arêtes partielles. → Manfred Mohr ; artistes.md
 
 ## Trames et points
-- [ ] ★ **Trame liquide** : une image, un logo ou un mot en trame de points qui fusionnent en métaballes. Grille carrée, hexagonale ou en phyllotaxie, mode « trame ouverte » avec texte sur chemin, numérotation de série. Palettes `gris-0006`, `trame-nuit`. → moodboard 2 et 25
-- [ ] ★ **Voxels de points** : un glyphe ou un logo extrudé dans une grille 3D de points, en rotation et en orbite au pointeur. → moodboard 3
+- [ ] ★ **Trame liquide** : une image, un logo ou un mot en trame de points qui fusionnent en métaballes. Grille carrée, hexagonale ou en phyllotaxie, mode « trame ouverte ». Palettes `gris-0006`, `trame-nuit`. → moodboard 2 et 25
+- [ ] ★ **Voxels de points** : un logo ou une forme extrudé dans une grille 3D de points, en rotation et en orbite au pointeur. → moodboard 3
 - [ ] ★ **Trame en fuite** : une trame projetée vers un point de fuite qui suit le pointeur, traînées et flou de zoom. → moodboard 4
-- [ ] ★ **Marques en points** : générateur de monogrammes en points (grilles, cisaillement, fusions), planche de variantes numérotées. Palette `papier-60`. → moodboard 7 ; Gerstner
+- [ ] ★ **Marques en points** : générateur de monogrammes en points (grilles, cisaillement, fusions), planche de variantes. Palette `papier-60`. → moodboard 7 ; Gerstner
 - [ ] ★ **Trame en barres** : une image ou une vidéo rendue en tirets horizontaux, seuil animé, moiré volontaire. Palette `photocopie`. → moodboard 17
 - [ ] **Dithering de marque** : Bayer, Atkinson, Floyd-Steinberg, bruit bleu avec 2 à 4 couleurs de la charte, seuil animé. → Surma, Ditherpunk ; techniques.md
 - [ ] **Halftone CMJN** : trames par canal avec angles, formes de points, moiré volontaire. → techniques.md
@@ -78,7 +78,7 @@ Une idée est faite quand son dossier existe dans `tools/`. Les agents ne modifi
 - [ ] **Stippling de Voronoï pondéré** : portrait ou logo en points (relaxation de Lloyd), animé. → Secord ; techniques.md
 
 ## WebGL & 3D
-- [ ] ★ **Tubes chromés** : formes et lettres gonflées en chrome (raymarching, matcap de marque), tubes dessinés au pointeur. Palette `luzern`. → moodboard 27 ; shaders.md
+- [ ] ★ **Tubes chromés** : formes gonflées en chrome (raymarching, matcap de marque), tubes dessinés au pointeur. Palette `luzern`. → moodboard 27 ; shaders.md
 - [ ] **Marbre domain warping** : warp à deux niveaux coloré par q et r, gradient map de marque. → Quilez ; shaders.md
 - [ ] **Verre et réfraction** : texte ou logo derrière un bloc de verre qui disperse la lumière. → physique-maths.md (lumière) ; shaders.md
 

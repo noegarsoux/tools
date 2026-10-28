@@ -38,9 +38,9 @@
           bg: { type: 'color', label: 'Fond', value: '#111114' },
           palette: { type: 'palette', label: 'Palette', value: ['#0d99ff', '#ff4d1a', '#f4efe6'] },
         },
-        'Contenu': {
-          text: { type: 'text', label: 'Texte', value: 'ATELIER' },
-          font: { type: 'font', label: 'Typo', options: { Inter: 'Inter', Georgia: 'Serif' }, value: 'Inter' },
+        'Centre': {
+          core: { type: 'toggle', label: 'Noyau', value: true },
+          coreSize: { type: 'range', label: 'Taille du noyau', min: 0.02, max: 0.3, step: 0.01, value: 0.08, show: (p) => p.core },
         },
       },
       presets: {
@@ -75,10 +75,7 @@
         else if (p.shape === 'ring') { ctx.arc(x, y, s, 0, Math.PI * 2); ctx.stroke(); }
         else { ctx.arc(x, y, s, 0, Math.PI * 2); ctx.fill(); }
       }
-      ctx.fillStyle = p.palette[0];
-      ctx.font = `700 ${u * 0.06}px ${p.font}, sans-serif`;
-      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-      ctx.fillText(p.text, w / 2, h / 2);
+      if (p.core) { ctx.fillStyle = p.palette[0]; ctx.beginPath(); ctx.arc(w / 2, h / 2, u * p.coreSize, 0, Math.PI * 2); ctx.fill(); }
       app.finish(ctx);
     });
   </script>

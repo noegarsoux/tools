@@ -6,6 +6,10 @@ Les images ne sont pas copiées dans le dépôt, qui est public. Chaque fiche d�
 
 **Palettes.** Les palettes de ce fichier existent dans le kit : `Atelier.PALETTES`. Dans chaque outil, elles sont sous Réglages → Charte de marque → Palettes. La première couleur est le fond, les suivantes sont les encres. Un outil peut s'en servir pour ses presets : `colors: Atelier.PALETTES.bitmap.colors`. Cite le nom de la palette dans `inspiration`.
 
+## Règle
+
+Jamais de texte dans le rendu d'un outil, sauf pour les outils typographiques. Les fiches qui parlent de typo (10, 11, 16, 19, 22, 23, 24) donnent des outils typographiques. Pour les autres, la forme de marque vient du logo importé ou de figures géométriques.
+
 ## Ce qui revient dans la sélection
 
 - **Le point et la trame.** Des points qui fusionnent en métaballes, s'étirent en perspective, deviennent des voxels ou une trame qui s'ouvre (fiches 2, 3, 4, 7, 25). La trame n'est pas un filtre : c'est la matière du dessin.
@@ -27,13 +31,13 @@ Du sable sur une plaque qui vibre se range sur les lignes nodales, là où la pl
 Deux silhouettes humaines faites de points noirs qui fusionnent entre voisins, sur gris moyen, numérotées « 0006 » comme une série.
 - **Mécanique** : trame de points dont le rayon suit la densité d'une image, puis seuil d'un champ de métaballes, donc les points proches se soudent.
 - **Palette `gris-0006`** : `#aaa9a7 #040404`
-- **Outil** : **Trame liquide**. Une image, un logo ou un mot devient une trame de points qui fusionnent. Réglages : pas, rayon, seuil de fusion, forme de grille (carrée, hexagonale, phyllotaxie), numérotation automatique pour des séries d'affiches.
+- **Outil** : **Trame liquide**. Une image, un logo ou un mot devient une trame de points qui fusionnent. Réglages : pas, rayon, seuil de fusion, forme de grille (carrée, hexagonale, phyllotaxie).
 
 ### 3. Lettre en voxels dans un cube de points
 Un cube de petits points en perspective, et à l'intérieur des points plus gros qui dessinent un volume, comme une lettre en 3D.
 - **Mécanique** : grille 3D de points dont la taille vaut 1 dans la forme et presque 0 ailleurs, projection perspective, rotation lente.
 - **Palette `papier`** : `#fdfdfd #0f0f0f`
-- **Outil** : **Voxels de points**. Un glyphe ou un logo extrudé dans une grille 3D de points, en rotation et en orbite au pointeur. Réglages : résolution 3D, taille min/max, perspective, épaisseur d'extrusion. Exports SVG et séquence.
+- **Outil** : **Voxels de points**. Un logo ou une forme extrudé dans une grille 3D de points, en rotation et en orbite au pointeur. Réglages : résolution 3D, taille min/max, perspective, épaisseur d'extrusion. Exports SVG et séquence.
 
 ### 4. Trame en perspective radiale
 Une trame de gros points noirs, étirée vers un point de fuite central qui fait un trou blanc, comme un zoom ou une explosion.
@@ -57,7 +61,7 @@ Des taches organiques pixelisées, contourées en noir, sur crème. Typographie 
 Des logos faits de points ronds noirs de tailles différentes qui se touchent, se soudent ou se répartissent en éventail. Ils sont numérotés comme dans un catalogue de marques.
 - **Mécanique** : une grille de points déformée (cisaillement, rotation, gradient de taille) et des points fusionnés par endroits.
 - **Palette `papier-60`** : `#f4f4f2 #27262b`
-- **Outil** : **Marques en points**. Générateur de monogrammes en points, avec grilles, transformations, fusions et une planche de variantes numérotées. Lié à la Boîte morphologique.
+- **Outil** : **Marques en points**. Générateur de marques en points, avec grilles, transformations, fusions et une planche de variantes. Lié à la Boîte morphologique.
 
 ### 8. Fronts d'onde et gradient thermique
 Une source émet des fronts d'onde qui s'éloignent, colorés comme une image thermique : sauge, indigo au cœur, orange et jaune sur les crêtes, violet en bas.
@@ -69,7 +73,7 @@ Une source émet des fronts d'onde qui s'éloignent, colorés comme une image th
 Un triangle sombre et flou dont le contour se répète en lignes décalées, avec un liseré menthe lumineux, sur un fond gris-vert granuleux.
 - **Mécanique** : courbes de niveau d'un champ de distance flouté, décalées dans une direction (balayage) avec une lueur sur le bord.
 - **Palette `menthe`** : `#dce8e5 #191d1e #a4e0bc #4f9d7a`
-- **Outil** : **Échos**. Une forme (logo, lettre) qui laisse des contours décalés quand elle bouge, avec lueur et grain. Réglages : nombre d'échos, décalage, flou, couleur de lueur.
+- **Outil** : **Échos**. Une forme (logo, figure géométrique) qui laisse des contours décalés quand elle bouge, avec lueur et grain. Réglages : nombre d'échos, décalage, flou, couleur de lueur.
 
 ### 10. Calligramme en flux
 Des phrases manuscrites et des motifs de traits qui remplissent des régions qui ondulent comme du bois veiné ou des courbes de niveau.
@@ -123,7 +127,7 @@ Une image (un arbre) rendue en tirets horizontaux de longueurs variables, avec d
 Sur un aplat orange, des lettres tournent en ellipses autour d'un centre, et des traits noirs relient le centre aux mots-clés.
 - **Mécanique** : du texte posé sur des orbites elliptiques à vitesses différentes, avec des rayons vers certaines étiquettes.
 - **Palette `orbite`** : `#e05527 #111111 #f2f2f1`
-- **Outil** : **Orbites**. Les mots d'une marque gravitent selon de vraies orbites képlériennes (ellipses, vitesse plus grande au périhélie). On attrape un mot pour changer son orbite.
+- **Outil** : **Orbites**. Des formes de marque gravitent selon de vraies orbites képlériennes (ellipses, vitesse plus grande au périhélie). On attrape un corps pour changer son orbite. En version typographique, ce sont les mots de la marque.
 
 ### 19. Salon Skug : grille de pastilles
 Une affiche faite d'une grille de carrés arrondis de tailles différentes. Certains portent une lettre, en rouge, vert ou jaune, et les autres sont noirs.
@@ -165,7 +169,7 @@ Un titre noir sur blanc qui coule et ondule comme un liquide, en restant lisible
 Une trame régulière de points blancs sur noir. Par endroits les points grossissent jusqu'à fusionner en grandes taches blanches, et du texte suit des chemins.
 - **Mécanique** : le rayon des points suit un champ (bruit ou métaballes), et le seuil fait fusionner les plus gros.
 - **Palette `trame-nuit`** : `#131313 #f5f5f5 #828282`
-- **Outil** : fusionné avec **Trame liquide** (fiche 2) : mode « trame ouverte », avec texte sur chemin.
+- **Outil** : fusionné avec **Trame liquide** (fiche 2) : mode « trame ouverte ».
 
 ### 26. Klubkegelbahn : triangles concentriques
 Des bandes en zigzag qui forment des triangles concentriques jusqu'au centre, en rose, bleu, jaune, vert, orange et noir.
@@ -177,7 +181,7 @@ Des bandes en zigzag qui forment des triangles concentriques jusqu'au centre, en
 Des tubes et des formes gonflées dans un dégradé chrome violet à lavande, sur un aplat orange, avec une typo noire mono qui suit les tubes.
 - **Mécanique** : des SDF arrondies (smin) éclairées avec une réflexion d'environnement en dégradé (matcap), sur fond plat.
 - **Palette `luzern`** : `#f25f03 #7d38e7 #b9a0e6 #1a1410 #ffffff`
-- **Outil** : **Tubes chromés**. Des formes et lettres gonflées en chrome (raymarching, matcap de marque), avec des tubes qu'on dessine au pointeur.
+- **Outil** : **Tubes chromés**. Des formes gonflées en chrome (raymarching, matcap de marque), avec des tubes qu'on dessine au pointeur.
 
 ## Ajouter des images
 

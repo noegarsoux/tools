@@ -2,11 +2,10 @@
   "slug": "flow-field",
   "title": "Champ de flux",
   "type": "generative",
-  "description": "Champ de flux à la Tyler Hobbs : marbre, spirale ou ondes, traits d'épaisseur variable, tourbillons posés à la souris et masque typographique.",
+  "description": "Champ de flux à la Tyler Hobbs : marbre, spirale ou ondes, traits d'épaisseur variable, tourbillons posés à la souris et masque de forme ou de logo.",
   "tags": [
     "flow-field",
     "bruit",
-    "typographie",
     "interactif"
   ],
   "author": "claude",

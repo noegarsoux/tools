@@ -67,7 +67,7 @@
     let sand32 = null;
     let linePolys = null;
 
-    const glyphOn = (q) => q.forme === 'lettre' || q.forme === 'logo';
+    const glyphOn = (q) => q.forme === 'polygone' || q.forme === 'logo';
 
     const app = Atelier.app({
       stage: canvas,
@@ -78,12 +78,10 @@
       notes: 'Le sable gagne les lignes immobiles. Le second mode a un cycle de plus : la figure boucle.',
       params: {
         'Plaque': {
-          forme: { type: 'segmented', label: 'Forme', options: { carre: 'Carré', disque: 'Disque', lettre: 'Lettre', logo: 'Logo' }, value: 'carre' },
+          forme: { type: 'segmented', label: 'Forme', options: { carre: 'Carré', disque: 'Disque', polygone: 'Polygone', logo: 'Logo' }, value: 'carre' },
           cadre: { type: 'segmented', label: 'Cadre', options: { plein: 'Plein', inscrit: 'Inscrit' }, value: 'plein', show: (q) => q.forme === 'carre' || q.forme === 'disque' },
-          mot: { type: 'text', label: 'Mot', value: 'A', maxlength: 16, show: (q) => q.forme === 'lettre' || (q.forme === 'logo' && !q.masque) },
-          fonte: { type: 'font', label: 'Fonte', options: { serif: 'Serif', 'sans-serif': 'Sans', monospace: 'Mono', 'Impact, "Arial Black", sans-serif': 'Impact' }, value: 'serif', show: glyphOn },
-          graisse: { type: 'range', label: 'Graisse', min: 400, max: 900, step: 10, value: 720, show: glyphOn },
-          approche: { type: 'range', label: 'Approche', min: -0.04, max: 0.35, step: 0.01, value: 0, show: glyphOn },
+          cotes: { type: 'range', label: 'Côtés', min: 3, max: 9, step: 1, value: 3, show: (q) => q.forme === 'polygone' || (q.forme === 'logo' && !q.masque) },
+          creux: { type: 'range', label: 'Creux (étoile)', min: 0, max: 0.7, step: 0.01, value: 0, show: (q) => q.forme === 'polygone' || (q.forme === 'logo' && !q.masque) },
           masque: { type: 'file', label: 'Logo', accept: 'image/*', show: (q) => q.forme === 'logo' },
           echelle: { type: 'range', label: 'Échelle', min: 0.46, max: 1.2, step: 0.01, value: 0.94 },
           inclinaison: { type: 'range', label: 'Inclinaison', min: -40, max: 40, step: 1, value: 0 },
@@ -126,7 +124,7 @@
       presets: {
         'Sable': { forme: 'carre', cadre: 'plein', n: 4, m: 3, famille: 'ecart', melange: 0.38, n2: 2, m2: 5, battement: 1, boucle: 12, balayage: 0, nombre: 9800, calibre: 1.25, mobilite: 1.15, frottement: 3.4, agitation: 0.07, epaisseur: 0.32, vers: 'noeuds', echelle: 0.94, inclinaison: 0, lueur: 0.28, fond: CH[0], plaque: '#101010', sable: CH[1], eclat: CH[2], seed: 21 },
         'Rosace': { forme: 'disque', cadre: 'inscrit', n: 5, m: 2, famille: 'ecart', melange: 0.5, n2: 3, m2: 2, battement: 1, boucle: 14, balayage: 0, nombre: 9400, calibre: 0.9, mobilite: 1.2, epaisseur: 0.44, vers: 'noeuds', echelle: 0.9, lueur: 0.62, fond: CH[0], plaque: '#0c0c0c', sable: '#d2d2d2', eclat: CH[2], seed: 8 },
-        'Glyphe': { forme: 'lettre', mot: 'A', fonte: 'Impact, "Arial Black", sans-serif', graisse: 840, approche: 0, n: 3, m: 2, famille: 'ecart', melange: 0.28, n2: 2, m2: 4, battement: 1, boucle: 12, nombre: 10000, calibre: 0.9, epaisseur: 0.62, bord: 0.18, echelle: 0.92, vers: 'noeuds', lueur: 0.32, fond: CH[0], plaque: '#3a3a3a', sable: CH[2], eclat: '#ffffff', seed: 5 },
+        'Triangle': { forme: 'polygone', n: 3, m: 2, famille: 'ecart', melange: 0.28, n2: 2, m2: 4, battement: 1, boucle: 12, nombre: 10000, calibre: 0.9, epaisseur: 0.62, bord: 0.18, echelle: 0.92, vers: 'noeuds', lueur: 0.32, fond: CH[0], plaque: '#3a3a3a', sable: CH[2], eclat: '#ffffff', seed: 5 },
         'Encre': { forme: 'carre', cadre: 'plein', n: 2, m: 5, famille: 'ecart', melange: 0.22, n2: 4, m2: 1, battement: 1, boucle: 16, balayage: 0, nombre: 7200, calibre: 1.2, mobilite: 0.95, agitation: 0.06, epaisseur: 0.48, vers: 'noeuds', echelle: 0.92, lueur: 0.06, fond: PAPIER[0], plaque: '#f3f0e8', sable: PAPIER[1], eclat: '#4a4a4a', grain: 0.08, vignette: 0.12, seed: 11 },
         'Battement': { forme: 'carre', cadre: 'plein', n: 4, m: 3, famille: 'ecart', melange: 0.95, n2: 5, m2: 2, battement: 2, boucle: 8, balayage: 0, nombre: 7800, calibre: 1, mobilite: 1.55, frottement: 2.6, epaisseur: 0.3, vers: 'noeuds', echelle: 0.94, lueur: 0.7, fond: NUIT[0], plaque: '#1a1a1a', sable: NUIT[1], eclat: '#ffffff', seed: 19 },
         'Balayage': { forme: 'disque', cadre: 'inscrit', n: 3, m: 2, famille: 'ecart', melange: 0.2, battement: 0, balayage: 1, boucle: 10, nombre: 7600, mobilite: 1.65, epaisseur: 0.34, vers: 'noeuds', echelle: 0.9, lueur: 0.5, fond: CH[0], plaque: '#101010', sable: CH[1], eclat: CH[2], seed: 3 },
@@ -150,7 +148,7 @@
         },
       },
       onChange(key) {
-        if (key === 'nombre' || key === 'forme' || key === 'mot' || key === 'fonte' || key === 'graisse' || key === 'approche' || key === 'masque' || key === '*') {
+        if (key === 'nombre' || key === 'forme' || key === 'cotes' || key === 'creux' || key === 'masque' || key === '*') {
           if (key !== 'nombre') rebuildMask();
           respawn(true);
         }
@@ -238,7 +236,7 @@
       x ^= x >>> 13;
       return (x >>> 0) / 4294967296;
     }
-    function isGlyph() { return p.forme === 'lettre' || p.forme === 'logo'; }
+    function isGlyph() { return p.forme === 'polygone' || p.forme === 'logo'; }
 
     function geom() {
       const { w, h, dpr } = app.size;
@@ -290,28 +288,23 @@
       return dst;
     }
 
+    // Plaque polygonale ou en étoile (creux > 0), pointe en haut.
+    function polyPoints(cx, cy, R) {
+      const n = p.cotes | 0 || 3, k = p.creux > 0 ? 2 : 1, pts = [];
+      for (let i = 0; i < n * k; i++) {
+        const r = k === 2 && i % 2 ? R * (1 - p.creux) : R, t = -Math.PI / 2 + i * Math.PI * 2 / (n * k);
+        pts.push([cx + r * Math.cos(t), cy + r * Math.sin(t)]);
+      }
+      return pts;
+    }
+
     function paintGlyph(g, S) {
-      const text = String(p.mot || 'A').trim().slice(0, 16) || 'A';
       g.clearRect(0, 0, S, S);
       g.fillStyle = '#fff';
-      g.strokeStyle = '#fff';
-      g.textAlign = 'center';
-      g.textBaseline = 'middle';
-      g.lineJoin = 'round';
-      g.letterSpacing = `${p.approche || 0}em`;
-      const family = p.fonte || 'serif';
-      const weight = p.graisse || 700;
-      let size = S * 0.76;
-      g.font = `${weight} ${size}px ${family}`;
-      const width = g.measureText(text).width || size;
-      if (width > S * 0.88) {
-        size *= (S * 0.88) / width;
-        g.font = `${weight} ${size}px ${family}`;
-      }
-      const extra = Math.max(0, (weight - 520) / 420) * size * 0.04;
-      g.lineWidth = extra;
-      if (extra > 0.4) g.strokeText(text, S / 2, S / 2);
-      g.fillText(text, S / 2, S / 2);
+      g.beginPath();
+      for (const [x, y] of polyPoints(S / 2, S / 2 + ((p.cotes | 0) === 3 ? S * 0.08 : 0), S * 0.46)) g.lineTo(x, y);
+      g.closePath();
+      g.fill();
     }
 
     function paintLogo(g, S, img) {
@@ -1358,9 +1351,8 @@
       let shape = '';
       if (p.forme === 'disque') shape = `<ellipse cx="${cx}" cy="${cy}" rx="${(g.pw / 2).toFixed(1)}" ry="${(g.ph / 2).toFixed(1)}" fill="${p.plaque}"${rot}/>`;
       else if (isGlyph()) {
-        const text = String(p.mot || 'A').trim().slice(0, 16) || 'A';
-        const size = Math.min(g.pw, g.ph) * 0.7;
-        shape = `<text x="${cx.toFixed(1)}" y="${cy.toFixed(1)}" text-anchor="middle" dominant-baseline="central" fill="${p.plaque}" font-family="${esc(p.fonte || 'serif')}" font-size="${size.toFixed(1)}" font-weight="${p.graisse | 0}"${rot}>${esc(text)}</text>`;
+        const S = Math.min(g.pw, g.ph), pts = polyPoints(cx, cy + ((p.cotes | 0) === 3 ? S * 0.08 : 0), S * 0.46);
+        if (p.forme === 'polygone' || !p.masque) shape = `<path d="M${pts.map((q) => q[0].toFixed(1) + ' ' + q[1].toFixed(1)).join('L')}Z" fill="${p.plaque}"${rot}/>`;
       } else shape = `<rect x="${(cx - g.pw / 2).toFixed(1)}" y="${(cy - g.ph / 2).toFixed(1)}" width="${g.pw.toFixed(1)}" height="${g.ph.toFixed(1)}" fill="${p.plaque}"${rot}/>`;
       return `<svg xmlns="http://www.w3.org/2000/svg" width="${g.w}" height="${g.h}" viewBox="0 0 ${g.w} ${g.h}"><rect width="${g.w}" height="${g.h}" fill="${p.fond}"/>${shape}${paths}</svg>`;
     }

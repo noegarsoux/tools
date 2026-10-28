@@ -2,14 +2,20 @@
   "slug": "ondes",
   "title": "Ondes",
   "type": "webgl",
-  "description": "L'équation des ondes 2D en WebGL : sources, fentes et texte en mur ou en verre qui diffractent les fronts. Boucles vidéo, aplats, isolignes SVG.",
-  "tags": ["ondes", "physique", "interference", "typographie", "simulation", "boucle"],
+  "description": "L'équation des ondes 2D en WebGL : sources, fentes, prismes et logos en mur ou en verre qui diffractent les fronts. Boucles vidéo, aplats, isolignes SVG.",
+  "tags": [
+    "ondes",
+    "physique",
+    "interference",
+    "simulation",
+    "boucle"
+  ],
   "inspiration": [
     "Moodboard de Noé, fiche 8 — fronts d'onde et gradient thermique",
     "Équation des ondes amortie ∂²u/∂t² = c²∇²u − γ∂u/∂t, schéma saute-mouton (physique-maths.md)",
     "Fentes de Young, diffraction et réfraction de Snell (physique-maths.md)",
     "Cuve à ondes de laboratoire : ombroscopie des crêtes",
-    "Studio Dumbar — identités dynamiques, la typo comme image"
+    "Studio Dumbar — identités dynamiques"
   ],
   "author": "cursor",
   "created": "2026-10-28",

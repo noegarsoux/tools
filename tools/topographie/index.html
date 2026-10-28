@@ -49,7 +49,6 @@
           stroke: { type: 'range', label: 'Trait', min: 0.2, max: 6, step: 0.1, value: 1.2 },
           shade: { type: 'range', label: 'Ombrage', min: 0, max: 1, step: 0.01, value: 0.75, show: (p) => p.style !== 'lines' },
           light: { type: 'range', label: 'Lumière', min: 0, max: 360, step: 1, value: 315, show: (p) => p.style !== 'lines' },
-          labels: { type: 'toggle', label: 'Cotes', value: true },
         },
         'Couleur': {
           paper: { type: 'color', label: 'Fond', value: '#e7d3b0' },
@@ -60,10 +59,9 @@
           waterInk: { type: 'color', label: 'Lignes d\'eau', value: '#e4f4f0' },
         },
         'Matière de marque': {
-          text: { type: 'text', label: 'Texte gravé', value: '', placeholder: 'ex. ATELIER' },
-          font: { type: 'font', label: 'Typo', options: { 'Inter': 'Inter', 'Georgia': 'Serif', 'Impact': 'Condensée' }, value: 'Inter', show: (p) => !!p.text },
-          textHeight: { type: 'range', label: 'Hauteur', min: -1, max: 1, step: 0.01, value: 0.45, show: (p) => !!p.text },
-          textSoft: { type: 'range', label: 'Douceur', min: 0, max: 1, step: 0.01, value: 0.35, show: (p) => !!p.text },
+          logo: { type: 'file', label: 'Logo gravé', accept: 'image/*', button: 'Importer un logo' },
+          textHeight: { type: 'range', label: 'Hauteur', min: -1, max: 1, step: 0.01, value: 0.45, show: (p) => !!p.logo },
+          textSoft: { type: 'range', label: 'Douceur', min: 0, max: 1, step: 0.01, value: 0.35, show: (p) => !!p.logo },
         },
         'Pinceau': {
           brush: { type: 'range', label: 'Rayon', min: 0.02, max: 0.4, step: 0.005, value: 0.1 },
@@ -73,12 +71,12 @@
       },
       presets: {
         'Atlas': {},
-        'Glacier': { relief: 'cretes', scale: 1.2, curves: 26, shade: 0.9, labels: false, paper: '#e7f1f4', ink: '#1a3144', land: ['#c6dce4', '#e8f0f2', '#ffffff'], deep: '#071422', shallow: '#82b8cc', waterInk: '#d7f1f8', sea: 0.3 },
-        'Lignes': { style: 'lines', relief: 'collines', scale: 1.6, curves: 42, major: 6, stroke: 0.9, labels: false, paper: '#0e0e10', ink: '#ff4d1a', waterInk: '#3d2bff', sea: 0.35, tide: 0.08, drift: 0.2 },
-        'Aplats': { style: 'bands', relief: 'collines', scale: 1.4, curves: 9, stroke: 1.6, shade: 0.35, labels: false, paper: '#f4efe6', ink: '#141414', land: ['#ff4d1a', '#ffb000', '#f4efe6', '#3d2bff'], deep: '#141414', shallow: '#3d2bff', waterInk: '#f4efe6', sea: 0.28 },
+        'Glacier': { relief: 'cretes', scale: 1.2, curves: 26, shade: 0.9, paper: '#e7f1f4', ink: '#1a3144', land: ['#c6dce4', '#e8f0f2', '#ffffff'], deep: '#071422', shallow: '#82b8cc', waterInk: '#d7f1f8', sea: 0.3 },
+        'Lignes': { style: 'lines', relief: 'collines', scale: 1.6, curves: 42, major: 6, stroke: 0.9, paper: '#0e0e10', ink: '#ff4d1a', waterInk: '#3d2bff', sea: 0.35, tide: 0.08, drift: 0.2 },
+        'Aplats': { style: 'bands', relief: 'collines', scale: 1.4, curves: 9, stroke: 1.6, shade: 0.35, paper: '#f4efe6', ink: '#141414', land: ['#ff4d1a', '#ffb000', '#f4efe6', '#3d2bff'], deep: '#141414', shallow: '#3d2bff', waterInk: '#f4efe6', sea: 0.28 },
         'Nuit': { relief: 'melange', curves: 16, shade: 0.6, paper: '#14182e', ink: '#f0d48a', land: ['#3a4c96', '#c6a05a', '#f6ecd2'], deep: '#07091a', shallow: '#2a3878', waterInk: '#a9bbee' },
-        'Terrasses': { relief: 'terrasses', style: 'bands', scale: 2, curves: 14, shade: 0.8, labels: false, paper: '#efe7d8', ink: '#3b2a1e', land: ['#d9c3a0', '#b98b5e', '#8a5a3c', '#efe7d8'], deep: '#2b4a52', shallow: '#7aa3a0', waterInk: '#efe7d8', sea: 0.2 },
-        'Logotype': { style: 'lines', text: 'ATELIER', textHeight: 0.5, textSoft: 0.45, amp: 0.4, detail: 2, scale: 2.4, warp: 0.4, curves: 48, major: 8, stroke: 0.8, labels: false, paper: '#f4efe6', ink: '#141414', waterInk: '#ff4d1a', sea: 0.36, tide: 0.03 },
+        'Terrasses': { relief: 'terrasses', style: 'bands', scale: 2, curves: 14, shade: 0.8, paper: '#efe7d8', ink: '#3b2a1e', land: ['#d9c3a0', '#b98b5e', '#8a5a3c', '#efe7d8'], deep: '#2b4a52', shallow: '#7aa3a0', waterInk: '#efe7d8', sea: 0.2 },
+        'Gravure': { style: 'lines', amp: 0.4, detail: 2, scale: 2.4, warp: 0.4, curves: 48, major: 8, stroke: 0.8, paper: '#f4efe6', ink: '#141414', waterInk: '#ff4d1a', sea: 0.36, tide: 0.03 },
       },
       export: { svg: () => svgMarkup(), name: 'topographie' },
       pointer: {
@@ -87,7 +85,7 @@
         wheel: (q, dy) => app.set('brush', Math.max(0.02, Math.min(0.4, p.brush * (dy > 0 ? 0.9 : 1.1)))),
       },
       onChange(key) {
-        if (['text', 'font', 'textSoft', 'res', '*'].includes(key)) buildType();
+        if (['logo', 'textSoft', 'res', '*'].includes(key)) buildType();
         if (key === 'res' || key === '*') sculpt = null;
         dirty = true;
       },
@@ -273,27 +271,6 @@
       }
     }
 
-    function labelAnchor(poly, margin, w, h) {
-      let best = null, bestScore = 0.62;
-      const step = Math.max(1, Math.floor(poly.length / 28));
-      for (let i = 0; i < poly.length; i += step) {
-        const x = poly[i][0], y = poly[i][1];
-        if (x < margin || y < margin || x > w - margin || y > h - margin) continue;
-        const i0 = Math.max(0, i - step);
-        const i1 = Math.min(poly.length - 1, i + step);
-        const dx = poly[i1][0] - poly[i0][0];
-        const dy = poly[i1][1] - poly[i0][1];
-        const len = Math.hypot(dx, dy) || 1;
-        const horiz = 1 - Math.abs(dy) / len;
-        if (horiz > bestScore) {
-          let ang = Math.atan2(dy, dx);
-          if (ang > Math.PI / 2 || ang < -Math.PI / 2) ang += Math.PI;
-          bestScore = horiz;
-          best = { x, y, ang };
-        }
-      }
-      return best;
-    }
 
 
     // ——— Champ de hauteur ———
@@ -343,23 +320,16 @@
       }
     }
 
-    // Texte gravé dans le relief : rendu flou de la typo, ajouté à la hauteur.
+    // Logo gravé dans le relief : image floutée, ajoutée à la hauteur.
     function buildType() {
       typeField = null;
-      if (!p.text) return;
+      if (!p.logo) return;
       const { cols, rows } = dims();
       type.width = cols; type.height = rows;
       tctx.clearRect(0, 0, cols, rows);
-      const fam = p.font.includes(' ') ? `"${p.font}"` : p.font;
-      let size = rows * 0.5;
-      tctx.font = `900 ${size}px ${fam}, sans-serif`;
-      const tw = tctx.measureText(p.text).width;
-      if (tw > cols * 0.86) size *= (cols * 0.86) / tw;
-      tctx.filter = `blur(${(p.textSoft * size * 0.08).toFixed(2)}px)`;
-      tctx.font = `900 ${size}px ${fam}, sans-serif`;
-      tctx.textAlign = 'center'; tctx.textBaseline = 'middle';
-      tctx.fillStyle = '#fff';
-      tctx.fillText(p.text, cols / 2, rows / 2 + size * 0.04);
+      const img = p.logo, k = Math.min(cols * 0.7 / img.width, rows * 0.6 / img.height);
+      tctx.filter = `blur(${(p.textSoft * Math.min(cols, rows) * 0.04).toFixed(2)}px)`;
+      tctx.drawImage(img, (cols - img.width * k) / 2, (rows - img.height * k) / 2, img.width * k, img.height * k);
       tctx.filter = 'none';
       const d = tctx.getImageData(0, 0, cols, rows).data;
       typeField = new Float32Array(cols * rows);
@@ -449,23 +419,6 @@
       ctx.globalAlpha = 1;
     }
 
-    function drawLabels(items, sea, u, w, h) {
-      const placed = [], fs = Math.round(11 * u);
-      ctx.font = `600 ${fs}px Inter, system-ui, sans-serif`;
-      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-      for (const item of items) for (const line of item.lines) {
-        if (line.len < 110 * u) continue;
-        const spot = labelAnchor(line.poly, 56 * u, w, h);
-        if (!spot || placed.some((q) => Math.hypot(q[0] - spot.x, q[1] - spot.y) < 96 * u)) continue;
-        placed.push([spot.x, spot.y]);
-        const text = `${Math.round((item.level - sea) * 900)} m`;
-        ctx.save();
-        ctx.translate(spot.x, spot.y); ctx.rotate(spot.ang);
-        ctx.lineWidth = 4 * u; ctx.strokeStyle = p.paper; ctx.strokeText(text, 0, 0);
-        ctx.fillStyle = item.level < sea ? p.waterInk : p.ink; ctx.fillText(text, 0, 0);
-        ctx.restore();
-      }
-    }
 
     let fieldTime = -1;
     function render(t) {
@@ -487,7 +440,6 @@
       strokeLines(groups.landMinor, p.ink, base * 0.75, lines ? 0.85 : 0.55);
       strokeLines(groups.landMajor, p.ink, base * 1.7, 1);
       strokeLines(groups.coast, lines ? p.waterInk : p.ink, base * 2.4, 1);
-      if (p.labels) drawLabels(labels, sea, u, w, h);
       app.finish(ctx);
     }
 

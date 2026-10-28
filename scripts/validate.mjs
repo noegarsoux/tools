@@ -97,9 +97,11 @@ async function browserChecks(browser, origin, dir) {
   if (info.kit) {
     const q = await page.evaluate(() => {
       const a = window.Atelier.instance, o = a.opts;
+      const textual = Object.entries(a.specs).filter(([, s]) => !s.internal && ['text', 'textarea', 'font'].includes(s.type)).map(([k]) => k);
       const own = Object.entries(a.specs).filter(([k, s]) => !s.internal && !['grain', 'vignette'].includes(k)).length;
-      return { own, presets: Object.keys(o.presets || {}).length, pointer: !!o.pointer && Object.keys(o.pointer).length > 0, hint: !!o.hint, version: window.Atelier.version };
+      return { textual, own, presets: Object.keys(o.presets || {}).length, pointer: !!o.pointer && Object.keys(o.pointer).length > 0, hint: !!o.hint, version: window.Atelier.version };
     });
+    if (q.textual.length && readMeta(dir).meta?.type !== 'typography') errors.push(`réglage de texte (${q.textual.join(', ')}) dans un outil non typographique : jamais de texte dans le rendu, sauf type typography`);
     if (q.own < 10) errors.push(`seulement ${q.own} réglages propres à l'outil (minimum 10) : tout ce qui influence le rendu doit être réglable`);
     if (q.presets < 4) errors.push(`seulement ${q.presets} presets (minimum 4)`);
     if (!q.pointer) errors.push("pas d'interaction sur la scène : déclare pointer: { down, drag, move… } dans Atelier.app");

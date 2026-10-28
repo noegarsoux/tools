@@ -53,10 +53,9 @@
           colorBy: { type: 'segmented', label: 'Répartition', options: { random: 'Hasard', angle: 'Direction', y: 'Hauteur', x: 'Largeur' }, value: 'random' },
           blend: { type: 'select', label: 'Fusion', options: { 'source-over': 'Normale', lighter: 'Lumière', screen: 'Écran', multiply: 'Produit', difference: 'Différence' }, value: 'source-over' },
         },
-        'Masque typographique': {
+        'Masque': {
           maskMode: { type: 'segmented', label: 'Masque', options: { none: 'Aucun', inside: 'Dedans', outside: 'Autour' }, value: 'none' },
-          text: { type: 'text', label: 'Texte', value: 'FLUX', show: (p) => p.maskMode !== 'none' },
-          font: { type: 'font', label: 'Typo', options: { 'Inter': 'Inter', 'Georgia': 'Serif', 'Courier New': 'Mono', 'Impact': 'Condensée' }, value: 'Inter', show: (p) => p.maskMode !== 'none' },
+          shape: { type: 'segmented', label: 'Forme', options: { circle: 'Cercle', ring: 'Anneau', square: 'Carré', diamond: 'Losange' }, value: 'circle', show: (p) => p.maskMode !== 'none' && !p.image },
           textSize: { type: 'range', label: 'Taille', min: 0.1, max: 1, step: 0.01, value: 0.55, show: (p) => p.maskMode !== 'none' },
           image: { type: 'file', label: 'Logo', accept: 'image/*', button: 'Importer un logo', show: (p) => p.maskMode !== 'none' },
         },
@@ -73,7 +72,7 @@
         'Fidenza': { field: 'noise', scale: 1.1, octaves: 1, curl: 0.9, quant: 0, count: 380, step: 1.8, wMin: 4, wMax: 18, life: 520, alpha: 1, fade: 0, bg: '#efe7d8', palette: ['#1f2a44', '#e2563b', '#f2b33d', '#efe7d8', '#2b6e5e'], accent: '#e84a8a', accentRate: 0.04, colorBy: 'random', blend: 'source-over', cap: 'round', spawn: 'grid' },
         'Soie': { field: 'warp', scale: 1.2, octaves: 4, warp: 4.2, curl: 1, count: 6000, step: 0.8, wMin: 0.2, wMax: 0.7, life: 400, alpha: 0.35, fade: 0, bg: '#0f0f12', palette: ['#ffffff', '#bdbdbd', '#7a7a7a'], accent: '#ffd400', accentRate: 0.01, colorBy: 'y', blend: 'screen', cap: 'round', spawn: 'random' },
         'Circuit': { field: 'noise', scale: 3, octaves: 2, curl: 1, quant: 4, count: 1400, step: 2.4, wMin: 1, wMax: 2.5, life: 220, alpha: 0.9, fade: 0.02, bg: '#05070d', palette: ['#00e5ff', '#2962ff', '#e0f7fa'], accent: '#ff1744', accentRate: 0.02, colorBy: 'angle', blend: 'lighter', cap: 'square', spawn: 'grid' },
-        'Typo': { field: 'warp', scale: 2.6, warp: 2, curl: 1.4, count: 4200, step: 1.2, wMin: 0.4, wMax: 2, life: 300, alpha: 0.8, fade: 0.008, bg: '#f4efe6', palette: ['#111111', '#3d2bff'], accent: '#ff4d1a', accentRate: 0.05, colorBy: 'x', blend: 'source-over', maskMode: 'inside', text: 'FLUX', textSize: 0.6, spawn: 'random' },
+        'Forme': { field: 'warp', scale: 2.6, warp: 2, curl: 1.4, count: 4200, step: 1.2, wMin: 0.4, wMax: 2, life: 300, alpha: 0.8, fade: 0.008, bg: '#f4efe6', palette: ['#111111', '#3d2bff'], accent: '#ff4d1a', accentRate: 0.05, colorBy: 'x', blend: 'source-over', maskMode: 'inside', shape: 'ring', textSize: 0.7, spawn: 'random' },
         'Vortex': { field: 'spiral', scale: 1.4, octaves: 3, curl: 1.6, count: 3500, step: 2.2, wMin: 0.4, wMax: 2.4, life: 500, alpha: 0.6, fade: 0.03, bg: '#07010f', palette: ['#f72585', '#7209b7', '#4cc9f0', '#b5179e'], accent: '#ffffff', accentRate: 0.02, colorBy: 'angle', blend: 'lighter', spawn: 'random' },
         'Ondes': { field: 'waves', scale: 2.4, octaves: 2, curl: 0.8, count: 2200, step: 1.6, wMin: 1, wMax: 6, life: 600, alpha: 0.85, fade: 0, bg: '#0b1b2b', palette: ['#f4efe6', '#7fb7be', '#d3f3ee'], accent: '#ff6b35', accentRate: 0.03, colorBy: 'y', blend: 'source-over', spawn: 'grid' },
       },
@@ -85,8 +84,8 @@
       },
       onChange(key) {
         if (key === 'count') return resizePool();
-        if (['text', 'font', 'textSize', 'image', 'maskMode', '*'].includes(key)) buildMask();
-        if (['bg', 'palette', 'accent', 'accentRate', 'colorBy', 'spawn', 'maskMode', 'text', 'font', 'textSize', 'image', 'blend', '*'].includes(key)) reset();
+        if (['shape', 'textSize', 'image', 'maskMode', '*'].includes(key)) buildMask();
+        if (['bg', 'palette', 'accent', 'accentRate', 'colorBy', 'spawn', 'maskMode', 'shape', 'textSize', 'image', 'blend', '*'].includes(key)) reset();
       },
       onSeed: () => { reseed(); reset(); },
       onResize: () => { buildMask(); reset(); },
@@ -150,7 +149,7 @@
       if (forces.length > 120) forces.shift();
     }
 
-    // ——— Masque typographique (texte ou logo importé) ———
+    // ——— Masque : forme géométrique ou logo importé ———
     function buildMask() {
       const { w, h } = app.size;
       mask.width = Math.max(1, Math.round(w / 2)); mask.height = Math.max(1, Math.round(h / 2));
@@ -163,14 +162,12 @@
         const img = p.image, k = Math.min(W / img.width, H / img.height) * p.textSize;
         mctx.drawImage(img, (W - img.width * k) / 2, (H - img.height * k) / 2, img.width * k, img.height * k);
       } else {
-        const fam = p.font.includes(' ') ? `"${p.font}"` : p.font;
-        let size = H * p.textSize;
-        mctx.font = `900 ${size}px ${fam}, sans-serif`;
-        const tw = mctx.measureText(p.text || ' ').width;
-        if (tw > W * 0.92) size *= (W * 0.92) / tw;
-        mctx.font = `900 ${size}px ${fam}, sans-serif`;
-        mctx.textAlign = 'center'; mctx.textBaseline = 'middle';
-        mctx.fillText(p.text, W / 2, H / 2 + size * 0.05);
+        const r = Math.min(W, H) * p.textSize / 2, cx = W / 2, cy = H / 2;
+        mctx.beginPath();
+        if (p.shape === 'square') mctx.rect(cx - r, cy - r, 2 * r, 2 * r);
+        else if (p.shape === 'diamond') { mctx.moveTo(cx, cy - r); mctx.lineTo(cx + r, cy); mctx.lineTo(cx, cy + r); mctx.lineTo(cx - r, cy); mctx.closePath(); }
+        else { mctx.arc(cx, cy, r, 0, Math.PI * 2); if (p.shape === 'ring') mctx.arc(cx, cy, r * 0.55, 0, Math.PI * 2, true); }
+        mctx.fill('evenodd');
       }
       maskData = mctx.getImageData(0, 0, W, H).data;
     }

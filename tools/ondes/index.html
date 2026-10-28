@@ -25,29 +25,19 @@
     const LUZ = Atelier.PALETTES.luzern.colors;
     const ACIDE = Atelier.PALETTES.acide.colors;
 
-    const FONTS = {
-      '"Helvetica Neue", Helvetica, Arial, "Liberation Sans", sans-serif': 'Grotesque',
-      'Lato, "Avenir Next", Avenir, "Segoe UI", sans-serif': 'Humaniste',
-      'Georgia, "Times New Roman", "Liberation Serif", serif': 'Serif',
-      '"SF Mono", Menlo, Consolas, "Liberation Mono", monospace': 'Mono',
-    };
-    const GROT = Object.keys(FONTS)[0];
-    const SERIF = Object.keys(FONTS)[2];
-    const MONO = Object.keys(FONTS)[3];
     const CMAX = 0.7;
     const WARM_BUDGET = 3.2e7;
 
     const pts = (q) => q.emission === 'points';
     const hasObst = (q) => q.forme !== 'aucun';
-    const isText = (q) => q.forme === 'texte' || (q.forme === 'image' && !q.image && !app.logoImg);
 
     const app = Atelier.app({
       stage: canvas,
       animate: true,
       seed: 12,
       finish: { grain: 0.1, vignette: 0.22 },
-      hint: 'Appuyez et glissez pour émettre · attrapez une source ou le texte · molette : longueur d’onde',
-      notes: 'Équation des ondes 2D : ∂²u/∂t² = c²∇²u − γ∂u/∂t + ν∇²∂u/∂t. λ est en fraction du petit côté, f en hertz, γ en 1/s ; la viscosité ν lisse les vaguelettes trop fines pour la grille. Le texte est un mur (réflexion, diffraction) ou du verre (réfraction, c/n). La fréquence et l’orbite sont arrondies pour boucler exactement sur la durée choisie. Le SVG exporte les isolignes de l’amplitude.',
+      hint: 'Appuyez et glissez pour émettre · attrapez une source ou l’obstacle · molette : longueur d’onde',
+      notes: 'Équation des ondes 2D : ∂²u/∂t² = c²∇²u − γ∂u/∂t + ν∇²∂u/∂t. λ est en fraction du petit côté, f en hertz, γ en 1/s ; la viscosité ν lisse les vaguelettes trop fines pour la grille. L’obstacle est un mur (réflexion, diffraction) ou du verre (réfraction, c/n). La fréquence et l’orbite sont arrondies pour boucler exactement sur la durée choisie. Le SVG exporte les isolignes de l’amplitude.',
       params: {
         'Sources': {
           emission: { type: 'segmented', label: 'Émission', options: { points: 'Points', plane: 'Onde plane', aucune: 'Aucune' }, value: 'points' },
@@ -72,14 +62,10 @@
           relancer: { type: 'button', label: 'Relancer la cuve', action: () => restart(true) },
         },
         'Obstacle': {
-          forme: { type: 'segmented', label: 'Obstacle', options: { aucun: 'Aucun', texte: 'Texte', fentes: 'Fentes', image: 'Image' }, value: 'texte' },
+          forme: { type: 'segmented', label: 'Obstacle', options: { aucun: 'Aucun', disque: 'Disque', prisme: 'Prisme', fentes: 'Fentes', image: 'Image' }, value: 'prisme' },
           matiere: { type: 'segmented', label: 'Matière', options: { mur: 'Mur', verre: 'Verre' }, value: 'mur', show: hasObst },
           indice: { type: 'range', label: 'Indice n', min: 1.1, max: 3.5, step: 0.05, value: 1.8, show: (q) => hasObst(q) && q.matiere === 'verre' },
-          texte: { type: 'textarea', label: 'Texte', value: 'ONDES', rows: 2, show: (q) => q.forme === 'texte' },
-          typo: { type: 'font', label: 'Typo', options: FONTS, value: GROT, show: isText },
-          graisse: { type: 'range', label: 'Graisse', min: 100, max: 900, step: 100, value: 800, show: isText },
-          approche: { type: 'range', label: 'Approche', min: -0.1, max: 0.4, step: 0.01, value: -0.02, show: isText },
-          taille: { type: 'range', label: 'Taille', min: 0.1, max: 1, step: 0.01, value: 0.62, show: (q) => q.forme === 'texte' || q.forme === 'image' },
+          taille: { type: 'range', label: 'Taille', min: 0.1, max: 1, step: 0.01, value: 0.62, show: (q) => q.forme !== 'aucun' && q.forme !== 'fentes' },
           ox: { type: 'range', label: 'Position X', min: 0, max: 1, step: 0.005, value: 0.5, show: hasObst },
           oy: { type: 'range', label: 'Position Y', min: 0, max: 1, step: 0.005, value: 0.47, show: hasObst },
           fentes: { type: 'range', label: 'Nombre de fentes', min: 1, max: 9, step: 1, value: 2, show: (q) => q.forme === 'fentes' },
@@ -174,7 +160,7 @@
       onChange(key) {
         if (key === '*') { maskDirty = true; shapeDirty = true; restart(true); return; }
         if (key === 'image') { shapeDirty = true; if (p.image && p.forme !== 'image') app.set('forme', 'image'); }
-        if (['forme', 'texte', 'typo', 'graisse', 'approche', 'taille', 'ox', 'oy', 'fentes', 'largeur', 'pas', 'image'].includes(key)) maskDirty = true;
+        if (['forme', 'taille', 'ox', 'oy', 'fentes', 'largeur', 'pas', 'image'].includes(key)) maskDirty = true;
         if (key === 'resolution') gridKey = '';
       },
       onSeed() { freeKey = ''; },
@@ -613,10 +599,6 @@
       x.putImageData(im, 0, 0);
     }
 
-    function textLines() {
-      return String(p.texte ?? '').split('\n').map((l) => l.trim()).filter(Boolean).slice(0, 6);
-    }
-
     // Dessine l'obstacle en blanc dans un contexte dont la transformation va des pixels d'affichage au canvas cible.
     function drawObstacle(x, ext) {
       const { w, h } = app.size, short = Math.min(w, h);
@@ -644,26 +626,15 @@
         obstBox = { x0: cx - bw / 2, y0: cy - bh / 2, x1: cx + bw / 2, y1: cy + bh / 2 };
         return;
       }
-      const lines = textLines();
-      if (!lines.length) return;
-      const fam = p.typo || GROT, wt = p.graisse | 0;
-      x.font = `${wt} 100px ${fam}`;
-      x.letterSpacing = `${p.approche}em`;
-      const widths = lines.map((l) => x.measureText(l).width);
-      const cap = x.measureText('H').actualBoundingBoxAscent || 72;
-      const lh = 0.94;
-      let size = 100 * (p.taille * w) / Math.max(1, ...widths);
-      size = Math.min(size, (h * 0.86) / ((lines.length - 1) * lh + cap / 100));
-      x.font = `${wt} ${size}px ${fam}`;
-      x.letterSpacing = `${p.approche}em`;
-      x.textAlign = 'center';
-      x.textBaseline = 'alphabetic';
-      const capH = cap * size / 100;
-      const blockH = capH + (lines.length - 1) * size * lh;
-      const top = cy - blockH / 2;
-      lines.forEach((l, i) => x.fillText(l, cx, top + capH + i * size * lh));
-      const bw = Math.max(...widths) * size / 100;
-      obstBox = { x0: cx - bw / 2, y0: top, x1: cx + bw / 2, y1: top + blockH, size, capH, lh, fam, wt };
+      // Disque ou prisme (équilatéral, pointe en haut) : formes simples qui montrent diffraction et réfraction.
+      const r = p.taille * short * 0.5;
+      x.beginPath();
+      if (p.forme === 'prisme') {
+        for (let i = 0; i < 3; i++) { const t = -Math.PI / 2 + i * 2 * Math.PI / 3; x.lineTo(cx + r * Math.cos(t), cy + r * 0.15 + r * Math.sin(t)); }
+        x.closePath();
+      } else x.arc(cx, cy, r, 0, Math.PI * 2);
+      x.fill();
+      obstBox = { x0: cx - r, y0: cy - r, x1: cx + r, y1: cy + r };
     }
 
     function rebuildMasks() {
@@ -1048,11 +1019,6 @@
         for (const [a, b] of barrier.open) { if (a > y) obst += `<rect x="${(barrier.x - barrier.t / 2).toFixed(1)}" y="${y.toFixed(1)}" width="${barrier.t.toFixed(1)}" height="${(a - y).toFixed(1)}"/>`; y = Math.max(y, b); }
         if (h > y) obst += `<rect x="${(barrier.x - barrier.t / 2).toFixed(1)}" y="${y.toFixed(1)}" width="${barrier.t.toFixed(1)}" height="${(h - y).toFixed(1)}"/>`;
         obst = `<g ${paint}>${obst}</g>`;
-      } else if (obstBox && obstBox.size && isText(p)) {
-        const lines = textLines();
-        const fam = esc(p.typo === 'AtelierBrand' ? 'sans-serif' : p.typo);
-        obst = `<g ${paint} font-family="${fam}" font-weight="${obstBox.wt}" font-size="${obstBox.size.toFixed(1)}" letter-spacing="${(p.approche * obstBox.size).toFixed(2)}" text-anchor="middle">`
-          + lines.map((l, i) => `<text x="${(p.ox * w).toFixed(1)}" y="${(obstBox.y0 + obstBox.capH + i * obstBox.size * obstBox.lh).toFixed(1)}">${esc(l)}</text>`).join('') + '</g>';
       } else if (obstBox || wallsUsed) {
         obst = `<image href="${tinted(hiCv)}" x="0" y="0" width="${w}" height="${h}" opacity="${op}"/>`;
       }
