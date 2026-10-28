@@ -1,0 +1,10 @@
+{
+  "slug": "truchet",
+  "title": "Tuiles de Truchet",
+  "type": "pattern",
+  "description": "Composez des motifs infinis à partir de tuiles de Truchet orientées au hasard : arcs, diagonales, triangles ou labyrinthe. Export en SVG vectoriel ou en PNG.",
+  "tags": ["tuiles", "svg", "labyrinthe"],
+  "author": "claude",
+  "created": "2026-10-28",
+  "status": "finished"
+}

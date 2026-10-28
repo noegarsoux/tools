@@ -1,0 +1,65 @@
+name: Session Cursor
+
+# Fenêtre de 24 h avant le reset mensuel de Cursor (le 12) : un passage toutes
+# les 3 h le 11 (UTC). Chaque passage enchaîne les outils jusqu'à ce que Cursor
+# refuse faute de quota, ou jusqu'à la limite de durée du job.
+on:
+  schedule:
+    - cron: '0 5,8,11,14,17,20,23 11 * *'
+  workflow_dispatch:
+    inputs:
+      max_tools:
+        description: Nombre maximum d'outils pour ce passage
+        default: '20'
+
+concurrency:
+  group: cursor-agent
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  build-tools:
+    runs-on: ubuntu-latest
+    timeout-minutes: 175
+    env:
+      CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
+      GH_TOKEN: ${{ secrets.AGENT_GITHUB_TOKEN }}
+      MAX_TOOLS: ${{ inputs.max_tools || '20' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.AGENT_GITHUB_TOKEN }}
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install && npx playwright install --with-deps chromium
+      - name: Installer Cursor CLI
+        run: |
+          curl -fsSL https://cursor.com/install | bash
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Identité git
+        run: |
+          git config user.name "cursor-agent"
+          git config user.email "cursor-agent@users.noreply.github.com"
+      - name: Construire des outils jusqu'à épuisement du quota
+        run: |
+          CLI=$(command -v cursor-agent || command -v agent)
+          for i in $(seq 1 "$MAX_TOOLS"); do
+            echo "::group::Outil $i"
+            set +e
+            "$CLI" -p --force --output-format text \
+              "Lis AGENTS.md et réalise UNE itération complète de la boucle de travail (étapes 1 à 8) en tant qu'agent 'cursor'. Termine quand la PR est ouverte avec l'auto-merge activé, ou supprime le dossier si l'outil ne peut pas être fini." \
+              2>&1 | tee "run-$i.log"
+            code=${PIPESTATUS[0]}
+            set -e
+            echo "::endgroup::"
+            git checkout -q main && git pull -q
+            if [ $code -ne 0 ] || grep -qiE 'usage limit|quota|rate limit|out of (credits|usage)|upgrade your plan' "run-$i.log"; then
+              echo "Arrêt : quota Cursor épuisé ou erreur (code $code)."
+              break
+            fi
+          done

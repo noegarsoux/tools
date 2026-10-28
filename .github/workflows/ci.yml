@@ -1,0 +1,44 @@
+name: Validation
+
+on:
+  pull_request:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install
+      - run: npx playwright install --with-deps chromium
+
+      - name: Périmètre des PR d'agents
+        if: startsWith(github.head_ref, 'claude/') || startsWith(github.head_ref, 'cursor/')
+        run: |
+          outside=$(git diff --name-only origin/${{ github.base_ref }}...HEAD | grep -vE '^(tools/[a-z0-9-]+/|IDEAS\.md$)' || true)
+          if [ -n "$outside" ]; then
+            echo "::error::Une PR d'agent ne peut modifier que tools/<slug>/ et IDEAS.md :"
+            echo "$outside"
+            exit 1
+          fi
+
+      - name: Valider les outils modifiés
+        run: |
+          slugs=$(git diff --name-only origin/${{ github.base_ref }}...HEAD | sed -nE 's#^tools/([a-z0-9-]+)/.*#\1#p' | sort -u)
+          existing=""
+          for s in $slugs; do [ -d "tools/$s" ] && existing="$existing $s"; done
+          if [ -n "$existing" ]; then node scripts/validate.mjs $existing; else node scripts/validate.mjs; fi
+
+      - name: Les miniatures sont commitées
+        run: |
+          if [ -n "$(git status --porcelain -- tools/)" ]; then
+            git status --short -- tools/
+            echo "::error::thumbnail.jpg manquante : lancer npm run validate en local et committer la miniature"
+            exit 1
+          fi
+
+      - run: npm run build

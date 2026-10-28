@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{TITLE}}</title>
+  <style>
+    :root { --bg: #0f0f12; --panel: rgba(24,24,29,.92); --ink: #f1efe9; --muted: #96939c; --line: #2a2a31; --accent: #ff5a36; }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink); font: 13px/1.4 system-ui, sans-serif; overflow: hidden; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+    .panel { position: fixed; top: 16px; right: 16px; width: 260px; max-height: calc(100vh - 32px); overflow: auto; background: var(--panel); backdrop-filter: blur(8px); border: 1px solid var(--line); border-radius: 12px; padding: 14px; display: grid; gap: 12px; }
+    .panel h1 { font-size: 14px; margin: 0; }
+    .panel label { display: grid; gap: 4px; color: var(--muted); }
+    .panel label span { display: flex; justify-content: space-between; }
+    .panel output { color: var(--ink); font-variant-numeric: tabular-nums; }
+    input[type=range] { width: 100%; accent-color: var(--accent); }
+    .row { display: flex; gap: 8px; }
+    button { flex: 1; border: 0; border-radius: 8px; padding: 8px; font: 600 13px system-ui; cursor: pointer; background: #2a2a31; color: var(--ink); }
+    button.primary { background: var(--accent); color: #fff; }
+    @media (max-width: 600px) {
+      .panel { top: auto; bottom: 0; right: 0; left: 0; width: auto; max-height: 45vh; border-radius: 12px 12px 0 0; }
+    }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <aside class="panel" data-ui>
+    <h1>{{TITLE}}</h1>
+    <label><span>Exemple <output for="example"></output></span><input id="example" type="range" min="1" max="100" value="50"></label>
+    <div class="row">
+      <button id="random">Aléatoire</button>
+      <button id="save" class="primary">Exporter PNG</button>
+    </div>
+  </aside>
+  <script>
+    const canvas = document.getElementById('c');
+    const ctx = canvas.getContext('2d');
+    // Remplacer ce gabarit par l'outil réel.
+  </script>
+</body>
+</html>

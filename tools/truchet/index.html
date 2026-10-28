@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tuiles de Truchet</title>
+  <style>
+    :root { --bg: #0f0f12; --panel: rgba(24,24,29,.92); --ink: #f1efe9; --muted: #96939c; --line: #2a2a31; --accent: #ff5a36; }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink); font: 13px/1.4 system-ui, sans-serif; overflow: hidden; }
+    #art { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; cursor: crosshair; }
+    .panel { position: fixed; top: 16px; right: 16px; width: 260px; max-height: calc(100vh - 32px); overflow: auto; background: var(--panel); backdrop-filter: blur(8px); border: 1px solid var(--line); border-radius: 12px; padding: 14px; display: grid; gap: 12px; }
+    .panel h1 { font-size: 14px; margin: 0; }
+    .panel p { margin: 0; color: var(--muted); }
+    .panel label { display: grid; gap: 4px; color: var(--muted); }
+    .panel label span { display: flex; justify-content: space-between; }
+    .panel output { color: var(--ink); font-variant-numeric: tabular-nums; }
+    input[type=range], select { width: 100%; accent-color: var(--accent); }
+    .colors { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    input[type=color] { width: 100%; height: 32px; border: 0; padding: 0; background: none; cursor: pointer; }
+    select { background: #2a2a31; color: var(--ink); border: 0; border-radius: 6px; padding: 6px; font: inherit; }
+    .row { display: flex; gap: 8px; }
+    button { flex: 1; border: 0; border-radius: 8px; padding: 8px; font: 600 13px system-ui; cursor: pointer; background: #2a2a31; color: var(--ink); }
+    button.primary { background: var(--accent); color: #fff; }
+    @media (max-width: 600px) {
+      .panel { top: auto; bottom: 0; right: 0; left: 0; width: auto; max-height: 45vh; border-radius: 12px 12px 0 0; }
+    }
+  </style>
+</head>
+<body>
+  <svg id="art" xmlns="http://www.w3.org/2000/svg"></svg>
+  <aside class="panel" data-ui>
+    <h1>Tuiles de Truchet</h1>
+    <p>Cliquez sur une tuile pour la faire pivoter.</p>
+    <label><span>Style</span>
+      <select id="style">
+        <option value="arcs">Arcs</option>
+        <option value="diagonal">Diagonales</option>
+        <option value="triangles">Triangles</option>
+        <option value="maze">Labyrinthe</option>
+        <option value="circles">Quarts de cercle pleins</option>
+      </select>
+    </label>
+    <label><span>Taille des tuiles <output></output></span><input id="size" type="range" min="16" max="160" step="2" value="56"></label>
+    <label><span>Épaisseur du trait <output></output></span><input id="stroke" type="range" min="1" max="40" value="10"></label>
+    <label><span>Probabilité d'orientation <output></output></span><input id="bias" type="range" min="0" max="1" step="0.05" value="0.5"></label>
+    <div class="colors">
+      <label><span>Fond</span><input id="bg" type="color" value="#14141a"></label>
+      <label><span>Motif</span><input id="fg" type="color" value="#ff5a36"></label>
+    </div>
+    <button id="random">Nouvelle graine</button>
+    <div class="row">
+      <button id="svg">Exporter SVG</button>
+      <button id="png" class="primary">Exporter PNG</button>
+    </div>
+  </aside>
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const svg = $('art');
+    let seed = 1 + Math.floor(Math.random() * 2147483646), flips = new Map();
+
+    function rng(s) { return () => (s = (s * 16807) % 2147483647) / 2147483647; }
+
+    function tile(style, x, y, s, r, fg) {
+      const cx = x + s / 2, cy = y + s / 2, h = s / 2;
+      const rot = `rotate(${r * 90} ${cx} ${cy})`;
+      switch (style) {
+        case 'arcs':
+          return `<path transform="${rot}" d="M${x + h} ${y} A${h} ${h} 0 0 1 ${x} ${y + h} M${x + s} ${y + h} A${h} ${h} 0 0 0 ${x + h} ${y + s}" fill="none" stroke="${fg}"/>`;
+        case 'diagonal':
+          return `<line transform="${rot}" x1="${x}" y1="${y}" x2="${x + s}" y2="${y + s}" stroke="${fg}"/>`;
+        case 'maze':
+          return `<line transform="${rot}" x1="${x}" y1="${y + s}" x2="${x + s}" y2="${y}" stroke="${fg}"/>`;
+        case 'triangles':
+          return `<path transform="${rot}" d="M${x} ${y}H${x + s}L${x} ${y + s}Z" fill="${fg}"/>`;
+        case 'circles':
+          return `<path transform="${rot}" d="M${x} ${y}h${h}a${h} ${h} 0 0 1 ${-h} ${h}Z M${x + s} ${y + s}h${-h}a${h} ${h} 0 0 1 ${h} ${-h}Z" fill="${fg}"/>`;
+      }
+    }
+
+    function markup(w, h) {
+      const style = $('style').value, s = +$('size').value, bias = +$('bias').value;
+      const fg = $('fg').value, bg = $('bg').value;
+      const rand = rng(seed);
+      const cols = Math.ceil(w / s), rows = Math.ceil(h / s);
+      let out = '';
+      for (let j = 0; j < rows; j++) {
+        for (let i = 0; i < cols; i++) {
+          // Deux orientations pour les styles symétriques, quatre pour les triangles.
+          let r = rand() < bias ? 1 : 0;
+          if (style === 'triangles' || style === 'circles') r = r * 2 + (rand() < 0.5 ? 1 : 0);
+          r = (r + (flips.get(`${i},${j}`) || 0)) % 4;
+          out += tile(style, i * s, j * s, s, r, fg);
+        }
+      }
+      return `<rect width="${w}" height="${h}" fill="${bg}"/><g stroke-width="${$('stroke').value}" stroke-linecap="round">${out}</g>`;
+    }
+
+    function draw() {
+      const w = innerWidth, h = innerHeight;
+      svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+      svg.innerHTML = markup(w, h);
+    }
+
+    function file(w, h) {
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">${markup(w, h)}</svg>`;
+    }
+    function download(name, href) {
+      const a = document.createElement('a');
+      a.download = name; a.href = href; a.click();
+      setTimeout(() => URL.revokeObjectURL(href), 1000);
+    }
+
+    svg.addEventListener('click', (e) => {
+      const s = +$('size').value, k = `${Math.floor(e.clientX / s)},${Math.floor(e.clientY / s)}`;
+      flips.set(k, ((flips.get(k) || 0) + 1) % 4);
+      draw();
+    });
+    document.querySelectorAll('input, select').forEach((el) => {
+      const out = el.closest('label')?.querySelector('output');
+      const sync = () => { if (out) out.textContent = el.value; };
+      sync();
+      el.addEventListener('input', () => { sync(); if (el.id === 'size') flips.clear(); draw(); });
+      el.addEventListener('change', () => { sync(); draw(); });
+    });
+    $('random').onclick = () => { seed = 1 + Math.floor(Math.random() * 2147483646); flips.clear(); draw(); };
+    $('svg').onclick = () => download('truchet.svg', URL.createObjectURL(new Blob([file(innerWidth, innerHeight)], { type: 'image/svg+xml' })));
+    $('png').onclick = async () => {
+      const w = innerWidth * 2, h = innerHeight * 2;
+      const img = new Image();
+      img.src = URL.createObjectURL(new Blob([file(innerWidth, innerHeight)], { type: 'image/svg+xml' }));
+      await img.decode();
+      const c = document.createElement('canvas');
+      c.width = w; c.height = h;
+      c.getContext('2d').drawImage(img, 0, 0, w, h);
+      URL.revokeObjectURL(img.src);
+      download('truchet.png', c.toDataURL('image/png'));
+    };
+    addEventListener('resize', draw);
+    draw();
+  </script>
+</body>
+</html>

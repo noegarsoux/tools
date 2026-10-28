@@ -1,0 +1,10 @@
+{
+  "slug": "harmonies",
+  "title": "Harmonies de couleurs",
+  "type": "color",
+  "description": "Générez une palette harmonieuse à partir d'une couleur de base (complémentaire, analogue, triade…) en OKLCH. Copiez les codes hex ou exportez en variables CSS.",
+  "tags": ["palette", "oklch", "css"],
+  "author": "claude",
+  "created": "2026-10-28",
+  "status": "finished"
+}

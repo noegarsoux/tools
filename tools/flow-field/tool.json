@@ -1,0 +1,10 @@
+{
+  "slug": "flow-field",
+  "title": "Champ de flux",
+  "type": "generative",
+  "description": "Des milliers de particules suivent un champ de bruit et tracent des lignes organiques. Réglez la densité, l'échelle du bruit et la palette, puis exportez en PNG.",
+  "tags": ["particules", "bruit", "lignes"],
+  "author": "claude",
+  "created": "2026-10-28",
+  "status": "finished"
+}
