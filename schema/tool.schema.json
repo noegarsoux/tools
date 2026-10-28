@@ -3,17 +3,70 @@
   "title": "Creative coding tool",
   "type": "object",
   "additionalProperties": false,
-  "required": ["slug", "title", "type", "description", "author", "created", "status"],
+  "required": [
+    "slug",
+    "title",
+    "type",
+    "description",
+    "author",
+    "created",
+    "status"
+  ],
   "properties": {
-    "slug": { "type": "string", "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$", "description": "Identique au nom du dossier." },
-    "title": { "type": "string", "minLength": 3, "maxLength": 40 },
-    "type": {
-      "enum": ["generative", "shader", "typography", "color", "pattern", "image", "animation", "audio", "3d", "utility"]
+    "slug": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
+      "description": "Identique au nom du dossier."
     },
-    "description": { "type": "string", "minLength": 40, "maxLength": 180 },
-    "tags": { "type": "array", "items": { "type": "string", "pattern": "^[a-z0-9-]+$" }, "maxItems": 6 },
-    "author": { "enum": ["claude", "cursor", "human"] },
-    "created": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
-    "status": { "enum": ["finished"] }
+    "title": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 40
+    },
+    "type": {
+      "enum": [
+        "typography",
+        "system",
+        "shapes",
+        "pattern",
+        "generative",
+        "motion",
+        "webgl",
+        "filter",
+        "gradient",
+        "color",
+        "audio",
+        "utility"
+      ]
+    },
+    "description": {
+      "type": "string",
+      "minLength": 40,
+      "maxLength": 180
+    },
+    "tags": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z0-9-]+$"
+      },
+      "maxItems": 6
+    },
+    "author": {
+      "enum": [
+        "claude",
+        "cursor",
+        "human"
+      ]
+    },
+    "created": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+    },
+    "status": {
+      "enum": [
+        "finished"
+      ]
+    }
   }
 }
