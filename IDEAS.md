@@ -35,6 +35,7 @@ Coche une idée (`[x]`) dans la PR qui publie l'outil. Ajoute de nouvelles idée
 
 ## Génératif
 - [x] Champ de flux (`flow-field`)
+- [x] Topographie (`topographie`)
 - [ ] Croissance différentielle en temps réel
 - [ ] Réaction-diffusion avec masque typographique
 - [ ] Attracteurs étranges en haute densité, rotation lente

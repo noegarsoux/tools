@@ -1,0 +1,600 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Topographie</title>
+  <style>
+    :root { --bg: #102028; --panel: rgba(24,24,29,.92); --ink: #f1efe9; --muted: #96939c; --line: #2a2a31; --accent: #e07a3d; }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink); font: 13px/1.4 system-ui, sans-serif; overflow: hidden; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+    .panel { position: fixed; top: 16px; right: 16px; width: 272px; max-height: calc(100vh - 32px); overflow: auto; background: var(--panel); backdrop-filter: blur(8px); border: 1px solid var(--line); border-radius: 12px; padding: 14px; display: grid; gap: 10px; }
+    .panel h1 { font-size: 14px; margin: 0; }
+    .panel p { margin: 0; color: var(--muted); }
+    .panel label { display: grid; gap: 4px; color: var(--muted); }
+    .panel label span { display: flex; justify-content: space-between; gap: 8px; }
+    .panel output { color: var(--ink); font-variant-numeric: tabular-nums; }
+    input[type=range] { width: 100%; margin: 0; accent-color: var(--accent); }
+    select, input[type=number] { width: 100%; background: #2a2a31; color: var(--ink); border: 0; border-radius: 6px; padding: 6px 8px; font: inherit; }
+    label.inline { display: flex; align-items: center; gap: 8px; color: var(--ink); }
+    label.inline input { width: 16px; height: 16px; accent-color: var(--accent); }
+    .row { display: flex; gap: 8px; }
+    button { flex: 1; border: 0; border-radius: 8px; padding: 8px; font: 600 13px system-ui; cursor: pointer; background: #2a2a31; color: var(--ink); }
+    button.primary { background: var(--accent); color: #fff; }
+    button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    @media (max-width: 600px) {
+      .panel { top: auto; bottom: 0; right: 0; left: 0; width: auto; max-height: 45vh; border-radius: 12px 12px 0 0; }
+    }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <aside class="panel" data-ui>
+    <h1>Topographie</h1>
+    <p>Le PNG garde l'ombrage, le SVG les courbes seules.</p>
+    <label><span>Palette</span>
+      <select id="palette">
+        <option value="atlas" selected>Atlas</option>
+        <option value="glacier">Glacier</option>
+        <option value="desert">Désert</option>
+        <option value="night">Nuit</option>
+        <option value="ink">Encre</option>
+      </select>
+    </label>
+    <label><span>Relief</span>
+      <select id="relief">
+        <option value="melange" selected>Mélange</option>
+        <option value="collines">Collines</option>
+        <option value="cretes">Crêtes</option>
+      </select>
+    </label>
+    <label><span>Échelle du relief <output></output></span><input id="scale" type="range" min="0.8" max="3.2" step="0.05" value="1.7" data-fmt="dec"></label>
+    <label><span>Détail <output></output></span><input id="detail" type="range" min="1" max="6" step="1" value="5" data-fmt="int"></label>
+    <label><span>Courbes de niveau <output></output></span><input id="curves" type="range" min="6" max="28" step="1" value="16" data-fmt="int"></label>
+    <label><span>Niveau de la mer <output></output></span><input id="sea" type="range" min="0.15" max="0.75" step="0.01" value="0.46" data-fmt="pct"></label>
+    <label><span>Ombrage <output></output></span><input id="shade" type="range" min="0" max="1" step="0.01" value="0.78" data-fmt="pct"></label>
+    <label><span>Épaisseur du trait <output></output></span><input id="stroke" type="range" min="0.4" max="3.5" step="0.1" value="1.2" data-fmt="dec"></label>
+    <label><span>Déformation <output></output></span><input id="warp" type="range" min="0" max="1.4" step="0.02" value="0.7" data-fmt="dec"></label>
+    <label><span>Graine</span><input id="seed" type="number" min="1" max="2147483646" step="1" value="184293"></label>
+    <label class="inline"><input id="labels" type="checkbox" checked> Cotes d'altitude</label>
+    <button id="random" type="button">Nouvelle graine</button>
+    <div class="row">
+      <button id="svg" type="button">Exporter SVG</button>
+      <button id="png" type="button" class="primary">Exporter PNG</button>
+    </div>
+  </aside>
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const canvas = $('c');
+    const ctx = canvas.getContext('2d');
+    const relief = document.createElement('canvas');
+    const rctx = relief.getContext('2d');
+
+    const F2 = 0.5 * (Math.sqrt(3) - 1);
+    const G2 = (3 - Math.sqrt(3)) / 6;
+    const GRAD = [[1, 1], [-1, 1], [1, -1], [-1, -1], [1, 0], [-1, 0], [0, 1], [0, -1]];
+
+    const PALETTES = {
+      atlas: {
+        below: [[0, 7, 32, 44], [0.5, 14, 86, 98], [1, 140, 206, 196]],
+        above: [[0, 236, 220, 186], [0.14, 118, 156, 74], [0.38, 198, 172, 88], [0.6, 166, 118, 78], [0.8, 214, 206, 196], [1, 250, 248, 244]],
+        ink: '#2a2118', water: '#e4f4f0', coast: '#1a140e', paper: '#e7d3b0',
+        label: '#241c14', halo: 'rgba(255,248,236,.92)', waterLabel: '#f4fffc', waterHalo: 'rgba(6,32,40,.75)'
+      },
+      glacier: {
+        below: [[0, 7, 20, 34], [0.55, 22, 64, 96], [1, 130, 184, 204]],
+        above: [[0, 198, 220, 228], [0.4, 232, 240, 242], [1, 255, 255, 255]],
+        ink: '#1a3144', water: '#d7f1f8', coast: '#0e2433', paper: '#e7f1f4',
+        label: '#163044', halo: 'rgba(244,250,252,.92)', waterLabel: '#f5fcff', waterHalo: 'rgba(8,24,40,.7)'
+      },
+      desert: {
+        below: [[0, 122, 68, 46], [1, 214, 156, 116]],
+        above: [[0, 232, 196, 150], [0.4, 240, 214, 176], [0.75, 246, 230, 204], [1, 252, 248, 240]],
+        ink: '#5c3218', water: '#f6e6d4', coast: '#4a2816', paper: '#f0d8b4',
+        label: '#5c3218', halo: 'rgba(255,246,232,.92)', waterLabel: '#fff6ee', waterHalo: 'rgba(80,36,20,.65)'
+      },
+      night: {
+        below: [[0, 7, 9, 26], [1, 42, 56, 120]],
+        above: [[0, 58, 76, 150], [0.42, 198, 160, 90], [1, 246, 236, 210]],
+        ink: '#f0d48a', water: '#a9bbee', coast: '#ffe7a8', paper: '#14182e',
+        label: '#f6ecd2', halo: 'rgba(10,12,28,.78)', waterLabel: '#e4ecff', waterHalo: 'rgba(8,10,24,.7)'
+      },
+      ink: {
+        below: [[0, 168, 176, 172], [1, 214, 218, 214]],
+        above: [[0, 228, 222, 210], [0.5, 240, 234, 226], [1, 248, 245, 240]],
+        ink: '#1c1915', water: '#5e6a66', coast: '#12110e', paper: '#efeae2',
+        label: '#1c1915', halo: 'rgba(247,244,238,.92)', waterLabel: '#1c2422', waterHalo: 'rgba(236,240,238,.88)'
+      }
+    };
+
+    let seed = parseInt($('seed').value, 10) || 1;
+    let cache = { key: '', H: null, cols: 0, rows: 0 };
+    let raf = 0;
+
+    function hash(ix, iy, s) {
+      let n = Math.imul(ix | 0, 374761393) + Math.imul(iy | 0, 668265263) + Math.imul(s | 0, 1442695041);
+      n = Math.imul(n ^ (n >>> 13), 1274126177);
+      return (n ^ (n >>> 16)) & 7;
+    }
+
+    function simplex(xin, yin, s) {
+      const skew = (xin + yin) * F2;
+      const i = Math.floor(xin + skew);
+      const j = Math.floor(yin + skew);
+      const t = (i + j) * G2;
+      const x0 = xin - (i - t);
+      const y0 = yin - (j - t);
+      const i1 = x0 > y0 ? 1 : 0;
+      const j1 = x0 > y0 ? 0 : 1;
+      const x1 = x0 - i1 + G2;
+      const y1 = y0 - j1 + G2;
+      const x2 = x0 - 1 + 2 * G2;
+      const y2 = y0 - 1 + 2 * G2;
+      let n0 = 0, n1 = 0, n2 = 0;
+      let t0 = 0.5 - x0 * x0 - y0 * y0;
+      if (t0 > 0) {
+        t0 *= t0;
+        const g = GRAD[hash(i, j, s)];
+        n0 = t0 * t0 * (g[0] * x0 + g[1] * y0);
+      }
+      let t1 = 0.5 - x1 * x1 - y1 * y1;
+      if (t1 > 0) {
+        t1 *= t1;
+        const g = GRAD[hash(i + i1, j + j1, s)];
+        n1 = t1 * t1 * (g[0] * x1 + g[1] * y1);
+      }
+      let t2 = 0.5 - x2 * x2 - y2 * y2;
+      if (t2 > 0) {
+        t2 *= t2;
+        const g = GRAD[hash(i + 1, j + 1, s)];
+        n2 = t2 * t2 * (g[0] * x2 + g[1] * y2);
+      }
+      return 70 * (n0 + n1 + n2);
+    }
+
+    function fbm(x, y, s, octaves) {
+      let amp = 1, freq = 1, sum = 0, norm = 0;
+      for (let o = 0; o < octaves; o++) {
+        sum += amp * simplex(x * freq, y * freq, s + o * 104729);
+        norm += amp;
+        amp *= 0.5;
+        freq *= 2.03;
+      }
+      return sum / norm;
+    }
+
+    function ridged(x, y, s, octaves) {
+      let amp = 1, freq = 1, sum = 0, norm = 0;
+      for (let o = 0; o < octaves; o++) {
+        let n = 1 - Math.abs(simplex(x * freq, y * freq, s + o * 104729));
+        n *= n;
+        sum += amp * n;
+        norm += amp;
+        amp *= 0.5;
+        freq *= 2.07;
+      }
+      return sum / norm;
+    }
+
+    function sampleRelief(x, y, oct, warp, type) {
+      const wx = simplex(x * 0.55 + 1.7, y * 0.55, seed + 91);
+      const wy = simplex(x * 0.55 - 2.2, y * 0.55 + 4.4, seed + 157);
+      const px = x + wx * warp;
+      const py = y + wy * warp;
+      if (type === 'collines') return fbm(px, py, seed, oct);
+      if (type === 'cretes') return ridged(px, py, seed + 11, oct);
+      return fbm(px, py, seed, oct) * 0.58 + ridged(px, py, seed + 11, oct) * 0.42;
+    }
+
+    function ramp(stops, t) {
+      if (t <= stops[0][0]) return stops[0];
+      if (t >= stops[stops.length - 1][0]) return stops[stops.length - 1];
+      let i = 1;
+      while (stops[i][0] < t) i++;
+      const a = stops[i - 1], b = stops[i];
+      const f = (t - a[0]) / (b[0] - a[0] || 1);
+      return [0, a[1] + (b[1] - a[1]) * f, a[2] + (b[2] - a[2]) * f, a[3] + (b[3] - a[3]) * f];
+    }
+
+    function clampByte(v) {
+      return v < 0 ? 0 : v > 255 ? 255 : v | 0;
+    }
+
+    function getField(w, h) {
+      const scale = +$('scale').value;
+      const oct = +$('detail').value;
+      const warp = +$('warp').value;
+      const type = $('relief').value;
+      const aspect = w / Math.max(1, h);
+      const target = 54000;
+      let cols = Math.max(64, Math.round(Math.sqrt(target * aspect)));
+      let rows = Math.max(64, Math.round(target / cols));
+      const key = [seed, scale, oct, warp, type, cols, rows].join('|');
+      if (cache.key === key) return cache;
+      const H = new Float32Array(cols * rows);
+      let min = Infinity, max = -Infinity;
+      for (let j = 0; j < rows; j++) {
+        const v = (j / (rows - 1) - 0.5) * scale;
+        for (let i = 0; i < cols; i++) {
+          const u = (i / (cols - 1) - 0.5) * scale * aspect;
+          const value = sampleRelief(u, v, oct, warp, type);
+          H[j * cols + i] = value;
+          if (value < min) min = value;
+          if (value > max) max = value;
+        }
+      }
+      const span = max - min || 1;
+      for (let i = 0; i < H.length; i++) H[i] = (H[i] - min) / span;
+      cache = { key, H, cols, rows };
+      return cache;
+    }
+
+    function paintRelief(H, cols, rows, sea, palette, shadeAmt) {
+      if (relief.width !== cols || relief.height !== rows) {
+        relief.width = cols;
+        relief.height = rows;
+      }
+      const img = rctx.createImageData(cols, rows);
+      const d = img.data;
+      const lx = -0.48, ly = -0.62, lz = 0.62;
+      const linv = 1 / Math.hypot(lx, ly, lz);
+      for (let j = 0; j < rows; j++) {
+        for (let i = 0; i < cols; i++) {
+          const h = H[j * cols + i];
+          const hl = H[j * cols + (i > 0 ? i - 1 : i)];
+          const hr = H[j * cols + (i + 1 < cols ? i + 1 : i)];
+          const ht = H[(j > 0 ? j - 1 : j) * cols + i];
+          const hb = H[(j + 1 < rows ? j + 1 : j) * cols + i];
+          const water = h < sea;
+          const damp = water ? 0.32 : 1;
+          const sx = (hr - hl) * cols * damp;
+          const sy = (hb - ht) * rows * damp;
+          const dz = 1.45;
+          const inv = 1 / Math.hypot(sx, sy, dz);
+          const nd = Math.max(0, (-sx * inv) * lx * linv + (-sy * inv) * ly * linv + (dz * inv) * lz * linv);
+          const lit = 0.4 + 0.6 * nd;
+          const f = (1 - shadeAmt) + shadeAmt * lit;
+          const warm = shadeAmt * (f - 0.76);
+          const base = water
+            ? ramp(palette.below, sea > 0.001 ? h / sea : 0)
+            : ramp(palette.above, sea < 0.999 ? (h - sea) / (1 - sea) : 1);
+          const o = (j * cols + i) * 4;
+          d[o] = clampByte(base[1] * f + warm * 20);
+          d[o + 1] = clampByte(base[2] * f + warm * 6);
+          d[o + 2] = clampByte(base[3] * f - warm * 12);
+          d[o + 3] = 255;
+        }
+      }
+      rctx.putImageData(img, 0, 0);
+    }
+
+    function smoothPoly(poly, closed) {
+      if (poly.length < 4) return poly;
+      const out = [];
+      const n = poly.length;
+      const count = closed ? n : n - 1;
+      for (let i = 0; i < count; i++) {
+        const p = poly[i];
+        const q = poly[(i + 1) % n];
+        out.push([p[0] * 0.75 + q[0] * 0.25, p[1] * 0.75 + q[1] * 0.25]);
+        out.push([p[0] * 0.25 + q[0] * 0.75, p[1] * 0.25 + q[1] * 0.75]);
+      }
+      if (!closed) {
+        out.unshift(poly[0]);
+        out.push(poly[n - 1]);
+      }
+      return out;
+    }
+
+    function chain(segs) {
+      const map = new Map();
+      for (let i = 0; i < segs.length; i++) {
+        for (const k of [segs[i].a.k, segs[i].b.k]) {
+          if (!map.has(k)) map.set(k, []);
+          map.get(k).push(i);
+        }
+      }
+      const used = new Uint8Array(segs.length);
+      const lines = [];
+      for (let i = 0; i < segs.length; i++) {
+        if (used[i]) continue;
+        used[i] = 1;
+        const poly = [[segs[i].a.x, segs[i].a.y], [segs[i].b.x, segs[i].b.y]];
+        extend(segs[i].a.k, true);
+        extend(segs[i].b.k, false);
+        let closed = false;
+        const a = poly[0], b = poly[poly.length - 1];
+        if (poly.length > 3 && Math.hypot(a[0] - b[0], a[1] - b[1]) < 0.05) {
+          poly.pop();
+          closed = true;
+        }
+        const smooth = smoothPoly(poly, closed);
+        let len = 0;
+        for (let p = 1; p < smooth.length; p++) len += Math.hypot(smooth[p][0] - smooth[p - 1][0], smooth[p][1] - smooth[p - 1][1]);
+        if (closed && smooth.length > 1) len += Math.hypot(smooth[0][0] - smooth[smooth.length - 1][0], smooth[0][1] - smooth[smooth.length - 1][1]);
+        if (len >= 12 && smooth.length >= 2) lines.push({ poly: smooth, closed, len });
+
+        function extend(startK, front) {
+          let k = startK;
+          let guard = segs.length + 2;
+          while (guard--) {
+            const list = map.get(k);
+            if (!list) return;
+            let nxt = -1;
+            for (let p = 0; p < list.length; p++) if (!used[list[p]]) { nxt = list[p]; break; }
+            if (nxt < 0) return;
+            used[nxt] = 1;
+            const s = segs[nxt];
+            const far = s.a.k === k ? s.b : s.a;
+            if (far.k === k) return;
+            if (front) poly.unshift([far.x, far.y]);
+            else poly.push([far.x, far.y]);
+            k = far.k;
+          }
+        }
+      }
+      return lines;
+    }
+
+    function contours(H, cols, rows, w, h, level) {
+      const segs = [];
+      const inside = (v) => v >= level;
+      for (let j = 0; j < rows - 1; j++) {
+        const row = j * cols;
+        const next = (j + 1) * cols;
+        for (let i = 0; i < cols - 1; i++) {
+          const tl = H[row + i];
+          const tr = H[row + i + 1];
+          const bl = H[next + i];
+          const br = H[next + i + 1];
+          const btl = inside(tl), btr = inside(tr), bbl = inside(bl), bbr = inside(br);
+          const pts = [];
+          if (btl !== btr) pts.push(pt('h', i, j, tl, tr));
+          if (btr !== bbr) pts.push(pt('v', i + 1, j, tr, br));
+          if (bbl !== bbr) pts.push(pt('h', i, j + 1, bl, br));
+          if (btl !== bbl) pts.push(pt('v', i, j, tl, bl));
+          if (pts.length === 2) segs.push({ a: pts[0], b: pts[1] });
+          else if (pts.length === 4) {
+            if (inside((tl + tr + br + bl) / 4) === btl) {
+              segs.push({ a: pts[0], b: pts[1] }, { a: pts[2], b: pts[3] });
+            } else {
+              segs.push({ a: pts[0], b: pts[3] }, { a: pts[1], b: pts[2] });
+            }
+          }
+        }
+      }
+      return chain(segs);
+
+      function pt(kind, i, j, v0, v1) {
+        let f = v1 === v0 ? 0.5 : (level - v0) / (v1 - v0);
+        if (f < 0) f = 0;
+        else if (f > 1) f = 1;
+        const x = (kind === 'h' ? i + f : i) / (cols - 1) * w;
+        const y = (kind === 'h' ? j : j + f) / (rows - 1) * h;
+        return { k: kind + i + '_' + j, x, y };
+      }
+    }
+
+    function trace(lines) {
+      ctx.beginPath();
+      for (const { poly, closed } of lines) {
+        ctx.moveTo(poly[0][0], poly[0][1]);
+        for (let i = 1; i < poly.length; i++) ctx.lineTo(poly[i][0], poly[i][1]);
+        if (closed) ctx.closePath();
+      }
+    }
+
+    function strokeLines(lines, color, width, alpha, underlay) {
+      if (!lines.length) return;
+      trace(lines);
+      ctx.lineJoin = 'round';
+      ctx.lineCap = 'round';
+      if (underlay) {
+        ctx.globalAlpha = 0.35;
+        ctx.strokeStyle = underlay;
+        ctx.lineWidth = width + Math.max(1, width * 0.85);
+        ctx.stroke();
+      }
+      ctx.globalAlpha = alpha;
+      ctx.strokeStyle = color;
+      ctx.lineWidth = width;
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+
+    function labelAnchor(poly, margin, w, h) {
+      let best = null, bestScore = 0.62;
+      const step = Math.max(1, Math.floor(poly.length / 28));
+      for (let i = 0; i < poly.length; i += step) {
+        const x = poly[i][0], y = poly[i][1];
+        if (x < margin || y < margin || x > w - margin || y > h - margin) continue;
+        const i0 = Math.max(0, i - step);
+        const i1 = Math.min(poly.length - 1, i + step);
+        const dx = poly[i1][0] - poly[i0][0];
+        const dy = poly[i1][1] - poly[i0][1];
+        const len = Math.hypot(dx, dy) || 1;
+        const horiz = 1 - Math.abs(dy) / len;
+        if (horiz > bestScore) {
+          let ang = Math.atan2(dy, dx);
+          if (ang > Math.PI / 2 || ang < -Math.PI / 2) ang += Math.PI;
+          bestScore = horiz;
+          best = { x, y, ang };
+        }
+      }
+      return best;
+    }
+
+    function drawLabels(items, palette, dpr, w, h) {
+      const placed = [];
+      const minDist = 92 * dpr;
+      const margin = 64 * dpr;
+      ctx.font = `600 ${Math.round(12.5 * dpr)}px system-ui, sans-serif`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.lineJoin = 'round';
+      for (const item of items) {
+        for (const line of item.lines) {
+          if (line.len < 110 * dpr) continue;
+          const spot = labelAnchor(line.poly, margin, w, h);
+          if (!spot) continue;
+          if (placed.some((p) => Math.hypot(p[0] - spot.x, p[1] - spot.y) < minDist)) continue;
+          placed.push([spot.x, spot.y]);
+          const meters = Math.round((item.level - item.sea) * 900);
+          const text = meters + ' m';
+          const onWater = item.level < item.sea - 0.0001;
+          ctx.save();
+          ctx.translate(spot.x, spot.y);
+          ctx.rotate(spot.ang);
+          ctx.lineWidth = 4 * dpr;
+          ctx.strokeStyle = onWater ? palette.waterHalo : palette.halo;
+          ctx.strokeText(text, 0, 0);
+          ctx.fillStyle = onWater ? palette.waterLabel : palette.label;
+          ctx.fillText(text, 0, 0);
+          ctx.restore();
+        }
+      }
+    }
+
+    function classify(H, cols, rows, w, h, sea) {
+      const n = +$('curves').value;
+      const step = 1 / n;
+      const groups = { waterMinor: [], waterMajor: [], landMinor: [], landMajor: [], coast: [] };
+      const labels = [];
+      for (let k = 1; k < n; k++) {
+        const level = k * step;
+        if (Math.abs(level - sea) < step * 0.55) continue;
+        const lines = contours(H, cols, rows, w, h, level);
+        const major = k % 5 === 0;
+        const water = level < sea;
+        groups[water ? (major ? 'waterMajor' : 'waterMinor') : (major ? 'landMajor' : 'landMinor')].push(...lines);
+        if (major) labels.push({ lines, level, sea });
+      }
+      const coast = contours(H, cols, rows, w, h, sea);
+      groups.coast = coast;
+      labels.push({ lines: coast, level: sea, sea });
+      return { groups, labels };
+    }
+
+    function draw() {
+      const w = canvas.width, h = canvas.height;
+      if (w < 2 || h < 2) return;
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.globalAlpha = 1;
+      const { H, cols, rows } = getField(w, h);
+      const sea = Math.min(0.98, Math.max(0.02, +$('sea').value || 0.46));
+      const palette = PALETTES[$('palette').value] || PALETTES.atlas;
+      paintRelief(H, cols, rows, sea, palette, +$('shade').value || 0);
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = 'high';
+      ctx.drawImage(relief, 0, 0, w, h);
+      const g = ctx.createRadialGradient(w * 0.5, h * 0.46, Math.min(w, h) * 0.2, w * 0.5, h * 0.5, Math.max(w, h) * 0.72);
+      g.addColorStop(0, 'rgba(0,0,0,0)');
+      g.addColorStop(1, 'rgba(0,0,0,0.14)');
+      ctx.fillStyle = g;
+      ctx.fillRect(0, 0, w, h);
+
+      const dpr = w / Math.max(1, window.innerWidth);
+      const base = (+$('stroke').value || 1) * dpr;
+      const { groups, labels } = classify(H, cols, rows, w, h, sea);
+      strokeLines(groups.waterMinor, palette.water, base * 0.6, 0.42);
+      strokeLines(groups.waterMajor, palette.water, base * 1.15, 0.82, 'rgba(0,0,0,.25)');
+      strokeLines(groups.landMinor, palette.ink, base * 0.72, 0.55);
+      strokeLines(groups.landMajor, palette.ink, base * 1.6, 0.95, 'rgba(255,250,242,.55)');
+      strokeLines(groups.coast, palette.coast, base * 2.4, 1, 'rgba(255,248,236,.45)');
+      if ($('labels').checked) drawLabels(labels, palette, dpr, w, h);
+    }
+
+    function pathData(lines) {
+      let d = '';
+      for (const { poly, closed } of lines) {
+        d += 'M' + poly[0][0].toFixed(1) + ' ' + poly[0][1].toFixed(1);
+        for (let i = 1; i < poly.length; i++) d += 'L' + poly[i][0].toFixed(1) + ' ' + poly[i][1].toFixed(1);
+        if (closed) d += 'Z';
+      }
+      return d;
+    }
+
+    function svgMarkup(w, h) {
+      const { H, cols, rows } = getField(w, h);
+      const sea = Math.min(0.98, Math.max(0.02, +$('sea').value || 0.46));
+      const palette = PALETTES[$('palette').value] || PALETTES.atlas;
+      const { groups } = classify(H, cols, rows, w, h, sea);
+      const sw = +$('stroke').value || 1;
+      const group = (lines, color, width, opacity) =>
+        lines.length ? `<path d="${pathData(lines)}" fill="none" stroke="${color}" stroke-width="${width}" stroke-opacity="${opacity}" stroke-linecap="round" stroke-linejoin="round"/>` : '';
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">` +
+        `<rect width="${w}" height="${h}" fill="${palette.paper}"/>` +
+        group(groups.waterMinor, palette.water, sw * 0.6, 0.7) +
+        group(groups.waterMajor, palette.water, sw * 1.15, 0.9) +
+        group(groups.landMinor, palette.ink, sw * 0.72, 0.7) +
+        group(groups.landMajor, palette.ink, sw * 1.6, 1) +
+        group(groups.coast, palette.coast, sw * 2.4, 1) +
+        `</svg>`;
+    }
+
+    function download(name, href) {
+      const a = document.createElement('a');
+      a.download = name;
+      a.href = href;
+      a.click();
+      if (href.startsWith('blob:')) setTimeout(() => URL.revokeObjectURL(href), 1500);
+    }
+
+    function requestDraw() {
+      if (raf) return;
+      raf = requestAnimationFrame(() => { raf = 0; draw(); });
+    }
+
+    function syncRange(el) {
+      const out = el.parentElement.querySelector('output');
+      if (!out) return;
+      const v = +el.value;
+      if (el.dataset.fmt === 'int') out.textContent = String(Math.round(v));
+      else if (el.dataset.fmt === 'pct') out.textContent = Math.round(v * 100) + ' %';
+      else out.textContent = v.toFixed(1);
+    }
+
+    document.querySelectorAll('input[type=range]').forEach((el) => {
+      syncRange(el);
+      el.addEventListener('input', () => { syncRange(el); requestDraw(); });
+    });
+    document.querySelectorAll('select, input[type=checkbox]').forEach((el) => {
+      el.addEventListener('input', requestDraw);
+      el.addEventListener('change', requestDraw);
+    });
+    $('seed').addEventListener('input', () => {
+      const n = parseInt($('seed').value, 10);
+      if (!n || n < 1) return;
+      seed = Math.min(2147483646, n);
+      requestDraw();
+    });
+    $('random').addEventListener('click', () => {
+      seed = 1 + Math.floor(Math.random() * 2147483646);
+      $('seed').value = String(seed);
+      draw();
+    });
+    $('svg').addEventListener('click', () => {
+      const blob = new Blob([svgMarkup(canvas.width, canvas.height)], { type: 'image/svg+xml' });
+      download('topographie.svg', URL.createObjectURL(blob));
+    });
+    $('png').addEventListener('click', () => {
+      download('topographie.png', canvas.toDataURL('image/png'));
+    });
+
+    function fit() {
+      const dpr = Math.min(2, window.devicePixelRatio || 1);
+      const w = Math.max(2, Math.round(window.innerWidth * dpr));
+      const h = Math.max(2, Math.round(window.innerHeight * dpr));
+      if (canvas.width !== w || canvas.height !== h) {
+        canvas.width = w;
+        canvas.height = h;
+      }
+      draw();
+    }
+
+    addEventListener('resize', fit);
+    fit();
+  </script>
+</body>
+</html>
