@@ -1,0 +1,1287 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mousse</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Mousse 2D sèche. Chaque bulle a une quantité de gaz ; le diagramme de Laguerre
+    // (Voronoï pondéré) lui donne une aire, la relaxation de Lloyd rapproche les
+    // germes des centroïdes (parois qui tendent vers 120°), et la loi de von Neumann
+    // fait mûrir les cellules : dA/dt ∝ (n − 6). La courbure des films suit
+    // Young-Laplace : une petite bulle, à plus haute pression, bombe vers sa voisine.
+    // L'épaisseur et l'arrondi des coins sont le liquide des bords de Plateau.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d', { alpha: false });
+    const off = document.createElement('canvas');
+    const octx = off.getContext('2d', { alpha: true });
+
+    const pal = (name, from = 0, to) => Atelier.PALETTES[name].colors.slice(from, to);
+
+    let bubbles = [];
+    let diagram = [];
+    let framePts = [];
+    let targets = [];
+    let needRebuild = true;
+    let birthSerial = 0;
+    let arm = 0;
+    let regionSeed = 1;
+    let gesture = null;
+    let maskKey = '';
+    let maskCanvas = null;
+    let maskErode = null;
+    let maskVessel = null;
+    let maskGrid = null;
+    let svgCapture = null;
+    const view = { s: 1, x: 0, y: 0 };
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.08, vignette: 0.07 },
+      hint: 'Glissez pour gonfler une bulle · Alt pour la crever · Maj pour la déplacer · molette pour zoomer',
+      params: {
+        'Mousse': {
+          count: { type: 'range', label: 'Bulles', min: 6, max: 110, step: 1, value: 32 },
+          variation: { type: 'range', label: 'Polydispersité', min: 0, max: 1, step: 0.01, value: 0.66 },
+          forme: {
+            type: 'segmented', label: 'Cadre',
+            options: { plein: 'Plein', disque: 'Disque', hexagone: 'Hexagone', triangle: 'Triangle' },
+            value: 'plein',
+          },
+          marge: { type: 'range', label: 'Marge', min: 0, max: 0.22, step: 0.005, value: 0 },
+        },
+        'Physique': {
+          coarsening: { type: 'range', label: 'Mûrissement', min: 0, max: 1, step: 0.01, value: 0.32 },
+          relaxation: { type: 'range', label: 'Relaxation', min: 0, max: 1, step: 0.01, value: 0.62 },
+          tension: { type: 'range', label: 'Tension', min: 0, max: 1, step: 0.01, value: 0.28 },
+          souffle: { type: 'range', label: 'Respiration', min: 0, max: 0.85, step: 0.01, value: 0.2 },
+          duree: { type: 'range', label: 'Période', min: 2, max: 24, step: 0.1, value: 10 },
+          regen: { type: 'toggle', label: 'Régénération', value: true },
+        },
+        'Parois': {
+          epaisseur: { type: 'range', label: 'Épaisseur', min: 0.0015, max: 0.055, step: 0.0005, value: 0.0125 },
+          plateau: { type: 'range', label: 'Bords de Plateau', min: 0, max: 1, step: 0.01, value: 0.52 },
+          lueur: { type: 'range', label: 'Lueur du film', min: 0, max: 1, step: 0.01, value: 0.22 },
+          fibre: { type: 'range', label: 'Fibre du papier', min: 0, max: 1, step: 0.01, value: 0.28 },
+        },
+        'Couleur': {
+          bg: { type: 'color', label: 'Cellules', value: '#fdfdfd' },
+          paroi: { type: 'color', label: 'Parois', value: '#0f0f0f' },
+          sol: { type: 'color', label: 'Hors cadre', value: '#fdfdfd' },
+          reflet: { type: 'color', label: 'Reflet', value: '#ffffff' },
+          palette: { type: 'palette', label: 'Accents', value: pal('bitmap', 2) },
+          teinte: { type: 'range', label: 'Teinte', min: 0, max: 1, step: 0.01, value: 0 },
+          repartition: {
+            type: 'segmented', label: 'Répartition',
+            options: { regions: 'Régions', alea: 'Aléatoire' },
+            value: 'regions',
+          },
+        },
+        'Cadre': {
+          image: { type: 'file', label: 'Image de cadre', accept: 'image/*', button: 'Importer…' },
+        },
+        'Geste': {
+          debit: { type: 'range', label: 'Débit', min: 0.15, max: 2.5, step: 0.05, value: 1 },
+          recadrer: {
+            type: 'button', label: 'Recadrer',
+            action: () => { view.s = 1; view.x = 0; view.y = 0; },
+          },
+        },
+      },
+      presets: {
+        'Savon': { seed: 18 },
+        'Nuit': {
+          seed: 42,
+          bg: pal('trame-nuit')[0],
+          paroi: pal('trame-nuit')[1],
+          sol: pal('trame-nuit')[0],
+          reflet: pal('trame-nuit')[2],
+          palette: [pal('trame-nuit')[1], pal('trame-nuit')[2]],
+          teinte: 0,
+          count: 74,
+          variation: 0.5,
+          epaisseur: 0.0065,
+          plateau: 0.2,
+          tension: 0.12,
+          souffle: 0.1,
+          coarsening: 0.22,
+          relaxation: 0.4,
+          lueur: 0.15,
+          fibre: 0.18,
+          grain: 0.16,
+          vignette: 0.2,
+        },
+        'Humide': {
+          seed: 7,
+          bg: pal('acide')[3],
+          paroi: pal('acide')[1],
+          sol: pal('acide')[0],
+          reflet: '#ffffff',
+          palette: [pal('acide')[2], pal('acide')[3]],
+          teinte: 1,
+          repartition: 'regions',
+          count: 14,
+          variation: 0.78,
+          epaisseur: 0.03,
+          plateau: 0.96,
+          tension: 0.7,
+          souffle: 0.34,
+          duree: 8,
+          coarsening: 0.12,
+          forme: 'plein',
+          marge: 0,
+          lueur: 0.3,
+          fibre: 0.12,
+          grain: 0.07,
+          vignette: 0.06,
+        },
+        'Sec': {
+          seed: 101,
+          bg: pal('papier-gris')[0],
+          paroi: pal('papier-gris')[1],
+          sol: pal('papier-gris')[0],
+          reflet: pal('papier-gris')[2],
+          palette: pal('papier-gris'),
+          teinte: 0,
+          count: 96,
+          variation: 0.46,
+          epaisseur: 0.0032,
+          plateau: 0.06,
+          tension: 0.08,
+          souffle: 0.06,
+          coarsening: 0.48,
+          relaxation: 0.35,
+          lueur: 0.05,
+          fibre: 0.22,
+          grain: 0.1,
+          vignette: 0.08,
+        },
+        'Vitrail': {
+          seed: 64,
+          bg: pal('glyphes')[1],
+          paroi: pal('glyphes')[0],
+          sol: pal('glyphes')[0],
+          reflet: '#ffffff',
+          palette: pal('glyphes', 1),
+          teinte: 1,
+          repartition: 'regions',
+          count: 46,
+          variation: 0.52,
+          epaisseur: 0.018,
+          plateau: 0.46,
+          tension: 0.22,
+          souffle: 0.14,
+          forme: 'hexagone',
+          marge: 0.045,
+          lueur: 0.16,
+          fibre: 0.1,
+          grain: 0.07,
+          vignette: 0.05,
+        },
+        'Disque': {
+          seed: 23,
+          bg: pal('orbite')[2],
+          paroi: pal('orbite')[1],
+          sol: pal('orbite')[0],
+          reflet: '#ffffff',
+          palette: [pal('orbite')[1], pal('orbite')[0]],
+          teinte: 0,
+          repartition: 'alea',
+          count: 28,
+          variation: 0.64,
+          epaisseur: 0.014,
+          plateau: 0.58,
+          tension: 0.42,
+          souffle: 0.18,
+          forme: 'disque',
+          marge: 0,
+          lueur: 0.18,
+          fibre: 0.12,
+          grain: 0.06,
+          vignette: 0.04,
+        },
+        'Souffle': {
+          seed: 11,
+          bg: pal('menthe')[0],
+          paroi: pal('menthe')[1],
+          sol: pal('menthe')[1],
+          reflet: pal('menthe')[2],
+          palette: [pal('menthe')[2], pal('menthe')[3], pal('menthe')[0]],
+          teinte: 0.48,
+          repartition: 'regions',
+          count: 20,
+          variation: 0.48,
+          epaisseur: 0.018,
+          plateau: 0.74,
+          tension: 0.82,
+          souffle: 0.58,
+          duree: 6.5,
+          coarsening: 0,
+          relaxation: 0.78,
+          forme: 'disque',
+          marge: 0.02,
+          lueur: 0.7,
+          fibre: 0.16,
+          grain: 0.08,
+          vignette: 0.1,
+        },
+      },
+      pointer: {
+        down(q) {
+          const wpt = toWorld(q.x, q.y);
+          const bubble = pick(wpt.x, wpt.y);
+          if (!bubble) return;
+          const mode = q.alt ? 'deflate' : q.shift ? 'move' : 'inflate';
+          gesture = { bubble, mode, x: wpt.x, y: wpt.y };
+          if (mode === 'deflate') bubble.gas *= 0.42;
+        },
+        drag(q) {
+          if (!gesture) return;
+          const wpt = toWorld(q.x, q.y);
+          gesture.x = wpt.x;
+          gesture.y = wpt.y;
+          gesture.mode = q.alt ? 'deflate' : q.shift ? 'move' : 'inflate';
+        },
+        up() { gesture = null; },
+        move(q) {
+          const wpt = toWorld(q.x, q.y);
+          if (gesture) { gesture.x = wpt.x; gesture.y = wpt.y; }
+        },
+        wheel(q, dy) {
+          const factor = Math.exp(-dy * 0.00115);
+          const ns = clamp(view.s * factor, 0.45, 5.5);
+          const k = ns / view.s;
+          view.x = q.x - (q.x - view.x) * k;
+          view.y = q.y - (q.y - view.y) * k;
+          view.s = ns;
+        },
+      },
+      brand(colors) {
+        const bg = colors[0];
+        const paroi = colors[1] || colors[0];
+        const reflet = colors[2] || '#ffffff';
+        const accents = colors.slice(2);
+        const out = {
+          bg, paroi, sol: bg, reflet,
+          palette: (accents.length ? accents : colors).slice(),
+        };
+        if (accents.length >= 1) {
+          out.teinte = 0.88;
+          out.repartition = 'regions';
+        }
+        return out;
+      },
+      onChange(key) {
+        if (key === 'image') maskKey = '';
+        if (key === '*' || key === 'count' || key === 'variation' || key === 'forme' || key === 'marge' || key === 'image') {
+          needRebuild = true;
+        }
+      },
+      onSeed() { needRebuild = true; },
+      export: {
+        svg() {
+          return svgCapture || '<svg xmlns="http://www.w3.org/2000/svg"></svg>';
+        },
+      },
+    });
+
+    const p = app.params;
+    app.reseed(18);
+
+    function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+    function hexRgb(h) {
+      const n = parseInt(String(h).replace('#', ''), 16);
+      if (!Number.isFinite(n)) return [253, 253, 253];
+      return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+    }
+    function rgbHex(r, g, b) {
+      return '#' + [r, g, b].map((v) => clamp(Math.round(v), 0, 255).toString(16).padStart(2, '0')).join('');
+    }
+    function mixHex(a, b, t) {
+      const A = hexRgb(a), B = hexRgb(b);
+      return rgbHex(A[0] + (B[0] - A[0]) * t, A[1] + (B[1] - A[1]) * t, A[2] + (B[2] - A[2]) * t);
+    }
+    function shade(hex, amt) {
+      const [r, g, b] = hexRgb(hex);
+      const k = 1 + amt;
+      return rgbHex(r * k, g * k, b * k);
+    }
+    function hash2(ix, iy) {
+      let n = Math.imul(ix, 374761393) + Math.imul(iy, 668265263) + (regionSeed | 0);
+      n = Math.imul(n ^ (n >>> 13), 1274126177);
+      return ((n ^ (n >>> 16)) >>> 0) / 4294967296;
+    }
+    function vnoise(x, y) {
+      const x0 = Math.floor(x), y0 = Math.floor(y);
+      const fx = x - x0, fy = y - y0;
+      const sx = fx * fx * (3 - 2 * fx), sy = fy * fy * (3 - 2 * fy);
+      const a = hash2(x0, y0), b = hash2(x0 + 1, y0), c = hash2(x0, y0 + 1), d = hash2(x0 + 1, y0 + 1);
+      return a + (b - a) * sx + (c - a) * sy + (a - b - c + d) * sx * sy;
+    }
+    function polyArea(pts) {
+      let a = 0;
+      for (let i = 0, n = pts.length; i < n; i++) {
+        const p0 = pts[i], p1 = pts[(i + 1) % n];
+        a += p0.x * p1.y - p1.x * p0.y;
+      }
+      return a * 0.5;
+    }
+    function centroid(pts, area) {
+      let x = 0, y = 0;
+      for (let i = 0, n = pts.length; i < n; i++) {
+        const p0 = pts[i], p1 = pts[(i + 1) % n];
+        const c = p0.x * p1.y - p1.x * p0.y;
+        x += (p0.x + p1.x) * c;
+        y += (p0.y + p1.y) * c;
+      }
+      const f = 1 / (6 * area);
+      return { x: x * f, y: y * f };
+    }
+    function orient(pts) {
+      if (polyArea(pts) < 0) pts.reverse();
+      return pts;
+    }
+    function pointInPoly(poly, x, y) {
+      let inside = false;
+      for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+        const xi = poly[i].x, yi = poly[i].y, xj = poly[j].x, yj = poly[j].y;
+        if ((yi > y) !== (yj > y) && x < ((xj - xi) * (y - yi)) / ((yj - yi) || 1e-12) + xi) inside = !inside;
+      }
+      return inside;
+    }
+    function boundsOf(pts) {
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      for (const q of pts) {
+        if (q.x < minX) minX = q.x;
+        if (q.y < minY) minY = q.y;
+        if (q.x > maxX) maxX = q.x;
+        if (q.y > maxY) maxY = q.y;
+      }
+      return { minX, minY, maxX, maxY };
+    }
+    function toWorld(x, y) {
+      return { x: (x - view.x) / view.s, y: (y - view.y) / view.s };
+    }
+    function wallPx(w, h) {
+      return Math.max(0.0015, p.epaisseur) * Math.min(w, h);
+    }
+
+    function makeFrame(w, h) {
+      const m = Math.min(w, h);
+      const wall = wallPx(w, h);
+      const pad = p.marge * m;
+      if (p.forme === 'plein' && p.marge < 0.001) {
+        const b = wall * 2.6 + 3;
+        return orient([
+          { x: -b, y: -b }, { x: w + b, y: -b }, { x: w + b, y: h + b }, { x: -b, y: h + b },
+        ]);
+      }
+      const x0 = pad, y0 = pad, x1 = w - pad, y1 = h - pad;
+      const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
+      const r = Math.min(x1 - x0, y1 - y0) / 2;
+      if (p.forme === 'disque') {
+        const pts = [];
+        const N = 80;
+        for (let i = 0; i < N; i++) {
+          const a = (i / N) * Math.PI * 2 - Math.PI / 2;
+          pts.push({ x: cx + Math.cos(a) * r, y: cy + Math.sin(a) * r });
+        }
+        return orient(pts);
+      }
+      if (p.forme === 'hexagone') {
+        const pts = [];
+        for (let i = 0; i < 6; i++) {
+          const a = -Math.PI / 2 + (i / 6) * Math.PI * 2;
+          pts.push({ x: cx + Math.cos(a) * r, y: cy + Math.sin(a) * r });
+        }
+        return orient(pts);
+      }
+      if (p.forme === 'triangle') {
+        const pts = [];
+        for (let i = 0; i < 3; i++) {
+          const a = -Math.PI / 2 + (i / 3) * Math.PI * 2;
+          pts.push({ x: cx + Math.cos(a) * r, y: cy + Math.sin(a) * r });
+        }
+        return orient(pts);
+      }
+      return orient([{ x: x0, y: y0 }, { x: x1, y: y0 }, { x: x1, y: y1 }, { x: x0, y: y1 }]);
+    }
+
+    function clipHalf(poly, nx, ny, c, nbrNew) {
+      const out = [];
+      const n = poly.length;
+      for (let i = 0; i < n; i++) {
+        const s = poly[i];
+        const e = poly[(i + 1) % n];
+        const ds = nx * s.x + ny * s.y - c;
+        const de = nx * e.x + ny * e.y - c;
+        const sIn = ds <= 1e-4;
+        const eIn = de <= 1e-4;
+        if (sIn && eIn) {
+          out.push({ x: e.x, y: e.y, nbr: e.nbr });
+        } else if (sIn && !eIn) {
+          const t = ds / (ds - de || 1e-12);
+          out.push({
+            x: s.x + (e.x - s.x) * t,
+            y: s.y + (e.y - s.y) * t,
+            nbr: nbrNew,
+          });
+        } else if (!sIn && eIn) {
+          const t = ds / (ds - de || 1e-12);
+          out.push({
+            x: s.x + (e.x - s.x) * t,
+            y: s.y + (e.y - s.y) * t,
+            nbr: s.nbr,
+          });
+          out.push({ x: e.x, y: e.y, nbr: e.nbr });
+        }
+      }
+      return out;
+    }
+
+    function cleanPoly(poly) {
+      if (poly.length < 3) return poly;
+      const out = [];
+      for (const q of poly) {
+        if (!Number.isFinite(q.x) || !Number.isFinite(q.y)) continue;
+        const prev = out[out.length - 1];
+        if (prev && Math.hypot(q.x - prev.x, q.y - prev.y) < 0.65) continue;
+        out.push(q);
+      }
+      if (out.length > 3) {
+        const a = out[0], b = out[out.length - 1];
+        if (Math.hypot(a.x - b.x, a.y - b.y) < 0.65) out.pop();
+      }
+      // Arêtes coupées en plusieurs segments : un même voisin = une seule droite.
+      const merged = [];
+      for (let i = 0; i < out.length; i++) {
+        const prev = out[(i + out.length - 1) % out.length];
+        const cur = out[i];
+        const next = out[(i + 1) % out.length];
+        if (prev.nbr === cur.nbr) {
+          const c1x = cur.x - prev.x, c1y = cur.y - prev.y;
+          const c2x = next.x - cur.x, c2y = next.y - cur.y;
+          const cross = c1x * c2y - c1y * c2x;
+          const scale = Math.hypot(c1x, c1y) + Math.hypot(c2x, c2y) + 1e-6;
+          if (Math.abs(cross) <= scale * 1.25) continue;
+        }
+        merged.push(cur);
+      }
+      poly = merged.length >= 3 ? merged : out;
+      // Cellule de Laguerre convexe : on retire les sommets réflexes (bruit numérique).
+      for (let pass = 0; pass < 6 && poly.length > 3; pass++) {
+        const next = [];
+        let dropped = false;
+        for (let i = 0; i < poly.length; i++) {
+          const a = poly[(i + poly.length - 1) % poly.length];
+          const b = poly[i];
+          const c = poly[(i + 1) % poly.length];
+          const cross = (b.x - a.x) * (c.y - b.y) - (b.y - a.y) * (c.x - b.x);
+          if (cross < 0.15) { dropped = true; continue; }
+          next.push(b);
+        }
+        if (!dropped || next.length < 3) break;
+        poly = next;
+      }
+      return poly.length >= 3 ? poly : out;
+    }
+
+    function sideCount(poly) {
+      const n = poly.length;
+      if (n < 3) return 0;
+      let sides = 0;
+      let prev = null;
+      for (let i = 0; i < n; i++) {
+        const nb = poly[i].nbr;
+        if (nb !== prev) sides++;
+        prev = nb;
+      }
+      if (poly[0].nbr === poly[n - 1].nbr && sides > 1) sides--;
+      return sides;
+    }
+
+    function buildDiagram(frame, m) {
+      const n = bubbles.length;
+      const box = boundsOf(frame);
+      const cells = new Array(n);
+      for (let i = 0; i < n; i++) {
+        const si = bubbles[i];
+        const wi = si.weight * m * m;
+        let poly = frame.map((q) => ({ x: q.x, y: q.y, nbr: -1 }));
+        for (let j = 0; j < n; j++) {
+          if (j === i) continue;
+          const sj = bubbles[j];
+          const nx = sj.x - si.x;
+          const ny = sj.y - si.y;
+          if (nx * nx + ny * ny < 1e-8) continue;
+          const wj = sj.weight * m * m;
+          const c = 0.5 * ((sj.x * sj.x + sj.y * sj.y - wj) - (si.x * si.x + si.y * si.y - wi));
+          const x = nx >= 0 ? box.maxX : box.minX;
+          const y = ny >= 0 ? box.maxY : box.minY;
+          if (nx * x + ny * y <= c + 0.75) continue;
+          poly = clipHalf(poly, nx, ny, c, j);
+          if (poly.length < 3) break;
+        }
+        poly = cleanPoly(poly);
+        const area = poly.length >= 3 ? polyArea(poly) : 0;
+        if (area < 1.5) {
+          cells[i] = null;
+          continue;
+        }
+        const wallTouch = poly.some((q) => q.nbr < 0);
+        cells[i] = {
+          poly, area, cen: centroid(poly, area), bubble: si, index: i,
+          sides: sideCount(poly), wallTouch,
+        };
+      }
+      return cells;
+    }
+
+    function renorm() {
+      let s = 0;
+      for (const b of bubbles) s += Math.max(0, b.gas);
+      if (s < 1e-8) {
+        const g = 1 / Math.max(1, bubbles.length);
+        for (const b of bubbles) b.gas = g;
+        return;
+      }
+      for (const b of bubbles) b.gas = Math.max(0, b.gas) / s;
+    }
+
+    function logoRect(img, w, h) {
+      const m = Math.min(w, h);
+      const inset = p.marge * m + wallPx(w, h);
+      const aw = Math.max(8, w - inset * 2);
+      const ah = Math.max(8, h - inset * 2);
+      const s = Math.min(aw / img.naturalWidth, ah / img.naturalHeight);
+      const lw = img.naturalWidth * s;
+      const lh = img.naturalHeight * s;
+      return { x: (w - lw) / 2, y: (h - lh) / 2, w: lw, h: lh };
+    }
+
+    function erodeMask(src, radius) {
+      const c = document.createElement('canvas');
+      c.width = src.width;
+      c.height = src.height;
+      const g = c.getContext('2d');
+      const r = Math.max(0, radius);
+      g.drawImage(src, 0, 0);
+      if (r < 0.5) return c;
+      g.globalCompositeOperation = 'destination-in';
+      const N = 18;
+      for (let i = 0; i < N; i++) {
+        const a = (i / N) * Math.PI * 2;
+        g.drawImage(src, Math.cos(a) * r, Math.sin(a) * r);
+      }
+      g.globalCompositeOperation = 'source-over';
+      return c;
+    }
+
+    function syncMask() {
+      const img = p.image;
+      const { w, h, dpr } = app.size;
+      if (!img || !img.naturalWidth) {
+        maskCanvas = null;
+        maskErode = null;
+        maskVessel = null;
+        maskGrid = null;
+        maskKey = '';
+        return;
+      }
+      const wall = wallPx(w, h);
+      const key = [w, h, dpr.toFixed(3), p.marge, p.epaisseur, p.paroi, img.src].join('|');
+      if (key === maskKey && maskCanvas) return;
+      maskKey = key;
+      const bw = Math.max(1, Math.round(w * dpr));
+      const bh = Math.max(1, Math.round(h * dpr));
+      const full = document.createElement('canvas');
+      full.width = bw;
+      full.height = bh;
+      const g = full.getContext('2d', { willReadFrequently: true });
+      g.setTransform(dpr, 0, 0, dpr, 0, 0);
+      const box = logoRect(img, w, h);
+      g.drawImage(img, box.x, box.y, box.w, box.h);
+      const id = g.getImageData(0, 0, bw, bh);
+      let trans = 0;
+      const pix = id.data;
+      const samples = Math.max(1, (pix.length / 4) | 0);
+      for (let i = 3, k = 0; i < pix.length; i += 16, k++) if (pix[i] < 250) trans++;
+      const useAlpha = trans > (samples / 4) * 0.02;
+      for (let i = 0; i < pix.length; i += 4) {
+        let a = pix[i + 3];
+        if (!useAlpha) {
+          const lum = (pix[i] * 0.2126 + pix[i + 1] * 0.7152 + pix[i + 2] * 0.0722) / 255;
+          a = lum < 0.78 ? 255 : 0;
+        } else a = a > 40 ? 255 : 0;
+        pix[i] = pix[i + 1] = pix[i + 2] = 255;
+        pix[i + 3] = a;
+      }
+      g.setTransform(1, 0, 0, 1, 0, 0);
+      g.putImageData(id, 0, 0);
+      maskCanvas = full;
+      maskErode = erodeMask(full, wall * dpr);
+      const vessel = document.createElement('canvas');
+      vessel.width = bw;
+      vessel.height = bh;
+      const vg = vessel.getContext('2d');
+      vg.drawImage(full, 0, 0);
+      vg.globalCompositeOperation = 'source-in';
+      vg.fillStyle = p.paroi;
+      vg.fillRect(0, 0, bw, bh);
+      maskVessel = vessel;
+      const gw = 180;
+      const gh = Math.max(1, Math.round(gw * h / Math.max(1, w)));
+      const sc = document.createElement('canvas');
+      sc.width = gw;
+      sc.height = gh;
+      const sg = sc.getContext('2d', { willReadFrequently: true });
+      sg.drawImage(full, 0, 0, gw, gh);
+      const sd = sg.getImageData(0, 0, gw, gh).data;
+      const data = new Uint8Array(gw * gh);
+      let sx = 0, sy = 0, sn = 0;
+      for (let i = 0; i < data.length; i++) {
+        data[i] = sd[i * 4 + 3];
+        if (data[i] > 128) {
+          sx += i % gw;
+          sy += (i / gw) | 0;
+          sn++;
+        }
+      }
+      const m = Math.min(w, h);
+      maskGrid = {
+        data, gw, gh, w, h,
+        cu: sn ? (w / m) * ((sx / sn) / gw - 0.5) : 0,
+        cv: sn ? (h / m) * ((sy / sn) / gh - 0.5) : 0,
+      };
+    }
+
+    function alphaAt(x, y) {
+      if (!maskGrid) return 255;
+      const { w, h } = app.size;
+      const ix = clamp(Math.floor(x / w * maskGrid.gw), 0, maskGrid.gw - 1);
+      const iy = clamp(Math.floor(y / h * maskGrid.gh), 0, maskGrid.gh - 1);
+      return maskGrid.data[iy * maskGrid.gw + ix];
+    }
+
+    function maskBoundsFrame(w, h) {
+      if (!maskGrid) return null;
+      const { data, gw, gh } = maskGrid;
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity, n = 0;
+      for (let i = 0; i < data.length; i++) {
+        if (data[i] < 128) continue;
+        const x = ((i % gw) + 0.5) / gw * w;
+        const y = (((i / gw) | 0) + 0.5) / gh * h;
+        if (x < minX) minX = x;
+        if (y < minY) minY = y;
+        if (x > maxX) maxX = x;
+        if (y > maxY) maxY = y;
+        n++;
+      }
+      if (n < 8 || maxX - minX < 6 || maxY - minY < 6) return null;
+      const pad = 1.5;
+      return orient([
+        { x: minX - pad, y: minY - pad },
+        { x: maxX + pad, y: minY - pad },
+        { x: maxX + pad, y: maxY + pad },
+        { x: minX - pad, y: maxY + pad },
+      ]);
+    }
+
+    function activeFrame(w, h) {
+      return maskBoundsFrame(w, h) || makeFrame(w, h);
+    }
+
+    function randomInside(rand, w, h) {
+      if (maskGrid) {
+        const { data, gw, gh } = maskGrid;
+        for (let k = 0; k < 24; k++) {
+          const i = (rand() * data.length) | 0;
+          if (data[i] > 140) {
+            return {
+              x: ((i % gw) + rand()) / gw * w,
+              y: (((i / gw) | 0) + rand()) / gh * h,
+            };
+          }
+        }
+      }
+      return null;
+    }
+
+    function spawn(frame, w, h) {
+      const rand = app.rng(3);
+      regionSeed = app.seed;
+      const n = Math.max(6, Math.round(p.count));
+      const aspect = w / Math.max(1, h);
+      const cols = Math.max(1, Math.round(Math.sqrt(n * aspect)));
+      const rows = Math.max(1, Math.ceil(n / cols));
+      const pts = [];
+      const jitter = 0.22 + p.variation * 0.55;
+      const m = Math.min(w, h);
+      for (let r = 0; r < rows; r++) {
+        for (let c = 0; c < cols; c++) {
+          let x = ((c + 0.5) / cols) * w + (r % 2 ? (w / cols) * 0.45 : 0);
+          let y = ((r + 0.5) / rows) * h;
+          x += (rand() - 0.5) * (w / cols) * jitter;
+          y += (rand() - 0.5) * (h / rows) * jitter;
+          x = clamp(x, m * 0.02, w - m * 0.02);
+          y = clamp(y, m * 0.02, h - m * 0.02);
+          if (pointInPoly(frame, x, y) && alphaAt(x, y) > 120) pts.push({ x, y });
+        }
+      }
+      let guard = 0;
+      while (pts.length < n && guard < n * 50) {
+        guard++;
+        const x = rand() * w;
+        const y = rand() * h;
+        if (pointInPoly(frame, x, y) && alphaAt(x, y) > 120) pts.push({ x, y });
+      }
+      while (pts.length < n) {
+        const hit = randomInside(rand, w, h);
+        if (hit && pointInPoly(frame, hit.x, hit.y)) pts.push(hit);
+        else pts.push({ x: w * 0.5 + (rand() - 0.5) * m * 0.2, y: h * 0.5 + (rand() - 0.5) * m * 0.2 });
+      }
+      bubbles = [];
+      for (let i = 0; i < n; i++) {
+        const g = Math.exp((rand() - 0.5) * 2.15 * p.variation);
+        bubbles.push({
+          u: (pts[i].x - w / 2) / m,
+          v: (pts[i].y - h / 2) / m,
+          x: pts[i].x,
+          y: pts[i].y,
+          gas: g,
+          weight: 0,
+          phase: rand() * Math.PI * 2,
+          tint: Math.floor(rand() * 12),
+          hue: rand(),
+          pin: false,
+        });
+      }
+      renorm();
+      arm = 0.9;
+      birthSerial = 0;
+    }
+
+    function projectSites(frame, w, h) {
+      const m = Math.min(w, h);
+      for (const b of bubbles) {
+        let x = w / 2 + b.u * m;
+        let y = h / 2 + b.v * m;
+        if (!pointInPoly(frame, x, y)) {
+          b.u *= 0.9;
+          b.v *= 0.9;
+          x = w / 2 + b.u * m;
+          y = h / 2 + b.v * m;
+        }
+        if (maskGrid && alphaAt(x, y) < 48) {
+          b.u += (maskGrid.cu - b.u) * 0.55;
+          b.v += (maskGrid.cv - b.v) * 0.55;
+        }
+        b.x = w / 2 + b.u * m;
+        b.y = h / 2 + b.v * m;
+      }
+    }
+
+    function breathTargets(t, frameArea) {
+      const T = Math.max(1.5, p.duree);
+      const raw = new Array(bubbles.length);
+      let sum = 0;
+      for (let i = 0; i < bubbles.length; i++) {
+        const b = bubbles[i];
+        const breath = 1 + p.souffle * Math.sin((Math.PI * 2 * t) / T + b.phase);
+        const v = Math.max(1e-6, b.gas * breath);
+        raw[i] = v;
+        sum += v;
+      }
+      const out = new Array(raw.length);
+      for (let i = 0; i < raw.length; i++) out[i] = raw[i] / sum * frameArea;
+      return out;
+    }
+
+    function updateWeights(cells, tgt, m) {
+      const areaScale = m * m;
+      for (let i = 0; i < cells.length; i++) {
+        const cell = cells[i];
+        const b = bubbles[i];
+        if (!cell) {
+          b.weight *= 0.45;
+          continue;
+        }
+        const err = (tgt[i] - cell.area) / areaScale;
+        b.weight += err * 0.42;
+      }
+      const n = Math.max(1, bubbles.length);
+      const cap = (Math.abs(polyArea(framePts)) / n) / (m * m) * 7;
+      for (const b of bubbles) b.weight = clamp(b.weight, -cap * 0.35, cap);
+    }
+
+    function lloyd(cells, w, h, k) {
+      const m = Math.min(w, h);
+      for (const cell of cells) {
+        if (!cell) continue;
+        const b = cell.bubble;
+        if (b.pin) { b.pin = false; continue; }
+        const nu = (cell.cen.x - w / 2) / m;
+        const nv = (cell.cen.y - h / 2) / m;
+        b.u += (nu - b.u) * k;
+        b.v += (nv - b.v) * k;
+      }
+    }
+
+    function separate(w, h) {
+      const n = bubbles.length;
+      const minD = 0.42 / Math.sqrt(n);
+      for (let i = 0; i < n; i++) {
+        for (let j = i + 1; j < n; j++) {
+          let dx = bubbles[j].u - bubbles[i].u;
+          let dy = bubbles[j].v - bubbles[i].v;
+          const d = Math.hypot(dx, dy);
+          if (d < 1e-6) { bubbles[j].u += minD; continue; }
+          if (d < minD) {
+            const push = (minD - d) * 0.5;
+            dx /= d; dy /= d;
+            if (!bubbles[j].pin) { bubbles[j].u += dx * push; bubbles[j].v += dy * push; }
+            if (!bubbles[i].pin) { bubbles[i].u -= dx * push; bubbles[i].v -= dy * push; }
+          }
+        }
+      }
+    }
+
+    function applyGesture(dt, w, h) {
+      if (!gesture) return;
+      if (!bubbles.includes(gesture.bubble)) { gesture = null; return; }
+      const b = gesture.bubble;
+      const m = Math.min(w, h);
+      if (gesture.mode === 'move') {
+        const nu = (gesture.x - w / 2) / m;
+        const nv = (gesture.y - h / 2) / m;
+        const k = 1 - Math.exp(-12 * dt);
+        b.u += (nu - b.u) * k;
+        b.v += (nv - b.v) * k;
+        b.pin = true;
+        return;
+      }
+      if (gesture.mode === 'inflate') {
+        b.gas = Math.min(0.68, b.gas + p.debit * 0.34 * dt);
+      } else {
+        b.gas *= Math.max(0.02, 1 - p.debit * 1.35 * dt);
+      }
+      renorm();
+    }
+
+    function vonNeumann(dt) {
+      const rates = bubbles.map(() => 0);
+      let interior = 0;
+      for (const cell of diagram) {
+        if (!cell || cell.wallTouch) continue;
+        rates[cell.index] = cell.sides - 6;
+        interior++;
+      }
+      if (!interior) return;
+      let mean = 0;
+      for (const r of rates) mean += r;
+      mean /= bubbles.length;
+      const mu = p.coarsening * 0.011 * dt;
+      for (let i = 0; i < bubbles.length; i++) bubbles[i].gas += (rates[i] - mean) * mu;
+      renorm();
+    }
+
+    function splitLargest(w, h) {
+      if (!bubbles.length) return;
+      let bi = 0;
+      for (let i = 1; i < bubbles.length; i++) if (bubbles[i].gas > bubbles[bi].gas) bi = i;
+      const parent = bubbles[bi];
+      const rand = app.rng(4000 + birthSerial);
+      birthSerial++;
+      const ang = rand() * Math.PI * 2;
+      const mag = 0.055 + 0.02 * rand();
+      const childGas = parent.gas * 0.4;
+      parent.gas *= 0.6;
+      parent.weight *= 0.45;
+      bubbles.push({
+        u: parent.u + Math.cos(ang) * mag,
+        v: parent.v + Math.sin(ang) * mag,
+        x: 0, y: 0,
+        gas: childGas,
+        weight: parent.weight * 0.4,
+        phase: ang,
+        tint: (parent.tint + 3) % 12,
+        hue: rand(),
+        pin: false,
+      });
+      renorm();
+    }
+
+    function removeAt(i) {
+      bubbles.splice(i, 1);
+      renorm();
+    }
+
+    function population(dt, w, h) {
+      if (arm > 0) { arm -= dt; return false; }
+      let changed = false;
+      const floor = 0.18 / Math.max(6, p.count);
+      for (let i = bubbles.length - 1; i >= 0; i--) {
+        if (bubbles.length <= 6) break;
+        if (bubbles[i].gas < floor) {
+          removeAt(i);
+          arm = Math.max(arm, 0.28);
+          changed = true;
+        }
+      }
+      if (bubbles.length > p.count) {
+        let bi = 0;
+        for (let i = 1; i < bubbles.length; i++) if (bubbles[i].gas < bubbles[bi].gas) bi = i;
+        removeAt(bi);
+        changed = true;
+      } else if (p.regen && bubbles.length < p.count && arm <= 0) {
+        splitLargest(w, h);
+        changed = true;
+      }
+      return changed;
+    }
+
+    function placeXY(w, h) {
+      const m = Math.min(w, h);
+      for (const b of bubbles) {
+        b.x = w / 2 + b.u * m;
+        b.y = h / 2 + b.v * m;
+      }
+    }
+
+    function physicsOnce(t, dt, settle) {
+      const { w, h } = app.size;
+      if (w < 8 || h < 8) return;
+      const m = Math.min(w, h);
+      framePts = activeFrame(w, h);
+      if (!bubbles.length) return;
+      if (!settle) applyGesture(dt, w, h);
+      placeXY(w, h);
+      const frameArea = Math.abs(polyArea(framePts));
+      if (frameArea < 4) return;
+      targets = breathTargets(settle ? 0 : t, frameArea);
+      diagram = buildDiagram(framePts, m);
+      if (!settle && p.coarsening > 0) vonNeumann(dt);
+      targets = breathTargets(settle ? 0 : t, frameArea);
+      updateWeights(diagram, targets, m);
+      const k = settle ? 0.58 : (1 - Math.exp(-3.4 * p.relaxation * dt));
+      lloyd(diagram, w, h, k);
+      separate(w, h);
+      projectSites(framePts, w, h);
+      if (!settle) {
+        const changed = population(dt, w, h);
+        placeXY(w, h);
+        if (changed) {
+          targets = breathTargets(t, Math.abs(polyArea(framePts)));
+          diagram = buildDiagram(framePts, m);
+          updateWeights(diagram, targets, m);
+          diagram = buildDiagram(framePts, m);
+        } else {
+          diagram = buildDiagram(framePts, m);
+        }
+      }
+    }
+
+    function rebuild() {
+      const { w, h } = app.size;
+      if (w < 8 || h < 8) return;
+      needRebuild = false;
+      syncMask();
+      framePts = activeFrame(w, h);
+      spawn(framePts, w, h);
+      for (let i = 0; i < 18; i++) physicsOnce(0, 0.08, true);
+      placeXY(w, h);
+      const m = Math.min(w, h);
+      targets = breathTargets(0, Math.abs(polyArea(framePts)));
+      diagram = buildDiagram(framePts, m);
+      updateWeights(diagram, targets, m);
+      diagram = buildDiagram(framePts, m);
+    }
+
+    function pick(x, y) {
+      for (let i = diagram.length - 1; i >= 0; i--) {
+        const cell = diagram[i];
+        if (!cell) continue;
+        if (pointInPoly(cell.poly, x, y)) return cell.bubble;
+      }
+      return null;
+    }
+
+    function inradius(pts) {
+      const n = pts.length;
+      if (n < 3) return 0;
+      const area = Math.abs(polyArea(pts));
+      let per = 0;
+      for (let i = 0; i < n; i++) {
+        const a = pts[i], b = pts[(i + 1) % n];
+        per += Math.hypot(b.x - a.x, b.y - a.y);
+      }
+      return per > 1e-4 ? (2 * area) / per : 0;
+    }
+
+    function isConvex(pts) {
+      const n = pts.length;
+      if (n < 3) return false;
+      for (let i = 0; i < n; i++) {
+        const a = pts[(i + n - 1) % n], b = pts[i], c = pts[(i + 1) % n];
+        const cross = (b.x - a.x) * (c.y - b.y) - (b.y - a.y) * (c.x - b.x);
+        if (cross < -0.8) return false;
+      }
+      return true;
+    }
+
+    function contour(pts, sagAt, radius) {
+      const n = pts.length;
+      if (n < 3) return null;
+      const rCap = Math.min(radius, inradius(pts) * 0.9);
+      const lens = new Array(n);
+      for (let i = 0; i < n; i++) {
+        const a = pts[i], b = pts[(i + 1) % n];
+        lens[i] = Math.hypot(b.x - a.x, b.y - a.y);
+      }
+      const trim = new Array(n);
+      for (let i = 0; i < n; i++) {
+        const a = pts[(i + n - 1) % n], b = pts[i], c = pts[(i + 1) % n];
+        const d1x = a.x - b.x, d1y = a.y - b.y, d2x = c.x - b.x, d2y = c.y - b.y;
+        const l1 = Math.hypot(d1x, d1y) || 1, l2 = Math.hypot(d2x, d2y) || 1;
+        const dot = clamp((d1x * d2x + d1y * d2y) / (l1 * l2), -1, 1);
+        const ang = Math.acos(dot);
+        const tanHalf = Math.tan(Math.max(0.12, ang) / 2);
+        const tAng = tanHalf > 1e-3 ? rCap / tanHalf : 0;
+        trim[i] = Math.max(0, Math.min(tAng, lens[(i + n - 1) % n] * 0.42, lens[i] * 0.42));
+      }
+      const cmds = [];
+      for (let i = 0; i < n; i++) {
+        const a = pts[i];
+        const b = pts[(i + 1) % n];
+        const L = Math.max(lens[i], 1e-6);
+        const dx = (b.x - a.x) / L, dy = (b.y - a.y) / L;
+        const x0 = a.x + dx * trim[i];
+        const y0 = a.y + dy * trim[i];
+        const x1 = b.x - dx * trim[(i + 1) % n];
+        const y1 = b.y - dy * trim[(i + 1) % n];
+        if (i === 0) cmds.push(['M', x0, y0]);
+        const span = Math.hypot(x1 - x0, y1 - y0);
+        let sag = span > 1.5 ? sagAt(i, L) : 0;
+        sag = clamp(sag, -span * 0.18, span * 0.18);
+        if (Math.abs(sag) >= 0.35 && span > 2) {
+          cmds.push(['Q', (x0 + x1) / 2 - dy * sag, (y0 + y1) / 2 + dx * sag, x1, y1]);
+        } else cmds.push(['L', x1, y1]);
+        const i2 = (i + 1) % n;
+        const c = pts[(i2 + 1) % n];
+        const L2 = Math.max(lens[i2], 1e-6);
+        const ex = (c.x - b.x) / L2, ey = (c.y - b.y) / L2;
+        const x2 = b.x + ex * trim[i2];
+        const y2 = b.y + ey * trim[i2];
+        if (trim[i2] >= 0.6) cmds.push(['Q', b.x, b.y, x2, y2]);
+        else cmds.push(['L', x2, y2]);
+      }
+      cmds.push(['Z']);
+      return { cmds };
+    }
+
+    function trace(g, cmds) {
+      g.beginPath();
+      for (const c of cmds) {
+        if (c[0] === 'M') g.moveTo(c[1], c[2]);
+        else if (c[0] === 'L') g.lineTo(c[1], c[2]);
+        else if (c[0] === 'Q') g.quadraticCurveTo(c[1], c[2], c[3], c[4]);
+        else g.closePath();
+      }
+    }
+
+    function pathD(cmds) {
+      let d = '';
+      for (const c of cmds) {
+        if (c[0] === 'Z') d += 'Z';
+        else if (c[0] === 'M') d += `M${c[1].toFixed(2)} ${c[2].toFixed(2)}`;
+        else if (c[0] === 'L') d += `L${c[1].toFixed(2)} ${c[2].toFixed(2)}`;
+        else d += `Q${c[1].toFixed(2)} ${c[2].toFixed(2)} ${c[3].toFixed(2)} ${c[4].toFixed(2)}`;
+      }
+      return d;
+    }
+
+    function insetPoly(pts, distAt) {
+      const n = pts.length;
+      if (n < 3) return null;
+      const lines = [];
+      for (let i = 0; i < n; i++) {
+        const a = pts[i], b = pts[(i + 1) % n];
+        let dx = b.x - a.x, dy = b.y - a.y;
+        const len = Math.hypot(dx, dy);
+        if (len < 1e-5) return null;
+        dx /= len; dy /= len;
+        const nx = -dy, ny = dx;
+        const d = distAt(i);
+        lines.push({ px: a.x + nx * d, py: a.y + ny * d, dx, dy, nbr: a.nbr });
+      }
+      const out = [];
+      for (let i = 0; i < n; i++) {
+        const l0 = lines[(i + n - 1) % n];
+        const l1 = lines[i];
+        const det = l0.dx * l1.dy - l0.dy * l1.dx;
+        if (Math.abs(det) < 1e-10) return null;
+        const rx = l1.px - l0.px, ry = l1.py - l0.py;
+        const t = (rx * l1.dy - ry * l1.dx) / det;
+        const x = l0.px + l0.dx * t;
+        const y = l0.py + l0.dy * t;
+        if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+        out.push({ x, y, nbr: l1.nbr });
+      }
+      if (polyArea(out) < 2) return null;
+      return out;
+    }
+
+    function cellColor(b) {
+      const palet = p.palette && p.palette.length ? p.palette : [p.bg];
+      let base = p.bg;
+      if (p.teinte > 0.001) {
+        let idx;
+        if (p.repartition === 'alea') idx = Math.abs(b.tint) % palet.length;
+        else {
+          const n1 = vnoise(b.u * 2.6 + 2.2, b.v * 2.6 - 0.7);
+          const n2 = vnoise(b.u * 5.1 + 9.1, b.v * 4.8 + 3.4);
+          const v = n1 * 0.75 + n2 * 0.25;
+          idx = clamp(Math.floor(v * palet.length), 0, palet.length - 1);
+        }
+        base = mixHex(p.bg, palet[idx], p.teinte);
+      }
+      if (p.fibre > 0.001) base = shade(base, (b.hue - 0.5) * p.fibre * 0.16);
+      return base;
+    }
+
+    function sagAtFactory(poly, index, areas, tgt, scale) {
+      return (i, L) => {
+        const nb = poly[i].nbr;
+        if (nb < 0 || !areas[nb]) return 0;
+        const ai = Math.max(areas[index] || 1, 1);
+        const aj = Math.max(areas[nb], 1);
+        const Pi = scale / Math.sqrt(ai) + (tgt[index] - ai) / ai;
+        const Pj = scale / Math.sqrt(aj) + ((tgt[nb] || aj) - aj) / aj;
+        let sag = (Pj - Pi) * p.tension * L * 0.26;
+        const lim = L * 0.18;
+        return clamp(sag, -lim, lim);
+      };
+    }
+
+    function paintCells(g, w, h, capture) {
+      const m = Math.min(w, h);
+      const wall = wallPx(w, h);
+      const corner = p.plateau * m * 0.042;
+      const areas = bubbles.map(() => 0);
+      for (const cell of diagram) if (cell) areas[cell.index] = cell.area;
+      const scale = Math.sqrt(Math.abs(polyArea(framePts)) / Math.max(1, bubbles.length));
+      const paths = [];
+      g.beginPath();
+      for (let i = 0; i < framePts.length; i++) {
+        const q = framePts[i];
+        if (i === 0) g.moveTo(q.x, q.y);
+        else g.lineTo(q.x, q.y);
+      }
+      g.closePath();
+      g.fillStyle = p.paroi;
+      g.fill();
+      const frameD = framePts.map((q, i) => `${i ? 'L' : 'M'}${q.x.toFixed(2)} ${q.y.toFixed(2)}`).join('') + 'Z';
+      g.save();
+      g.clip();
+      for (const cell of diagram) {
+        if (!cell) continue;
+        if (inradius(cell.poly) < wall * 0.42) continue;
+        const distAt = (poly, k) => (i) => (poly[i].nbr < 0 ? wall * k : wall * 0.5 * k);
+        let inset = insetPoly(cell.poly, distAt(cell.poly, 1));
+        if (!inset || !isConvex(inset)) inset = insetPoly(cell.poly, distAt(cell.poly, 0.55));
+        if (!inset || !isConvex(inset)) inset = cell.poly;
+        const built = contour(inset, sagAtFactory(inset, cell.index, areas, targets, scale), corner);
+        if (!built) continue;
+        trace(g, built.cmds);
+        const fill = cellColor(cell.bubble);
+        g.fillStyle = fill;
+        g.fill();
+        if (p.lueur > 0.02) {
+          g.save();
+          trace(g, built.cmds);
+          g.clip();
+          g.globalAlpha = p.lueur * 0.55;
+          g.strokeStyle = p.reflet;
+          g.lineWidth = Math.max(0.7, wall * 0.28);
+          g.lineJoin = 'round';
+          trace(g, built.cmds);
+          g.stroke();
+          g.restore();
+        }
+        if (capture) paths.push({ d: pathD(built.cmds), fill });
+      }
+      g.restore();
+      return { frameD, paths };
+    }
+
+    function draw(w, h) {
+      const { dpr } = app.size;
+      syncMask();
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = p.sol;
+      ctx.fillRect(0, 0, w, h);
+      ctx.translate(view.x, view.y);
+      ctx.scale(view.s, view.s);
+      let captured;
+      if (maskErode && maskVessel) {
+        const bw = canvas.width, bh = canvas.height;
+        if (off.width !== bw || off.height !== bh) { off.width = bw; off.height = bh; }
+        octx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        octx.clearRect(0, 0, w, h);
+        octx.translate(view.x, view.y);
+        octx.scale(view.s, view.s);
+        captured = paintCells(octx, w, h, true);
+        octx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        octx.translate(view.x, view.y);
+        octx.scale(view.s, view.s);
+        octx.globalCompositeOperation = 'destination-in';
+        octx.drawImage(maskErode, 0, 0, w, h);
+        octx.globalCompositeOperation = 'source-over';
+        ctx.drawImage(maskVessel, 0, 0, w, h);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        ctx.drawImage(off, 0, 0, w, h);
+      } else {
+        captured = paintCells(ctx, w, h, true);
+      }
+      svgCapture = buildSVG(w, h, captured);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      app.finish(ctx);
+    }
+
+    function buildSVG(w, h, captured) {
+      if (!captured) return '';
+      const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+      const cells = captured.paths.map((c) => `<path d="${c.d}" fill="${esc(c.fill)}"/>`).join('');
+      return `<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">
+<rect width="100%" height="100%" fill="${esc(p.sol)}"/>
+<g transform="translate(${view.x.toFixed(2)} ${view.y.toFixed(2)}) scale(${view.s.toFixed(4)})">
+<clipPath id="cadre"><path d="${captured.frameD}"/></clipPath>
+<g clip-path="url(#cadre)">
+<path d="${captured.frameD}" fill="${esc(p.paroi)}"/>
+${cells}
+</g>
+</g>
+</svg>`;
+    }
+
+    app.loop((t, dt) => {
+      const { w, h } = app.size;
+      if (w < 8 || h < 8) return;
+      if (needRebuild || !bubbles.length) rebuild();
+      if (!bubbles.length) return;
+      const steps = Math.max(1, Math.min(4, Math.ceil(dt / 0.022)));
+      const hdt = dt / steps;
+      for (let i = 0; i < steps; i++) physicsOnce(t - dt + hdt * (i + 1), hdt, false);
+      draw(w, h);
+    });
+  </script>
+</body>
+</html>

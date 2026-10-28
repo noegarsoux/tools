@@ -1,0 +1,17 @@
+{
+  "slug": "mousse",
+  "title": "Mousse",
+  "type": "generative",
+  "description": "Une mousse de savon selon Plateau : parois à 120°, bords épaissis aux jonctions, mûrissement de von Neumann. Le geste gonfle ou crève les bulles.",
+  "tags": ["mousse", "plateau", "voronoi", "savon"],
+  "inspiration": [
+    "Moodboard de Noé, fiche 13 — Mousse de savon",
+    "Palette papier",
+    "Lois de Plateau — trois parois à 120° et bords de Plateau",
+    "John von Neumann — dA/dt ∝ (n − 6) pour une mousse 2D",
+    "Diagramme de Laguerre et relaxation de Lloyd"
+  ],
+  "author": "cursor",
+  "created": "2026-10-28",
+  "status": "finished"
+}
