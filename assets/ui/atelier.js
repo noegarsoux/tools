@@ -35,6 +35,31 @@
   const FALLBACK_STOPS = ['#0b0b0f', '#3d2bff', '#ff4d1a', '#f4efe6'];
   const BRAND_KEY = 'atelier.brand.v1';
   const BRAND_FONT = 'AtelierBrand';
+  // Palettes relevées sur le moodboard de Noé (references/moodboard.md). Fond d'abord, puis encres.
+  const PALETTES = {
+    chladni: { name: 'Chladni', colors: ['#050505', '#b4b4b4', '#f2f2f2'] },
+    'gris-0006': { name: 'Gris 0006', colors: ['#aaa9a7', '#040404'] },
+    papier: { name: 'Papier', colors: ['#fdfdfd', '#0f0f0f'] },
+    'papier-60': { name: 'Papier 60', colors: ['#f4f4f2', '#27262b'] },
+    'papier-gris': { name: 'Papier gris', colors: ['#ecebe8', '#2a2927', '#94928f'] },
+    photocopie: { name: 'Photocopie', colors: ['#e3e4e6', '#1c191b', '#767478'] },
+    'trame-nuit': { name: 'Trame nuit', colors: ['#131313', '#f5f5f5', '#828282'] },
+    acide: { name: 'Acide', colors: ['#c3c3c2', '#1c1c17', '#d6ea3f', '#f2f2f0'] },
+    menthe: { name: 'Menthe', colors: ['#dce8e5', '#191d1e', '#a4e0bc', '#4f9d7a'] },
+    bitmap: { name: 'Bitmap', colors: ['#e3e0d6', '#1f1e1c', '#e8552b', '#4b6cf0', '#f4c53a'] },
+    thermique: { name: 'Thermique', colors: ['#8ea79c', '#3b3bb3', '#e0622e', '#f2c06a', '#7a47b4', '#d1bde0'] },
+    glyphes: { name: 'Glyphes', colors: ['#0a0a0a', '#f4f1ea', '#2f6b3a', '#e79ab5', '#e5502a', '#f2c230', '#3a6fd0'] },
+    pyramides: { name: 'Pyramides', colors: ['#9b8f84', '#2e3b25', '#e0402f', '#e57d9e', '#c49a35', '#524e76', '#111111'] },
+    code: { name: 'Code', colors: ['#d2c9c5', '#e07a2e', '#d49be0', '#2e7d32', '#e8b830', '#5b7fd6', '#1a1a1a'] },
+    orbite: { name: 'Orbite', colors: ['#e05527', '#111111', '#f2f2f1'] },
+    salon: { name: 'Salon', colors: ['#e5e3e0', '#0a0a0a', '#d6453b', '#5fae5c', '#f0e04a'] },
+    'good-room': { name: 'Good Room', colors: ['#111111', '#6dbf45', '#e8782f', '#b07ad8', '#9db0ef'] },
+    eventail: { name: 'Éventail', colors: ['#3b2a10', '#2f4fa8', '#a3a03a', '#c9401f', '#4c8a5a'] },
+    biennale: { name: 'Biennale', colors: ['#f4f3f0', '#111111', '#e5452a', '#f2b0c8', '#f2e640'] },
+    pixels: { name: 'Pixels', colors: ['#999899', '#42956e', '#d0453a', '#3c4fd0', '#a047ab', '#6fe0a0'] },
+    kegelbahn: { name: 'Kegelbahn', colors: ['#060303', '#f272ba', '#486cfc', '#edd14b', '#297c26', '#ef5a2f'] },
+    luzern: { name: 'Luzern', colors: ['#f25f03', '#7d38e7', '#b9a0e6', '#1a1410', '#ffffff'] },
+  };
 
   const svg = (d) => `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${d}</svg>`;
   const ICON = {
@@ -373,6 +398,17 @@
       const auto = el('input', { class: 'at-switch', type: 'checkbox', role: 'switch', id: 'at-brand-auto' });
       auto.checked = !!b.auto;
       auto.addEventListener('change', () => { b.auto = auto.checked; this.saveBrand(); });
+      // Palettes du moodboard : un clic les essaie sur l'outil, « Garder » les met dans la charte.
+      let tried = null;
+      const keep = el('button', { class: 'at-btn at-small', type: 'button', hidden: true, onclick: () => { if (tried) this.setBrandColors(tried.colors); keep.hidden = true; } }, 'Garder comme charte');
+      const pals = el('div', { class: 'at-pals' }, ...Object.values(PALETTES).map((p) => {
+        const b = el('button', { class: 'at-pal', type: 'button', title: p.name, 'aria-label': `Palette ${p.name}`, onclick: () => {
+          tried = p; this.apply(this.brandValues(p.colors));
+          pals.querySelectorAll('.at-pal').forEach((x) => x.setAttribute('aria-pressed', x === b));
+          keep.hidden = false; keep.textContent = `Garder « ${p.name} » comme charte`;
+        } }, ...p.colors.map((c) => el('span', { style: `background:${c}` })));
+        return b;
+      }));
       render(); refreshAssets();
       return el('section', { class: 'at-section' }, el('h3', {}, 'Charte de marque'),
         el('p', { class: 'at-note' }, 'Partagée par tous les outils de cet appareil.'),
@@ -380,6 +416,7 @@
         el('div', { class: 'at-presets' },
           el('button', { class: 'at-btn', type: 'button', onclick: () => this.applyBrand() }, 'Appliquer'),
           el('button', { class: 'at-btn', type: 'button', 'data-skip-test': true, onclick: () => pick.click() }, 'D\'une image'), pick),
+        el('div', { class: 'at-row at-full' }, el('label', {}, 'Palettes du moodboard'), pals, keep),
         el('div', { class: 'at-row' }, el('label', { for: 'at-brand-auto' }, 'À l\'ouverture'), el('div', { class: 'at-ctl' }, auto, el('span', { class: 'at-note' }, 'appliquer la charte'))),
         el('div', { class: 'at-row' }, el('label', {}, 'Typo'), el('div', { class: 'at-ctl' }, fontName, fontDel,
           el('button', { class: 'at-btn at-small', type: 'button', 'data-skip-test': true, onclick: () => fontIn.click() }, 'Importer'), fontIn)),
@@ -710,8 +747,7 @@
     }
 
     // Répartit la charte sur les réglages de couleur de l'outil (ou via opts.brand(colors, app)).
-    brandValues() {
-      const cols = this.brand.colors;
+    brandValues(cols = this.brand.colors) {
       if (!cols.length) return {};
       if (typeof this.opts.brand === 'function') return this.opts.brand([...cols], this) || {};
       const out = {};
@@ -1192,6 +1228,6 @@
     }
   }
 
-  const Atelier = { app: (opts) => new App(opts), rng, extractPalette, version: '1.2.0', instance: null };
+  const Atelier = { app: (opts) => new App(opts), rng, extractPalette, PALETTES, version: '1.3.0', instance: null };
   window.Atelier = Atelier;
 })();

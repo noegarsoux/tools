@@ -35,6 +35,10 @@ Le code comme pratique critique. Utile pour donner du sens à un outil (données
 
 ## Systèmes graphiques et design
 
+**CodeCrafted: Generative Design in Branding** — Victionary (2024, 304 p.) ★ référence choisie par Noé
+Le livre le plus proche de ce qu'Atelier fabrique : des identités de marque dont les visuels sont produits par du code, des algorithmes et des données, et qui s'adaptent au support (écran, installation, imprimé). Il montre des projets de studios comme DIA, Studio Dumbar/DEPT® et LAVA, avec des essais de Patrik Hübner et Tim Rodenbröker. Sources : victionary.com/products/codecrafted, creativeapplications.net/books/codecrafted-generative-design-in-branding.
+→ Le niveau à viser : chaque outil doit pouvoir produire une déclinaison d'identité complète (affiche, écran, réseau social, motion), pas une démo. Patrik Hübner : identités pilotées par les données et les règles. Tim Rodenbröker : typographie et grilles programmées, outils simples avec peu de paramètres mais justes. DIA : typo cinétique. Dumbar : systèmes de motion de marque.
+
 **Designing Programmes** — Karl Gerstner (1964, réédité Lars Müller)
 La source de la pensée « programme » en design : une identité est un système de règles, pas une forme figée. Le « morphological box » (tableau de paramètres croisés) génère toutes les variations d'un logo ou d'une typo.
 → Tout outil « Langages visuels » doit être une boîte morphologique : des axes de variation explicites, chacun réglable.

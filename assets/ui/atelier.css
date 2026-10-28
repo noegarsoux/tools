@@ -57,6 +57,12 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .at-swatch::-webkit-color-swatch { border: 0; }
 .at-swatch::-moz-color-swatch { border: 0; }
 .at-colors { display: grid; grid-template-columns: repeat(auto-fill, 28px); gap: 6px; }
+.at-pals { display: grid; grid-template-columns: repeat(auto-fill, minmax(52px, 1fr)); gap: 6px; }
+.at-pal { display: flex; height: 22px; padding: 0; border: 1px solid var(--at-line-strong); border-radius: var(--at-radius); overflow: hidden; cursor: pointer; background: none; }
+.at-pal span { flex: 1; }
+.at-pal span:first-child { flex: 1.6; }
+.at-pal:hover { border-color: var(--at-ink-2); }
+.at-pal[aria-pressed="true"] { outline: 2px solid var(--at-accent); outline-offset: 1px; }
 
 .at-seg { display: flex; background: var(--at-field); border-radius: var(--at-radius); padding: 2px; gap: 2px; width: 100%; }
 .at-seg button { flex: 1; border: 0; background: none; border-radius: 4px; height: 24px; cursor: pointer; color: var(--at-ink-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding: 0 4px; }
