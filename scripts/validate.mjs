@@ -135,7 +135,8 @@ async function browserChecks(browser, origin, dir) {
     for (const fmt of ['9:16', '1:1', '16:9']) {
       await page.evaluate((f) => window.Atelier.instance.apply({ _fmt: f, _res: 1 }), fmt);
       await page.waitForTimeout(700);
-      const fshot = await page.locator('.at-frame').screenshot();
+      // Capture par zone : une scène animée lente (WebGL logiciel en CI) ne passe jamais le test de stabilité d'un locator.
+      const fshot = await page.screenshot({ clip: await page.locator('.at-frame').boundingBox(), timeout: 60000 });
       if ((await imageVariance(page, fshot)) < 20) errors.push(`rendu vide ou uni au format ${fmt}`);
     }
     const out = await page.evaluate(async () => {
