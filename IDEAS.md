@@ -10,7 +10,7 @@ Coche une idée (`[x]`) dans la PR qui publie l'outil. Ajoute de nouvelles idée
 - [ ] Réaction-diffusion (Gray-Scott) avec pinceau
 - [ ] Circle packing avec export SVG
 - [ ] Attracteurs étranges (Clifford, De Jong) en haute densité
-- [ ] Topographie : lignes de niveau à partir de bruit
+- [x] Topographie : lignes de niveau à partir de bruit (`topographie`)
 
 ## Shaders
 - [ ] Bac à sable de dégradés en mesh (gradient mesh)

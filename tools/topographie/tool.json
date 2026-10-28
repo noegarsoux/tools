@@ -1,0 +1,10 @@
+{
+  "slug": "topographie",
+  "title": "Topographie",
+  "type": "generative",
+  "description": "Des courbes de niveau tracées sur un relief de bruit, avec ombrage et palettes. Exportez la carte en PNG ou le dessin vectoriel en SVG.",
+  "tags": ["relief", "contours", "bruit", "carte"],
+  "author": "cursor",
+  "created": "2026-10-28",
+  "status": "finished"
+}
