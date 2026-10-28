@@ -16,6 +16,7 @@ Répète ces étapes tant qu'il te reste du budget :
 6. **Valider** : `npm run validate -- <slug>`. Corrige jusqu'à ce que ce soit vert. Ce script génère aussi `thumbnail.jpg`.
 7. **Relire visuellement** : ouvre `tools/<slug>/thumbnail.jpg` et regarde-la. Si la miniature n'est pas belle ou ne montre pas ce que fait l'outil, améliore le rendu par défaut et relance `npm run validate -- <slug> --thumbs`.
 8. **Publier** : coche l'idée dans `IDEAS.md`, commit **uniquement** `tools/<slug>/` et `IDEAS.md`, pousse la branche et ouvre une PR intitulée `Outil : <Titre>`.
+   (Avec `gh pr create`, ou l'outil GitHub de ta session si `gh` n'a pas accès à l'API GraphQL.)
    La CI revalide l'outil ; s'il passe, elle fusionne la PR elle-même et le site est republié. Si elle échoue, corrige et repousse sur la même branche.
 9. Reviens à l'étape 1.
 
