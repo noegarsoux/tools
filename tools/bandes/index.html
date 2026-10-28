@@ -480,12 +480,9 @@
       notes: 'Lignes de niveau d’une distance signée. Le zigzag suit le périmètre de la forme. La période règle une boucle parfaite : le motif retrouve exactement sa place.',
       params: {
         'Forme': {
-          forme: { type: 'segmented', label: 'Forme', value: 'poly', options: { poly: 'Polygone', star: 'Étoile', disk: 'Disque', lettre: 'Lettre', signe: 'Signe' } },
+          forme: { type: 'segmented', label: 'Forme', value: 'poly', options: { poly: 'Polygone', star: 'Étoile', disk: 'Disque', signe: 'Signe' } },
           cotes: { type: 'range', label: 'Côtés', min: 3, max: 8, step: 1, value: 3, show: (p) => p.forme === 'poly' || p.forme === 'star' },
           creux: { type: 'range', label: 'Creux', min: 0.22, max: 0.78, step: 0.01, value: 0.4, show: (p) => p.forme === 'star' },
-          texte: { type: 'text', label: 'Texte', value: 'A', maxlength: 16, show: (p) => p.forme === 'lettre' },
-          typo: { type: 'font', label: 'Typo', value: 'Lato', options: { Lato: 'Lato', serif: 'Serif', cond: 'Condensée' }, show: (p) => p.forme === 'lettre' },
-          chasse: { type: 'range', label: 'Approche', min: -0.08, max: 0.22, step: 0.005, value: 0, show: (p) => p.forme === 'lettre' },
           fichier: { type: 'file', label: 'Signe', accept: 'image/*', show: (p) => p.forme === 'signe' },
           seuil: { type: 'range', label: 'Seuil', min: 0.08, max: 0.92, step: 0.01, value: 0.5, show: (p) => p.forme === 'signe' },
           taille: { type: 'range', label: 'Taille', min: 0.1, max: 1.15, step: 0.005, value: 0.5 },
@@ -548,14 +545,14 @@
           grain: 0.14, vignette: 0.22,
         },
         'Glyphe': {
-          forme: 'lettre', texte: 'A', typo: 'Lato', chasse: -0.02, taille: 0.78,
+          forme: 'star', cotes: 6, creux: 0.22, taille: 0.78,
           pas: 0.02, joint: 0.12, onde: 'angle', zigzag: 0.22, frequence: 6, durete: 0,
           cadre: 'interieur', fusion: 0, souffle: 0, ax: 0, ay: 0, proportion: 1,
           fond: paper('glyphes'), trait: '#f4f1ea', encres: ink('glyphes'),
           periode: 10, sens: 'rentrant', grain: 0.08, vignette: 0.18,
         },
         'Anneau': {
-          forme: 'lettre', texte: 'A', typo: 'Lato', taille: 0.64, cadre: 'anneau', marge: 0.085,
+          forme: 'poly', cotes: 3, taille: 0.64, cadre: 'anneau', marge: 0.085,
           pas: 0.016, joint: 0.18, onde: 'angle', zigzag: 0.1, frequence: 8, durete: 0,
           fond: paper('menthe'), trait: '#191d1e', encres: ['#191d1e', '#4f9d7a', '#a4e0bc'],
           souffle: 0, fusion: 0, ax: 0, ay: 0, periode: 14, sens: 'rentrant',

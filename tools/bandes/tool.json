@@ -2,8 +2,8 @@
   "slug": "bandes",
   "title": "Bandes concentriques",
   "type": "pattern",
-  "description": "Bandes concentriques autour d'un polygone, d'une étoile, d'une lettre ou d'un signe : zigzags, créneaux et défilement en boucle parfaite.",
-  "tags": ["sdf", "bandes", "zigzag", "typographie", "motif"],
+  "description": "Bandes concentriques autour d'un polygone, d'une étoile, d'un disque ou d'un logo : zigzags, créneaux et défilement en boucle parfaite.",
+  "tags": ["sdf", "bandes", "zigzag", "motif"],
   "inspiration": [
     "Moodboard de Noé, fiche 26 — Klubkegelbahn",
     "Palette kegelbahn",
