@@ -52,7 +52,7 @@ jobs:
             echo "::group::Outil $i"
             set +e
             "$CLI" -p --force --output-format text \
-              "Lis AGENTS.md et réalise UNE itération complète de la boucle de travail (étapes 1 à 8) en tant qu'agent 'cursor'. Termine quand la PR est ouverte avec l'auto-merge activé, ou supprime le dossier si l'outil ne peut pas être fini." \
+              "Lis AGENTS.md et réalise UNE itération complète de la boucle de travail (étapes 1 à 8) en tant qu'agent 'cursor'. Termine quand la PR est ouverte, ou supprime le dossier si l'outil ne peut pas être fini." \
               2>&1 | tee "run-$i.log"
             code=${PIPESTATUS[0]}
             set -e

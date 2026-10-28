@@ -3,6 +3,11 @@ name: Publication
 on:
   push:
     branches: [main]
+  # Une fusion faite par la CI (jeton GITHUB_TOKEN) ne déclenche pas `push` :
+  # on republie donc aussi à la fin du workflow Validation.
+  workflow_run:
+    workflows: [Validation]
+    types: [completed]
   workflow_dispatch:
 
 permissions:
@@ -16,12 +21,15 @@ concurrency:
 
 jobs:
   deploy:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: main
       - uses: actions/setup-node@v4
         with:
           node-version: 22

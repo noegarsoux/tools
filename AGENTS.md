@@ -15,12 +15,8 @@ Répète ces étapes tant qu'il te reste du budget :
 5. **Construire l'outil** dans `tools/<slug>/index.html` (voir la barre de qualité ci-dessous).
 6. **Valider** : `npm run validate -- <slug>`. Corrige jusqu'à ce que ce soit vert. Ce script génère aussi `thumbnail.jpg`.
 7. **Relire visuellement** : ouvre `tools/<slug>/thumbnail.jpg` et regarde-la. Si la miniature n'est pas belle ou ne montre pas ce que fait l'outil, améliore le rendu par défaut et relance `npm run validate -- <slug> --thumbs`.
-8. **Publier** : coche l'idée dans `IDEAS.md`, commit **uniquement** `tools/<slug>/` et `IDEAS.md`, pousse, ouvre une PR, puis active l'auto-merge :
-   ```bash
-   gh pr create --fill --title "Outil : <Titre>"
-   gh pr merge --auto --squash
-   ```
-   La CI revalide l'outil ; s'il passe, il est fusionné et publié automatiquement.
+8. **Publier** : coche l'idée dans `IDEAS.md`, commit **uniquement** `tools/<slug>/` et `IDEAS.md`, pousse la branche et ouvre une PR intitulée `Outil : <Titre>`.
+   La CI revalide l'outil ; s'il passe, elle fusionne la PR elle-même et le site est republié. Si elle échoue, corrige et repousse sur la même branche.
 9. Reviens à l'étape 1.
 
 **Si tu ne peux pas finir un outil** (bloqué, budget presque épuisé) : supprime le dossier, ne pousse rien. Aucun brouillon sur `main`, jamais.

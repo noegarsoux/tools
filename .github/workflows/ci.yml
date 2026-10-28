@@ -3,6 +3,10 @@ name: Validation
 on:
   pull_request:
 
+permissions:
+  contents: write
+  pull-requests: write
+
 jobs:
   validate:
     runs-on: ubuntu-latest
@@ -42,3 +46,16 @@ jobs:
           fi
 
       - run: npm run build
+
+  # Les PR d'agents validées sont fusionnées automatiquement ; le workflow
+  # Publication se déclenche ensuite et met le site à jour.
+  merge:
+    needs: validate
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      (startsWith(github.head_ref, 'claude/') || startsWith(github.head_ref, 'cursor/'))
+    runs-on: ubuntu-latest
+    steps:
+      - run: gh pr merge ${{ github.event.pull_request.number }} --repo ${{ github.repository }} --squash --delete-branch
+        env:
+          GH_TOKEN: ${{ github.token }}
