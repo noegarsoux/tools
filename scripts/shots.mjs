@@ -17,7 +17,7 @@ const browser = await chromium.launch(process.env.CHROMIUM_PATH ? { executablePa
 const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
 const errors = [];
 page.on('pageerror', (e) => errors.push(e.message));
-const shot = async (name) => { await page.locator('.at-frame').screenshot({ path: path.join(out, `${name}.png`) }); console.log(`  ${name}.png`); };
+const shot = async (name) => { await page.screenshot({ clip: await page.locator('.at-frame').boundingBox(), path: path.join(out, `${name}.png`), timeout: 60000 }); console.log(`  ${name}.png`); };
 const app = (fn, arg) => page.evaluate(fn, arg);
 
 await page.goto(url + '?thumbnail', { waitUntil: 'load' });
