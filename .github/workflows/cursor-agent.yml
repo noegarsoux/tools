@@ -11,6 +11,10 @@ on:
       max_tools:
         description: Nombre maximum d'outils pour ce passage
         default: '20'
+      list_models:
+        description: Afficher seulement la liste des modèles disponibles (aucun outil construit)
+        type: boolean
+        default: false
 
 concurrency:
   group: cursor-agent
@@ -45,7 +49,13 @@ jobs:
         run: |
           git config user.name "cursor-agent"
           git config user.email "cursor-agent@users.noreply.github.com"
+      - name: Lister les modèles
+        if: inputs.list_models
+        run: |
+          CLI=$(command -v cursor-agent || command -v agent)
+          "$CLI" --list-models || "$CLI" models || "$CLI" --help
       - name: Construire des outils jusqu'à épuisement du quota
+        if: ${{ !inputs.list_models }}
         run: |
           CLI=$(command -v cursor-agent || command -v agent)
           for i in $(seq 1 "$MAX_TOOLS"); do
