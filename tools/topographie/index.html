@@ -4,70 +4,54 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Topographie</title>
-  <style>
-    :root { --bg: #102028; --panel: rgba(24,24,29,.92); --ink: #f1efe9; --muted: #96939c; --line: #2a2a31; --accent: #e07a3d; }
-    * { box-sizing: border-box; }
-    html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink); font: 13px/1.4 system-ui, sans-serif; overflow: hidden; }
-    canvas { display: block; width: 100vw; height: 100vh; }
-    .panel { position: fixed; top: 16px; right: 16px; width: 272px; max-height: calc(100vh - 32px); overflow: auto; background: var(--panel); backdrop-filter: blur(8px); border: 1px solid var(--line); border-radius: 12px; padding: 14px; display: grid; gap: 10px; }
-    .panel h1 { font-size: 14px; margin: 0; }
-    .panel p { margin: 0; color: var(--muted); }
-    .panel label { display: grid; gap: 4px; color: var(--muted); }
-    .panel label span { display: flex; justify-content: space-between; gap: 8px; }
-    .panel output { color: var(--ink); font-variant-numeric: tabular-nums; }
-    input[type=range] { width: 100%; margin: 0; accent-color: var(--accent); }
-    select, input[type=number] { width: 100%; background: #2a2a31; color: var(--ink); border: 0; border-radius: 6px; padding: 6px 8px; font: inherit; }
-    label.inline { display: flex; align-items: center; gap: 8px; color: var(--ink); }
-    label.inline input { width: 16px; height: 16px; accent-color: var(--accent); }
-    .row { display: flex; gap: 8px; }
-    button { flex: 1; border: 0; border-radius: 8px; padding: 8px; font: 600 13px system-ui; cursor: pointer; background: #2a2a31; color: var(--ink); }
-    button.primary { background: var(--accent); color: #fff; }
-    button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-    @media (max-width: 600px) {
-      .panel { top: auto; bottom: 0; right: 0; left: 0; width: auto; max-height: 45vh; border-radius: 12px 12px 0 0; }
-    }
-  </style>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
 </head>
 <body>
-  <canvas id="c"></canvas>
-  <aside class="panel" data-ui>
-    <h1>Topographie</h1>
-    <p>Le PNG garde l'ombrage, le SVG les courbes seules.</p>
-    <label><span>Palette</span>
-      <select id="palette">
-        <option value="atlas" selected>Atlas</option>
-        <option value="glacier">Glacier</option>
-        <option value="desert">Désert</option>
-        <option value="night">Nuit</option>
-        <option value="ink">Encre</option>
-      </select>
-    </label>
-    <label><span>Relief</span>
-      <select id="relief">
-        <option value="melange" selected>Mélange</option>
-        <option value="collines">Collines</option>
-        <option value="cretes">Crêtes</option>
-      </select>
-    </label>
-    <label><span>Échelle du relief <output></output></span><input id="scale" type="range" min="0.8" max="3.2" step="0.05" value="1.7" data-fmt="dec"></label>
-    <label><span>Détail <output></output></span><input id="detail" type="range" min="1" max="6" step="1" value="5" data-fmt="int"></label>
-    <label><span>Courbes de niveau <output></output></span><input id="curves" type="range" min="6" max="28" step="1" value="16" data-fmt="int"></label>
-    <label><span>Niveau de la mer <output></output></span><input id="sea" type="range" min="0.15" max="0.75" step="0.01" value="0.46" data-fmt="pct"></label>
-    <label><span>Ombrage <output></output></span><input id="shade" type="range" min="0" max="1" step="0.01" value="0.78" data-fmt="pct"></label>
-    <label><span>Épaisseur du trait <output></output></span><input id="stroke" type="range" min="0.4" max="3.5" step="0.1" value="1.2" data-fmt="dec"></label>
-    <label><span>Déformation <output></output></span><input id="warp" type="range" min="0" max="1.4" step="0.02" value="0.7" data-fmt="dec"></label>
-    <label><span>Graine</span><input id="seed" type="number" min="1" max="2147483646" step="1" value="184293"></label>
-    <label class="inline"><input id="labels" type="checkbox" checked> Cotes d'altitude</label>
-    <button id="random" type="button">Nouvelle graine</button>
-    <div class="row">
-      <button id="svg" type="button">Exporter SVG</button>
-      <button id="png" type="button" class="primary">Exporter PNG</button>
-    </div>
-  </aside>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
   <script>
-    const $ = (id) => document.getElementById(id);
-    const canvas = $('c');
+    const canvas = document.querySelector('canvas');
     const ctx = canvas.getContext('2d');
+    let raf = 0;
+    const requestDraw = () => { if (!raf) raf = requestAnimationFrame(() => { raf = 0; draw(); }); };
+
+    const app = Atelier.app({
+      stage: canvas,
+      seed: 184293,
+      params: {
+        'Relief': {
+          relief: { type: 'segmented', label: 'Type', value: 'melange', options: { melange: 'Mélange', collines: 'Collines', cretes: 'Crêtes' } },
+          scale: { type: 'range', label: 'Échelle', min: 0.8, max: 3.2, step: 0.05, value: 1.7 },
+          detail: { type: 'range', label: 'Détail', min: 1, max: 6, step: 1, value: 5 },
+          warp: { type: 'range', label: 'Déformation', min: 0, max: 1.4, step: 0.02, value: 0.7 },
+          sea: { type: 'range', label: 'Niveau mer', min: 0.15, max: 0.75, step: 0.01, value: 0.46 },
+        },
+        'Courbes': {
+          curves: { type: 'range', label: 'Nombre', min: 6, max: 28, step: 1, value: 16 },
+          stroke: { type: 'range', label: 'Trait', min: 0.4, max: 3.5, step: 0.1, value: 1.2 },
+          shade: { type: 'range', label: 'Ombrage', min: 0, max: 1, step: 0.01, value: 0.78 },
+          labels: { type: 'toggle', label: 'Cotes', value: true },
+        },
+        'Couleur': {
+          palette: { type: 'select', label: 'Palette', value: 'atlas', options: { atlas: 'Atlas', glacier: 'Glacier', desert: 'Désert', night: 'Nuit', ink: 'Encre' } },
+        },
+      },
+      presets: {
+        'Atlas': { palette: 'atlas', relief: 'melange', scale: 1.7, curves: 16, shade: 0.78, labels: true },
+        'Glacier': { palette: 'glacier', relief: 'cretes', scale: 1.2, curves: 22, shade: 0.9, labels: false },
+        'Dunes': { palette: 'desert', relief: 'collines', scale: 2.6, curves: 24, shade: 0.5, warp: 1.2, labels: false },
+        'Nuit': { palette: 'night', relief: 'melange', scale: 1.5, curves: 14, shade: 0.6, labels: true },
+        'Gravure': { palette: 'ink', relief: 'cretes', scale: 2, curves: 28, shade: 0.2, stroke: 0.8, labels: false },
+      },
+      notes: "Le PNG garde l'ombrage, le SVG ne contient que les courbes.",
+      export: { png: true, svg: () => svgMarkup(canvas.width, canvas.height), name: 'topographie' },
+      onChange: requestDraw,
+      onSeed: (s) => { seed = s; requestDraw(); },
+      onResize: requestDraw,
+    });
+    const p = app.params;
+    let seed = app.seed;
+
     const relief = document.createElement('canvas');
     const rctx = relief.getContext('2d');
 
@@ -108,9 +92,8 @@
       }
     };
 
-    let seed = parseInt($('seed').value, 10) || 1;
     let cache = { key: '', H: null, cols: 0, rows: 0 };
-    let raf = 0;
+    
 
     function hash(ix, iy, s) {
       let n = Math.imul(ix | 0, 374761393) + Math.imul(iy | 0, 668265263) + Math.imul(s | 0, 1442695041);
@@ -202,10 +185,10 @@
     }
 
     function getField(w, h) {
-      const scale = +$('scale').value;
-      const oct = +$('detail').value;
-      const warp = +$('warp').value;
-      const type = $('relief').value;
+      const scale = p.scale;
+      const oct = p.detail;
+      const warp = p.warp;
+      const type = p.relief;
       const aspect = w / Math.max(1, h);
       const target = 54000;
       let cols = Math.max(64, Math.round(Math.sqrt(target * aspect)));
@@ -457,7 +440,7 @@
     }
 
     function classify(H, cols, rows, w, h, sea) {
-      const n = +$('curves').value;
+      const n = p.curves;
       const step = 1 / n;
       const groups = { waterMinor: [], waterMajor: [], landMinor: [], landMajor: [], coast: [] };
       const labels = [];
@@ -482,9 +465,9 @@
       ctx.setTransform(1, 0, 0, 1, 0, 0);
       ctx.globalAlpha = 1;
       const { H, cols, rows } = getField(w, h);
-      const sea = Math.min(0.98, Math.max(0.02, +$('sea').value || 0.46));
-      const palette = PALETTES[$('palette').value] || PALETTES.atlas;
-      paintRelief(H, cols, rows, sea, palette, +$('shade').value || 0);
+      const sea = Math.min(0.98, Math.max(0.02, p.sea || 0.46));
+      const palette = PALETTES[p.palette] || PALETTES.atlas;
+      paintRelief(H, cols, rows, sea, palette, p.shade || 0);
       ctx.imageSmoothingEnabled = true;
       ctx.imageSmoothingQuality = 'high';
       ctx.drawImage(relief, 0, 0, w, h);
@@ -494,15 +477,15 @@
       ctx.fillStyle = g;
       ctx.fillRect(0, 0, w, h);
 
-      const dpr = w / Math.max(1, window.innerWidth);
-      const base = (+$('stroke').value || 1) * dpr;
+      const dpr = app.size.dpr;
+      const base = (p.stroke || 1) * dpr;
       const { groups, labels } = classify(H, cols, rows, w, h, sea);
       strokeLines(groups.waterMinor, palette.water, base * 0.6, 0.42);
       strokeLines(groups.waterMajor, palette.water, base * 1.15, 0.82, 'rgba(0,0,0,.25)');
       strokeLines(groups.landMinor, palette.ink, base * 0.72, 0.55);
       strokeLines(groups.landMajor, palette.ink, base * 1.6, 0.95, 'rgba(255,250,242,.55)');
       strokeLines(groups.coast, palette.coast, base * 2.4, 1, 'rgba(255,248,236,.45)');
-      if ($('labels').checked) drawLabels(labels, palette, dpr, w, h);
+      if (p.labels) drawLabels(labels, palette, dpr, w, h);
     }
 
     function pathData(lines) {
@@ -517,10 +500,10 @@
 
     function svgMarkup(w, h) {
       const { H, cols, rows } = getField(w, h);
-      const sea = Math.min(0.98, Math.max(0.02, +$('sea').value || 0.46));
-      const palette = PALETTES[$('palette').value] || PALETTES.atlas;
+      const sea = Math.min(0.98, Math.max(0.02, p.sea || 0.46));
+      const palette = PALETTES[p.palette] || PALETTES.atlas;
       const { groups } = classify(H, cols, rows, w, h, sea);
-      const sw = +$('stroke').value || 1;
+      const sw = p.stroke || 1;
       const group = (lines, color, width, opacity) =>
         lines.length ? `<path d="${pathData(lines)}" fill="none" stroke="${color}" stroke-width="${width}" stroke-opacity="${opacity}" stroke-linecap="round" stroke-linejoin="round"/>` : '';
       return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">` +
@@ -533,68 +516,7 @@
         `</svg>`;
     }
 
-    function download(name, href) {
-      const a = document.createElement('a');
-      a.download = name;
-      a.href = href;
-      a.click();
-      if (href.startsWith('blob:')) setTimeout(() => URL.revokeObjectURL(href), 1500);
-    }
-
-    function requestDraw() {
-      if (raf) return;
-      raf = requestAnimationFrame(() => { raf = 0; draw(); });
-    }
-
-    function syncRange(el) {
-      const out = el.parentElement.querySelector('output');
-      if (!out) return;
-      const v = +el.value;
-      if (el.dataset.fmt === 'int') out.textContent = String(Math.round(v));
-      else if (el.dataset.fmt === 'pct') out.textContent = Math.round(v * 100) + ' %';
-      else out.textContent = v.toFixed(1);
-    }
-
-    document.querySelectorAll('input[type=range]').forEach((el) => {
-      syncRange(el);
-      el.addEventListener('input', () => { syncRange(el); requestDraw(); });
-    });
-    document.querySelectorAll('select, input[type=checkbox]').forEach((el) => {
-      el.addEventListener('input', requestDraw);
-      el.addEventListener('change', requestDraw);
-    });
-    $('seed').addEventListener('input', () => {
-      const n = parseInt($('seed').value, 10);
-      if (!n || n < 1) return;
-      seed = Math.min(2147483646, n);
-      requestDraw();
-    });
-    $('random').addEventListener('click', () => {
-      seed = 1 + Math.floor(Math.random() * 2147483646);
-      $('seed').value = String(seed);
-      draw();
-    });
-    $('svg').addEventListener('click', () => {
-      const blob = new Blob([svgMarkup(canvas.width, canvas.height)], { type: 'image/svg+xml' });
-      download('topographie.svg', URL.createObjectURL(blob));
-    });
-    $('png').addEventListener('click', () => {
-      download('topographie.png', canvas.toDataURL('image/png'));
-    });
-
-    function fit() {
-      const dpr = Math.min(2, window.devicePixelRatio || 1);
-      const w = Math.max(2, Math.round(window.innerWidth * dpr));
-      const h = Math.max(2, Math.round(window.innerHeight * dpr));
-      if (canvas.width !== w || canvas.height !== h) {
-        canvas.width = w;
-        canvas.height = h;
-      }
-      draw();
-    }
-
-    addEventListener('resize', fit);
-    fit();
+    draw();
   </script>
 </body>
 </html>

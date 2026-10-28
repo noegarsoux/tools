@@ -1,0 +1,45 @@
+/* Atelier — jetons de design partagés par la bibliothèque et tous les outils. */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap');
+
+:root {
+  --at-font: 'Inter', system-ui, -apple-system, sans-serif;
+  --at-mono: 'JetBrains Mono', ui-monospace, monospace;
+
+  --at-bg: #ffffff;
+  --at-panel: #ffffff;
+  --at-canvas: #f0f0f0;
+  --at-ink: #1b1b1b;
+  --at-ink-2: #5c5c5c;
+  --at-muted: #9a9a9a;
+  --at-line: #e8e8e8;
+  --at-line-strong: #d4d4d4;
+  --at-hover: #f3f3f3;
+  --at-field: #f5f5f5;
+  --at-accent: #0d99ff;
+  --at-accent-ink: #ffffff;
+  --at-accent-soft: #e5f4ff;
+  --at-danger: #f24822;
+
+  --at-radius: 6px;
+  --at-radius-lg: 10px;
+  --at-topbar: 44px;
+  --at-sidebar: 272px;
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --at-bg: #1e1e1e; --at-panel: #2c2c2c; --at-canvas: #1e1e1e;
+    --at-ink: #f0f0f0; --at-ink-2: #bdbdbd; --at-muted: #8c8c8c;
+    --at-line: #3a3a3a; --at-line-strong: #4a4a4a; --at-hover: #383838; --at-field: #383838;
+    --at-accent-soft: #0d99ff26;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --at-bg: #1e1e1e; --at-panel: #2c2c2c; --at-canvas: #1e1e1e;
+  --at-ink: #f0f0f0; --at-ink-2: #bdbdbd; --at-muted: #8c8c8c;
+  --at-line: #3a3a3a; --at-line-strong: #4a4a4a; --at-hover: #383838; --at-field: #383838;
+  --at-accent-soft: #0d99ff26;
+  color-scheme: dark;
+}

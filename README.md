@@ -11,6 +11,7 @@ Les outils sont construits par des agents (Claude, Cursor) pendant les dernière
 
 | Élément | Rôle |
 | --- | --- |
+| `assets/ui/` | kit d'interface commun à tous les outils (structure Figma) et jetons de design partagés avec le site |
 | `tools/<slug>/` | un outil = un dossier (`index.html`, `tool.json`, `thumbnail.jpg`) |
 | `scripts/validate.mjs` | garde-fou : métadonnées, erreurs JS, rendu non vide, mobile, miniature |
 | `scripts/build.mjs` | assemble `dist/` et l'index `tools.json` lu par le site |

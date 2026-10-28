@@ -4,140 +4,127 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Tuiles de Truchet</title>
-  <style>
-    :root { --bg: #0f0f12; --panel: rgba(24,24,29,.92); --ink: #f1efe9; --muted: #96939c; --line: #2a2a31; --accent: #ff5a36; }
-    * { box-sizing: border-box; }
-    html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink); font: 13px/1.4 system-ui, sans-serif; overflow: hidden; }
-    #art { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; cursor: crosshair; }
-    .panel { position: fixed; top: 16px; right: 16px; width: 260px; max-height: calc(100vh - 32px); overflow: auto; background: var(--panel); backdrop-filter: blur(8px); border: 1px solid var(--line); border-radius: 12px; padding: 14px; display: grid; gap: 12px; }
-    .panel h1 { font-size: 14px; margin: 0; }
-    .panel p { margin: 0; color: var(--muted); }
-    .panel label { display: grid; gap: 4px; color: var(--muted); }
-    .panel label span { display: flex; justify-content: space-between; }
-    .panel output { color: var(--ink); font-variant-numeric: tabular-nums; }
-    input[type=range], select { width: 100%; accent-color: var(--accent); }
-    .colors { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-    input[type=color] { width: 100%; height: 32px; border: 0; padding: 0; background: none; cursor: pointer; }
-    select { background: #2a2a31; color: var(--ink); border: 0; border-radius: 6px; padding: 6px; font: inherit; }
-    .row { display: flex; gap: 8px; }
-    button { flex: 1; border: 0; border-radius: 8px; padding: 8px; font: 600 13px system-ui; cursor: pointer; background: #2a2a31; color: var(--ink); }
-    button.primary { background: var(--accent); color: #fff; }
-    @media (max-width: 600px) {
-      .panel { top: auto; bottom: 0; right: 0; left: 0; width: auto; max-height: 45vh; border-radius: 12px 12px 0 0; }
-    }
-  </style>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
 </head>
 <body>
-  <svg id="art" xmlns="http://www.w3.org/2000/svg"></svg>
-  <aside class="panel" data-ui>
-    <h1>Tuiles de Truchet</h1>
-    <p>Cliquez sur une tuile pour la faire pivoter.</p>
-    <label><span>Style</span>
-      <select id="style">
-        <option value="arcs">Arcs</option>
-        <option value="diagonal">Diagonales</option>
-        <option value="triangles">Triangles</option>
-        <option value="maze">Labyrinthe</option>
-        <option value="circles">Quarts de cercle pleins</option>
-      </select>
-    </label>
-    <label><span>Taille des tuiles <output></output></span><input id="size" type="range" min="16" max="160" step="2" value="56"></label>
-    <label><span>Épaisseur du trait <output></output></span><input id="stroke" type="range" min="1" max="40" value="10"></label>
-    <label><span>Probabilité d'orientation <output></output></span><input id="bias" type="range" min="0" max="1" step="0.05" value="0.5"></label>
-    <div class="colors">
-      <label><span>Fond</span><input id="bg" type="color" value="#14141a"></label>
-      <label><span>Motif</span><input id="fg" type="color" value="#ff5a36"></label>
-    </div>
-    <button id="random">Nouvelle graine</button>
-    <div class="row">
-      <button id="svg">Exporter SVG</button>
-      <button id="png" class="primary">Exporter PNG</button>
-    </div>
-  </aside>
+  <canvas style="cursor: crosshair"></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
   <script>
-    const $ = (id) => document.getElementById(id);
-    const svg = $('art');
-    let seed = 1 + Math.floor(Math.random() * 2147483646), flips = new Map();
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    let grid = [], cols = 0, rows = 0;
 
-    function rng(s) { return () => (s = (s * 16807) % 2147483647) / 2147483647; }
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      params: {
+        'Tuiles': {
+          style: { type: 'select', label: 'Style', value: 'arcs', options: { arcs: 'Arcs', diagonal: 'Diagonales', maze: 'Labyrinthe', triangles: 'Triangles', circles: 'Quarts pleins' } },
+          size: { type: 'range', label: 'Taille', min: 16, max: 200, step: 2, value: 64 },
+          stroke: { type: 'range', label: 'Trait', min: 1, max: 48, step: 1, value: 12 },
+          bias: { type: 'range', label: 'Orientation', min: 0, max: 1, step: 0.05, value: 0.5 },
+        },
+        'Mouvement': {
+          rate: { type: 'range', label: 'Rotations / s', min: 0, max: 60, step: 1, value: 12 },
+          ease: { type: 'range', label: 'Souplesse', min: 0.02, max: 0.4, step: 0.01, value: 0.12 },
+        },
+        'Couleur': {
+          bg: { type: 'color', label: 'Fond', value: '#111114' },
+          fg: { type: 'color', label: 'Motif', value: '#ff5a36' },
+        },
+      },
+      presets: {
+        'Corail': { style: 'arcs', size: 64, stroke: 12, bg: '#111114', fg: '#ff5a36', rate: 12 },
+        'Labyrinthe': { style: 'maze', size: 36, stroke: 6, bg: '#f2efe8', fg: '#1b1b1b', rate: 30 },
+        'Bauhaus': { style: 'circles', size: 110, bg: '#1d3fbb', fg: '#f7c948', rate: 6 },
+        'Signal': { style: 'triangles', size: 48, bg: '#0b0b0b', fg: '#e8ff3a', rate: 40 },
+        'Néon': { style: 'arcs', size: 90, stroke: 4, bg: '#08010f', fg: '#4cc9f0', rate: 20 },
+      },
+      notes: 'Cliquez sur une tuile pour la faire pivoter.',
+      export: { png: true, video: true, svg: () => toSVG(), name: 'truchet' },
+      onChange(key) { if (['size', 'bias', 'style', '*'].includes(key)) build(); },
+      onSeed: () => build(),
+      onResize: () => build(),
+    });
+    const p = app.params;
 
-    function tile(style, x, y, s, r, fg) {
-      const cx = x + s / 2, cy = y + s / 2, h = s / 2;
-      const rot = `rotate(${r * 90} ${cx} ${cy})`;
-      switch (style) {
-        case 'arcs':
-          return `<path transform="${rot}" d="M${x + h} ${y} A${h} ${h} 0 0 1 ${x} ${y + h} M${x + s} ${y + h} A${h} ${h} 0 0 0 ${x + h} ${y + s}" fill="none" stroke="${fg}"/>`;
-        case 'diagonal':
-          return `<line transform="${rot}" x1="${x}" y1="${y}" x2="${x + s}" y2="${y + s}" stroke="${fg}"/>`;
-        case 'maze':
-          return `<line transform="${rot}" x1="${x}" y1="${y + s}" x2="${x + s}" y2="${y}" stroke="${fg}"/>`;
-        case 'triangles':
-          return `<path transform="${rot}" d="M${x} ${y}H${x + s}L${x} ${y + s}Z" fill="${fg}"/>`;
-        case 'circles':
-          return `<path transform="${rot}" d="M${x} ${y}h${h}a${h} ${h} 0 0 1 ${-h} ${h}Z M${x + s} ${y + s}h${-h}a${h} ${h} 0 0 1 ${h} ${-h}Z" fill="${fg}"/>`;
-      }
+    // Chaque tuile a une orientation cible (quarts de tour) et un angle affiché qui la rejoint en douceur.
+    function build() {
+      const r = app.rng();
+      cols = Math.ceil(app.size.w / p.size); rows = Math.ceil(app.size.h / p.size);
+      const four = p.style === 'triangles' || p.style === 'circles';
+      grid = Array.from({ length: cols * rows }, () => {
+        let o = r() < p.bias ? 1 : 0;
+        if (four) o = o * 2 + (r() < 0.5 ? 1 : 0);
+        return { target: o, angle: o };
+      });
     }
 
-    function markup(w, h) {
-      const style = $('style').value, s = +$('size').value, bias = +$('bias').value;
-      const fg = $('fg').value, bg = $('bg').value;
-      const rand = rng(seed);
-      const cols = Math.ceil(w / s), rows = Math.ceil(h / s);
-      let out = '';
-      for (let j = 0; j < rows; j++) {
-        for (let i = 0; i < cols; i++) {
-          // Deux orientations pour les styles symétriques, quatre pour les triangles.
-          let r = rand() < bias ? 1 : 0;
-          if (style === 'triangles' || style === 'circles') r = r * 2 + (rand() < 0.5 ? 1 : 0);
-          r = (r + (flips.get(`${i},${j}`) || 0)) % 4;
-          out += tile(style, i * s, j * s, s, r, fg);
-        }
+    function shape(c, s, style) {
+      const h = s / 2;
+      c.beginPath();
+      switch (style) {
+        case 'arcs':
+          c.arc(-h, -h, h, 0, Math.PI / 2); c.moveTo(h, 0); c.arc(h, h, h, -Math.PI / 2, -Math.PI, true); c.stroke(); break;
+        case 'diagonal': c.moveTo(-h, -h); c.lineTo(h, h); c.stroke(); break;
+        case 'maze': c.moveTo(-h, h); c.lineTo(h, -h); c.stroke(); break;
+        case 'triangles': c.moveTo(-h, -h); c.lineTo(h, -h); c.lineTo(-h, h); c.closePath(); c.fill(); break;
+        case 'circles':
+          c.moveTo(-h, -h); c.arc(-h, -h, h, 0, Math.PI / 2); c.closePath();
+          c.moveTo(h, h); c.arc(h, h, h, Math.PI, Math.PI * 1.5); c.closePath(); c.fill(); break;
       }
-      return `<rect width="${w}" height="${h}" fill="${bg}"/><g stroke-width="${$('stroke').value}" stroke-linecap="round">${out}</g>`;
     }
 
     function draw() {
-      const w = innerWidth, h = innerHeight;
-      svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
-      svg.innerHTML = markup(w, h);
+      const { w, h, dpr } = app.size, s = p.size;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = p.bg; ctx.fillRect(0, 0, w, h);
+      ctx.strokeStyle = ctx.fillStyle = p.fg;
+      ctx.lineWidth = p.stroke; ctx.lineCap = 'round';
+      for (let j = 0; j < rows; j++) for (let i = 0; i < cols; i++) {
+        const t = grid[j * cols + i];
+        ctx.save();
+        ctx.translate(i * s + s / 2, j * s + s / 2);
+        ctx.rotate(t.angle * Math.PI / 2);
+        shape(ctx, s, p.style);
+        ctx.restore();
+      }
     }
 
-    function file(w, h) {
-      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">${markup(w, h)}</svg>`;
-    }
-    function download(name, href) {
-      const a = document.createElement('a');
-      a.download = name; a.href = href; a.click();
-      setTimeout(() => URL.revokeObjectURL(href), 1000);
-    }
-
-    svg.addEventListener('click', (e) => {
-      const s = +$('size').value, k = `${Math.floor(e.clientX / s)},${Math.floor(e.clientY / s)}`;
-      flips.set(k, ((flips.get(k) || 0) + 1) % 4);
+    let budget = 0;
+    app.loop((t, dt) => {
+      budget += p.rate * dt;
+      while (budget >= 1 && grid.length) { grid[Math.floor(Math.random() * grid.length)].target += 1; budget -= 1; }
+      const k = 1 - Math.pow(1 - p.ease, dt * 60);
+      for (const g of grid) g.angle += (g.target - g.angle) * k;
       draw();
     });
-    document.querySelectorAll('input, select').forEach((el) => {
-      const out = el.closest('label')?.querySelector('output');
-      const sync = () => { if (out) out.textContent = el.value; };
-      sync();
-      el.addEventListener('input', () => { sync(); if (el.id === 'size') flips.clear(); draw(); });
-      el.addEventListener('change', () => { sync(); draw(); });
+
+    canvas.addEventListener('click', (e) => {
+      const r = canvas.getBoundingClientRect();
+      const i = Math.floor((e.clientX - r.left) / p.size), j = Math.floor((e.clientY - r.top) / p.size);
+      const g = grid[j * cols + i];
+      if (g) { g.target += 1; if (!app.playing) { g.angle = g.target; draw(); } }
     });
-    $('random').onclick = () => { seed = 1 + Math.floor(Math.random() * 2147483646); flips.clear(); draw(); };
-    $('svg').onclick = () => download('truchet.svg', URL.createObjectURL(new Blob([file(innerWidth, innerHeight)], { type: 'image/svg+xml' })));
-    $('png').onclick = async () => {
-      const w = innerWidth * 2, h = innerHeight * 2;
-      const img = new Image();
-      img.src = URL.createObjectURL(new Blob([file(innerWidth, innerHeight)], { type: 'image/svg+xml' }));
-      await img.decode();
-      const c = document.createElement('canvas');
-      c.width = w; c.height = h;
-      c.getContext('2d').drawImage(img, 0, 0, w, h);
-      URL.revokeObjectURL(img.src);
-      download('truchet.png', c.toDataURL('image/png'));
-    };
-    addEventListener('resize', draw);
-    draw();
+
+    function toSVG() {
+      const { w, h } = app.size, s = p.size, hs = s / 2;
+      const paths = {
+        arcs: `<path d="M0 ${-hs}A${hs} ${hs} 0 0 1 ${-hs} 0M${hs} 0A${hs} ${hs} 0 0 0 0 ${hs}" fill="none" stroke="${p.fg}"/>`,
+        diagonal: `<line x1="${-hs}" y1="${-hs}" x2="${hs}" y2="${hs}" stroke="${p.fg}"/>`,
+        maze: `<line x1="${-hs}" y1="${hs}" x2="${hs}" y2="${-hs}" stroke="${p.fg}"/>`,
+        triangles: `<path d="M${-hs} ${-hs}H${hs}L${-hs} ${hs}Z" fill="${p.fg}"/>`,
+        circles: `<path d="M${-hs} ${-hs}h${hs}a${hs} ${hs} 0 0 1 ${-hs} ${hs}Z M${hs} ${hs}h${-hs}a${hs} ${hs} 0 0 1 ${hs} ${-hs}Z" fill="${p.fg}"/>`,
+      };
+      let out = '';
+      for (let j = 0; j < rows; j++) for (let i = 0; i < cols; i++) {
+        const a = Math.round(grid[j * cols + i].target) * 90;
+        out += `<g transform="translate(${i * s + hs} ${j * s + hs}) rotate(${a})">${paths[p.style]}</g>`;
+      }
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><rect width="${w}" height="${h}" fill="${p.bg}"/><g stroke-width="${p.stroke}" stroke-linecap="round">${out}</g></svg>`;
+    }
+
+    build();
   </script>
 </body>
 </html>

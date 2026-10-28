@@ -47,11 +47,56 @@ Répète ces étapes tant qu'il te reste du budget :
 
 Ne modifie pas le site (`index.html`, `assets/`, `scripts/`, `.github/`) pendant une session autonome : la CI refuse les PR d'agents qui touchent autre chose que `tools/`.
 
+## Interface commune (obligatoire)
+
+Tous les outils partagent **la même interface**, générée par le kit `assets/ui/` (structure inspirée de Figma) : barre du haut (retour à la bibliothèque, titre, lecture/pause, graine, thème, bouton Exporter), **scène au centre**, **panneau de propriétés à droite** avec les onglets Réglages et Exporter. Sur mobile, le panneau passe sous la scène.
+
+Un outil **ne dessine jamais sa propre interface** : pas de panneau, de bouton ou de champ en HTML. Il décrit ses paramètres et le kit fait le reste. La validation refuse un outil qui n'utilise pas le kit.
+
+```html
+<link rel="stylesheet" href="../../assets/ui/atelier.css">
+…
+<canvas></canvas>   <!-- ou <svg>, ou <div class="at-fill"> : la scène -->
+<script src="../../assets/ui/atelier.js"></script>
+<script>
+  const app = Atelier.app({
+    stage: document.querySelector('canvas'),
+    animate: true,                 // lecture/pause, vitesse, app.loop
+    seed: true,                    // graine affichée, app.rng() déterministe
+    params: {                      // sections du panneau, dans l'ordre
+      'Forme': {
+        count: { type: 'range', label: 'Nombre', min: 1, max: 100, step: 1, value: 20 },
+        mode:  { type: 'segmented', label: 'Mode', options: { a: 'A', b: 'B' }, value: 'a' },
+      },
+      'Marque': {
+        text:  { type: 'text', label: 'Texte', value: 'ATELIER' },
+        logo:  { type: 'file', label: 'Logo', accept: 'image/*' },   // → HTMLImageElement (+ .svgText)
+        ink:   { type: 'color', label: 'Encre', value: '#0d99ff' },
+      },
+    },
+    presets: { 'Calme': { count: 10 }, 'Dense': { count: 90 } },
+    export: { png: true, video: true, svg: () => svgString },   // png peut être (scale) => canvas
+    onChange(key, value, params) {},   // key = '*' quand un preset est appliqué
+    onSeed(seed) {},
+    onResize({ w, h, dpr }) {},        // le canvas est déjà redimensionné (w×dpr, h×dpr)
+  });
+  const p = app.params;                // valeurs courantes
+  app.loop((t, dt) => { /* dessiner ; t en secondes, vitesse incluse */ });
+</script>
+```
+
+Types de contrôles : `range`, `select`, `segmented`, `color`, `palette` (tableau de couleurs), `toggle`, `text`, `textarea`, `file`, `button` (`action: (app) => …`). Option `show: (p) => bool` pour n'afficher un réglage que dans certains cas.
+Utilitaires : `app.size`, `app.rng(offset)`, `app.set(key, value)`, `app.playing`, `app.download(nom, blob)`, `export.extra: { 'Libellé': (app) => … }` pour un export spécifique (CSS, JSON…).
+
+Le CSS propre à l'outil se limite à sa scène (ex. le contenu d'un `.at-fill`). Utilise les jetons `var(--at-…)` de `assets/ui/tokens.css` plutôt que des couleurs en dur pour tout ce qui n'est pas l'œuvre elle-même.
+
+Ne modifie jamais le kit pendant une session autonome. Si un besoin d'interface manque, contourne-le dans la scène et note l'idée dans le bilan.
+
 ## Format d'un outil
 
 ```
 tools/<slug>/
-├── index.html      # point d'entrée, autonome
+├── index.html      # point d'entrée, utilise le kit ../../assets/ui/
 ├── tool.json       # métadonnées (voir ci-dessous)
 ├── thumbnail.jpg   # générée par npm run validate, 1200×750
 └── …               # autres fichiers éventuels (js, glsl, images), 3 Mo max au total
@@ -81,11 +126,11 @@ Un outil est « fini » quand **tout** ceci est vrai :
 - **Utile pour une marque** : il fait une chose clairement, on peut y mettre sa propre matière, et en sortir un fichier exploitable (PNG HD, SVG, WebM/MP4, CSS…).
 - **Réglable** : au moins 3 paramètres qui changent vraiment le résultat, des presets, et un bouton « Aléatoire » ou « Nouvelle graine » quand c'est pertinent.
 - **Beau par défaut** : à l'ouverture, sans rien toucher, le rendu est déjà réussi et digne d'un studio. C'est lui qui fait la miniature.
-- **Autonome** : un seul `index.html` de préférence, JavaScript natif. three.js, p5.js, regl, ogl, opentype.js, etc. sont autorisés uniquement depuis `cdn.jsdelivr.net/npm/`, `cdnjs.cloudflare.com` ou `unpkg.com`, avec une version exacte (`three@0.170.0`). Aucun appel réseau à une API.
+- **Autonome** : un seul `index.html` de préférence (plus le kit commun), JavaScript natif. three.js, p5.js, regl, ogl, opentype.js, etc. sont autorisés uniquement depuis `cdn.jsdelivr.net/npm/`, `cdnjs.cloudflare.com` ou `unpkg.com`, avec une version exacte (`three@0.170.0`). Aucun appel réseau à une API.
 - **Robuste** : aucune erreur console, même en bougeant tous les contrôles ; gère le redimensionnement ; reste fluide (viser 60 fps).
-- **Mobile** : pas de défilement horizontal à 390px de large ; le panneau passe en bas de l'écran (le gabarit le fait déjà).
+- **Mobile** : pas de défilement horizontal à 390px de large (le kit gère la mise en page).
 - **Interface en français**, `<html lang="fr">`, contrôles accessibles au clavier, libellés explicites.
-- **Miniature propre** : le panneau de réglages porte l'attribut `data-ui`, il est masqué sur la miniature.
+- **Miniature propre** : la miniature est prise en mode `?thumbnail` (le kit masque l'interface, la scène occupe tout le cadre).
 - **Aucun marqueur d'inachevé** : pas de TODO, FIXME, lorem ipsum, « à venir ».
 - **Outils audio / caméra / micro** : ils doivent produire un rendu visuel sans permission ni geste de l'utilisateur (démo par défaut), et ne demander l'accès qu'au clic.
 

@@ -2,7 +2,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { ROOT, TOOLS_DIR, listToolDirs, readMeta } from './lib.mjs';
-import { TYPES } from './types.mjs';
+import { TYPES, TYPE_DESCRIPTIONS } from './types.mjs';
 
 const DIST = path.join(ROOT, 'dist');
 fs.rmSync(DIST, { recursive: true, force: true });
@@ -26,7 +26,7 @@ for (const dir of listToolDirs()) {
 }
 
 tools.sort((a, b) => b.created.localeCompare(a.created) || a.title.localeCompare(b.title));
-const index = { generated: new Date().toISOString(), types: TYPES, tools };
+const index = { generated: new Date().toISOString(), types: TYPES, descriptions: TYPE_DESCRIPTIONS, tools };
 fs.writeFileSync(path.join(DIST, 'tools.json'), JSON.stringify(index, null, 2));
 console.log(`${tools.length} outil(s) publié(s) dans dist/`);
 if (failed) process.exit(1);

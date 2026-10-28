@@ -4,54 +4,11 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Champ de flux</title>
-  <style>
-    :root { --bg: #0f0f12; --panel: rgba(24,24,29,.92); --ink: #f1efe9; --muted: #96939c; --line: #2a2a31; --accent: #ff5a36; }
-    * { box-sizing: border-box; }
-    html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink); font: 13px/1.4 system-ui, sans-serif; overflow: hidden; }
-    canvas { display: block; width: 100vw; height: 100vh; }
-    .panel { position: fixed; top: 16px; right: 16px; width: 260px; max-height: calc(100vh - 32px); overflow: auto; background: var(--panel); backdrop-filter: blur(8px); border: 1px solid var(--line); border-radius: 12px; padding: 14px; display: grid; gap: 12px; }
-    .panel h1 { font-size: 14px; margin: 0; }
-    .panel label { display: grid; gap: 4px; color: var(--muted); }
-    .panel label span { display: flex; justify-content: space-between; }
-    .panel output { color: var(--ink); font-variant-numeric: tabular-nums; }
-    input[type=range], select { width: 100%; accent-color: var(--accent); }
-    select { background: #2a2a31; color: var(--ink); border: 0; border-radius: 6px; padding: 6px; font: inherit; }
-    .row { display: flex; gap: 8px; }
-    button { flex: 1; border: 0; border-radius: 8px; padding: 8px; font: 600 13px system-ui; cursor: pointer; background: #2a2a31; color: var(--ink); }
-    button.primary { background: var(--accent); color: #fff; }
-    @media (max-width: 600px) {
-      .panel { top: auto; bottom: 0; right: 0; left: 0; width: auto; max-height: 45vh; border-radius: 12px 12px 0 0; }
-    }
-  </style>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
 </head>
 <body>
-  <canvas id="c"></canvas>
-  <aside class="panel" data-ui>
-    <h1>Champ de flux</h1>
-    <label><span>Particules <output></output></span><input id="count" type="range" min="200" max="6000" step="100" value="2500"></label>
-    <label><span>Échelle du bruit <output></output></span><input id="scale" type="range" min="0.5" max="10" step="0.1" value="3"></label>
-    <label><span>Turbulence <output></output></span><input id="curl" type="range" min="0.5" max="6" step="0.1" value="2"></label>
-    <label><span>Vitesse <output></output></span><input id="speed" type="range" min="0.3" max="4" step="0.1" value="1.2"></label>
-    <label><span>Persistance <output></output></span><input id="fade" type="range" min="0" max="0.2" step="0.005" value="0.02"></label>
-    <label><span>Épaisseur <output></output></span><input id="width" type="range" min="0.3" max="3" step="0.1" value="0.8"></label>
-    <label><span>Palette</span>
-      <select id="palette">
-        <option value="ember">Braise</option>
-        <option value="ocean">Océan</option>
-        <option value="mono">Monochrome</option>
-        <option value="neon">Néon</option>
-        <option value="paper">Papier</option>
-      </select>
-    </label>
-    <div class="row">
-      <button id="pause">Pause</button>
-      <button id="random">Nouvelle graine</button>
-    </div>
-    <div class="row">
-      <button id="clear">Effacer</button>
-      <button id="save" class="primary">Exporter PNG</button>
-    </div>
-  </aside>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
   <script>
     const PALETTES = {
       ember: { bg: '#0d0a0b', colors: ['#ff5a36', '#ffb347', '#ffd9a0', '#c2185b'] },
@@ -60,20 +17,52 @@
       neon: { bg: '#07010f', colors: ['#f72585', '#7209b7', '#4cc9f0', '#b5179e'] },
       paper: { bg: '#f3eee3', colors: ['#1b1b1b', '#3d405b', '#e07a5f', '#81b29a'] },
     };
-    const canvas = document.getElementById('c');
+    const canvas = document.querySelector('canvas');
     const ctx = canvas.getContext('2d');
-    const $ = (id) => document.getElementById(id);
-    const p = {};
-    const newSeed = () => 1 + Math.floor(Math.random() * 2147483646);
-    let seed = newSeed(), particles = [], paused = false, dpr = 1, W = 0, H = 0, t = 0;
+    let particles = [], perm = new Uint8Array(512), z = 0;
 
-    // Bruit de valeur 3D lissé, suffisant pour un champ continu.
-    const perm = new Uint8Array(512);
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      params: {
+        'Particules': {
+          count: { type: 'range', label: 'Nombre', min: 200, max: 6000, step: 100, value: 2500 },
+          step: { type: 'range', label: 'Pas', min: 0.3, max: 4, step: 0.1, value: 1.2 },
+          width: { type: 'range', label: 'Épaisseur', min: 0.3, max: 3, step: 0.1, value: 0.8 },
+          fade: { type: 'range', label: 'Persistance', min: 0, max: 0.2, step: 0.005, value: 0.02 },
+        },
+        'Champ': {
+          scale: { type: 'range', label: 'Échelle', min: 0.5, max: 10, step: 0.1, value: 3 },
+          curl: { type: 'range', label: 'Turbulence', min: 0.5, max: 6, step: 0.1, value: 2 },
+          drift: { type: 'range', label: 'Évolution', min: 0, max: 3, step: 0.1, value: 1 },
+        },
+        'Couleur': {
+          palette: { type: 'select', label: 'Palette', value: 'ember', options: { ember: 'Braise', ocean: 'Océan', mono: 'Monochrome', neon: 'Néon', paper: 'Papier' } },
+          clear: { type: 'button', label: 'Effacer la toile', action: () => reset() },
+        },
+      },
+      presets: {
+        'Braise': { palette: 'ember', count: 2500, scale: 3, curl: 2, step: 1.2, fade: 0.02, width: 0.8 },
+        'Soie': { palette: 'mono', count: 5000, scale: 1.4, curl: 1.2, step: 0.8, fade: 0, width: 0.4 },
+        'Encre': { palette: 'paper', count: 1500, scale: 4.5, curl: 3, step: 1.6, fade: 0, width: 1.2 },
+        'Néon': { palette: 'neon', count: 3500, scale: 6, curl: 4.5, step: 2.2, fade: 0.06, width: 1 },
+        'Courant': { palette: 'ocean', count: 4000, scale: 2, curl: 1.6, step: 3, fade: 0.1, width: 0.6 },
+      },
+      export: { png: true, video: true },
+      onChange(key) {
+        if (key === 'count') resize();
+        else if (key === 'palette' || key === '*') reset();
+      },
+      onSeed: () => { reseed(); reset(); },
+      onResize: () => reset(),
+    });
+    const p = app.params;
+
+    // Bruit de valeur 3D lissé, piloté par la graine.
     function reseed() {
-      let s = seed;
-      const rnd = () => (s = (s * 16807) % 2147483647) / 2147483647;
+      const r = app.rng();
       const a = [...Array(256).keys()];
-      for (let i = 255; i > 0; i--) { const j = Math.floor(rnd() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; }
+      for (let i = 255; i > 0; i--) { const j = Math.floor(r() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; }
       for (let i = 0; i < 512; i++) perm[i] = a[i & 255];
     }
     const fade = (x) => x * x * x * (x * (x * 6 - 15) + 10);
@@ -88,81 +77,51 @@
     }
 
     function spawn(q = {}) {
-      q.x = Math.random() * W; q.y = Math.random() * H; q.px = q.x; q.py = q.y;
+      const { w, h } = app.size;
+      q.x = Math.random() * w; q.y = Math.random() * h;
       q.life = 50 + Math.random() * 250;
       const cols = PALETTES[p.palette].colors;
       q.color = cols[Math.floor(Math.random() * cols.length)];
       return q;
     }
-    function reset() {
-      ctx.fillStyle = PALETTES[p.palette].bg;
-      ctx.fillRect(0, 0, W, H);
-      particles = Array.from({ length: p.count }, () => spawn());
-    }
     function resize() {
-      dpr = Math.min(devicePixelRatio || 1, 2);
-      W = innerWidth; H = innerHeight;
-      canvas.width = W * dpr; canvas.height = H * dpr;
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      reset();
-    }
-
-    function step() {
-      if (!paused) {
-        if (p.fade > 0) {
-          ctx.globalAlpha = p.fade;
-          ctx.fillStyle = PALETTES[p.palette].bg;
-          ctx.fillRect(0, 0, W, H);
-          ctx.globalAlpha = 1;
-        }
-        ctx.lineWidth = p.width;
-        ctx.lineCap = 'round';
-        const sc = p.scale / 1000;
-        t += 0.002;
-        ctx.globalAlpha = 0.55;
-        for (const q of particles) {
-          const a = noise(q.x * sc, q.y * sc, t) * Math.PI * 2 * p.curl;
-          q.px = q.x; q.py = q.y;
-          q.x += Math.cos(a) * p.speed;
-          q.y += Math.sin(a) * p.speed;
-          ctx.strokeStyle = q.color;
-          ctx.beginPath(); ctx.moveTo(q.px, q.py); ctx.lineTo(q.x, q.y); ctx.stroke();
-          if (--q.life < 0 || q.x < 0 || q.x > W || q.y < 0 || q.y > H) spawn(q);
-        }
-        ctx.globalAlpha = 1;
-      }
-      requestAnimationFrame(step);
-    }
-
-    function bind(id, onChange) {
-      const el = $(id);
-      const out = el.closest('label')?.querySelector('output');
-      const read = () => { p[id] = el.type === 'range' ? +el.value : el.value; if (out) out.textContent = el.value; };
-      read();
-      el.addEventListener('input', () => { read(); onChange?.(); });
-    }
-    bind('count', () => {
       while (particles.length < p.count) particles.push(spawn());
       particles.length = p.count;
-    });
-    ['scale', 'curl', 'speed', 'fade', 'width'].forEach((id) => bind(id));
-    bind('palette');
-    $('palette').addEventListener('change', () => { p.palette = $('palette').value; reset(); });
+    }
+    function reset() {
+      const { w, h, dpr } = app.size;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = PALETTES[p.palette].bg;
+      ctx.fillRect(0, 0, w, h);
+      particles = Array.from({ length: p.count }, () => spawn());
+    }
 
-    $('pause').onclick = () => { paused = !paused; $('pause').textContent = paused ? 'Reprendre' : 'Pause'; };
-    $('random').onclick = () => { seed = newSeed(); reseed(); reset(); };
-    $('clear').onclick = reset;
-    $('save').onclick = () => {
-      const a = document.createElement('a');
-      a.download = `champ-de-flux-${seed}.png`;
-      a.href = canvas.toDataURL('image/png');
-      a.click();
-    };
-    addEventListener('resize', resize);
+    app.loop((t, dt) => {
+      const { w, h } = app.size;
+      if (p.fade > 0) {
+        ctx.globalAlpha = p.fade;
+        ctx.fillStyle = PALETTES[p.palette].bg;
+        ctx.fillRect(0, 0, w, h);
+      }
+      ctx.lineWidth = p.width;
+      ctx.lineCap = 'round';
+      ctx.globalAlpha = 0.55;
+      const sc = p.scale / 1000, k = dt * 60;
+      z += dt * 0.12 * p.drift;
+      for (const q of particles) {
+        const a = noise(q.x * sc, q.y * sc, z) * Math.PI * 2 * p.curl;
+        const px = q.x, py = q.y;
+        q.x += Math.cos(a) * p.step * k;
+        q.y += Math.sin(a) * p.step * k;
+        ctx.strokeStyle = q.color;
+        ctx.beginPath(); ctx.moveTo(px, py); ctx.lineTo(q.x, q.y); ctx.stroke();
+        if (--q.life < 0 || q.x < 0 || q.x > w || q.y < 0 || q.y > h) spawn(q);
+      }
+      ctx.globalAlpha = 1;
+    });
 
     reseed();
-    resize();
-    requestAnimationFrame(step);
+    reset();
   </script>
 </body>
 </html>

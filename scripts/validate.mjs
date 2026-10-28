@@ -80,11 +80,15 @@ async function browserChecks(browser, origin, dir) {
   await page.waitForTimeout(2500);
 
   const info = await page.evaluate(() => ({
+    kit: !!(window.Atelier && window.Atelier.instance && document.querySelector('.at-app .at-stage')),
+    ownPanel: !!document.querySelector('body > :not(.at-app):not(script):not(template) input, body > :not(.at-app):not(script):not(template) button'),
     title: document.title.trim(),
     controls: document.querySelectorAll('input, select, button, textarea, [contenteditable="true"]').length,
     lang: document.documentElement.lang,
     viewport: !!document.querySelector('meta[name="viewport"]'),
   }));
+  if (!info.kit) errors.push("l'outil n'utilise pas le kit d'interface commun (Atelier.app, voir AGENTS.md)");
+  if (info.ownPanel) errors.push("contrôles hors du panneau Atelier : tous les réglages doivent passer par Atelier.app({ params })");
   if (!info.title) errors.push('<title> vide');
   if (!info.viewport) errors.push('balise <meta name="viewport"> manquante');
   if (info.controls === 0) errors.push("aucun contrôle interactif : un outil doit exposer au moins un réglage");
@@ -119,12 +123,10 @@ async function browserChecks(browser, origin, dir) {
   // Miniature : capture 1200×750 après rechargement propre.
   const thumb = path.join(TOOLS_DIR, dir, 'thumbnail.jpg');
   if (forceThumbs || !fs.existsSync(thumb)) {
+    // Mode miniature du kit : seule la scène est affichée, en plein cadre.
     await page.setViewportSize({ width: 1200, height: 750 });
-    await page.reload({ waitUntil: 'load' });
-    await page.waitForTimeout(2500);
-    // Les éléments d'interface marqués data-ui sont masqués sur la miniature.
-    await page.addStyleTag({ content: '[data-ui] { display: none !important; }' });
-    await page.waitForTimeout(100);
+    await page.goto(url + '?thumbnail', { waitUntil: 'load' });
+    await page.waitForTimeout(3000);
     await page.screenshot({ path: thumb, type: 'jpeg', quality: 82 });
   }
   await ctx.close();

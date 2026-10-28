@@ -3,46 +3,25 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Atelier — outils de creative coding</title>
-  <meta name="description" content="Une bibliothèque d'outils de creative coding, à utiliser directement dans le navigateur.">
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='12' fill='none' stroke='%23ff5a36' stroke-width='4'/%3E%3C/svg%3E">
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+  <title>Atelier</title>
+  <meta name="description" content="Bibliothèque d'outils de creative coding pour créer des identités de marque, utilisables dans le navigateur.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='11' fill='none' stroke='%230d99ff' stroke-width='5'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="assets/ui/tokens.css">
   <link rel="stylesheet" href="assets/site.css">
 </head>
 <body>
-  <header class="top">
-    <div class="wrap">
-      <a class="brand" href="./"><span class="dot"></span>Atelier</a>
-      <p class="tagline">Outils de creative coding, prêts à l'emploi dans le navigateur.</p>
-      <p class="count" id="count" aria-live="polite"></p>
-    </div>
+  <header class="bar">
+    <a class="brand" href="#/"><i></i>Atelier</a>
+    <label class="search">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.5" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M10.5 10.5 14 14" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+      <input id="q" type="search" placeholder="Rechercher un outil, un tag…" autocomplete="off" aria-label="Rechercher">
+    </label>
+    <nav class="nav"><a href="#/">Channels</a><a href="#/tous">Tous les blocs</a></nav>
   </header>
 
-  <nav class="filters wrap" aria-label="Filtrer">
-    <input id="search" type="search" placeholder="Rechercher un outil…" autocomplete="off">
-    <div class="chips" id="chips" role="tablist"></div>
-  </nav>
+  <main id="view" class="wrap"><p class="empty">Chargement…</p></main>
 
-  <main class="wrap" id="library">
-    <p class="empty" id="status">Chargement…</p>
-  </main>
-
-  <footer class="wrap foot">
-    Outils construits par Claude et Cursor, vérifiés automatiquement avant publication.
-  </footer>
-
-  <template id="card">
-    <article class="card">
-      <a class="thumb" target="_blank" rel="noopener"><img loading="lazy" alt=""></a>
-      <div class="body">
-        <div class="meta"><span class="type"></span><span class="author"></span></div>
-        <h3></h3>
-        <p class="desc"></p>
-        <a class="open" target="_blank" rel="noopener">Ouvrir <span aria-hidden="true">↗</span></a>
-      </div>
-    </article>
-  </template>
+  <div id="block" class="block-view" hidden role="dialog" aria-modal="true" aria-labelledby="bv-title"></div>
 
   <script src="assets/site.js" type="module"></script>
 </body>
