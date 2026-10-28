@@ -1,0 +1,640 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Typo élastique</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="https://cdn.jsdelivr.net/npm/opentype.js@1.3.4/dist/opentype.min.js"></script>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const src = document.createElement('canvas');
+    const sctx = src.getContext('2d');
+
+    const TAU = Math.PI * 2;
+    const MAX_CELLS = 6000;
+    const MAX_BANDS = 48;
+    const FONT_CDN = 'https://cdn.jsdelivr.net/npm/@fontsource/';
+    const FONTS = {
+      archivo: 'archivo-black@5.2.7/files/archivo-black-latin-400-normal.woff',
+      anton: 'anton@5.2.7/files/anton-latin-400-normal.woff',
+      unbounded: 'unbounded@5.2.7/files/unbounded-latin-800-normal.woff',
+      serif: 'dm-serif-display@5.2.7/files/dm-serif-display-latin-400-normal.woff',
+      mono: 'space-mono@5.2.7/files/space-mono-latin-700-normal.woff',
+    };
+    // Réglages qui ne touchent que le mouvement : la matière (texte, couleurs) n'a pas à être redessinée.
+    const MOTION_KEYS = new Set(['axis', 'rhythm', 'amp', 'freq', 'shift', 'chaos', 'cols', 'loop', 'guides', 'accent']);
+
+    let raf = 0;
+    const requestDraw = () => {
+      if (app.playing || raf) return;
+      raf = requestAnimationFrame(() => { raf = 0; render(); });
+    };
+    const invalidate = () => { dirty = true; requestDraw(); };
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: 5021,
+      params: {
+        'Matière': {
+          source: { type: 'segmented', label: 'Source', value: 'text', options: { text: 'Texte', logo: 'Logo' } },
+          text: { type: 'textarea', label: 'Texte (une ligne par rangée)', value: 'ATELIER', rows: 2, show: (p) => p.source === 'text' },
+          caps: { type: 'toggle', label: 'Capitales', value: true, show: (p) => p.source === 'text' },
+          font: { type: 'select', label: 'Police', value: 'archivo', show: (p) => p.source === 'text',
+            options: { archivo: 'Archivo Black', anton: 'Anton', unbounded: 'Unbounded', serif: 'DM Serif Display', mono: 'Space Mono', custom: 'Police importée' } },
+          fontFile: { type: 'file', label: 'Police de marque', accept: '.otf,.ttf,.woff', button: 'Importer OTF, TTF, WOFF…', show: (p) => p.source === 'text' },
+          logo: { type: 'file', label: 'Logo', accept: 'image/svg+xml,image/png,image/jpeg,image/webp', button: 'Importer SVG, PNG…' },
+          tint: { type: 'toggle', label: "Teinter le logo à l'encre", value: true, show: (p) => p.source === 'logo' },
+        },
+        'Composition': {
+          rep: { type: 'range', label: 'Répétitions', min: 1, max: 10, step: 1, value: 5 },
+          layout: { type: 'segmented', label: 'Mise en page', value: 'bands', options: { bands: 'Bandes égales', justify: 'Justifiée', center: 'Centrée' } },
+          lead: { type: 'range', label: 'Interligne', min: 0, max: 0.6, step: 0.01, value: 0.1 },
+          tracking: { type: 'range', label: 'Interlettrage', min: -0.05, max: 0.4, step: 0.01, value: 0, show: (p) => p.source === 'text' },
+          margin: { type: 'range', label: 'Marge', min: 0, max: 0.2, step: 0.005, value: 0.04 },
+        },
+        'Élasticité': {
+          axis: { type: 'segmented', label: 'Axe', value: 'x', options: { x: 'Horizontal', y: 'Vertical', xy: 'Les deux' } },
+          rhythm: { type: 'select', label: 'Rythme', value: 'onde', options: { onde: 'Onde', lentille: 'Lentille', battement: 'Battement', organique: 'Organique' } },
+          amp: { type: 'range', label: 'Amplitude', min: 0, max: 1, step: 0.01, value: 0.8 },
+          freq: { type: 'range', label: 'Fréquence', min: 1, max: 4, step: 1, value: 1 },
+          shift: { type: 'range', label: 'Décalage des rangées', min: 0, max: 1, step: 0.01, value: 0.5 },
+          chaos: { type: 'range', label: 'Désordre', min: 0, max: 1, step: 0.01, value: 0.15 },
+          cols: { type: 'range', label: 'Colonnes', min: 2, max: 160, step: 1, value: 64 },
+          sub: { type: 'range', label: 'Rangées par ligne', min: 1, max: 8, step: 1, value: 1 },
+          loop: { type: 'range', label: 'Durée de boucle (s)', min: 2, max: 12, step: 0.5, value: 6 },
+        },
+        'Couleur': {
+          bg: { type: 'color', label: 'Fond', value: '#ff4b1f' },
+          ink: { type: 'color', label: 'Encre', value: '#141414' },
+          style: { type: 'segmented', label: 'Style', value: 'fill', options: { fill: 'Plein', outline: 'Contour' } },
+          stroke: { type: 'range', label: 'Épaisseur du contour', min: 0.5, max: 8, step: 0.1, value: 2, show: (p) => p.style === 'outline' },
+          alternate: { type: 'toggle', label: 'Une rangée sur deux inversée', value: false },
+          guides: { type: 'toggle', label: 'Grille visible', value: false },
+          accent: { type: 'color', label: 'Couleur de grille', value: '#ffffff', show: (p) => p.guides },
+        },
+      },
+      presets: {
+        'Vague': { axis: 'x', rhythm: 'onde', amp: 0.8, freq: 1, shift: 0.5, chaos: 0.15, cols: 64, sub: 1, rep: 5, layout: 'bands', lead: 0.1, tracking: 0, margin: 0.04, font: 'archivo', style: 'fill', alternate: false, guides: false, bg: '#ff4b1f', ink: '#141414' },
+        'Battement': { axis: 'x', rhythm: 'battement', amp: 1, freq: 2, shift: 0.3, chaos: 0.2, cols: 28, sub: 1, rep: 3, layout: 'bands', lead: 0.06, tracking: 0.02, margin: 0.04, font: 'anton', style: 'fill', alternate: false, guides: false, bg: '#0f0f0f', ink: '#d6ff3d' },
+        'Marée': { axis: 'y', rhythm: 'onde', amp: 0.6, freq: 1, shift: 0.25, chaos: 0, cols: 48, sub: 8, rep: 2, layout: 'bands', lead: 0.12, tracking: 0, margin: 0.05, font: 'serif', style: 'fill', alternate: false, guides: false, bg: '#efe9dd', ink: '#1b1b1b' },
+        'Lentille': { axis: 'xy', rhythm: 'lentille', amp: 0.9, freq: 1, shift: 0.35, chaos: 0.1, cols: 90, sub: 1, rep: 6, layout: 'bands', lead: 0.12, tracking: 0, margin: 0, font: 'unbounded', style: 'fill', alternate: true, guides: false, bg: '#1d35ff', ink: '#f4f1ea' },
+        'Construction': { axis: 'xy', rhythm: 'organique', amp: 0.7, freq: 1, shift: 0.6, chaos: 0.3, cols: 12, sub: 2, rep: 3, layout: 'bands', lead: 0.14, tracking: 0.04, margin: 0.05, font: 'archivo', style: 'outline', stroke: 1.6, alternate: false, guides: true, bg: '#101010', ink: '#f2f2f2', accent: '#ff4b1f' },
+        'Strates': { axis: 'x', rhythm: 'organique', amp: 0.8, freq: 1, shift: 0.7, chaos: 0.35, cols: 16, sub: 4, rep: 2, layout: 'bands', lead: 0.04, tracking: 0, margin: 0.04, font: 'mono', style: 'fill', alternate: false, guides: false, bg: '#e9e4da', ink: '#ff3d00' },
+      },
+      notes: "À vitesse 1, l'animation boucle exactement sur la durée choisie : une vidéo de même durée (ou d'un multiple) est une boucle parfaite. Le SVG garde les lettres en contours vectoriels, découpées par la grille.",
+      export: { png: (scale) => exportPNG(scale), svg: () => svgMarkup(), video: true, name: 'typo-elastique' },
+      onChange(key, value) {
+        if (key === 'fontFile') { loadCustomFont(value); return; }
+        if (key === 'logo') { prepareLogo(value); if (logo && p.source !== 'logo') { app.set('source', 'logo'); return; } }
+        if (key === 'font' || key === '*') loadFont(fontKey());
+        if (MOTION_KEYS.has(key)) requestDraw(); else invalidate();
+      },
+      onSeed() { buildTables(); requestDraw(); },
+      onResize: invalidate,
+    });
+    const p = app.params;
+
+    let dirty = true;
+    let layout = null;
+    let tables = null;
+    let customFont = null, customId = 0;
+    let logo = null, imageId = 0;
+    const fonts = {};
+    const shapes = new Map();
+    const tints = new Map();
+    const textImages = new Map();
+    const buffers = {};
+
+    const frac = (v) => v - Math.floor(v);
+    const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+    const ease = (x) => (x < 0.5 ? 8 * x ** 4 : 1 - 8 * (1 - x) ** 4);
+    const r2 = (v) => Math.round(v * 100) / 100;
+    const r4 = (v) => Math.round(v * 1e4) / 1e4;
+    const buffer = (name, n) => (buffers[name] && buffers[name].length >= n ? buffers[name] : (buffers[name] = new Float64Array(Math.max(n, 64) * 2)));
+    const phase = () => frac(app.time / p.loop);
+
+    // ——— Polices ———
+    const fontKey = () => (p.font === 'custom' && customFont ? 'custom' : FONTS[p.font] ? p.font : 'archivo');
+
+    function loadFont(key) {
+      if (!FONTS[key] || fonts[key] || !window.opentype) return;
+      fonts[key] = 'loading';
+      fetch(FONT_CDN + FONTS[key])
+        .then((r) => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.arrayBuffer(); })
+        .then((buf) => { fonts[key] = { font: opentype.parse(buf) }; })
+        .catch((e) => { fonts[key] = 'error'; console.warn('Typo élastique : police indisponible, repli sur la police système.', e); })
+        .finally(() => {
+          if (fontKey() === key) invalidate();
+          if (key === 'archivo') Object.keys(FONTS).forEach(loadFont);
+        });
+    }
+
+    async function loadCustomFont(file) {
+      if (!file || typeof file.arrayBuffer !== 'function' || !window.opentype) return;
+      try {
+        customFont = opentype.parse(await file.arrayBuffer());
+        customId++;
+        shapes.clear();
+        if (p.font !== 'custom') app.set('font', 'custom'); else invalidate();
+      } catch (e) {
+        console.warn('Typo élastique : fichier de police illisible (OTF, TTF ou WOFF attendu).', e);
+      }
+    }
+
+    // null = police système de repli ; { loading } = on attend le fichier.
+    function currentFont() {
+      if (!window.opentype) return null;
+      const key = fontKey();
+      if (key === 'custom') return { id: 'custom' + customId, font: customFont };
+      const f = fonts[key];
+      if (f && f.font) return { id: key, font: f.font };
+      if (!f || f === 'loading') return { loading: true };
+      return null;
+    }
+
+    // Met une ligne en forme une fois pour toutes (corps 1000, chasse et crénage compris).
+    function shape(cf, str) {
+      const id = cf.id + '|' + p.tracking + '|' + str;
+      if (shapes.has(id)) return shapes.get(id);
+      const font = cf.font, size = 1000, scale = size / font.unitsPerEm;
+      const glyphs = font.stringToGlyphs(str);
+      const out = [];
+      let x = 0, bx1 = Infinity, by1 = Infinity, bx2 = -Infinity, by2 = -Infinity;
+      for (let i = 0; i < glyphs.length; i++) {
+        const g = glyphs[i];
+        const path = g.getPath(x, 0, size);
+        if (path.commands.length) {
+          const b = path.getBoundingBox();
+          if (Number.isFinite(b.x1) && b.x2 > b.x1) {
+            out.push({ cmds: path.commands, x0: b.x1, x1: b.x2 });
+            bx1 = Math.min(bx1, b.x1); by1 = Math.min(by1, b.y1); bx2 = Math.max(bx2, b.x2); by2 = Math.max(by2, b.y2);
+          }
+        }
+        x += (g.advanceWidth || 0) * scale;
+        if (i < glyphs.length - 1) x += font.getKerningValue(g, glyphs[i + 1]) * scale + p.tracking * size;
+      }
+      const s = out.length ? { glyphs: out, box: { x1: bx1, y1: by1, x2: bx2, y2: by2 } } : null;
+      if (shapes.size > 300) shapes.clear();
+      shapes.set(id, s);
+      return s;
+    }
+
+    function pathD(cmds, a, d, e, f) {
+      const X = (v) => r2(v * a + e), Y = (v) => r2(v * d + f);
+      let s = '';
+      for (const c of cmds) {
+        if (c.type === 'M' || c.type === 'L') s += c.type + X(c.x) + ' ' + Y(c.y);
+        else if (c.type === 'Q') s += 'Q' + X(c.x1) + ' ' + Y(c.y1) + ' ' + X(c.x) + ' ' + Y(c.y);
+        else if (c.type === 'C') s += 'C' + X(c.x1) + ' ' + Y(c.y1) + ' ' + X(c.x2) + ' ' + Y(c.y2) + ' ' + X(c.x) + ' ' + Y(c.y);
+        else if (c.type === 'Z') s += 'Z';
+      }
+      return s;
+    }
+
+    // ——— Images (logo, texte de repli) ———
+    function base64(str) {
+      const bytes = new TextEncoder().encode(str);
+      let bin = '';
+      for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+      return btoa(bin);
+    }
+
+    // Rogne les marges transparentes pour que la matière touche les bords de sa rangée.
+    function alphaBox(c) {
+      const s = Math.min(1, 480 / Math.max(c.width, c.height));
+      const w = Math.max(1, Math.round(c.width * s)), h = Math.max(1, Math.round(c.height * s));
+      const t = document.createElement('canvas');
+      t.width = w; t.height = h;
+      const g = t.getContext('2d', { willReadFrequently: true });
+      g.drawImage(c, 0, 0, w, h);
+      const d = g.getImageData(0, 0, w, h).data;
+      let x0 = w, y0 = h, x1 = -1, y1 = -1;
+      for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+        if (d[(y * w + x) * 4 + 3] > 8) { if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+      }
+      if (x1 < 0) return [0, 0, c.width, c.height];
+      const k = c.width / w, kh = c.height / h;
+      const bx = Math.max(0, Math.floor(x0 * k)), by = Math.max(0, Math.floor(y0 * kh));
+      return [bx, by, Math.min(c.width, Math.ceil((x1 + 1) * k)) - bx, Math.min(c.height, Math.ceil((y1 + 1) * kh)) - by];
+    }
+
+    function imageRecord(full, href, mono) {
+      const [cx, cy, cw, ch] = alphaBox(full);
+      const el = document.createElement('canvas');
+      el.width = cw; el.height = ch;
+      el.getContext('2d').drawImage(full, cx, cy, cw, ch, 0, 0, cw, ch);
+      return { key: 'img' + ++imageId, el, w: cw, h: ch, mono, crop: [cx, cy, cw, ch], fw: full.width, fh: full.height, href: href || (() => full.toDataURL('image/png')) };
+    }
+
+    function prepareLogo(img) {
+      if (!img || !(img instanceof HTMLImageElement)) { logo = null; return; }
+      let aw = img.naturalWidth, ah = img.naturalHeight;
+      const vb = img.svgText && img.svgText.match(/viewBox\s*=\s*["']\s*[-\d.e]+[\s,]+[-\d.e]+[\s,]+([\d.e]+)[\s,]+([\d.e]+)/i);
+      if (vb) { aw = +vb[1]; ah = +vb[2]; }
+      if (!(aw > 0 && ah > 0)) { aw = 1; ah = 1; }
+      const max = img.svgText ? 3072 : Math.min(3072, Math.max(img.naturalWidth, img.naturalHeight) || 1024);
+      const s = max / Math.max(aw, ah);
+      const full = document.createElement('canvas');
+      full.width = Math.max(1, Math.round(aw * s)); full.height = Math.max(1, Math.round(ah * s));
+      full.getContext('2d').drawImage(img, 0, 0, full.width, full.height);
+      const svgHref = img.svgText ? 'data:image/svg+xml;base64,' + base64(img.svgText) : null;
+      logo = imageRecord(full, svgHref && (() => svgHref), false);
+      tints.clear();
+    }
+
+    // Repli quand la police ne peut pas être chargée : la ligne devient une image teintée.
+    function textImage(str) {
+      if (textImages.has(str)) return textImages.get(str);
+      const font = '900 240px system-ui, "Helvetica Neue", Arial, sans-serif';
+      const c = document.createElement('canvas');
+      let g = c.getContext('2d');
+      g.font = font;
+      const m = g.measureText(str);
+      c.width = Math.max(1, Math.ceil(m.actualBoundingBoxLeft + m.actualBoundingBoxRight) + 8);
+      c.height = Math.max(1, Math.ceil(m.actualBoundingBoxAscent + m.actualBoundingBoxDescent) + 8);
+      g = c.getContext('2d');
+      g.font = font;
+      g.fillStyle = '#000';
+      g.fillText(str, m.actualBoundingBoxLeft + 4, m.actualBoundingBoxAscent + 4);
+      const rec = imageRecord(c, null, true);
+      if (textImages.size > 40) textImages.clear();
+      textImages.set(str, rec);
+      return rec;
+    }
+
+    function tinted(im, color) {
+      const key = im.key + color;
+      let c = tints.get(key);
+      if (c) return c;
+      c = document.createElement('canvas');
+      c.width = im.w; c.height = im.h;
+      const g = c.getContext('2d');
+      g.drawImage(im.el, 0, 0);
+      g.globalCompositeOperation = 'source-in';
+      g.fillStyle = color;
+      g.fillRect(0, 0, im.w, im.h);
+      if (tints.size > 16) tints.clear();
+      tints.set(key, c);
+      return c;
+    }
+
+    // ——— Mise en page de la matière (avant déformation) ———
+    function items() {
+      if (p.source === 'logo' && logo) return Array.from({ length: p.rep }, () => ({ kind: 'image', img: logo }));
+      let lines = String(p.text ?? '').split('\n').map((s) => s.trim()).filter(Boolean);
+      if (p.caps) lines = lines.map((s) => s.toLocaleUpperCase('fr-FR'));
+      const cf = currentFont();
+      if (cf && cf.loading) return null;
+      const base = lines.map((s) => {
+        if (!cf) return { kind: 'image', img: textImage(s) };
+        const sh = shape(cf, s);
+        return sh ? { kind: 'paths', shape: sh } : null;
+      }).filter(Boolean);
+      const list = [];
+      for (let i = 0; i < p.rep && base.length; i++) list.push(...base);
+      return list.slice(0, MAX_BANDS);
+    }
+
+    // iw × ih : taille de la zone utile en pixels de sortie ; k : pixels de sortie par pixel CSS.
+    function buildLayout(iw, ih, k) {
+      const list = items();
+      const L = { iw, ih, k, bands: [], rows: null };
+      if (!list || !list.length || iw < 2 || ih < 2) return L;
+      const boxes = list.map((it) => (it.kind === 'paths' ? it.shape.box : { x1: 0, y1: 0, x2: it.img.w, y2: it.img.h }));
+      const hs = boxes.map((b) => (p.layout === 'justify' ? (b.y2 - b.y1) / Math.max(1e-6, b.x2 - b.x1) : 1));
+      const total = hs.reduce((a, b) => a + b, 0);
+      let acc = 0;
+      list.forEach((it, i) => {
+        const b = boxes[i];
+        const bw = Math.max(1e-6, b.x2 - b.x1), bh = Math.max(1e-6, b.y2 - b.y1);
+        const y0 = (acc / total) * ih;
+        acc += hs[i];
+        const y1 = i === list.length - 1 ? ih : (acc / total) * ih;
+        const pad = ((y1 - y0) * p.lead) / 2;
+        let tx0 = 0, tx1 = iw, ty0 = y0 + pad, ty1 = y1 - pad;
+        if (p.layout === 'center') {
+          const s = Math.min(iw / bw, (ty1 - ty0) / bh);
+          tx0 = (iw - bw * s) / 2; tx1 = tx0 + bw * s;
+          ty0 = (y0 + y1 - bh * s) / 2; ty1 = ty0 + bh * s;
+        }
+        const a = (tx1 - tx0) / bw, d = (ty1 - ty0) / bh, e = tx0 - b.x1 * a, f = ty0 - b.y1 * d;
+        const band = { y0, y1, invert: p.alternate && i % 2 === 1, kind: it.kind };
+        if (it.kind === 'paths') {
+          band.glyphs = it.shape.glyphs.map((g) => {
+            const dd = pathD(g.cmds, a, d, e, f);
+            return { d: dd, path: new Path2D(dd), x0: g.x0 * a + e, x1: g.x1 * a + e };
+          });
+        } else {
+          band.img = it.img;
+          band.rect = [tx0, ty0, tx1 - tx0, ty1 - ty0];
+        }
+        L.bands.push(band);
+      });
+      const rows = [0];
+      for (const b of L.bands) for (let j = 1; j <= p.sub; j++) rows.push((b.y0 + ((b.y1 - b.y0) * j) / p.sub) / ih);
+      rows[rows.length - 1] = 1;
+      L.rows = Float64Array.from(rows);
+      return L;
+    }
+
+    function drawSource(c, L, cull) {
+      const lw = p.stroke * L.k;
+      const m = lw + 2;
+      const outline = p.style === 'outline';
+      for (const b of L.bands) {
+        if (cull && (b.y1 < cull[1] - m || b.y0 > cull[3] + m)) continue;
+        const color = b.invert ? p.bg : p.ink;
+        if (b.invert) { c.fillStyle = p.ink; c.fillRect(0, b.y0, L.iw, b.y1 - b.y0); }
+        if (b.kind === 'paths') {
+          if (outline) { c.strokeStyle = color; c.lineWidth = lw; c.lineJoin = 'round'; } else c.fillStyle = color;
+          for (const g of b.glyphs) {
+            if (cull && (g.x1 < cull[0] - m || g.x0 > cull[2] + m)) continue;
+            if (outline) c.stroke(g.path); else c.fill(g.path);
+          }
+        } else {
+          c.drawImage(b.img.mono || p.tint ? tinted(b.img, color) : b.img.el, ...b.rect);
+        }
+      }
+    }
+
+    function hasInk(L, x0, y0, x1, y1) {
+      const m = p.stroke * L.k + 2;
+      for (const b of L.bands) {
+        if (b.y1 < y0 - m || b.y0 > y1 + m) continue;
+        if (b.invert) return true;
+        if (b.kind === 'image') { if (b.rect[0] < x1 + m && b.rect[0] + b.rect[2] > x0 - m) return true; continue; }
+        for (const g of b.glyphs) if (g.x0 < x1 + m && g.x1 > x0 - m) return true;
+      }
+      return false;
+    }
+
+    // ——— Rythmes : profils périodiques en phase (boucle parfaite) ———
+    function buildTables() {
+      const r = app.rng(11);
+      const beats = [];
+      for (let i = 0; i < 10; i++) {
+        let c = 0.1 + r() * 0.8;
+        for (let t = 0; t < 12 && beats.length && Math.abs(c - beats[beats.length - 1].c) < 0.3; t++) c = 0.1 + r() * 0.8;
+        beats.push({ c, s: 0.07 + r() * 0.12 });
+      }
+      tables = {
+        beats,
+        waves: [0, 1, 2].map((m) => ({
+          fs: (0.5 + r() * 1.4) * (r() < 0.5 ? -1 : 1),
+          ft: (1 + Math.floor(r() * 2)) * (r() < 0.5 ? -1 : 1),
+          ph: r(),
+          a: 1 / (1 + m * 0.6),
+        })),
+        lanes: Array.from({ length: 64 }, () => ({ j: r() - 0.5, a: r() })),
+      };
+    }
+
+    function profile(u, ph) {
+      const f = p.freq;
+      switch (p.rhythm) {
+        case 'lentille': {
+          const s = 0.3 / (f + 1);
+          let g = 0;
+          for (let j = 0; j < f; j++) {
+            let d = u - frac(ph + j / f);
+            d -= Math.round(d);
+            g += Math.exp(-(d * d) / (s * s));
+          }
+          return 2 * Math.min(1, g) - 1;
+        }
+        case 'battement': {
+          const n = 2 + 2 * f;
+          const x = frac(ph) * n, k = Math.floor(x);
+          const e = ease(clamp((x - k - 0.3) / 0.7, 0, 1));
+          const A = tables.beats[k % n], B = tables.beats[(k + 1) % n];
+          const ga = Math.exp(-(((u - A.c) / A.s) ** 2)), gb = Math.exp(-(((u - B.c) / B.s) ** 2));
+          return 2 * (ga + (gb - ga) * e) - 1;
+        }
+        case 'organique': {
+          let g = 0, n = 0;
+          for (const w of tables.waves) { g += w.a * Math.sin(TAU * (w.fs * f * u + w.ft * ph + w.ph)); n += w.a; }
+          return (1.5 * g) / n;
+        }
+        default:
+          return Math.sin(TAU * (f * u - ph));
+      }
+    }
+
+    // Répartit les tranches d'un axe : chaque tranche s'élargit selon le profil, la somme reste constante.
+    function distribute(srcB, ph, lane, lanes, ampMul, out) {
+      const n = srcB.length - 1;
+      let off = 0, am = ampMul;
+      if (lane >= 0) {
+        const l = tables.lanes[lane % tables.lanes.length];
+        off = (p.shift * lane) / lanes + p.chaos * 0.6 * l.j;
+        am *= 1 - p.chaos * 0.7 * l.a;
+      }
+      const K = 1.7 * p.amp * am;
+      let sum = 0;
+      for (let i = 0; i < n; i++) {
+        const w = (srcB[i + 1] - srcB[i]) * Math.exp(K * profile((srcB[i] + srcB[i + 1]) / 2, ph - off));
+        out[i + 1] = w;
+        sum += w;
+      }
+      out[0] = 0;
+      let acc = 0;
+      for (let i = 1; i <= n; i++) { acc += out[i]; out[i] = acc / sum; }
+      out[n] = 1;
+      return out;
+    }
+
+    // Cellules : 8 valeurs normalisées (source x0 y0 x1 y1, destination x0 y0 x1 y1).
+    function buildCells(ph, rowsSrc) {
+      const R = rowsSrc.length - 1;
+      const C = Math.max(2, Math.min(p.cols, Math.floor(MAX_CELLS / R)));
+      const cols = buffer('cols', C + 1);
+      for (let c = 0; c <= C; c++) cols[c] = c / C;
+      const B = buffer('cells', R * C * 8);
+      let n = 0;
+      const push = (sx0, sy0, sx1, sy1, dx0, dy0, dx1, dy1) => {
+        const o = n++ * 8;
+        B[o] = sx0; B[o + 1] = sy0; B[o + 2] = sx1; B[o + 3] = sy1;
+        B[o + 4] = dx0; B[o + 5] = dy0; B[o + 6] = dx1; B[o + 7] = dy1;
+      };
+      const colsSrc = cols.subarray(0, C + 1);
+      if (p.axis === 'y') {
+        const dst = buffer('laneRows', R + 1);
+        for (let c = 0; c < C; c++) {
+          distribute(rowsSrc, ph, c, C, 1, dst);
+          for (let r = 0; r < R; r++) push(cols[c], rowsSrc[r], cols[c + 1], rowsSrc[r + 1], cols[c], dst[r], cols[c + 1], dst[r + 1]);
+        }
+      } else {
+        const rowsDst = p.axis === 'xy' ? distribute(rowsSrc, ph + 0.25, -1, 1, 0.8, buffer('rows', R + 1)) : rowsSrc;
+        const dst = buffer('laneCols', C + 1);
+        for (let r = 0; r < R; r++) {
+          distribute(colsSrc, ph, r, R, 1, dst);
+          for (let c = 0; c < C; c++) push(cols[c], rowsSrc[r], cols[c + 1], rowsSrc[r + 1], dst[c], rowsDst[r], dst[c + 1], rowsDst[r + 1]);
+        }
+      }
+      return { B, n };
+    }
+
+    function inner(W, H) {
+      const m = Math.round(p.margin * Math.min(W, H));
+      return { X: m, Y: m, iw: Math.max(1, W - 2 * m), ih: Math.max(1, H - 2 * m) };
+    }
+
+    function drawGuides(c, g, cells, k) {
+      const { B, n } = cells;
+      c.save();
+      c.strokeStyle = p.accent;
+      c.lineWidth = Math.max(1, k * 0.75);
+      c.beginPath();
+      for (let i = 0; i < n; i++) {
+        const o = i * 8;
+        c.rect(g.X + B[o + 4] * g.iw, g.Y + B[o + 5] * g.ih, (B[o + 6] - B[o + 4]) * g.iw, (B[o + 7] - B[o + 5]) * g.ih);
+      }
+      c.stroke();
+      c.restore();
+    }
+
+    // ——— Rendu en direct : la matière est rastérisée une fois, puis redistribuée cellule par cellule ———
+    function ensureSource(g) {
+      const ss = Math.min(1.5, 4096 / Math.max(g.iw, g.ih));
+      const sw = Math.max(1, Math.round(g.iw * ss)), sh = Math.max(1, Math.round(g.ih * ss));
+      if (!dirty && layout && src.width === sw && src.height === sh) return;
+      if (src.width !== sw || src.height !== sh) { src.width = sw; src.height = sh; }
+      layout = buildLayout(sw, sh, (sw / g.iw) * app.size.dpr);
+      sctx.setTransform(1, 0, 0, 1, 0, 0);
+      sctx.clearRect(0, 0, sw, sh);
+      drawSource(sctx, layout, null);
+      dirty = false;
+    }
+
+    function render() {
+      const W = canvas.width, H = canvas.height;
+      if (W < 2 || H < 2) return;
+      const g = inner(W, H);
+      ensureSource(g);
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.fillStyle = p.bg;
+      ctx.fillRect(0, 0, W, H);
+      if (!layout.rows) return;
+      const cells = buildCells(phase(), layout.rows);
+      const { B, n } = cells;
+      const sw = src.width, sh = src.height;
+      ctx.imageSmoothingEnabled = true;
+      // Bilinéaire : le filtrage mipmappé floute les colonnes compressées et coûte ~3× plus cher sans GPU.
+      ctx.imageSmoothingQuality = 'low';
+      for (let i = 0; i < n; i++) {
+        const o = i * 8;
+        const x0 = Math.round(g.X + B[o + 4] * g.iw), x1 = Math.round(g.X + B[o + 6] * g.iw);
+        const y0 = Math.round(g.Y + B[o + 5] * g.ih), y1 = Math.round(g.Y + B[o + 7] * g.ih);
+        if (x1 <= x0 || y1 <= y0) continue;
+        const sx = B[o] * sw, sy = B[o + 1] * sh;
+        const sW = Math.min(sw, B[o + 2] * sw) - sx, sH = Math.min(sh, B[o + 3] * sh) - sy;
+        if (sW <= 0 || sH <= 0 || !hasInk(layout, sx, sy, sx + sW, sy + sH)) continue;
+        ctx.drawImage(src, sx, sy, sW, sH, x0, y0, x1 - x0, y1 - y0);
+      }
+      if (p.guides) drawGuides(ctx, g, cells, app.size.dpr);
+    }
+
+    // ——— Exports ———
+    // PNG : chaque cellule redessine les contours vectoriels, net à toutes les échelles.
+    function exportPNG(scale) {
+      const W = Math.max(1, Math.round(app.size.w * scale)), H = Math.max(1, Math.round(app.size.h * scale));
+      const c = document.createElement('canvas');
+      c.width = W; c.height = H;
+      const g = c.getContext('2d');
+      g.fillStyle = p.bg;
+      g.fillRect(0, 0, W, H);
+      const geo = inner(W, H);
+      const L = buildLayout(geo.iw, geo.ih, scale);
+      if (!L.rows) return c;
+      g.imageSmoothingEnabled = true;
+      g.imageSmoothingQuality = 'high';
+      const cells = buildCells(phase(), L.rows);
+      const { B, n } = cells;
+      for (let i = 0; i < n; i++) {
+        const o = i * 8;
+        const x0 = Math.round(geo.X + B[o + 4] * geo.iw), x1 = Math.round(geo.X + B[o + 6] * geo.iw);
+        const y0 = Math.round(geo.Y + B[o + 5] * geo.ih), y1 = Math.round(geo.Y + B[o + 7] * geo.ih);
+        const sx0 = B[o] * geo.iw, sy0 = B[o + 1] * geo.ih, sx1 = B[o + 2] * geo.iw, sy1 = B[o + 3] * geo.ih;
+        if (x1 <= x0 || y1 <= y0 || !hasInk(L, sx0, sy0, sx1, sy1)) continue;
+        const a = (x1 - x0) / (sx1 - sx0), d = (y1 - y0) / (sy1 - sy0);
+        g.save();
+        g.beginPath();
+        g.rect(x0, y0, x1 - x0, y1 - y0);
+        g.clip();
+        g.setTransform(a, 0, 0, d, x0 - sx0 * a, y0 - sy0 * d);
+        drawSource(g, L, [sx0, sy0, sx1, sy1]);
+        g.restore();
+      }
+      if (p.guides) drawGuides(g, geo, cells, scale);
+      return c;
+    }
+
+    // SVG : la matière est définie une fois, chaque cellule la réutilise découpée et transformée.
+    function svgMarkup() {
+      const { w, h } = app.size;
+      const geo = inner(w, h);
+      const L = buildLayout(geo.iw, geo.ih, 1);
+      let out = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">`;
+      out += `<rect width="${w}" height="${h}" fill="${p.bg}"/>`;
+      if (!L.rows) return out + '</svg>';
+      let defs = '', source = '';
+      const images = new Map(), filters = new Set();
+      for (const b of L.bands) {
+        const color = b.invert ? p.bg : p.ink;
+        if (b.invert) source += `<rect x="0" y="${r2(b.y0)}" width="${r2(L.iw)}" height="${r2(b.y1 - b.y0)}" fill="${p.ink}"/>`;
+        if (b.kind === 'paths') {
+          const d = b.glyphs.map((g) => g.d).join('');
+          source += p.style === 'outline'
+            ? `<path d="${d}" fill="none" stroke="${color}" stroke-width="${p.stroke}" stroke-linejoin="round"/>`
+            : `<path d="${d}" fill="${color}"/>`;
+        } else {
+          const im = b.img;
+          if (!images.has(im.key)) {
+            const id = 'im' + images.size;
+            images.set(im.key, id);
+            const [cx, cy, cw, ch] = im.crop;
+            defs += `<svg id="${id}" width="${cw}" height="${ch}" viewBox="${cx} ${cy} ${cw} ${ch}" preserveAspectRatio="none" overflow="hidden"><image width="${im.fw}" height="${im.fh}" preserveAspectRatio="none" xlink:href="${im.href()}"/></svg>`;
+          }
+          const tint = im.mono || p.tint;
+          if (tint) filters.add(color);
+          const [rx, ry, rw, rh] = b.rect;
+          source += `<use xlink:href="#${images.get(im.key)}" transform="matrix(${r4(rw / im.w)} 0 0 ${r4(rh / im.h)} ${r2(rx)} ${r2(ry)})"${tint ? ` filter="url(#tint-${color.slice(1)})"` : ''}/>`;
+        }
+      }
+      for (const color of filters) {
+        defs += `<filter id="tint-${color.slice(1)}" x="0" y="0" width="1" height="1" color-interpolation-filters="sRGB"><feFlood flood-color="${color}"/><feComposite in2="SourceAlpha" operator="in"/></filter>`;
+      }
+      defs += `<g id="matiere">${source}</g>`;
+      const cells = buildCells(phase(), L.rows);
+      const { B, n } = cells;
+      let clips = '', body = '', guides = '';
+      for (let i = 0; i < n; i++) {
+        const o = i * 8;
+        const sx0 = B[o] * geo.iw, sy0 = B[o + 1] * geo.ih, sx1 = B[o + 2] * geo.iw, sy1 = B[o + 3] * geo.ih;
+        const dx0 = geo.X + B[o + 4] * geo.iw, dy0 = geo.Y + B[o + 5] * geo.ih;
+        const dx1 = geo.X + B[o + 6] * geo.iw, dy1 = geo.Y + B[o + 7] * geo.ih;
+        if (p.guides) guides += `<rect x="${r2(dx0)}" y="${r2(dy0)}" width="${r2(dx1 - dx0)}" height="${r2(dy1 - dy0)}"/>`;
+        if (dx1 - dx0 < 0.01 || dy1 - dy0 < 0.01 || !hasInk(L, sx0, sy0, sx1, sy1)) continue;
+        const a = (dx1 - dx0) / (sx1 - sx0), d = (dy1 - dy0) / (sy1 - sy0);
+        clips += `<clipPath id="c${i}"><rect x="${r2(dx0)}" y="${r2(dy0)}" width="${r2(dx1 - dx0 + 1)}" height="${r2(dy1 - dy0 + 1)}"/></clipPath>`;
+        body += `<g clip-path="url(#c${i})"><use xlink:href="#matiere" transform="matrix(${r4(a)} 0 0 ${r4(d)} ${r2(dx0 - sx0 * a)} ${r2(dy0 - sy0 * d)})"/></g>`;
+      }
+      out += `<defs>${defs}${clips}</defs>${body}`;
+      if (guides) out += `<g fill="none" stroke="${p.accent}" stroke-width="0.75">${guides}</g>`;
+      return out + '</svg>';
+    }
+
+    buildTables();
+    loadFont(fontKey());
+    app.loop(render);
+    render();
+  </script>
+</body>
+</html>
