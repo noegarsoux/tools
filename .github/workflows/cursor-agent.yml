@@ -53,7 +53,10 @@ jobs:
         if: inputs.list_models
         run: |
           CLI=$(command -v cursor-agent || command -v agent)
-          "$CLI" --list-models || "$CLI" models || "$CLI" --help
+          out=$("$CLI" --list-models 2>&1 || "$CLI" models 2>&1 || "$CLI" --help 2>&1)
+          echo "$out"
+          # Aussi en annotation, lisible depuis l'API GitHub.
+          echo "::notice title=Modèles Cursor::$(echo "$out" | sed ':a;N;$!ba;s/%/%25/g;s/\n/%0A/g')"
       - name: Construire des outils jusqu'à épuisement du quota
         if: ${{ !inputs.list_models }}
         run: |
