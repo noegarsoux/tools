@@ -1,0 +1,16 @@
+{
+  "slug": "caustiques",
+  "title": "Caustiques",
+  "type": "generative",
+  "description": "Réseaux lumineux sous une houle : la lumière se réfracte selon Snell, se concentre au rapport des aires, et éclaire une marque posée au fond.",
+  "tags": ["caustiques", "refraction", "lumiere", "eau", "houle"],
+  "inspiration": [
+    "physique-maths.md — Caustiques : maillage de rayons, intensité égale au rapport des aires",
+    "Loi de Snell n₁ sin θ₁ = n₂ sin θ₂ et dispersion de l'indice",
+    "Vagues de Gerstner, dispersion en eau profonde ω² = gk",
+    "Evan Wallace — caustiques temps réel (WebGL Water)"
+  ],
+  "author": "cursor",
+  "created": "2026-10-28",
+  "status": "finished"
+}
