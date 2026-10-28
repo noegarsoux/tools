@@ -1,0 +1,1100 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ondes</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Cuve à ondes : u_tt + γ u_t = c² ∇²u + F, schéma saute-mouton sur GPU (laplacien isotrope à 9 points).
+    // La grille déborde du cadre d'une couche absorbante invisible. Les sources sont « douces » et normalisées
+    // par la fonction de Green 2D : |u| ≈ amplitude à une longueur d'onde de la source.
+    const canvas = document.querySelector('canvas');
+    const gl = canvas.getContext('webgl2', { alpha: false, antialias: false, depth: false, stencil: false, premultipliedAlpha: false, preserveDrawingBuffer: false });
+
+    const TH = Atelier.PALETTES.thermique.colors;
+    const KB = Atelier.PALETTES.kegelbahn.colors;
+    const NUIT = Atelier.PALETTES['trame-nuit'].colors;
+    const PHOTO = Atelier.PALETTES.photocopie.colors;
+    const ORB = Atelier.PALETTES.orbite.colors;
+    const MENTHE = Atelier.PALETTES.menthe.colors;
+    const LUZ = Atelier.PALETTES.luzern.colors;
+    const ACIDE = Atelier.PALETTES.acide.colors;
+
+    const FONTS = {
+      '"Helvetica Neue", Helvetica, Arial, "Liberation Sans", sans-serif': 'Grotesque',
+      'Lato, "Avenir Next", Avenir, "Segoe UI", sans-serif': 'Humaniste',
+      'Georgia, "Times New Roman", "Liberation Serif", serif': 'Serif',
+      '"SF Mono", Menlo, Consolas, "Liberation Mono", monospace': 'Mono',
+    };
+    const GROT = Object.keys(FONTS)[0];
+    const SERIF = Object.keys(FONTS)[2];
+    const MONO = Object.keys(FONTS)[3];
+    const CMAX = 0.7;
+    const WARM_BUDGET = 3.2e7;
+
+    const pts = (q) => q.emission === 'points';
+    const hasObst = (q) => q.forme !== 'aucun';
+    const isText = (q) => q.forme === 'texte' || (q.forme === 'image' && !q.image && !app.logoImg);
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: 12,
+      finish: { grain: 0.1, vignette: 0.22 },
+      hint: 'Appuyez et glissez pour émettre · attrapez une source ou le texte · molette : longueur d’onde',
+      notes: 'Équation des ondes 2D : ∂²u/∂t² = c²∇²u − γ∂u/∂t + ν∇²∂u/∂t. λ est en fraction du petit côté, f en hertz, γ en 1/s ; la viscosité ν lisse les vaguelettes trop fines pour la grille. Le texte est un mur (réflexion, diffraction) ou du verre (réfraction, c/n). La fréquence et l’orbite sont arrondies pour boucler exactement sur la durée choisie. Le SVG exporte les isolignes de l’amplitude.',
+      params: {
+        'Sources': {
+          emission: { type: 'segmented', label: 'Émission', options: { points: 'Points', plane: 'Onde plane', aucune: 'Aucune' }, value: 'points' },
+          nombre: { type: 'range', label: 'Nombre', min: 1, max: 8, step: 1, value: 2, show: pts },
+          disposition: { type: 'segmented', label: 'Disposition', options: { ligne: 'Ligne', cercle: 'Cercle', libre: 'Libre' }, value: 'ligne', show: pts },
+          ecart: { type: 'range', label: 'Écart', min: 0, max: 1.4, step: 0.01, value: 0.95, show: pts },
+          sx: { type: 'range', label: 'Position X', min: 0, max: 1, step: 0.005, value: 0.5, show: pts },
+          sy: { type: 'range', label: 'Position Y', min: 0, max: 1, step: 0.005, value: 0.47, show: pts },
+          angle: { type: 'range', label: 'Orientation (°)', min: -180, max: 180, step: 1, value: -32, show: (q) => q.emission !== 'aucune' },
+          dephasage: { type: 'range', label: 'Déphasage (°)', min: 0, max: 360, step: 1, value: 0, show: (q) => pts(q) && q.nombre > 1 },
+          orbite: { type: 'range', label: 'Orbite (tours)', min: -4, max: 4, step: 1, value: 0, show: pts },
+          amplitude: { type: 'range', label: 'Amplitude', min: 0.1, max: 3, step: 0.05, value: 1, show: (q) => q.emission !== 'aucune' },
+        },
+        'Milieu': {
+          lambda: { type: 'range', label: 'Longueur λ', min: 0.03, max: 0.35, step: 0.005, value: 0.12 },
+          frequence: { type: 'range', label: 'Fréquence f', min: 0.1, max: 3, step: 0.05, value: 0.75 },
+          amortissement: { type: 'range', label: 'Atténuation γ', min: 0, max: 2, step: 0.01, value: 0.06 },
+          viscosite: { type: 'range', label: 'Viscosité ν', min: 0, max: 1, step: 0.01, value: 0.35 },
+          bords: { type: 'segmented', label: 'Bords', options: { absorbants: 'Absorbants', reflechissants: 'Réfléchissants' }, value: 'absorbants' },
+          resolution: { type: 'range', label: 'Résolution', min: 160, max: 480, step: 8, value: 288 },
+          boucle: { type: 'range', label: 'Boucle (s)', min: 2, max: 20, step: 0.5, value: 8 },
+          relancer: { type: 'button', label: 'Relancer la cuve', action: () => restart(true) },
+        },
+        'Obstacle': {
+          forme: { type: 'segmented', label: 'Obstacle', options: { aucun: 'Aucun', texte: 'Texte', fentes: 'Fentes', image: 'Image' }, value: 'texte' },
+          matiere: { type: 'segmented', label: 'Matière', options: { mur: 'Mur', verre: 'Verre' }, value: 'mur', show: hasObst },
+          indice: { type: 'range', label: 'Indice n', min: 1.1, max: 3.5, step: 0.05, value: 1.8, show: (q) => hasObst(q) && q.matiere === 'verre' },
+          texte: { type: 'textarea', label: 'Texte', value: 'ONDES', rows: 2, show: (q) => q.forme === 'texte' },
+          typo: { type: 'font', label: 'Typo', options: FONTS, value: GROT, show: isText },
+          graisse: { type: 'range', label: 'Graisse', min: 100, max: 900, step: 100, value: 800, show: isText },
+          approche: { type: 'range', label: 'Approche', min: -0.1, max: 0.4, step: 0.01, value: -0.02, show: isText },
+          taille: { type: 'range', label: 'Taille', min: 0.1, max: 1, step: 0.01, value: 0.62, show: (q) => q.forme === 'texte' || q.forme === 'image' },
+          ox: { type: 'range', label: 'Position X', min: 0, max: 1, step: 0.005, value: 0.5, show: hasObst },
+          oy: { type: 'range', label: 'Position Y', min: 0, max: 1, step: 0.005, value: 0.47, show: hasObst },
+          fentes: { type: 'range', label: 'Nombre de fentes', min: 1, max: 9, step: 1, value: 2, show: (q) => q.forme === 'fentes' },
+          largeur: { type: 'range', label: 'Largeur des fentes', min: 0.01, max: 0.2, step: 0.005, value: 0.04, show: (q) => q.forme === 'fentes' },
+          pas: { type: 'range', label: 'Écart des fentes', min: 0.03, max: 0.6, step: 0.005, value: 0.2, show: (q) => q.forme === 'fentes' },
+          image: { type: 'file', label: 'Image ou logo', accept: 'image/*', show: (q) => q.forme === 'image' },
+        },
+        'Rendu': {
+          mode: { type: 'select', label: 'Rendu', options: { thermique: 'Thermique', aplats: 'Aplats', energie: 'Énergie (enveloppe)', cuve: 'Cuve à ondes', contours: 'Contours' }, value: 'thermique' },
+          gain: { type: 'range', label: 'Exposition', min: 0.2, max: 4, step: 0.05, value: 0.85 },
+          paliers: { type: 'range', label: 'Paliers', min: 3, max: 17, step: 2, value: 7, show: (q) => q.mode === 'aplats' || q.mode === 'contours' },
+          trait: { type: 'range', label: 'Trait', min: 0.3, max: 6, step: 0.1, value: 1.6, show: (q) => q.mode === 'contours' },
+          relief: { type: 'range', label: 'Relief', min: 0, max: 1, step: 0.01, value: 0.25 },
+          lumiere: { type: 'range', label: 'Lumière (°)', min: 0, max: 360, step: 1, value: 135, show: (q) => q.relief > 0 },
+          presence: { type: 'range', label: 'Présence', min: 0, max: 1, step: 0.01, value: 1, show: hasObst },
+        },
+        'Couleur': {
+          fond: { type: 'color', label: 'Fond (repos)', value: TH[0] },
+          creux: { type: 'color', label: 'Creux', value: TH[1] },
+          crete: { type: 'color', label: 'Crêtes', value: TH[2] },
+          eclat: { type: 'color', label: 'Éclat', value: TH[3] },
+          ombre: { type: 'color', label: 'Ombre', value: TH[4] },
+          obstacle: { type: 'color', label: 'Obstacle', value: TH[5] },
+        },
+        'Geste': {
+          geste: { type: 'segmented', label: 'Au pointeur', options: { emettre: 'Émettre', goutte: 'Goutte', mur: 'Mur' }, value: 'emettre', explore: false },
+          force: { type: 'range', label: 'Force', min: 0.1, max: 3, step: 0.05, value: 1.2 },
+          pinceau: { type: 'range', label: 'Épaisseur du mur', min: 0.004, max: 0.08, step: 0.002, value: 0.018, show: (q) => q.geste === 'mur' },
+          effacer: { type: 'button', label: 'Effacer les murs tracés', action: () => clearWalls() },
+        },
+      },
+      presets: {
+        'Thermique': { seed: 12 },
+        'Fentes de Young': {
+          emission: 'plane', angle: 0, forme: 'fentes', ox: 0.24, oy: 0.5, fentes: 2, largeur: 0.045, pas: 0.22,
+          lambda: 0.07, frequence: 1.2, mode: 'energie', gain: 1.8, relief: 0.15,
+          fond: PHOTO[0], creux: PHOTO[2], crete: PHOTO[1], eclat: '#000000', ombre: '#000000', obstacle: PHOTO[1], grain: 0.14, vignette: 0.12,
+        },
+        'Lentille': {
+          emission: 'plane', angle: -90, matiere: 'verre', indice: 1.33, taille: 0.86, oy: 0.55, presence: 0,
+          lambda: 0.05, frequence: 2, resolution: 384, mode: 'aplats', paliers: 3, gain: 1.4, relief: 0.15,
+          fond: KB[0], creux: KB[1], ombre: KB[2], crete: KB[3], eclat: KB[5], obstacle: KB[4], grain: 0.12, vignette: 0.1,
+        },
+        'Cuve à ondes': {
+          nombre: 1, sx: 0.62, sy: 0.74, bords: 'reflechissants', amortissement: 0.08, lambda: 0.075, oy: 0.3,
+          mode: 'cuve', gain: 2, relief: 0,
+          fond: NUIT[0], ombre: '#000000', creux: '#070707', crete: NUIT[2], eclat: NUIT[1], obstacle: NUIT[2], grain: 0.16, vignette: 0.35,
+        },
+        'Réseau phasé': {
+          nombre: 7, ecart: 0.5, sx: 0.5, sy: 0.92, angle: 0, dephasage: 50, forme: 'aucun',
+          lambda: 0.1, mode: 'contours', paliers: 9, trait: 2.2, gain: 1, relief: 0,
+          fond: ORB[0], ombre: ORB[1], creux: ORB[1], crete: ORB[2], eclat: ORB[2], obstacle: ORB[1], grain: 0.08, vignette: 0.1,
+        },
+        'Sillage': {
+          nombre: 1, disposition: 'cercle', ecart: 0.5, sx: 0.5, sy: 0.5, angle: 0, orbite: 1, boucle: 10, frequence: 1, forme: 'aucun',
+          lambda: 0.1, gain: 1, relief: 0.3,
+          fond: LUZ[0], ombre: LUZ[3], creux: LUZ[1], crete: LUZ[2], eclat: LUZ[4], obstacle: LUZ[3], vignette: 0.18,
+        },
+        'Vortex': {
+          nombre: 6, disposition: 'cercle', ecart: 0.22, sx: 0.5, sy: 0.5, angle: 0, dephasage: 60, forme: 'aucun',
+          lambda: 0.11, mode: 'aplats', paliers: 7, gain: 0.9, relief: 0.2,
+          fond: ACIDE[0], ombre: ACIDE[1], creux: ACIDE[1], crete: ACIDE[3], eclat: ACIDE[2], obstacle: ACIDE[1],
+        },
+        'Écho': {
+          nombre: 1, sx: 0.22, sy: 0.3, bords: 'reflechissants', amortissement: 0.12, oy: 0.6, taille: 0.6,
+          lambda: 0.16, mode: 'aplats', paliers: 5, gain: 0.8, relief: 0.2,
+          fond: MENTHE[0], ombre: MENTHE[1], creux: MENTHE[3], crete: MENTHE[2], eclat: MENTHE[1], obstacle: MENTHE[1],
+        },
+      },
+      brand(colors) {
+        const fond = colors[0];
+        const inks = colors.slice(1);
+        if (!inks.length) inks.push(luma(fond) > 0.5 ? '#111111' : '#f2f2f2');
+        const creux = inks[0];
+        const crete = inks[1] || mixHex(creux, luma(fond) > 0.5 ? '#000000' : '#ffffff', 0.5);
+        const eclat = inks[2] || mixHex(crete, '#ffffff', 0.5);
+        const ombre = inks[3] || mixHex(creux, '#000000', 0.4);
+        const far = inks.reduce((a, c) => (Math.abs(luma(c) - luma(fond)) > Math.abs(luma(a) - luma(fond)) ? c : a), inks[0]);
+        return { fond, creux, crete, eclat, ombre, obstacle: inks[4] || far };
+      },
+      export: { svg: () => contourSVG(), name: 'ondes' },
+      pointer: {
+        down: (q) => pointerDown(q),
+        drag: (q) => pointerDrag(q),
+        up: () => pointerUp(),
+        wheel: (q, dy) => {
+          const k = dy > 0 ? 1 / 1.06 : 1.06;
+          if (q.shift) app.set('frequence', clamp(+(p.frequence * k).toFixed(2), 0.1, 3));
+          else app.set('lambda', clamp(+(p.lambda * k).toFixed(3), 0.03, 0.35));
+        },
+      },
+      onChange(key) {
+        if (key === '*') { maskDirty = true; shapeDirty = true; restart(true); return; }
+        if (key === 'image') { shapeDirty = true; if (p.image && p.forme !== 'image') app.set('forme', 'image'); }
+        if (['forme', 'texte', 'typo', 'graisse', 'approche', 'taille', 'ox', 'oy', 'fentes', 'largeur', 'pas', 'image'].includes(key)) maskDirty = true;
+        if (key === 'resolution') gridKey = '';
+      },
+      onSeed() { freeKey = ''; },
+    });
+    const p = app.params;
+
+    // ——— Couleur ———
+    function rgbOf(h) {
+      const n = parseInt(String(h || '#000000').slice(1), 16);
+      return Number.isFinite(n) ? [(n >> 16) & 255, (n >> 8) & 255, n & 255] : [0, 0, 0];
+    }
+    function luma(h) { const [r, g, b] = rgbOf(h); return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255; }
+    function mixHex(a, b, t) {
+      const A = rgbOf(a), B = rgbOf(b);
+      return '#' + A.map((v, i) => Math.round(v + (B[i] - v) * t).toString(16).padStart(2, '0')).join('');
+    }
+    function oklab(h) {
+      const lin = rgbOf(h).map((v) => { v /= 255; return v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; });
+      const [r, g, b] = lin;
+      const l = Math.cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b);
+      const m = Math.cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b);
+      const s = Math.cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b);
+      return [0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s, 1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s, 0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s];
+    }
+    const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+    const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;' }[c]));
+
+    // ——— WebGL ———
+    const VS = `#version 300 es
+    void main() { vec2 q = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2)); gl_Position = vec4(q * 2.0 - 1.0, 0.0, 1.0); }`;
+
+    const STEP_FS = `#version 300 es
+    precision highp float; precision highp int; precision highp sampler2D;
+    uniform sampler2D uState;
+    uniform sampler2D uMask;
+    uniform vec2 uGrid;
+    uniform float uPad, uC2, uDt, uGamma, uSponge, uReflect, uGlass, uInvN2, uRatio, uSig2, uPhase, uPlaneOn, uVisc;
+    uniform vec4 uSrc[10];
+    uniform int uNS;
+    uniform vec4 uPlane;
+    uniform vec4 uDrop[6];
+    uniform int uND;
+    out vec4 o;
+    vec2 U(ivec2 q) { q = clamp(q, ivec2(0), ivec2(uGrid) - 1); return texelFetch(uState, q, 0).rg; }
+    void main() {
+      ivec2 ij = ivec2(gl_FragCoord.xy);
+      vec4 s = texelFetch(uState, ij, 0);
+      float u = s.r;
+      float up = u - (u - s.g) * uRatio;
+      vec2 L = (4.0 * (U(ij + ivec2(1, 0)) + U(ij - ivec2(1, 0)) + U(ij + ivec2(0, 1)) + U(ij - ivec2(0, 1)))
+        + U(ij + ivec2(1, 1)) + U(ij + ivec2(-1, 1)) + U(ij + ivec2(1, -1)) + U(ij + ivec2(-1, -1)) - 20.0 * s.rg) / 6.0;
+      float lap = L.x;
+      // Kelvin-Voigt : ν∇²u_t, amortit en k² les vaguelettes que la grille résout mal.
+      float visc = uVisc * (L.x - L.y) * uRatio;
+      float m = texelFetch(uMask, ij, 0).a;
+      float c2 = uC2 * mix(1.0, mix(1.0, uInvN2, m), uGlass);
+      vec2 p = gl_FragCoord.xy;
+      float edge = min(min(p.x, p.y), min(uGrid.x - p.x, uGrid.y - p.y));
+      float depth = clamp((uPad - edge) / uPad, 0.0, 1.0);
+      float gd = (uGamma + (1.0 - uReflect) * uSponge * depth * depth) * uDt * 0.5;
+      float F = 0.0;
+      for (int i = 0; i < 10; i++) {
+        if (i >= uNS) break;
+        vec4 q = uSrc[i];
+        vec2 d = p - q.xy;
+        float r2 = dot(d, d);
+        if (r2 < uSig2 * 9.0) F += q.z * exp(-r2 / uSig2) * sin(uPhase + q.w);
+      }
+      if (uPlaneOn > 0.5) {
+        float dd = dot(p, uPlane.xy) - uPlane.z;
+        F += uPlane.w * exp(-dd * dd / uSig2) * sin(uPhase);
+      }
+      float un = (2.0 * u - (1.0 - gd) * up + c2 * lap + visc + F) / (1.0 + gd);
+      for (int i = 0; i < 6; i++) {
+        if (i >= uND) break;
+        vec4 q = uDrop[i];
+        vec2 d = p - q.xy;
+        float b = q.w * exp(-dot(d, d) / q.z);
+        un += b; u += b;
+      }
+      float keep = 1.0 - (1.0 - uGlass) * m;
+      if (uReflect > 0.5 && edge < uPad) keep = 0.0;
+      if (edge < 1.0) keep = 0.0;
+      un *= keep; u *= keep;
+      o = vec4(un, u, 0.0, 0.0);
+    }`;
+
+    // Grandeur affichée S selon le rendu : u, enveloppe √(u² + (u_t/ω)²) ou ombroscopie −∇²u/k² ; plus son gradient.
+    const DERIVE_FS = `#version 300 es
+    precision highp float; precision highp int; precision highp sampler2D;
+    uniform sampler2D uState;
+    uniform vec2 uGrid;
+    uniform float uSlope, uK2;
+    uniform vec2 uEnv;
+    uniform int uMode;
+    out vec4 o;
+    float U(ivec2 q) { q = clamp(q, ivec2(0), ivec2(uGrid) - 1); return texelFetch(uState, q, 0).r; }
+    float S(ivec2 q) {
+      q = clamp(q, ivec2(0), ivec2(uGrid) - 1);
+      if (uMode == 2) {
+        // u et u_t pris au même demi-pas, corrigés du schéma discret : enveloppe exacte pour une onde à ω.
+        vec2 s = texelFetch(uState, q, 0).rg;
+        float a = (s.x + s.y) / uEnv.y, b = (s.x - s.y) / uEnv.x;
+        return sqrt(a * a + b * b);
+      }
+      if (uMode == 3) {
+        float lap = (4.0 * (U(q + ivec2(1, 0)) + U(q - ivec2(1, 0)) + U(q + ivec2(0, 1)) + U(q - ivec2(0, 1)))
+          + U(q + ivec2(1, 1)) + U(q + ivec2(-1, 1)) + U(q + ivec2(1, -1)) + U(q + ivec2(-1, -1)) - 20.0 * U(q)) / 6.0;
+        return -lap * uK2;
+      }
+      return texelFetch(uState, q, 0).r;
+    }
+    void main() {
+      ivec2 ij = ivec2(gl_FragCoord.xy);
+      float l = S(ij - ivec2(1, 0)), r = S(ij + ivec2(1, 0)), d = S(ij - ivec2(0, 1)), t = S(ij + ivec2(0, 1));
+      o = vec4(S(ij), (r - l) * 0.5 * uSlope, (t - d) * 0.5 * uSlope, U(ij));
+    }`;
+
+    const SHOW_FS = `#version 300 es
+    precision highp float; precision highp int; precision highp sampler2D;
+    uniform sampler2D uField;
+    uniform sampler2D uMaskHi;
+    uniform vec2 uGrid, uVis, uRes, uLight, uShadowOff;
+    uniform float uPad, uScale, uGain, uSteps, uLine, uRelief, uPresence, uGrain, uVig, uFrame, uShadow, uShadowLod, uGlassView, uRim;
+    uniform int uMode;
+    uniform vec3 uLab[6];
+    out vec4 o;
+
+    vec4 cubic(float v) {
+      vec4 n = vec4(1.0, 2.0, 3.0, 4.0) - v;
+      vec4 s = n * n * n;
+      float x = s.x, y = s.y - 4.0 * s.x, z = s.z - 4.0 * s.y + 6.0 * s.x;
+      return vec4(x, y, z, 6.0 - x - y - z) / 6.0;
+    }
+    vec4 bicubic(vec2 c) {
+      vec2 inv = 1.0 / uGrid;
+      c -= 0.5;
+      vec2 f = fract(c); c -= f;
+      vec4 xc = cubic(f.x), yc = cubic(f.y);
+      vec4 b = c.xxyy + vec2(-0.5, 1.5).xyxy;
+      vec4 s = vec4(xc.xz + xc.yw, yc.xz + yc.yw);
+      vec4 off = (b + vec4(xc.yw, yc.yw) / s) * inv.xxyy;
+      vec4 s0 = texture(uField, off.xz), s1 = texture(uField, off.yz), s2 = texture(uField, off.xw), s3 = texture(uField, off.yw);
+      float sx = s.x / (s.x + s.y), sy = s.z / (s.z + s.w);
+      return mix(mix(s3, s2, sx), mix(s1, s0, sx), sy);
+    }
+    vec3 ramp5(float v) {
+      float x = clamp(v, -1.0, 1.0) * 2.0 + 2.0;
+      if (x < 1.0) return mix(uLab[1], uLab[2], x);
+      if (x < 2.0) return mix(uLab[2], uLab[0], x - 1.0);
+      if (x < 3.0) return mix(uLab[0], uLab[3], x - 2.0);
+      return mix(uLab[3], uLab[4], x - 3.0);
+    }
+    // Aplats : bande centrale = fond, puis encres pures d'un même côté (jamais mélangées au fond).
+    vec3 band(float k) {
+      float h = (uSteps - 1.0) * 0.5;
+      float i = clamp(k, 0.0, uSteps - 1.0) - h;
+      if (abs(i) < 0.5) return uLab[0];
+      float t = h > 1.0 ? (abs(i) - 1.0) / (h - 1.0) : 0.0;
+      return i > 0.0 ? mix(uLab[3], uLab[4], t) : mix(uLab[2], uLab[1], t);
+    }
+    vec3 ramp4(float v) {
+      float x = clamp(v, 0.0, 1.0) * 3.0;
+      if (x < 1.0) return mix(uLab[0], uLab[2], x);
+      if (x < 2.0) return mix(uLab[2], uLab[3], x - 1.0);
+      return mix(uLab[3], uLab[4], x - 2.0);
+    }
+    vec3 toSrgb(vec3 c) {
+      float l_ = c.x + 0.3963377774 * c.y + 0.2158037573 * c.z;
+      float m_ = c.x - 0.1055613458 * c.y - 0.0638541728 * c.z;
+      float s_ = c.x - 0.0894841775 * c.y - 1.2914855480 * c.z;
+      float l = l_ * l_ * l_, m = m_ * m_ * m_, s = s_ * s_ * s_;
+      vec3 lin = vec3(4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
+        -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
+        -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s);
+      lin = clamp(lin, 0.0, 1.0);
+      return mix(12.92 * lin, 1.055 * pow(lin, vec3(1.0 / 2.4)) - 0.055, step(0.0031308, lin));
+    }
+    float hash(uvec2 q, uint k) {
+      uint h = q.x * 1973u + q.y * 9277u + k * 26699u;
+      h = (h ^ 61u) ^ (h >> 16); h *= 9u; h ^= h >> 4; h *= 0x27d4eb2du; h ^= h >> 15;
+      return float(h) / 4294967295.0;
+    }
+    void main() {
+      vec2 fc = gl_FragCoord.xy;
+      vec2 uv = vec2(fc.x / uRes.x, 1.0 - fc.y / uRes.y);
+      vec4 f = bicubic(uPad + uv * uVis);
+      float s = tanh(f.r * uGain);
+      vec3 lab;
+      if (uMode == 0) lab = ramp5(s);
+      else if (uMode == 1) {
+        float x = (s * 0.5 + 0.5) * uSteps;
+        float fw = max(fwidth(x), 1e-4);
+        float k = floor(x), fr = x - k;
+        lab = mix(band(k), band(k + 1.0), smoothstep(1.0 - fw, 1.0, fr));
+      } else if (uMode == 2) lab = ramp4(s);
+      else if (uMode == 3) {
+        float L = -log(1.0 - 0.85 * tanh(f.r * uGain * 1.6));
+        lab = ramp5(L > 0.0 ? min(L / 1.2, 1.0) : max(L / 0.5, -1.0));
+      } else {
+        float x = (s * 0.5 + 0.5) * uSteps;
+        float fw = max(fwidth(x), 1e-4);
+        float d = abs(x - floor(x + 0.5)) / fw;
+        float hw = uLine * uScale * (0.45 + 0.9 * abs(s)) * 0.5;
+        float a = 1.0 - smoothstep(hw - 0.6, hw + 0.6, d);
+        if (x < 0.5 || x > uSteps - 0.5) a = 0.0;
+        lab = mix(uLab[0], s > 0.0 ? mix(uLab[3], uLab[4], smoothstep(0.5, 1.0, s)) : mix(uLab[2], uLab[1], smoothstep(0.5, 1.0, -s)), a);
+      }
+      if (uRelief > 0.0) {
+        vec2 g = f.gb * uGain * 2.2;
+        vec3 n = normalize(vec3(-g, 1.0));
+        vec3 L = normalize(vec3(uLight, 0.85));
+        float dif = dot(n, L) - L.z;
+        float sp = pow(max(dot(n, normalize(L + vec3(0.0, 0.0, 1.0))), 0.0), 48.0);
+        lab.x += (dif * 0.42 + sp * 0.16) * uRelief;
+      }
+      float a = textureLod(uMaskHi, uv, 0.0).a;
+      float m = clamp((a - 0.5) / max(fwidth(a), 1e-3) + 0.5, 0.0, 1.0);
+      if (uShadow > 0.0) {
+        float sh = textureLod(uMaskHi, uv + uShadowOff, uShadowLod).a;
+        lab.x -= sh * (1.0 - m) * uShadow;
+      }
+      if (uGlassView > 0.5) {
+        // Verre : corps teinté qui laisse voir la réfraction, liseré intérieur plein.
+        vec2 r = uRim / uRes;
+        float mn = 1.0;
+        for (int i = 0; i < 8; i++) {
+          float an = float(i) * 0.7853982;
+          mn = min(mn, textureLod(uMaskHi, uv + r * vec2(cos(an), sin(an)), 0.0).a);
+        }
+        float rim = m * clamp((1.0 - mn) * 1.6, 0.0, 1.0);
+        lab = mix(lab, uLab[5], m * uPresence * 0.38);
+        lab = mix(lab, uLab[5], rim * uPresence);
+      } else lab = mix(lab, uLab[5], m * uPresence);
+      vec3 col = toSrgb(lab);
+      vec2 q = uv - 0.5;
+      q.x *= uRes.x / uRes.y;
+      col *= 1.0 - uVig * 0.7 * smoothstep(0.3, 1.25, length(q) * 1.25);
+      float gs = max(1.0, uRes.x / 1600.0);
+      col += (hash(uvec2(fc / gs), uint(uFrame)) - 0.5) * uGrain * 0.17;
+      o = vec4(clamp(col, 0.0, 1.0), 1.0);
+    }`;
+
+    function compile(type, src) {
+      const s = gl.createShader(type);
+      gl.shaderSource(s, src);
+      gl.compileShader(s);
+      if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+      return s;
+    }
+    function program(fs) {
+      const pr = gl.createProgram();
+      gl.attachShader(pr, compile(gl.VERTEX_SHADER, VS));
+      gl.attachShader(pr, compile(gl.FRAGMENT_SHADER, fs));
+      gl.linkProgram(pr);
+      if (!gl.getProgramParameter(pr, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(pr));
+      const locs = {};
+      return { pr, u: (n) => (n in locs ? locs[n] : (locs[n] = gl.getUniformLocation(pr, n))) };
+    }
+
+    let progStep, progDerive, progShow, vao, floatFmt, halfFmt;
+    let stateTex = [], stateFbo = [], fieldTex = null, fieldFbo = null, maskTex = null, hiTex = null;
+    let cur = 0;
+    let Nx = 0, Ny = 0, Wc = 0, Hc = 0, P = 0, gridKey = '';
+    let simTime = 0, lastH = 0, warmLeft = 0, frame = 0;
+    let maskDirty = true, shapeDirty = true;
+    let freeKey = '', freePts = [];
+    let obstBox = null, barrier = null;
+    let logoSeen = null;
+    const drops = [];
+    const finger = { on: false, env: 0, x: 0, y: 0, px: 0, py: 0 };
+    let drag = null;
+
+    const hiCv = document.createElement('canvas');
+    const hiX = hiCv.getContext('2d', { willReadFrequently: true });
+    const simCv = document.createElement('canvas');
+    const simX = simCv.getContext('2d', { willReadFrequently: true });
+    const wallCv = document.createElement('canvas');
+    const wallX = wallCv.getContext('2d');
+    const shapeCv = document.createElement('canvas');
+    let wallsUsed = false;
+
+    function initGL() {
+      if (!gl) return false;
+      const ext = gl.getExtension('EXT_color_buffer_float');
+      const half = ext || gl.getExtension('EXT_color_buffer_half_float');
+      if (!half) return false;
+      gl.getExtension('OES_texture_float_linear');
+      const test = ({ internal, format, type }) => {
+        const t = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, t);
+        gl.texImage2D(gl.TEXTURE_2D, 0, internal, 4, 4, 0, format, type, null);
+        const f = gl.createFramebuffer();
+        gl.bindFramebuffer(gl.FRAMEBUFFER, f);
+        gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, t, 0);
+        const ok = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+        gl.deleteFramebuffer(f);
+        gl.deleteTexture(t);
+        return ok;
+      };
+      halfFmt = { internal: gl.RGBA16F, format: gl.RGBA, type: gl.HALF_FLOAT };
+      const rg32 = { internal: gl.RG32F, format: gl.RG, type: gl.FLOAT };
+      const rgba32 = { internal: gl.RGBA32F, format: gl.RGBA, type: gl.FLOAT };
+      floatFmt = ext ? [rg32, rgba32].find(test) || halfFmt : halfFmt;
+      if (!test(halfFmt)) return false;
+      progStep = program(STEP_FS);
+      progDerive = program(DERIVE_FS);
+      progShow = program(SHOW_FS);
+      vao = gl.createVertexArray();
+      maskTex = makeTex(gl.NEAREST);
+      hiTex = makeTex(gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+      return true;
+    }
+
+    function makeTex(filter) {
+      const t = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, t);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      return t;
+    }
+    function floatTarget(fmt, filter) {
+      const t = makeTex(filter);
+      gl.texImage2D(gl.TEXTURE_2D, 0, fmt.internal, Nx, Ny, 0, fmt.format, fmt.type, null);
+      const f = gl.createFramebuffer();
+      gl.bindFramebuffer(gl.FRAMEBUFFER, f);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, t, 0);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      return { t, f };
+    }
+
+    // ——— Grille ———
+    function lambdaCells() { return Math.max(6, p.lambda * Math.min(Wc, Hc)); }
+    function fEff() { const T = Math.max(1, p.boucle); return Math.max(1, Math.round(p.frequence * T)) / T; }
+    function speed() { return lambdaCells() * fEff(); }
+
+    function ensureGrid() {
+      const { w, h } = app.size;
+      const key = `${w}x${h}:${p.resolution}`;
+      if (key === gridKey) return false;
+      gridKey = key;
+      const short = Math.min(w, h), long = Math.max(w, h);
+      const pad = Math.max(24, Math.round(p.resolution * 0.16));
+      const res = Math.max(32, Math.min(p.resolution, Math.floor((4000 - 2 * pad) * short / long)));
+      Wc = Math.max(8, Math.round(res * w / short));
+      Hc = Math.max(8, Math.round(res * h / short));
+      P = pad;
+      Nx = Wc + 2 * P;
+      Ny = Hc + 2 * P;
+      for (const s of [...stateTex, ...stateFbo]) s && (s instanceof WebGLTexture ? gl.deleteTexture(s) : gl.deleteFramebuffer(s));
+      if (fieldTex) { gl.deleteTexture(fieldTex); gl.deleteFramebuffer(fieldFbo); }
+      const a = floatTarget(floatFmt, gl.NEAREST), b = floatTarget(floatFmt, gl.NEAREST), f = floatTarget(halfFmt, gl.LINEAR);
+      stateTex = [a.t, b.t]; stateFbo = [a.f, b.f];
+      fieldTex = f.t; fieldFbo = f.f;
+      cur = 0;
+      simCv.width = Nx; simCv.height = Ny;
+      const k = Math.min(app.size.dpr, 4096 / long);
+      const hw = Math.max(1, Math.round(w * k)), hh = Math.max(1, Math.round(h * k));
+      if (wallCv.width !== hw || wallCv.height !== hh) {
+        if (wallsUsed && wallCv.width > 1) {
+          const tmp = document.createElement('canvas');
+          tmp.width = wallCv.width; tmp.height = wallCv.height;
+          tmp.getContext('2d').drawImage(wallCv, 0, 0);
+          wallCv.width = hw; wallCv.height = hh;
+          wallX.drawImage(tmp, 0, 0, hw, hh);
+        } else { wallCv.width = hw; wallCv.height = hh; }
+      }
+      hiCv.width = hw; hiCv.height = hh;
+      maskDirty = true;
+      restart(true);
+      return true;
+    }
+
+    function restart(warm) {
+      if (!stateFbo.length) return;
+      gl.clearColor(0, 0, 0, 0);
+      for (const f of [...stateFbo, fieldFbo]) { gl.bindFramebuffer(gl.FRAMEBUFFER, f); gl.clear(gl.COLOR_BUFFER_BIT); }
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      lastH = 0;
+      drops.length = 0;
+      if (warm && p.emission !== 'aucune') {
+        const c = speed();
+        const T = Math.min(24, Math.max(3, warmReach() / c + 3 / fEff()));
+        warmLeft = Math.ceil(T * c / CMAX);
+      } else warmLeft = 0;
+    }
+
+    // Distance (cellules) que le front doit parcourir pour couvrir le cadre visible.
+    function warmReach() {
+      const corners = [[P, P], [P + Wc, P], [P, P + Hc], [P + Wc, P + Hc]];
+      if (p.bords === 'reflechissants' || (pts(p) && p.orbite !== 0)) return Math.hypot(Wc, Hc);
+      if (p.emission === 'plane') {
+        const a = (p.angle * Math.PI) / 180;
+        const d = corners.map(([x, y]) => x * Math.cos(a) + y * Math.sin(a));
+        return Math.max(...d) - Math.min(...d) + 0.3 * P;
+      }
+      let r = 0;
+      for (const s of sourceLayout(0)) {
+        const [gx, gy] = toGrid(s.x, s.y);
+        for (const [x, y] of corners) r = Math.max(r, Math.hypot(x - gx, y - gy));
+      }
+      return r * 1.15;
+    }
+
+    // ——— Obstacles (masques) ———
+    function rebuildShape() {
+      shapeDirty = false;
+      const img = p.image || app.logoImg;
+      logoSeen = app.logoImg;
+      if (!img || !(img.naturalWidth || img.width)) { shapeCv.width = shapeCv.height = 1; return; }
+      const iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height;
+      const k = Math.min(1, 1024 / Math.max(iw, ih));
+      const W = Math.max(1, Math.round(iw * k)), H = Math.max(1, Math.round(ih * k));
+      shapeCv.width = W; shapeCv.height = H;
+      const x = shapeCv.getContext('2d', { willReadFrequently: true });
+      x.drawImage(img, 0, 0, W, H);
+      const im = x.getImageData(0, 0, W, H), d = im.data;
+      let trans = 0, edge = 0, en = 0;
+      for (let j = 0; j < H; j++) for (let i = 0; i < W; i++) {
+        const o = (j * W + i) * 4;
+        if (d[o + 3] < 250) trans++;
+        if (i < 3 || j < 3 || i >= W - 3 || j >= H - 3) { edge += (d[o] * 0.2126 + d[o + 1] * 0.7152 + d[o + 2] * 0.0722) / 255; en++; }
+      }
+      const useAlpha = trans > W * H * 0.03;
+      const bgLight = edge / Math.max(1, en) > 0.5;
+      for (let o = 0; o < d.length; o += 4) {
+        const lum = (d[o] * 0.2126 + d[o + 1] * 0.7152 + d[o + 2] * 0.0722) / 255;
+        const a = useAlpha ? d[o + 3] / 255 : clamp(((bgLight ? 1 - lum : lum) - 0.25) / 0.5, 0, 1);
+        d[o] = d[o + 1] = d[o + 2] = 255;
+        d[o + 3] = Math.round(a * 255);
+      }
+      x.putImageData(im, 0, 0);
+    }
+
+    function textLines() {
+      return String(p.texte ?? '').split('\n').map((l) => l.trim()).filter(Boolean).slice(0, 6);
+    }
+
+    // Dessine l'obstacle en blanc dans un contexte dont la transformation va des pixels d'affichage au canvas cible.
+    function drawObstacle(x, ext) {
+      const { w, h } = app.size, short = Math.min(w, h);
+      x.fillStyle = '#fff';
+      obstBox = null; barrier = null;
+      if (p.forme === 'aucun') return;
+      const cx = p.ox * w, cy = p.oy * h;
+      if (p.forme === 'fentes') {
+        const t = Math.max(3 * w / Wc, short * 0.014);
+        const n = p.fentes | 0, gap = p.largeur * short, step = p.pas * short;
+        const open = [];
+        for (let i = 0; i < n; i++) { const c = cy + (i - (n - 1) / 2) * step; open.push([c - gap / 2, c + gap / 2]); }
+        open.sort((a, b) => a[0] - b[0]);
+        let y = -ext;
+        for (const [a, b] of open) { if (a > y) x.fillRect(cx - t / 2, y, t, a - y); y = Math.max(y, b); }
+        if (h + ext > y) x.fillRect(cx - t / 2, y, t, h + ext - y);
+        barrier = { x: cx, t, open };
+        return;
+      }
+      if (p.forme === 'image' && shapeCv.width > 1) {
+        const ar = shapeCv.width / shapeCv.height;
+        let bw = p.taille * w, bh = bw / ar;
+        if (bh > h * 0.9 * Math.max(0.3, p.taille)) { bh = h * 0.9 * Math.max(0.3, p.taille); bw = bh * ar; }
+        x.drawImage(shapeCv, cx - bw / 2, cy - bh / 2, bw, bh);
+        obstBox = { x0: cx - bw / 2, y0: cy - bh / 2, x1: cx + bw / 2, y1: cy + bh / 2 };
+        return;
+      }
+      const lines = textLines();
+      if (!lines.length) return;
+      const fam = p.typo || GROT, wt = p.graisse | 0;
+      x.font = `${wt} 100px ${fam}`;
+      x.letterSpacing = `${p.approche}em`;
+      const widths = lines.map((l) => x.measureText(l).width);
+      const cap = x.measureText('H').actualBoundingBoxAscent || 72;
+      const lh = 0.94;
+      let size = 100 * (p.taille * w) / Math.max(1, ...widths);
+      size = Math.min(size, (h * 0.86) / ((lines.length - 1) * lh + cap / 100));
+      x.font = `${wt} ${size}px ${fam}`;
+      x.letterSpacing = `${p.approche}em`;
+      x.textAlign = 'center';
+      x.textBaseline = 'alphabetic';
+      const capH = cap * size / 100;
+      const blockH = capH + (lines.length - 1) * size * lh;
+      const top = cy - blockH / 2;
+      lines.forEach((l, i) => x.fillText(l, cx, top + capH + i * size * lh));
+      const bw = Math.max(...widths) * size / 100;
+      obstBox = { x0: cx - bw / 2, y0: top, x1: cx + bw / 2, y1: top + blockH, size, capH, lh, fam, wt };
+    }
+
+    function rebuildMasks() {
+      maskDirty = false;
+      if (shapeDirty || (p.forme === 'image' && !p.image && app.logoImg !== logoSeen)) rebuildShape();
+      const { w, h } = app.size;
+      const k = hiCv.width / w;
+      hiX.setTransform(1, 0, 0, 1, 0, 0);
+      hiX.clearRect(0, 0, hiCv.width, hiCv.height);
+      hiX.setTransform(k, 0, 0, k, 0, 0);
+      drawObstacle(hiX, 4);
+      hiX.setTransform(1, 0, 0, 1, 0, 0);
+      if (wallsUsed) hiX.drawImage(wallCv, 0, 0);
+      simX.setTransform(1, 0, 0, 1, 0, 0);
+      simX.clearRect(0, 0, Nx, Ny);
+      simX.setTransform(Wc / w, 0, 0, Hc / h, P, P);
+      drawObstacle(simX, (P + 2) * h / Hc);
+      simX.setTransform(1, 0, 0, 1, 0, 0);
+      if (wallsUsed) { simX.imageSmoothingQuality = 'high'; simX.drawImage(wallCv, P, P, Wc, Hc); }
+      gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+      gl.bindTexture(gl.TEXTURE_2D, maskTex);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, simCv);
+      gl.bindTexture(gl.TEXTURE_2D, hiTex);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, hiCv);
+      gl.generateMipmap(gl.TEXTURE_2D);
+    }
+
+    function clearWalls() {
+      wallX.setTransform(1, 0, 0, 1, 0, 0);
+      wallX.clearRect(0, 0, wallCv.width, wallCv.height);
+      wallsUsed = false;
+      maskDirty = true;
+    }
+
+    function paintWall(a, b, erase) {
+      const { w } = app.size, short = Math.min(app.size.w, app.size.h);
+      const k = wallCv.width / w;
+      wallX.setTransform(k, 0, 0, k, 0, 0);
+      wallX.globalCompositeOperation = erase ? 'destination-out' : 'source-over';
+      wallX.strokeStyle = '#fff';
+      wallX.lineCap = 'round';
+      wallX.lineJoin = 'round';
+      wallX.lineWidth = Math.max(2, p.pinceau * short * (erase ? 2.2 : 1));
+      wallX.beginPath();
+      wallX.moveTo(a.x, a.y);
+      wallX.lineTo(b.x + 0.01, b.y);
+      wallX.stroke();
+      wallX.globalCompositeOperation = 'source-over';
+      if (!erase) wallsUsed = true;
+      maskDirty = true;
+    }
+
+    // ——— Sources ———
+    function freePoints(n) {
+      const key = `${app.seed}:${n}`;
+      if (key !== freeKey) {
+        freeKey = key;
+        const r = app.rng(7);
+        freePts = Array.from({ length: 8 }, () => { const a = r() * Math.PI * 2, d = Math.sqrt(0.15 + 0.85 * r()); return [Math.cos(a) * d, Math.sin(a) * d]; });
+      }
+      return freePts;
+    }
+
+    function sourceLayout(time) {
+      const { w, h } = app.size, short = Math.min(w, h);
+      if (!pts(p)) return [];
+      const n = p.nombre | 0;
+      const cx = p.sx * w, cy = p.sy * h;
+      const rot = (p.angle * Math.PI) / 180 + (2 * Math.PI * (p.orbite | 0) * time) / Math.max(1, p.boucle);
+      const c = Math.cos(rot), s = Math.sin(rot);
+      const span = p.ecart * short;
+      const free = p.disposition === 'libre' ? freePoints(n) : null;
+      const out = [];
+      for (let i = 0; i < n; i++) {
+        let x = 0, y = 0;
+        if (p.disposition === 'cercle') { const a = (i / n) * Math.PI * 2; x = Math.cos(a) * span / 2; y = Math.sin(a) * span / 2; }
+        else if (free) { x = free[i][0] * span / 2; y = free[i][1] * span / 2; }
+        else if (n > 1) x = (i / (n - 1) - 0.5) * span;
+        out.push({ x: cx + x * c - y * s, y: cy + x * s + y * c, phase: (i * p.dephasage * Math.PI) / 180 });
+      }
+      return out;
+    }
+
+    const toGrid = (x, y) => [P + (x / app.size.w) * Wc, P + (y / app.size.h) * Hc];
+    const srcBuf = new Float32Array(40);
+    const dropBuf = new Float32Array(24);
+
+    function step(hdt, ratio, fx, fy) {
+      const c = speed();
+      const C2 = (c * hdt) ** 2;
+      const lc = lambdaCells();
+      const sig = Math.max(1.2, lc * 0.07);
+      const sig2 = 2 * sig * sig;
+      const coef = 2 * C2 / (sig * sig);
+      const u = progStep.u;
+      gl.useProgram(progStep.pr);
+      let ns = 0;
+      if (p.emission === 'points') {
+        for (const s of sourceLayout(simTime)) {
+          const [gx, gy] = toGrid(s.x, s.y);
+          srcBuf.set([gx, gy, coef * p.amplitude, s.phase], ns * 4);
+          ns++;
+        }
+      }
+      if (finger.env > 0.002) {
+        srcBuf.set([fx, fy, coef * p.force * finger.env, 0], ns * 4);
+        ns++;
+      }
+      gl.uniform4fv(u('uSrc'), srcBuf);
+      gl.uniform1i(u('uNS'), ns);
+      const planeOn = p.emission === 'plane';
+      gl.uniform1f(u('uPlaneOn'), planeOn ? 1 : 0);
+      if (planeOn) {
+        const a = (p.angle * Math.PI) / 180, nx = Math.cos(a), ny = Math.sin(a);
+        const corners = [[P, P], [P + Wc, P], [P, P + Hc], [P + Wc, P + Hc]].map(([x, y]) => x * nx + y * ny);
+        const d0 = Math.min(...corners) + (p.bords === 'reflechissants' ? 2.5 : -0.3 * P);
+        const k = (2 * Math.PI) / lc;
+        gl.uniform4f(u('uPlane'), nx, ny, d0, (2 * k * C2 * p.amplitude) / (Math.sqrt(2 * Math.PI) * sig));
+      }
+      const nd = Math.min(6, drops.length);
+      for (let i = 0; i < nd; i++) dropBuf.set(drops[i], i * 4);
+      drops.splice(0, nd);
+      gl.uniform4fv(u('uDrop'), dropBuf);
+      gl.uniform1i(u('uND'), nd);
+      gl.uniform2f(u('uGrid'), Nx, Ny);
+      gl.uniform1f(u('uPad'), P);
+      gl.uniform1f(u('uC2'), C2);
+      gl.uniform1f(u('uDt'), hdt);
+      gl.uniform1f(u('uGamma'), p.amortissement);
+      gl.uniform1f(u('uVisc'), p.viscosite * 0.08 * c * hdt);
+      gl.uniform1f(u('uSponge'), (18 * c) / P);
+      gl.uniform1f(u('uReflect'), p.bords === 'reflechissants' ? 1 : 0);
+      gl.uniform1f(u('uGlass'), p.matiere === 'verre' ? 1 : 0);
+      gl.uniform1f(u('uInvN2'), 1 / (p.indice * p.indice));
+      gl.uniform1f(u('uRatio'), ratio);
+      gl.uniform1f(u('uSig2'), sig2);
+      gl.uniform1f(u('uPhase'), 2 * Math.PI * ((fEff() * simTime) % 1));
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, stateTex[cur]);
+      gl.uniform1i(u('uState'), 0);
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_2D, maskTex);
+      gl.uniform1i(u('uMask'), 1);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, stateFbo[1 - cur]);
+      gl.viewport(0, 0, Nx, Ny);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+      cur = 1 - cur;
+      simTime += hdt;
+      lastH = hdt;
+    }
+
+    function run(steps, hdt) {
+      const [gx, gy] = toGrid(finger.x, finger.y);
+      const [px, py] = toGrid(finger.px, finger.py);
+      const target = finger.on ? 1 : 0;
+      for (let i = 0; i < steps; i++) {
+        const k = (i + 1) / steps;
+        finger.env += (target - finger.env) * (1 - Math.exp(-hdt / (target ? 0.08 : 0.18)));
+        step(hdt, i === 0 && lastH > 0 ? hdt / lastH : 1, px + (gx - px) * k, py + (gy - py) * k);
+      }
+      finger.px = finger.x; finger.py = finger.y;
+    }
+
+    function simulate(dt) {
+      if (warmLeft > 0) {
+        const n = Math.max(1, Math.min(warmLeft, Math.floor(WARM_BUDGET / (Nx * Ny))));
+        run(n, CMAX / speed());
+        warmLeft -= n;
+      }
+      if (dt <= 0) return;
+      const n = clamp(Math.ceil((speed() * dt) / CMAX), 1, 160);
+      run(n, dt / n);
+    }
+
+    function render() {
+      const { w, h, dpr } = app.size;
+      gl.bindVertexArray(vao);
+      const mode = ['thermique', 'aplats', 'energie', 'cuve', 'contours'].indexOf(p.mode);
+      const lc = lambdaCells();
+      gl.useProgram(progDerive.pr);
+      gl.uniform2f(progDerive.u('uGrid'), Nx, Ny);
+      gl.uniform1f(progDerive.u('uSlope'), lc / (2 * Math.PI));
+      gl.uniform1f(progDerive.u('uK2'), (lc / (2 * Math.PI)) ** 2);
+      const wdt = 2 * Math.PI * fEff() * (lastH || CMAX / speed());
+      gl.uniform2f(progDerive.u('uEnv'), 2 * Math.sin(wdt / 2), 2 * Math.cos(wdt / 2));
+      gl.uniform1i(progDerive.u('uMode'), mode);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, stateTex[cur]);
+      gl.uniform1i(progDerive.u('uState'), 0);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, fieldFbo);
+      gl.viewport(0, 0, Nx, Ny);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+      const u = progShow.u;
+      gl.useProgram(progShow.pr);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.viewport(0, 0, canvas.width, canvas.height);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, fieldTex);
+      gl.uniform1i(u('uField'), 0);
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_2D, hiTex);
+      gl.uniform1i(u('uMaskHi'), 1);
+      gl.uniform2f(u('uGrid'), Nx, Ny);
+      gl.uniform2f(u('uVis'), Wc, Hc);
+      gl.uniform2f(u('uRes'), canvas.width, canvas.height);
+      gl.uniform1f(u('uPad'), P);
+      gl.uniform1f(u('uScale'), canvas.width / Math.max(1, w));
+      gl.uniform1i(u('uMode'), mode);
+      gl.uniform1f(u('uGain'), p.gain);
+      gl.uniform1f(u('uSteps'), p.paliers);
+      gl.uniform1f(u('uLine'), p.trait);
+      gl.uniform1f(u('uRelief'), p.relief);
+      const la = (p.lumiere * Math.PI) / 180;
+      const lx = Math.cos(la), ly = -Math.sin(la);
+      gl.uniform2f(u('uLight'), lx, ly);
+      const presence = p.forme === 'aucun' && !wallsUsed ? 0 : p.presence;
+      gl.uniform1f(u('uPresence'), presence);
+      const short = Math.min(w, h);
+      gl.uniform1f(u('uGlassView'), p.matiere === 'verre' ? 1 : 0);
+      gl.uniform1f(u('uRim'), Math.max(1.5, short * 0.0055) * (canvas.width / w));
+      gl.uniform1f(u('uShadow'), p.relief * presence * (p.matiere === 'verre' && !wallsUsed ? 0.12 : 0.34));
+      gl.uniform2f(u('uShadowOff'), (lx * short * 0.016) / w, (ly * short * 0.016) / h);
+      gl.uniform1f(u('uShadowLod'), Math.max(0, Math.log2(short * 0.014 * (hiCv.width / w))));
+      gl.uniform1f(u('uGrain'), p.grain);
+      gl.uniform1f(u('uVig'), p.vignette);
+      gl.uniform1f(u('uFrame'), Math.floor(app.time * 24) % 100000);
+      gl.uniform3fv(u('uLab'), [p.fond, p.ombre, p.creux, p.crete, p.eclat, p.obstacle].flatMap(oklab));
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+    }
+
+    // ——— Pointeur ———
+    function hitTest(q) {
+      const { w, h } = app.size, short = Math.min(w, h);
+      if (pts(p)) {
+        const r = Math.max(14, short * 0.035);
+        for (const s of sourceLayout(simTime)) {
+          if (Math.hypot(q.x - s.x, q.y - s.y) < r) return { kind: 'sources', dx: q.x - p.sx * w, dy: q.y - p.sy * h };
+        }
+      }
+      if (barrier && Math.abs(q.x - barrier.x) < Math.max(14, barrier.t)) return { kind: 'obstacle', dx: q.x - p.ox * w, dy: q.y - p.oy * h };
+      if (obstBox) {
+        const m = 6;
+        if (q.x > obstBox.x0 - m && q.x < obstBox.x1 + m && q.y > obstBox.y0 - m && q.y < obstBox.y1 + m) {
+          const k = hiCv.width / w;
+          const a = hiX.getImageData(clamp(Math.round(q.x * k), 0, hiCv.width - 1), clamp(Math.round(q.y * k), 0, hiCv.height - 1), 1, 1).data[3];
+          if (a > 40 || p.forme === 'image') return { kind: 'obstacle', dx: q.x - p.ox * w, dy: q.y - p.oy * h };
+        }
+      }
+      return null;
+    }
+
+    function addDrop(q) {
+      const [gx, gy] = toGrid(q.x, q.y);
+      const sd = Math.max(1.5, lambdaCells() * 0.2);
+      drops.push([gx, gy, 2 * sd * sd, 2.4 * p.force]);
+      if (drops.length > 24) drops.shift();
+    }
+
+    function pointerDown(q) {
+      if (p.geste === 'mur') { drag = { kind: 'wall', erase: q.shift || q.alt, last: { x: q.x, y: q.y } }; paintWall(q, q, drag.erase); return; }
+      if (p.geste === 'goutte') { drag = { kind: 'drop', last: { x: q.x, y: q.y } }; addDrop(q); return; }
+      const hit = hitTest(q);
+      if (hit) { drag = hit; return; }
+      drag = { kind: 'finger' };
+      finger.on = true;
+      finger.x = finger.px = q.x;
+      finger.y = finger.py = q.y;
+    }
+
+    function pointerDrag(q) {
+      if (!drag) return;
+      const { w, h } = app.size, short = Math.min(w, h);
+      if (drag.kind === 'sources') {
+        app.set('sx', +clamp((q.x - drag.dx) / w, 0, 1).toFixed(3));
+        app.set('sy', +clamp((q.y - drag.dy) / h, 0, 1).toFixed(3));
+      } else if (drag.kind === 'obstacle') {
+        app.set('ox', +clamp((q.x - drag.dx) / w, 0, 1).toFixed(3));
+        app.set('oy', +clamp((q.y - drag.dy) / h, 0, 1).toFixed(3));
+      } else if (drag.kind === 'finger') {
+        finger.x = q.x; finger.y = q.y;
+      } else if (drag.kind === 'wall') {
+        paintWall(drag.last, q, drag.erase || q.shift || q.alt);
+        drag.last = { x: q.x, y: q.y };
+      } else if (drag.kind === 'drop') {
+        if (Math.hypot(q.x - drag.last.x, q.y - drag.last.y) > short * p.lambda * 0.5) { addDrop(q); drag.last = { x: q.x, y: q.y }; }
+      }
+    }
+
+    function pointerUp() {
+      finger.on = false;
+      drag = null;
+    }
+
+    // ——— Export SVG : isolignes de l'amplitude ———
+    function readField() {
+      const buf = new Float32Array(Nx * Ny * 4);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, stateFbo[cur]);
+      try { gl.readPixels(0, 0, Nx, Ny, gl.RGBA, gl.FLOAT, buf); } catch { buf.fill(0); }
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      return buf;
+    }
+
+    function chain(segs) {
+      const key = (x, y) => `${Math.round(x * 64)},${Math.round(y * 64)}`;
+      const adj = new Map();
+      const add = (k, i) => { const a = adj.get(k); if (a) a.push(i); else adj.set(k, [i]); };
+      segs.forEach((s, i) => { add(key(s[0], s[1]), i); add(key(s[2], s[3]), i); });
+      const used = new Uint8Array(segs.length);
+      const polys = [];
+      const take = (x, y) => { for (const i of adj.get(key(x, y)) || []) if (!used[i]) return i; return -1; };
+      for (let s = 0; s < segs.length; s++) {
+        if (used[s]) continue;
+        used[s] = 1;
+        const poly = [[segs[s][0], segs[s][1]], [segs[s][2], segs[s][3]]];
+        for (const end of [true, false]) {
+          for (let guard = 0; guard < segs.length; guard++) {
+            const e = end ? poly[poly.length - 1] : poly[0];
+            const i = take(e[0], e[1]);
+            if (i < 0) break;
+            used[i] = 1;
+            const g = segs[i];
+            const nxt = Math.hypot(g[0] - e[0], g[1] - e[1]) < Math.hypot(g[2] - e[0], g[3] - e[1]) ? [g[2], g[3]] : [g[0], g[1]];
+            if (end) poly.push(nxt); else poly.unshift(nxt);
+          }
+        }
+        polys.push(poly);
+      }
+      return polys;
+    }
+
+    function contourSVG() {
+      const { w, h } = app.size;
+      const buf = readField();
+      const sx = w / Wc, sy = h / Hc;
+      const val = new Float32Array(Wc * Hc);
+      const wall = new Uint8Array(Wc * Hc);
+      const mk = simX.getImageData(P, P, Wc, Hc).data;
+      for (let j = 0; j < Hc; j++) for (let i = 0; i < Wc; i++) {
+        val[j * Wc + i] = Math.tanh(buf[((j + P) * Nx + i + P) * 4] * p.gain);
+        wall[j * Wc + i] = p.matiere === 'mur' && mk[(j * Wc + i) * 4 + 3] > 127 ? 1 : 0;
+      }
+      const N = p.paliers | 0;
+      let paths = '';
+      for (let k = 1; k < N; k++) {
+        const L = -1 + (2 * k) / N;
+        const segs = [];
+        for (let j = 0; j < Hc - 1; j++) for (let i = 0; i < Wc - 1; i++) {
+          if (wall[j * Wc + i] && wall[j * Wc + i + 1] && wall[(j + 1) * Wc + i] && wall[(j + 1) * Wc + i + 1]) continue;
+          const a = val[j * Wc + i] - L, b = val[j * Wc + i + 1] - L, c = val[(j + 1) * Wc + i + 1] - L, d = val[(j + 1) * Wc + i] - L;
+          const ptsA = [];
+          const cut = (v0, v1, x0, y0, x1, y1) => { if ((v0 > 0) !== (v1 > 0)) { const t = v0 / (v0 - v1); ptsA.push([x0 + (x1 - x0) * t, y0 + (y1 - y0) * t]); } };
+          cut(a, b, i, j, i + 1, j);
+          cut(b, c, i + 1, j, i + 1, j + 1);
+          cut(d, c, i, j + 1, i + 1, j + 1);
+          cut(a, d, i, j, i, j + 1);
+          if (ptsA.length === 2) segs.push([...ptsA[0], ...ptsA[1]]);
+          else if (ptsA.length === 4) {
+            const ctr = (a + b + c + d) / 4;
+            const pairs = (a > 0) === (ctr > 0) ? [[0, 1], [2, 3]] : [[0, 3], [1, 2]];
+            for (const [m, n] of pairs) segs.push([...ptsA[m], ...ptsA[n]]);
+          }
+        }
+        const col = L > 0 ? (L > 0.5 ? p.eclat : p.crete) : (L < -0.5 ? p.ombre : p.creux);
+        const sw = (p.trait * (0.45 + 0.9 * Math.abs(L))).toFixed(2);
+        let d = '';
+        for (const poly of chain(segs)) {
+          if (poly.length < 3) continue;
+          d += poly.map(([x, y], i) => `${i ? 'L' : 'M'}${((x + 0.5) * sx).toFixed(1)} ${((y + 0.5) * sy).toFixed(1)}`).join('');
+        }
+        if (d) paths += `<path d="${d}" fill="none" stroke="${col}" stroke-width="${sw}" stroke-linecap="round" stroke-linejoin="round"/>`;
+      }
+      let obst = '';
+      const glass = p.matiere === 'verre';
+      const op = glass ? p.presence * 0.5 : p.presence;
+      const paint = glass
+        ? `fill="${p.obstacle}" fill-opacity="${(p.presence * 0.38).toFixed(3)}" stroke="${p.obstacle}" stroke-opacity="${p.presence}" stroke-width="${Math.max(1.5, Math.min(w, h) * 0.0055).toFixed(2)}"`
+        : `fill="${p.obstacle}" fill-opacity="${op}"`;
+      if (p.forme === 'fentes' && barrier) {
+        let y = 0;
+        for (const [a, b] of barrier.open) { if (a > y) obst += `<rect x="${(barrier.x - barrier.t / 2).toFixed(1)}" y="${y.toFixed(1)}" width="${barrier.t.toFixed(1)}" height="${(a - y).toFixed(1)}"/>`; y = Math.max(y, b); }
+        if (h > y) obst += `<rect x="${(barrier.x - barrier.t / 2).toFixed(1)}" y="${y.toFixed(1)}" width="${barrier.t.toFixed(1)}" height="${(h - y).toFixed(1)}"/>`;
+        obst = `<g ${paint}>${obst}</g>`;
+      } else if (obstBox && obstBox.size && isText(p)) {
+        const lines = textLines();
+        const fam = esc(p.typo === 'AtelierBrand' ? 'sans-serif' : p.typo);
+        obst = `<g ${paint} font-family="${fam}" font-weight="${obstBox.wt}" font-size="${obstBox.size.toFixed(1)}" letter-spacing="${(p.approche * obstBox.size).toFixed(2)}" text-anchor="middle">`
+          + lines.map((l, i) => `<text x="${(p.ox * w).toFixed(1)}" y="${(obstBox.y0 + obstBox.capH + i * obstBox.size * obstBox.lh).toFixed(1)}">${esc(l)}</text>`).join('') + '</g>';
+      } else if (obstBox || wallsUsed) {
+        obst = `<image href="${tinted(hiCv)}" x="0" y="0" width="${w}" height="${h}" opacity="${op}"/>`;
+      }
+      if (wallsUsed && !(obstBox && !obstBox.size) && p.forme !== 'image') obst += `<image href="${tinted(wallCv)}" x="0" y="0" width="${w}" height="${h}" opacity="${op}"/>`;
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><rect width="${w}" height="${h}" fill="${p.fond}"/>${paths}${obst}</svg>`;
+    }
+
+    function tinted(src) {
+      const c = document.createElement('canvas');
+      c.width = src.width; c.height = src.height;
+      const x = c.getContext('2d');
+      x.drawImage(src, 0, 0);
+      x.globalCompositeOperation = 'source-in';
+      x.fillStyle = p.obstacle;
+      x.fillRect(0, 0, c.width, c.height);
+      return c.toDataURL('image/png');
+    }
+
+    // ——— Boucle ———
+    const ready = initGL();
+    if (!ready) {
+      const x = canvas.getContext('2d');
+      app.loop(() => {
+        const { w, h, dpr } = app.size;
+        if (!x) return;
+        x.setTransform(dpr, 0, 0, dpr, 0, 0);
+        x.fillStyle = p.fond; x.fillRect(0, 0, w, h);
+        x.fillStyle = p.obstacle; x.font = `600 ${Math.min(w, h) * 0.04}px sans-serif`; x.textAlign = 'center';
+        x.fillText('Ce navigateur ne permet pas le calcul WebGL 2 nécessaire aux ondes.', w / 2, h / 2);
+      });
+    } else {
+      ensureGrid();
+      app.loop((t, dt) => {
+        if (app.size.w < 2 || app.size.h < 2) return;
+        ensureGrid();
+        if (maskDirty || (p.forme === 'image' && !p.image && app.logoImg !== logoSeen)) rebuildMasks();
+        gl.bindVertexArray(vao);
+        simulate(dt);
+        render();
+        frame++;
+      });
+    }
+  </script>
+</body>
+</html>
