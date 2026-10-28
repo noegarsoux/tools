@@ -5,155 +5,307 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Harmonies de couleurs</title>
   <link rel="stylesheet" href="../../assets/ui/atelier.css">
-  <style>
-    #swatches { display: flex; }
-    .sw { flex: 1; min-width: 0; display: flex; flex-direction: column; justify-content: flex-end; padding: 20px 16px 24px; cursor: pointer; border: 0; text-align: left; font: inherit; transition: flex .3s; }
-    .sw:hover { flex: 1.25; }
-    .sw b { font: 600 18px var(--at-mono); letter-spacing: .02em; }
-    .sw small { opacity: .7; font: 11px var(--at-mono); margin-top: 2px; }
-    .sw .copied { opacity: 0; font-weight: 600; transition: opacity .2s; margin-bottom: 6px; }
-    .sw.flash .copied { opacity: 1; }
-    @media (max-width: 720px) {
-      #swatches { flex-direction: column; }
-      .sw { flex-direction: row; justify-content: space-between; align-items: center; padding: 6px 16px; }
-      .sw b { font-size: 14px; }
-      .sw:hover { flex: 1; }
-      .sw .copied { margin: 0; }
-    }
-  </style>
 </head>
 <body>
-  <div id="swatches" class="at-fill"></div>
+  <canvas></canvas>
   <script src="../../assets/ui/atelier.js"></script>
   <script>
-    const $ = (id) => document.getElementById(id);
+    // Générateur de palettes en OKLCH (Björn Ottosson), montré en situation : bandes, interactions
+    // d'Albers, composition Bauhaus en proportions 60/30/10 (contraste de quantité d'Itten), dégradé.
+    // La palette peut devenir la charte de marque partagée par tous les outils.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
 
-    // Conversions sRGB <-> OKLab <-> OKLCH (Björn Ottosson).
+    // ——— sRGB ⇄ OKLab ⇄ OKLCH ———
     const toLin = (c) => (c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
     const toGam = (c) => (c <= 0.0031308 ? 12.92 * c : 1.055 * c ** (1 / 2.4) - 0.055);
-    function hexToOklch(hex) {
+    function hexToOklab(hex) {
       const [r, g, b] = [1, 3, 5].map((i) => toLin(parseInt(hex.slice(i, i + 2), 16) / 255));
       const l = Math.cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b);
       const m = Math.cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b);
       const s = Math.cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b);
-      const L = 0.2104542553 * l + 0.793617785 * m - 0.0040720468 * s;
-      const A = 1.9779984951 * l - 2.428592205 * m + 0.4505937099 * s;
-      const B = 0.0259040371 * l + 0.7827717662 * m - 0.808675766 * s;
-      return { L, C: Math.hypot(A, B), H: ((Math.atan2(B, A) * 180) / Math.PI + 360) % 360 };
+      return [0.2104542553 * l + 0.793617785 * m - 0.0040720468 * s, 1.9779984951 * l - 2.428592205 * m + 0.4505937099 * s, 0.0259040371 * l + 0.7827717662 * m - 0.808675766 * s];
     }
-    function oklchToRgb({ L, C, H }) {
-      const a = C * Math.cos((H * Math.PI) / 180), b = C * Math.sin((H * Math.PI) / 180);
-      const l = (L + 0.3963377774 * a + 0.2158037573 * b) ** 3;
-      const m = (L - 0.1055613458 * a - 0.0638541728 * b) ** 3;
-      const s = (L - 0.0894841775 * a - 1.291485548 * b) ** 3;
-      return [
-        4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
-        -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
-        -0.0041960863 * l - 0.7034186147 * m + 1.707614701 * s,
-      ].map(toGam);
+    function hexToOklch(hex) { const [L, A, B] = hexToOklab(hex); return { L, C: Math.hypot(A, B), H: ((Math.atan2(B, A) * 180) / Math.PI + 360) % 360 }; }
+    function oklabToRgb(L, a, b) {
+      const l = (L + 0.3963377774 * a + 0.2158037573 * b) ** 3, m = (L - 0.1055613458 * a - 0.0638541728 * b) ** 3, s = (L - 0.0894841775 * a - 1.291485548 * b) ** 3;
+      return [4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s, -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s, -0.0041960863 * l - 0.7034186147 * m + 1.707614701 * s].map(toGam);
     }
+    const lchRgb = ({ L, C, H }) => oklabToRgb(L, C * Math.cos((H * Math.PI) / 180), C * Math.sin((H * Math.PI) / 180));
+    const inGamut = (v) => v.every((x) => x >= -1e-4 && x <= 1 + 1e-4);
+    const rgbHex = (rgb) => '#' + rgb.map((x) => Math.round(Math.min(1, Math.max(0, x)) * 255).toString(16).padStart(2, '0')).join('');
     // Réduit le chroma jusqu'à rentrer dans le gamut sRGB.
     function toHex(c) {
-      let lo = 0, hi = c.C, rgb = oklchToRgb(c);
-      const inGamut = (v) => v.every((x) => x >= -1e-4 && x <= 1 + 1e-4);
+      let rgb = lchRgb(c);
       if (!inGamut(rgb)) {
-        for (let i = 0; i < 20; i++) {
-          const mid = (lo + hi) / 2;
-          inGamut(oklchToRgb({ ...c, C: mid })) ? (lo = mid) : (hi = mid);
-        }
-        rgb = oklchToRgb({ ...c, C: lo });
+        let lo = 0, hi = c.C;
+        for (let i = 0; i < 20; i++) { const mid = (lo + hi) / 2; inGamut(lchRgb({ ...c, C: mid })) ? (lo = mid) : (hi = mid); }
+        rgb = lchRgb({ ...c, C: lo });
       }
-      return '#' + rgb.map((x) => Math.round(Math.min(1, Math.max(0, x)) * 255).toString(16).padStart(2, '0')).join('');
+      return rgbHex(rgb);
     }
+    const mixLab = (h1, h2, t) => { const a = hexToOklab(h1), b = hexToOklab(h2); return rgbHex(oklabToRgb(...a.map((v, i) => v + (b[i] - v) * t))); };
+    const ink = (hex) => (hexToOklch(hex).L > 0.66 ? '#111111' : '#ffffff');
 
     const OFFSETS = {
-      analogous: [-40, -20, 0, 20, 40],
-      complementary: [0, 180],
-      split: [0, 150, 210],
-      triad: [0, 120, 240],
-      tetrad: [0, 90, 180, 270],
-      mono: [0],
+      analogous: [-40, -20, 0, 20, 40], complementary: [0, 180], split: [0, 150, 210],
+      triad: [0, 120, 240], tetrad: [0, 90, 180, 270], mono: [0], golden: [0, 137.5, 275, 52.5, 190],
     };
 
     let palette = [];
     const app = Atelier.app({
-      stage: $('swatches'),
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.06, vignette: 0 },
+      hint: 'Glissez sur la scène : gauche-droite = teinte, haut-bas = luminosité · molette = chroma',
       params: {
         'Base': {
-          base: { type: 'color', label: 'Couleur', value: '#ff5a36' },
-          mode: { type: 'select', label: 'Harmonie', value: 'analogous', options: { analogous: 'Analogue', complementary: 'Complémentaire', split: 'Compl. divisée', triad: 'Triade', tetrad: 'Tétrade', mono: 'Monochrome' } },
+          base: { type: 'color', label: 'Couleur', value: '#ff5a36', brand: false },
+          mode: { type: 'select', label: 'Harmonie', value: 'split', options: { analogous: 'Analogue', complementary: 'Complémentaire', split: 'Compl. divisée', triad: 'Triade', tetrad: 'Tétrade', mono: 'Monochrome', golden: 'Angle d\'or' } },
+          hueShift: { type: 'range', label: 'Écart de teinte', min: 0.2, max: 2, step: 0.01, value: 1 },
         },
         'Palette': {
-          count: { type: 'range', label: 'Couleurs', min: 3, max: 8, step: 1, value: 5 },
-          spread: { type: 'range', label: 'Luminosité', min: 0, max: 0.5, step: 0.01, value: 0.25 },
-          chroma: { type: 'range', label: 'Chroma', min: 0.2, max: 1.5, step: 0.05, value: 1 },
+          count: { type: 'range', label: 'Couleurs', min: 2, max: 10, step: 1, value: 5 },
+          spread: { type: 'range', label: 'Étendue de lumière', min: 0, max: 0.6, step: 0.01, value: 0.32 },
+          chroma: { type: 'range', label: 'Chroma', min: 0, max: 1.6, step: 0.02, value: 1 },
+          neutrals: { type: 'range', label: 'Neutres', min: 0, max: 2, step: 1, value: 1 },
+          warmth: { type: 'range', label: 'Neutres chauds', min: -1, max: 1, step: 0.05, value: 0.3, show: (p) => p.neutrals > 0 },
+        },
+        'Vue': {
+          view: { type: 'segmented', label: 'Mise en situation', options: { bands: 'Bandes', albers: 'Albers', compo: 'Affiche', gradient: 'Dégradé' }, value: 'compo' },
+          labels: { type: 'segmented', label: 'Codes', options: { none: 'Aucun', hex: 'Hex', oklch: 'OKLCH', rgb: 'RGB' }, value: 'hex' },
+          motion: { type: 'range', label: 'Mouvement', min: 0, max: 1, step: 0.01, value: 0.6 },
+          gap: { type: 'range', label: 'Espacement', min: 0, max: 0.06, step: 0.002, value: 0 },
+          roles: { type: 'toggle', label: 'Proportions 60/30/10', value: true },
+        },
+        'Charte': {
+          toBrand: { type: 'button', label: 'Utiliser comme charte de marque', action: (a) => a.setBrandColors(palette) },
         },
       },
       presets: {
-        'Corail': { base: '#ff5a36', mode: 'analogous', count: 5, spread: 0.25, chroma: 1 },
-        'Électrique': { base: '#3a5cff', mode: 'split', count: 5, spread: 0.3, chroma: 1.3 },
-        'Forêt': { base: '#2f7d4f', mode: 'mono', count: 6, spread: 0.4, chroma: 0.8 },
-        'Pop': { base: '#ff2e88', mode: 'triad', count: 6, spread: 0.2, chroma: 1.2 },
-        'Sable': { base: '#c8a27a', mode: 'complementary', count: 5, spread: 0.35, chroma: 0.5 },
+        'Corail': { base: '#ff5a36', mode: 'split' },
+        'Électrique': { base: '#3a5cff', mode: 'split', spread: 0.36, chroma: 1.3, view: 'albers', neutrals: 1, warmth: -0.4 },
+        'Forêt': { base: '#2f7d4f', mode: 'mono', count: 6, spread: 0.5, chroma: 0.8, view: 'bands', neutrals: 0 },
+        'Pop': { base: '#ff2e88', mode: 'triad', count: 6, spread: 0.18, chroma: 1.25, view: 'compo', neutrals: 1, warmth: 0 },
+        'Sable': { base: '#c8a27a', mode: 'complementary', count: 5, spread: 0.4, chroma: 0.5, view: 'gradient', neutrals: 2, warmth: 0.6 },
+        'Or': { base: '#e2a400', mode: 'golden', count: 6, spread: 0.3, chroma: 1, view: 'compo', neutrals: 1, warmth: 0.2 },
+      },
+      brand(colors) {
+        // La couleur de charte la plus saturée devient la base.
+        const best = colors.reduce((a, c) => (hexToOklch(c).C > hexToOklch(a).C ? c : a), colors[0]);
+        return { base: best };
       },
       export: {
         name: 'palette',
-        png: (scale) => {
-          const c = document.createElement('canvas');
-          c.width = 200 * palette.length * scale; c.height = 400 * scale;
-          const x = c.getContext('2d');
-          x.scale(scale, scale);
-          palette.forEach((h, i) => {
-            x.fillStyle = h; x.fillRect(i * 200, 0, 200, 400);
-            x.fillStyle = hexToOklch(h).L > 0.65 ? '#111' : '#fff';
-            x.font = '600 20px ui-monospace, monospace';
-            x.fillText(h.toUpperCase(), i * 200 + 16, 376);
-          });
-          return c;
+        svg: () => {
+          const W = 200 * palette.length;
+          return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="400">${palette.map((h, i) => `<rect x="${i * 200}" y="0" width="200" height="400" fill="${h}"/><text x="${i * 200 + 16}" y="376" font-family="monospace" font-size="20" fill="${ink(h)}">${h.toUpperCase()}</text>`).join('')}</svg>`;
         },
-        svg: () => `<svg xmlns="http://www.w3.org/2000/svg" width="${palette.length * 200}" height="400">${palette.map((h, i) => `<rect x="${i * 200}" y="0" width="200" height="400" fill="${h}"/>`).join('')}</svg>`,
-        extra: { 'Copier les variables CSS': () => copy(':root {\n' + palette.map((h, i) => `  --color-${i + 1}: ${h};`).join('\n') + '\n}') },
+        extra: {
+          'Variables CSS': (a) => a.download('palette.css', new Blob([':root {\n' + palette.map((h, i) => `  --color-${i + 1}: ${h};\n  --color-${i + 1}-oklch: ${fmt(h, 'oklch')};`).join('\n') + '\n}\n'], { type: 'text/css' })),
+          'Tokens JSON': (a) => a.download('palette.tokens.json', new Blob([JSON.stringify({ color: Object.fromEntries(palette.map((h, i) => [`${i + 1}`, { $type: 'color', $value: h }])) }, null, 2)], { type: 'application/json' })),
+          'Nuancier Adobe (.ase)': (a) => a.download('palette.ase', ase(palette)),
+        },
+      },
+      pointer: {
+        down: (q) => pick(q),
+        drag: (q) => pick(q),
+        wheel: (q, dy) => app.set('chroma', Math.max(0, Math.min(1.6, +(p.chroma + (dy > 0 ? -0.05 : 0.05)).toFixed(2)))),
       },
       onChange: generate,
       onSeed() {
         const r = app.rng();
         app.set('base', toHex({ L: 0.55 + r() * 0.25, C: 0.08 + r() * 0.14, H: r() * 360 }), true);
-        app.set('mode', Object.keys(OFFSETS)[Math.floor(r() * 6)], true);
+        app.set('mode', Object.keys(OFFSETS)[Math.floor(r() * 7)], true);
+        buildLayout();
         generate();
       },
     });
     const p = app.params;
 
+    // Le pointeur parcourt l'espace OKLCH : x → teinte, y → luminosité.
+    function pick(q) {
+      const { w, h } = app.size, c = hexToOklch(p.base);
+      const H = (q.x / w) * 360, L = 0.92 - (q.y / h) * 0.72;
+      app.set('base', toHex({ L, C: Math.max(0.06, c.C), H }));
+    }
+
     function generate() {
       const base = hexToOklch(p.base);
-      const n = p.count, offs = OFFSETS[p.mode];
-      palette = Array.from({ length: n }, (_, i) => {
-        const t = n === 1 ? 0 : i / (n - 1) - 0.5;
-        const H = (base.H + offs[i % offs.length] + 360) % 360;
-        const L = Math.min(0.97, Math.max(0.15, base.L + t * p.spread * 2));
-        return toHex({ L, C: base.C * p.chroma, H });
+      const offs = OFFSETS[p.mode], n = p.count;
+      // La couleur de base reste intacte (indice 0) ; les autres s'écartent en lumière, alternativement.
+      const lf = (i) => (i === 0 ? 0 : (i % 2 ? 1 : -1) * Math.ceil(i / 2) / Math.ceil((n - 1) / 2));
+      const colors = Array.from({ length: n }, (_, i) => {
+        const H = (base.H + offs[i % offs.length] * p.hueShift + Math.floor(i / offs.length) * 8 + 360) % 360;
+        const L = Math.min(0.97, Math.max(0.12, base.L + lf(i) * p.spread));
+        return i === 0 && p.chroma === 1 ? p.base : toHex({ L, C: base.C * p.chroma, H });
       });
-      $('swatches').replaceChildren(...palette.map((hex) => {
-        const el = document.createElement('div');
-        el.className = 'sw';
-        el.tabIndex = 0;
-        el.setAttribute('role', 'button');
-        el.style.background = hex;
-        el.style.color = hexToOklch(hex).L > 0.65 ? '#111' : '#fff';
-        el.innerHTML = `<span class="copied">Copié</span><b>${hex.toUpperCase()}</b><small>${fmt(hex)}</small>`;
-        el.setAttribute('aria-label', `Copier ${hex}`);
-        el.onclick = () => copy(hex, el);
-        el.onkeydown = (e) => { if (e.key === 'Enter') copy(hex, el); };
-        return el;
-      }));
-    }
-    const fmt = (hex) => { const { L, C, H } = hexToOklch(hex); return `oklch(${(L * 100).toFixed(1)}% ${C.toFixed(3)} ${H.toFixed(0)})`; };
-
-    async function copy(text, el) {
-      try { await navigator.clipboard.writeText(text); } catch { /* presse-papiers indisponible */ }
-      if (el) { el.classList.add('flash'); setTimeout(() => el.classList.remove('flash'), 900); }
+      // Neutres teintés : un clair et un foncé, réchauffés ou refroidis.
+      const nh = p.warmth >= 0 ? 70 : 250, nc = Math.abs(p.warmth) * 0.025;
+      const neutrals = [toHex({ L: 0.96, C: nc, H: nh }), toHex({ L: 0.16, C: nc, H: nh })].slice(0, p.neutrals);
+      palette = [...colors, ...neutrals];
     }
 
+    const fmt = (hex, mode = p.labels) => {
+      if (mode === 'oklch') { const { L, C, H } = hexToOklch(hex); return `oklch(${(L * 100).toFixed(1)}% ${C.toFixed(3)} ${H.toFixed(0)})`; }
+      if (mode === 'rgb') return `rgb(${[1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16)).join(' ')})`;
+      return hex.toUpperCase();
+    };
+
+    // Rôles : dominante (la plus claire ou la plus sombre), secondaire, accent (la plus saturée).
+    function roles() {
+      const byL = [...palette].sort((a, b) => hexToOklch(b).L - hexToOklch(a).L);
+      const byC = [...palette].sort((a, b) => hexToOklch(b).C - hexToOklch(a).C);
+      const dom = byL[0], acc = byC.find((c) => c !== dom) || byC[0];
+      const sec = palette.find((c) => c !== dom && c !== acc) || byL.at(-1);
+      return { dom, sec, acc, rest: palette.filter((c) => ![dom, sec, acc].includes(c)) };
+    }
+
+    function label(text, x, y, color, size) {
+      if (p.labels === 'none') return;
+      ctx.font = `500 ${size}px "JetBrains Mono", ui-monospace, monospace`;
+      ctx.fillStyle = color;
+      ctx.textBaseline = 'alphabetic';
+      ctx.fillText(text, x, y);
+    }
+
+    function drawBands(t, w, h, u) {
+      const n = palette.length, g = p.gap * w;
+      const weights = palette.map((_, i) => 1 + Math.sin(t * 0.8 + i * 1.3) * 0.45 * p.motion);
+      const sum = weights.reduce((a, b) => a + b, 0);
+      let x = 0;
+      palette.forEach((c, i) => {
+        const bw = (weights[i] / sum) * (w - g * (n + 1));
+        ctx.fillStyle = c;
+        ctx.fillRect(x + g, g, bw, h - 2 * g);
+        label(fmt(c), x + g + 14 * u, h - g - 18 * u, ink(c), 13 * u);
+        x += bw + g;
+      });
+    }
+
+    function drawAlbers(t, w, h, u) {
+      // Carrés imbriqués d'Albers : la même couleur centrale paraît changer selon son entourage.
+      const n = palette.length, cols = Math.min(n, w > h ? 4 : 2), rows = Math.ceil(Math.min(n, 8) / cols);
+      const g = p.gap * w + 10 * u, cw = (w - g * (cols + 1)) / cols, ch = (h - g * (rows + 1)) / rows;
+      const center = roles().acc;
+      for (let k = 0; k < cols * rows; k++) {
+        const i = k % cols, j = Math.floor(k / cols), x = g + i * (cw + g), y = g + j * (ch + g);
+        const outer = palette[k % n], mid = palette[(k + 2) % n];
+        ctx.fillStyle = outer; ctx.fillRect(x, y, cw, ch);
+        const s = Math.min(cw, ch), drift = Math.sin(t * 0.7 + k) * 0.06 * p.motion;
+        ctx.fillStyle = mid; ctx.fillRect(x + cw / 2 - s * 0.32, y + ch / 2 - s * (0.3 - drift), s * 0.64, s * 0.62);
+        ctx.fillStyle = center; ctx.fillRect(x + cw / 2 - s * 0.16, y + ch / 2 - s * (0.1 - drift * 1.6), s * 0.32, s * 0.32);
+        label(fmt(outer), x + 10 * u, y + ch - 10 * u, ink(outer), 11 * u);
+      }
+    }
+
+    // Affiche-système à la Dumbar : grille de modules géométriques, fonds tirés selon les
+    // proportions 60/30/10 (contraste de quantité d'Itten), formes qui pivotent par quarts de tour.
+    let layout = [];
+    function buildLayout() {
+      const r = app.rng(3), SH = ['circle', 'half', 'quarter', 'square', 'bars', 'ring'];
+      layout = Array.from({ length: 64 }, () => ({ shape: SH[Math.floor(r() * SH.length)], rot: Math.floor(r() * 4), pick: r(), pick2: r(), phase: r() }));
+    }
+    function weighted(x, rl) {
+      if (!p.roles) return palette[Math.floor(x * palette.length)];
+      if (x < 0.55) return rl.dom;
+      if (x < 0.85) return rl.sec;
+      if (x < 0.93 || !rl.rest.length) return rl.acc;
+      return rl.rest[Math.floor(((x - 0.93) / 0.07) * rl.rest.length)];
+    }
+    function drawCompo(t, w, h, u) {
+      const rl = roles(), cols = w >= h ? 4 : 3, cs = w / cols, rows = Math.ceil(h / cs), g = p.gap * w;
+      ctx.fillStyle = rl.dom; ctx.fillRect(0, 0, w, h);
+      for (let j = 0; j < rows; j++) for (let i = 0; i < cols; i++) {
+        const L = layout[(j * cols + i) % layout.length];
+        const bg = weighted(L.pick, rl);
+        let fg = weighted(L.pick2, rl);
+        if (fg === bg) fg = bg === rl.acc ? rl.dom : rl.acc;
+        const x = i * cs + g / 2, y = j * cs + g / 2, s = cs - g;
+        ctx.fillStyle = bg; ctx.fillRect(x, y, s, s);
+        // Quart de tour toutes les ~3 s, décalé par module, avec un léger rebond.
+        const k = t * 0.33 * (0.4 + p.motion) + L.phase * 3, n = Math.floor(k), f = k - n;
+        const e = f < 0.25 ? 0 : Math.min(1, (f - 0.25) / 0.35);
+        const ease = e === 0 ? 0 : 1 - Math.cos(e * Math.PI / 2) ** 3 + Math.sin(e * Math.PI) * 0.08;
+        const ang = (L.rot + (p.motion > 0 ? n + ease : 0)) * Math.PI / 2;
+        ctx.save();
+        ctx.beginPath(); ctx.rect(x, y, s, s); ctx.clip();
+        ctx.translate(x + s / 2, y + s / 2); ctx.rotate(ang);
+        ctx.fillStyle = fg; ctx.strokeStyle = fg;
+        const hs = s / 2;
+        ctx.beginPath();
+        if (L.shape === 'circle') ctx.arc(0, 0, hs * 0.8, 0, Math.PI * 2);
+        else if (L.shape === 'half') ctx.arc(0, hs, hs, Math.PI, Math.PI * 2);
+        else if (L.shape === 'quarter') { ctx.moveTo(-hs, -hs); ctx.arc(-hs, -hs, s, 0, Math.PI / 2); }
+        else if (L.shape === 'square') ctx.rect(-hs * 0.5, -hs * 0.5, hs, hs);
+        else if (L.shape === 'bars') for (let b = 0; b < 3; b++) ctx.rect(-hs, -hs + b * s / 3, s, s / 6);
+        else { ctx.arc(0, 0, hs * 0.85, 0, Math.PI * 2); ctx.arc(0, 0, hs * 0.45, 0, Math.PI * 2, true); }
+        ctx.fill('evenodd');
+        ctx.restore();
+      }
+      // Légende des couleurs, sur un bandeau en pied.
+      if (p.labels !== 'none') {
+        const bh = 34 * u;
+        ctx.fillStyle = rl.dom; ctx.fillRect(0, h - bh, w, bh);
+        const textCol = ink(rl.dom);
+        palette.forEach((c, i) => {
+          const x = 14 * u + i * ((w - 28 * u) / palette.length), y = h - bh / 2;
+          ctx.fillStyle = c; ctx.fillRect(x, y - 6 * u, 12 * u, 12 * u);
+          ctx.strokeStyle = textCol; ctx.globalAlpha = 0.35; ctx.lineWidth = u; ctx.strokeRect(x, y - 6 * u, 12 * u, 12 * u); ctx.globalAlpha = 1;
+          label(fmt(c), x + 18 * u, y + 4 * u, textCol, 10 * u);
+        });
+      }
+    }
+
+    function drawGradient(t, w, h) {
+      // Dégradé en OKLab (sans zones grises) dont les arrêts ondulent.
+      const steps = 64, n = palette.length;
+      for (let k = 0; k < steps; k++) {
+        const y0 = (k / steps) * h, y1 = ((k + 1) / steps) * h;
+        const phase = Math.sin(t * 0.5 + k * 0.12) * 0.08 * p.motion;
+        const grad = ctx.createLinearGradient(0, 0, w, 0);
+        palette.forEach((c, i) => grad.addColorStop(Math.min(1, Math.max(0, i / (n - 1 || 1) + phase * (i % 2 ? 1 : -1))), c));
+        // Arrêts intermédiaires calculés en OKLab pour une transition propre.
+        for (let i = 0; i < n - 1; i++) grad.addColorStop(Math.min(1, Math.max(0, (i + 0.5) / (n - 1) + phase * 0.5)), mixLab(palette[i], palette[i + 1], 0.5));
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, y0, w, y1 - y0 + 1);
+      }
+    }
+
+    app.loop((t) => {
+      const { w, h, dpr } = app.size, u = Math.min(w, h) / 600;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = palette.at(-1); ctx.fillRect(0, 0, w, h);
+      if (p.view === 'bands') drawBands(t, w, h, u);
+      else if (p.view === 'albers') drawAlbers(t, w, h, u);
+      else if (p.view === 'gradient') drawGradient(t, w, h);
+      else drawCompo(t, w, h, u);
+      app.finish(ctx);
+    });
+
+    // Fichier .ase (Adobe Swatch Exchange) : en-tête, puis un bloc par couleur en RGB flottant.
+    function ase(colors) {
+      const blocks = colors.map((hex) => {
+        const name = hex.toUpperCase() + '\0';
+        const len = 2 + name.length * 2 + 4 + 12 + 2;
+        const b = new DataView(new ArrayBuffer(6 + len));
+        let o = 0;
+        b.setUint16(o, 0x0001); o += 2; b.setUint32(o, len); o += 4;
+        b.setUint16(o, name.length); o += 2;
+        for (const ch of name) { b.setUint16(o, ch.charCodeAt(0)); o += 2; }
+        'RGB '.split('').forEach((ch) => { b.setUint8(o++, ch.charCodeAt(0)); });
+        [1, 3, 5].forEach((i) => { b.setFloat32(o, parseInt(hex.slice(i, i + 2), 16) / 255); o += 4; });
+        b.setUint16(o, 2);
+        return b;
+      });
+      const head = new DataView(new ArrayBuffer(12));
+      'ASEF'.split('').forEach((ch, i) => head.setUint8(i, ch.charCodeAt(0)));
+      head.setUint16(4, 1); head.setUint16(6, 0); head.setUint32(8, colors.length);
+      return new Blob([head, ...blocks], { type: 'application/octet-stream' });
+    }
+
+    buildLayout();
     generate();
   </script>
 </body>

@@ -10,43 +10,76 @@
   <canvas></canvas>
   <script src="../../assets/ui/atelier.js"></script>
   <script>
+    // Gabarit : remplace tout ce dessin par l'outil. Garde la structure : réglages complets,
+    // interaction au pointeur, tailles relatives à app.size, aléatoire via app.rng(), finition.
     const canvas = document.querySelector('canvas');
     const ctx = canvas.getContext('2d');
+    let attractor = null;
 
-    // Toute l'interface (barre du haut, panneau, presets, graine, exports) est générée par le kit.
     const app = Atelier.app({
       stage: canvas,
       animate: true,
+      seed: true,
+      finish: true,
+      hint: 'Glissez pour attirer les formes',
       params: {
         'Forme': {
-          count: { type: 'range', label: 'Nombre', min: 1, max: 60, step: 1, value: 24 },
-          radius: { type: 'range', label: 'Rayon', min: 0.1, max: 0.5, step: 0.01, value: 0.32 },
+          count: { type: 'range', label: 'Nombre', min: 3, max: 120, step: 1, value: 36 },
+          radius: { type: 'range', label: 'Rayon du cercle', min: 0.1, max: 0.48, step: 0.01, value: 0.32 },
+          size: { type: 'range', label: 'Taille', min: 0.002, max: 0.08, step: 0.001, value: 0.018 },
+          shape: { type: 'segmented', label: 'Forme', options: { dot: 'Point', bar: 'Barre', ring: 'Anneau' }, value: 'dot' },
+        },
+        'Mouvement': {
+          speed: { type: 'range', label: 'Rotation', min: -2, max: 2, step: 0.01, value: 0.4 },
+          wave: { type: 'range', label: 'Ondulation', min: 0, max: 1, step: 0.01, value: 0.3 },
+          pull: { type: 'range', label: 'Attraction', min: 0, max: 1, step: 0.01, value: 0.5 },
         },
         'Couleur': {
           bg: { type: 'color', label: 'Fond', value: '#111114' },
-          fg: { type: 'color', label: 'Forme', value: '#0d99ff' },
+          palette: { type: 'palette', label: 'Palette', value: ['#0d99ff', '#ff4d1a', '#f4efe6'] },
+        },
+        'Contenu': {
+          text: { type: 'text', label: 'Texte', value: 'ATELIER' },
+          font: { type: 'font', label: 'Typo', options: { Inter: 'Inter', Georgia: 'Serif' }, value: 'Inter' },
         },
       },
       presets: {
-        'Défaut': { count: 24, radius: 0.32, bg: '#111114', fg: '#0d99ff' },
+        'Orbite': {},
+        'Dense': { count: 110, size: 0.008, wave: 0.6 },
+        'Barres': { shape: 'bar', count: 48, size: 0.03, speed: -0.3 },
+        'Anneaux': { shape: 'ring', count: 18, size: 0.05, bg: '#f4efe6', palette: ['#111114', '#ff4d1a'] },
       },
-      export: { png: true, video: true },
+      pointer: {
+        down: (q) => { attractor = { x: q.x, y: q.y }; },
+        drag: (q) => { attractor = { x: q.x, y: q.y }; },
+        up: () => { attractor = null; },
+      },
     });
     const p = app.params;
 
     app.loop((t) => {
-      const { w, h, dpr } = app.size;
+      const { w, h, dpr } = app.size, u = Math.min(w, h);
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       ctx.fillStyle = p.bg;
       ctx.fillRect(0, 0, w, h);
-      ctx.fillStyle = p.fg;
-      const R = Math.min(w, h) * p.radius;
+      const R = u * p.radius, s = u * p.size;
       for (let i = 0; i < p.count; i++) {
-        const a = (i / p.count) * Math.PI * 2 + t * 0.5;
+        const a = (i / p.count) * Math.PI * 2 + t * p.speed;
+        const r = R * (1 + Math.sin(a * 3 + t * 2) * p.wave * 0.2);
+        let x = w / 2 + Math.cos(a) * r, y = h / 2 + Math.sin(a) * r;
+        if (attractor) { x += (attractor.x - x) * p.pull * 0.3; y += (attractor.y - y) * p.pull * 0.3; }
+        ctx.fillStyle = ctx.strokeStyle = p.palette[i % p.palette.length];
+        ctx.lineWidth = s * 0.3;
         ctx.beginPath();
-        ctx.arc(w / 2 + Math.cos(a) * R, h / 2 + Math.sin(a) * R, 6, 0, Math.PI * 2);
-        ctx.fill();
+        if (p.shape === 'bar') { ctx.save(); ctx.translate(x, y); ctx.rotate(a); ctx.fillRect(-s * 2, -s / 2, s * 4, s); ctx.restore(); }
+        else if (p.shape === 'ring') { ctx.arc(x, y, s, 0, Math.PI * 2); ctx.stroke(); }
+        else { ctx.arc(x, y, s, 0, Math.PI * 2); ctx.fill(); }
       }
+      ctx.fillStyle = p.palette[0];
+      ctx.font = `700 ${u * 0.06}px ${p.font}, sans-serif`;
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText(p.text, w / 2, h / 2);
+      app.finish(ctx);
     });
   </script>
 </body>

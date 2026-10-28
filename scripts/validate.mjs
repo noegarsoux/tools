@@ -93,13 +93,28 @@ async function browserChecks(browser, origin, dir) {
   if (!info.viewport) errors.push('balise <meta name="viewport"> manquante');
   if (info.controls === 0) errors.push("aucun contrôle interactif : un outil doit exposer au moins un réglage");
 
+  // Barre de qualité : réglages, presets, interaction directe, inspiration.
+  if (info.kit) {
+    const q = await page.evaluate(() => {
+      const a = window.Atelier.instance, o = a.opts;
+      const own = Object.entries(a.specs).filter(([k, s]) => !s.internal && !['grain', 'vignette'].includes(k)).length;
+      return { own, presets: Object.keys(o.presets || {}).length, pointer: !!o.pointer && Object.keys(o.pointer).length > 0, hint: !!o.hint, version: window.Atelier.version };
+    });
+    if (q.own < 10) errors.push(`seulement ${q.own} réglages propres à l'outil (minimum 10) : tout ce qui influence le rendu doit être réglable`);
+    if (q.presets < 4) errors.push(`seulement ${q.presets} presets (minimum 4)`);
+    if (!q.pointer) errors.push("pas d'interaction sur la scène : déclare pointer: { down, drag, move… } dans Atelier.app");
+    if (q.pointer && !q.hint) errors.push("interaction non annoncée : ajoute hint: 'Glissez pour …' dans Atelier.app");
+  }
+  const { meta } = readMeta(dir);
+  if (!meta?.inspiration?.length) errors.push("tool.json : champ inspiration manquant (sources de references/ qui ont nourri l'outil)");
+
   const shot = await page.screenshot();
   if ((await imageVariance(page, shot)) < 20) errors.push('rendu vide ou uni après 2,5 s');
 
   // Test de fumée : on manipule chaque contrôle et on vérifie qu'aucune erreur n'apparaît.
   const before = errors.length;
   const controls = await page.$$('input[type=range], input[type=checkbox], input[type=color], select, button:not([data-skip-test])');
-  for (const el of controls.slice(0, 30)) {
+  for (const el of controls.slice(0, 120)) {
     if (!(await el.isVisible())) continue;
     const kind = await el.evaluate((e) => e.tagName.toLowerCase() + ':' + (e.type || ''));
     try {
@@ -112,6 +127,25 @@ async function browserChecks(browser, origin, dir) {
   }
   await page.waitForTimeout(500);
   if (errors.length > before) errors.push('(erreurs déclenchées en manipulant les contrôles)');
+
+  // Formats : chaque format doit rendre sans erreur, et l'export d'image doit produire la bonne taille.
+  if (info.kit) {
+    const beforeFmt = errors.length;
+    await page.evaluate(() => window.Atelier.instance.reset());
+    for (const fmt of ['9:16', '1:1', '16:9']) {
+      await page.evaluate((f) => window.Atelier.instance.apply({ _fmt: f, _res: 1 }), fmt);
+      await page.waitForTimeout(700);
+      const fshot = await page.locator('.at-frame').screenshot();
+      if ((await imageVariance(page, fshot)) < 20) errors.push(`rendu vide ou uni au format ${fmt}`);
+    }
+    const out = await page.evaluate(async () => {
+      const c = await window.Atelier.instance.renderImage();
+      return [c.width, c.height];
+    }).catch((e) => { errors.push(`export d'image : ${e.message}`); return null; });
+    if (out && (out[0] !== 1920 || out[1] !== 1080)) errors.push(`export 16:9 attendu en 1920×1080, obtenu ${out[0]}×${out[1]}`);
+    await page.evaluate(() => window.Atelier.instance.reset());
+    if (errors.length > beforeFmt) errors.push('(erreurs liées aux formats ou aux exports)');
+  }
 
   // Mobile : pas de défilement horizontal.
   await page.setViewportSize({ width: 390, height: 844 });

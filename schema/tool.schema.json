@@ -67,6 +67,16 @@
       "enum": [
         "finished"
       ]
+    },
+    "inspiration": {
+      "type": "array",
+      "description": "Sources de references/ qui ont nourri l'outil (titre court ou lien).",
+      "items": {
+        "type": "string",
+        "minLength": 3,
+        "maxLength": 160
+      },
+      "maxItems": 5
     }
   }
 }

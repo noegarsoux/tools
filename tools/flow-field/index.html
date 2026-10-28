@@ -10,117 +10,256 @@
   <canvas></canvas>
   <script src="../../assets/ui/atelier.js"></script>
   <script>
-    const PALETTES = {
-      ember: { bg: '#0d0a0b', colors: ['#ff5a36', '#ffb347', '#ffd9a0', '#c2185b'] },
-      ocean: { bg: '#04121c', colors: ['#2ec4b6', '#3a86ff', '#cbf3f0', '#80ffdb'] },
-      mono: { bg: '#0f0f12', colors: ['#ffffff', '#bdbdbd', '#7a7a7a'] },
-      neon: { bg: '#07010f', colors: ['#f72585', '#7209b7', '#4cc9f0', '#b5179e'] },
-      paper: { bg: '#f3eee3', colors: ['#1b1b1b', '#3d405b', '#e07a5f', '#81b29a'] },
-    };
+    // Champ de flux à la Tyler Hobbs : bruit fractal déformé (domain warping), angles quantifiables,
+    // épaisseurs variables, couleur d'accent rare, forces posées au pointeur et masque typographique.
     const canvas = document.querySelector('canvas');
     const ctx = canvas.getContext('2d');
-    let particles = [], perm = new Uint8Array(512), z = 0;
+    const mask = document.createElement('canvas');
+    const mctx = mask.getContext('2d', { willReadFrequently: true });
+    let particles = [], perm = new Uint8Array(512), z = 0, rand = Math.random, maskData = null, forces = [];
 
     const app = Atelier.app({
       stage: canvas,
       animate: true,
+      seed: true,
+      finish: { grain: 0.18, vignette: 0.3, overlay: true },
+      hint: 'Glissez pour poser des tourbillons · Maj pour repousser · molette pour la taille',
       params: {
-        'Particules': {
-          count: { type: 'range', label: 'Nombre', min: 200, max: 6000, step: 100, value: 2500 },
-          step: { type: 'range', label: 'Pas', min: 0.3, max: 4, step: 0.1, value: 1.2 },
-          width: { type: 'range', label: 'Épaisseur', min: 0.3, max: 3, step: 0.1, value: 0.8 },
-          fade: { type: 'range', label: 'Persistance', min: 0, max: 0.2, step: 0.005, value: 0.02 },
-        },
         'Champ': {
-          scale: { type: 'range', label: 'Échelle', min: 0.5, max: 10, step: 0.1, value: 3 },
-          curl: { type: 'range', label: 'Turbulence', min: 0.5, max: 6, step: 0.1, value: 2 },
-          drift: { type: 'range', label: 'Évolution', min: 0, max: 3, step: 0.1, value: 1 },
+          field: { type: 'segmented', label: 'Source', options: { noise: 'Bruit', warp: 'Marbre', spiral: 'Spirale', waves: 'Ondes' }, value: 'warp' },
+          scale: { type: 'range', label: 'Échelle', min: 0.3, max: 8, step: 0.1, value: 2.2 },
+          octaves: { type: 'range', label: 'Octaves', min: 1, max: 6, step: 1, value: 3 },
+          warp: { type: 'range', label: 'Déformation', min: 0, max: 6, step: 0.1, value: 2.4, show: (p) => p.field === 'warp' },
+          curl: { type: 'range', label: 'Torsion', min: 0.2, max: 4, step: 0.05, value: 1.2 },
+          quant: { type: 'range', label: 'Angles', min: 0, max: 12, step: 1, value: 0 },
+          drift: { type: 'range', label: 'Évolution', min: 0, max: 3, step: 0.05, value: 0.6 },
+        },
+        'Traits': {
+          count: { type: 'range', label: 'Nombre', min: 100, max: 8000, step: 50, value: 2600 },
+          step: { type: 'range', label: 'Vitesse', min: 0.2, max: 5, step: 0.1, value: 1.4 },
+          wMin: { type: 'range', label: 'Épaisseur min', min: 0.2, max: 12, step: 0.1, value: 0.6 },
+          wMax: { type: 'range', label: 'Épaisseur max', min: 0.2, max: 24, step: 0.1, value: 3.2 },
+          life: { type: 'range', label: 'Longueur', min: 20, max: 800, step: 10, value: 260 },
+          alpha: { type: 'range', label: 'Opacité', min: 0.05, max: 1, step: 0.01, value: 0.7 },
+          fade: { type: 'range', label: 'Effacement', min: 0, max: 0.15, step: 0.002, value: 0.012 },
+          cap: { type: 'segmented', label: 'Terminaison', options: { round: 'Ronde', butt: 'Nette', square: 'Carrée' }, value: 'round' },
+          spawn: { type: 'segmented', label: 'Départ', options: { random: 'Partout', grid: 'Grille', center: 'Centre', edges: 'Bords' }, value: 'random' },
         },
         'Couleur': {
-          palette: { type: 'select', label: 'Palette', value: 'ember', options: { ember: 'Braise', ocean: 'Océan', mono: 'Monochrome', neon: 'Néon', paper: 'Papier' } },
+          bg: { type: 'color', label: 'Fond', value: '#0d0a0b' },
+          palette: { type: 'palette', label: 'Palette', value: ['#ff5a36', '#ffb347', '#f4e6cf', '#c2185b'] },
+          accent: { type: 'color', label: 'Accent rare', value: '#3d5afe' },
+          accentRate: { type: 'range', label: 'Part d\'accent', min: 0, max: 0.3, step: 0.005, value: 0.03 },
+          colorBy: { type: 'segmented', label: 'Répartition', options: { random: 'Hasard', angle: 'Direction', y: 'Hauteur', x: 'Largeur' }, value: 'random' },
+          blend: { type: 'select', label: 'Fusion', options: { 'source-over': 'Normale', lighter: 'Lumière', screen: 'Écran', multiply: 'Produit', difference: 'Différence' }, value: 'source-over' },
+        },
+        'Masque typographique': {
+          maskMode: { type: 'segmented', label: 'Masque', options: { none: 'Aucun', inside: 'Dedans', outside: 'Autour' }, value: 'none' },
+          text: { type: 'text', label: 'Texte', value: 'FLUX', show: (p) => p.maskMode !== 'none' },
+          font: { type: 'font', label: 'Typo', options: { 'Inter': 'Inter', 'Georgia': 'Serif', 'Courier New': 'Mono', 'Impact': 'Condensée' }, value: 'Inter', show: (p) => p.maskMode !== 'none' },
+          textSize: { type: 'range', label: 'Taille', min: 0.1, max: 1, step: 0.01, value: 0.55, show: (p) => p.maskMode !== 'none' },
+          image: { type: 'file', label: 'Logo', accept: 'image/*', button: 'Importer un logo', show: (p) => p.maskMode !== 'none' },
+        },
+        'Forces au pointeur': {
+          brush: { type: 'range', label: 'Rayon', min: 20, max: 400, step: 5, value: 140 },
+          power: { type: 'range', label: 'Intensité', min: 0.1, max: 3, step: 0.05, value: 1.2 },
+          spin: { type: 'segmented', label: 'Sens', options: { cw: 'Horaire', ccw: 'Anti', sink: 'Puits' }, value: 'cw' },
+          clearForces: { type: 'button', label: 'Effacer les forces', action: () => { forces = []; } },
           clear: { type: 'button', label: 'Effacer la toile', action: () => reset() },
         },
       },
       presets: {
-        'Braise': { palette: 'ember', count: 2500, scale: 3, curl: 2, step: 1.2, fade: 0.02, width: 0.8 },
-        'Soie': { palette: 'mono', count: 5000, scale: 1.4, curl: 1.2, step: 0.8, fade: 0, width: 0.4 },
-        'Encre': { palette: 'paper', count: 1500, scale: 4.5, curl: 3, step: 1.6, fade: 0, width: 1.2 },
-        'Néon': { palette: 'neon', count: 3500, scale: 6, curl: 4.5, step: 2.2, fade: 0.06, width: 1 },
-        'Courant': { palette: 'ocean', count: 4000, scale: 2, curl: 1.6, step: 3, fade: 0.1, width: 0.6 },
+        'Braise': { field: 'warp', scale: 2.2, octaves: 3, warp: 2.4, curl: 1.2, quant: 0, count: 2600, step: 1.4, wMin: 0.6, wMax: 3.2, life: 260, alpha: 0.7, fade: 0.012, bg: '#0d0a0b', palette: ['#ff5a36', '#ffb347', '#f4e6cf', '#c2185b'], accent: '#3d5afe', accentRate: 0.03, colorBy: 'random', blend: 'source-over', cap: 'round', spawn: 'random' },
+        'Fidenza': { field: 'noise', scale: 1.1, octaves: 1, curl: 0.9, quant: 0, count: 380, step: 1.8, wMin: 4, wMax: 18, life: 520, alpha: 1, fade: 0, bg: '#efe7d8', palette: ['#1f2a44', '#e2563b', '#f2b33d', '#efe7d8', '#2b6e5e'], accent: '#e84a8a', accentRate: 0.04, colorBy: 'random', blend: 'source-over', cap: 'round', spawn: 'grid' },
+        'Soie': { field: 'warp', scale: 1.2, octaves: 4, warp: 4.2, curl: 1, count: 6000, step: 0.8, wMin: 0.2, wMax: 0.7, life: 400, alpha: 0.35, fade: 0, bg: '#0f0f12', palette: ['#ffffff', '#bdbdbd', '#7a7a7a'], accent: '#ffd400', accentRate: 0.01, colorBy: 'y', blend: 'screen', cap: 'round', spawn: 'random' },
+        'Circuit': { field: 'noise', scale: 3, octaves: 2, curl: 1, quant: 4, count: 1400, step: 2.4, wMin: 1, wMax: 2.5, life: 220, alpha: 0.9, fade: 0.02, bg: '#05070d', palette: ['#00e5ff', '#2962ff', '#e0f7fa'], accent: '#ff1744', accentRate: 0.02, colorBy: 'angle', blend: 'lighter', cap: 'square', spawn: 'grid' },
+        'Typo': { field: 'warp', scale: 2.6, warp: 2, curl: 1.4, count: 4200, step: 1.2, wMin: 0.4, wMax: 2, life: 300, alpha: 0.8, fade: 0.008, bg: '#f4efe6', palette: ['#111111', '#3d2bff'], accent: '#ff4d1a', accentRate: 0.05, colorBy: 'x', blend: 'source-over', maskMode: 'inside', text: 'FLUX', textSize: 0.6, spawn: 'random' },
+        'Vortex': { field: 'spiral', scale: 1.4, octaves: 3, curl: 1.6, count: 3500, step: 2.2, wMin: 0.4, wMax: 2.4, life: 500, alpha: 0.6, fade: 0.03, bg: '#07010f', palette: ['#f72585', '#7209b7', '#4cc9f0', '#b5179e'], accent: '#ffffff', accentRate: 0.02, colorBy: 'angle', blend: 'lighter', spawn: 'random' },
+        'Ondes': { field: 'waves', scale: 2.4, octaves: 2, curl: 0.8, count: 2200, step: 1.6, wMin: 1, wMax: 6, life: 600, alpha: 0.85, fade: 0, bg: '#0b1b2b', palette: ['#f4efe6', '#7fb7be', '#d3f3ee'], accent: '#ff6b35', accentRate: 0.03, colorBy: 'y', blend: 'source-over', spawn: 'grid' },
       },
-      export: { png: true, video: true },
+      export: { name: 'champ-de-flux' },
+      pointer: {
+        down: (q) => addForce(q),
+        drag: (q) => { if (Math.hypot(q.x - (forces.at(-1)?.x ?? -1e9), q.y - (forces.at(-1)?.y ?? -1e9)) > p.brush * 0.35) addForce(q); },
+        wheel: (q, dy) => app.set('brush', Math.max(20, Math.min(400, p.brush * (dy > 0 ? 0.9 : 1.1)))),
+      },
       onChange(key) {
-        if (key === 'count') resize();
-        else if (key === 'palette' || key === '*') reset();
+        if (key === 'count') return resizePool();
+        if (['text', 'font', 'textSize', 'image', 'maskMode', '*'].includes(key)) buildMask();
+        if (['bg', 'palette', 'accent', 'accentRate', 'colorBy', 'spawn', 'maskMode', 'text', 'font', 'textSize', 'image', 'blend', '*'].includes(key)) reset();
       },
       onSeed: () => { reseed(); reset(); },
-      onResize: () => reset(),
+      onResize: () => { buildMask(); reset(); },
     });
     const p = app.params;
 
-    // Bruit de valeur 3D lissé, piloté par la graine.
+    // ——— Bruit de valeur 3D lissé, piloté par la graine ———
     function reseed() {
       const r = app.rng();
       const a = [...Array(256).keys()];
       for (let i = 255; i > 0; i--) { const j = Math.floor(r() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; }
       for (let i = 0; i < 512; i++) perm[i] = a[i & 255];
     }
-    const fade = (x) => x * x * x * (x * (x * 6 - 15) + 10);
+    const sm = (x) => x * x * x * (x * (x * 6 - 15) + 10);
     const lerp = (a, b, k) => a + (b - a) * k;
-    const h = (x, y, z) => perm[(perm[(perm[x & 255] + y) & 255] + z) & 255] / 255;
+    const hs = (x, y, z) => perm[(perm[(perm[x & 255] + y) & 255] + z) & 255] / 255;
     function noise(x, y, z) {
       const X = Math.floor(x), Y = Math.floor(y), Z = Math.floor(z);
-      const u = fade(x - X), v = fade(y - Y), w = fade(z - Z);
+      const u = sm(x - X), v = sm(y - Y), w = sm(z - Z);
       return lerp(
-        lerp(lerp(h(X, Y, Z), h(X + 1, Y, Z), u), lerp(h(X, Y + 1, Z), h(X + 1, Y + 1, Z), u), v),
-        lerp(lerp(h(X, Y, Z + 1), h(X + 1, Y, Z + 1), u), lerp(h(X, Y + 1, Z + 1), h(X + 1, Y + 1, Z + 1), u), v), w);
+        lerp(lerp(hs(X, Y, Z), hs(X + 1, Y, Z), u), lerp(hs(X, Y + 1, Z), hs(X + 1, Y + 1, Z), u), v),
+        lerp(lerp(hs(X, Y, Z + 1), hs(X + 1, Y, Z + 1), u), lerp(hs(X, Y + 1, Z + 1), hs(X + 1, Y + 1, Z + 1), u), v), w);
+    }
+    function fbm(x, y, z) {
+      let v = 0, a = 0.5, n = 0;
+      for (let i = 0; i < p.octaves; i++) { v += a * noise(x, y, z + i * 7.1); n += a; x *= 2; y *= 2; a *= 0.5; }
+      return v / n;
     }
 
+    // Angle du champ au point (x, y), en pixels d'affichage.
+    function angle(x, y) {
+      const { w, h } = app.size, u = Math.min(w, h);
+      const sx = (x / u) * p.scale, sy = (y / u) * p.scale;
+      let a;
+      if (p.field === 'warp') {
+        // Domain warping (Inigo Quilez) : f(p + k·q), q = (fbm(p), fbm(p + décalage)).
+        const qx = fbm(sx, sy, z), qy = fbm(sx + 5.2, sy + 1.3, z);
+        a = fbm(sx + p.warp * qx, sy + p.warp * qy, z) * Math.PI * 4 * p.curl;
+      } else if (p.field === 'spiral') {
+        const dx = x - w / 2, dy = y - h / 2;
+        a = Math.atan2(dy, dx) + Math.PI / 2 + 0.6 * p.curl + (fbm(sx, sy, z) - 0.5) * 3;
+      } else if (p.field === 'waves') {
+        a = Math.sin(sy * 2.5 + z * 3) * p.curl + (fbm(sx, sy, z) - 0.5) * 2;
+      } else {
+        a = fbm(sx, sy, z) * Math.PI * 4 * p.curl;
+      }
+      // Forces posées au pointeur : tourbillons et puits qui s'additionnent au champ.
+      for (const f of forces) {
+        const dx = x - f.x, dy = y - f.y, d = Math.hypot(dx, dy);
+        if (d > f.r) continue;
+        const k = (1 - d / f.r) ** 2 * f.k;
+        const target = f.mode === 'sink' ? Math.atan2(-dy, -dx) : Math.atan2(dy, dx) + (f.mode === 'cw' ? Math.PI / 2 : -Math.PI / 2);
+        a += Math.atan2(Math.sin(target - a), Math.cos(target - a)) * Math.min(1, k);
+      }
+      if (p.quant > 0) { const s = (Math.PI * 2) / (p.quant * 2); a = Math.round(a / s) * s; }
+      return a;
+    }
+
+    function addForce(q) {
+      forces.push({ x: q.x, y: q.y, r: p.brush, k: p.power, mode: q.shift ? 'sink' : p.spin });
+      if (forces.length > 120) forces.shift();
+    }
+
+    // ——— Masque typographique (texte ou logo importé) ———
+    function buildMask() {
+      const { w, h } = app.size;
+      mask.width = Math.max(1, Math.round(w / 2)); mask.height = Math.max(1, Math.round(h / 2));
+      maskData = null;
+      if (p.maskMode === 'none') return;
+      const W = mask.width, H = mask.height;
+      mctx.clearRect(0, 0, W, H);
+      mctx.fillStyle = '#000';
+      if (p.image) {
+        const img = p.image, k = Math.min(W / img.width, H / img.height) * p.textSize;
+        mctx.drawImage(img, (W - img.width * k) / 2, (H - img.height * k) / 2, img.width * k, img.height * k);
+      } else {
+        const fam = p.font.includes(' ') ? `"${p.font}"` : p.font;
+        let size = H * p.textSize;
+        mctx.font = `900 ${size}px ${fam}, sans-serif`;
+        const tw = mctx.measureText(p.text || ' ').width;
+        if (tw > W * 0.92) size *= (W * 0.92) / tw;
+        mctx.font = `900 ${size}px ${fam}, sans-serif`;
+        mctx.textAlign = 'center'; mctx.textBaseline = 'middle';
+        mctx.fillText(p.text, W / 2, H / 2 + size * 0.05);
+      }
+      maskData = mctx.getImageData(0, 0, W, H).data;
+    }
+    function inMask(x, y) {
+      if (!maskData) return true;
+      const mx = Math.floor(x / 2), my = Math.floor(y / 2);
+      if (mx < 0 || my < 0 || mx >= mask.width || my >= mask.height) return p.maskMode === 'outside';
+      const on = maskData[(my * mask.width + mx) * 4 + 3] > 100;
+      return p.maskMode === 'inside' ? on : !on;
+    }
+
+    // ——— Particules ———
+    function pickColor(q) {
+      if (rand() < p.accentRate) return p.accent;
+      const cols = p.palette, { w, h } = app.size;
+      let t;
+      if (p.colorBy === 'x') t = q.x / w;
+      else if (p.colorBy === 'y') t = q.y / h;
+      else if (p.colorBy === 'angle') t = ((angle(q.x, q.y) / (Math.PI * 2)) % 1 + 1) % 1;
+      else return cols[Math.floor(rand() * cols.length)];
+      return cols[Math.min(cols.length - 1, Math.floor(t * cols.length))];
+    }
     function spawn(q = {}) {
       const { w, h } = app.size;
-      q.x = Math.random() * w; q.y = Math.random() * h;
-      q.life = 50 + Math.random() * 250;
-      const cols = PALETTES[p.palette].colors;
-      q.color = cols[Math.floor(Math.random() * cols.length)];
+      for (let tries = 0; tries < 30; tries++) {
+        if (p.spawn === 'grid') {
+          const n = Math.ceil(Math.sqrt(p.count * w / h)), cw = w / n;
+          const i = Math.floor(rand() * p.count);
+          q.x = (i % n + 0.5 + (rand() - 0.5) * 0.3) * cw; q.y = (Math.floor(i / n) + 0.5 + (rand() - 0.5) * 0.3) * cw;
+        } else if (p.spawn === 'center') {
+          const r = Math.sqrt(rand()) * Math.min(w, h) * 0.18, a = rand() * Math.PI * 2;
+          q.x = w / 2 + Math.cos(a) * r; q.y = h / 2 + Math.sin(a) * r;
+        } else if (p.spawn === 'edges') {
+          const s = rand() * 2 * (w + h);
+          if (s < w) { q.x = s; q.y = 1; } else if (s < 2 * w) { q.x = s - w; q.y = h - 1; } else if (s < 2 * w + h) { q.x = 1; q.y = s - 2 * w; } else { q.x = w - 1; q.y = s - 2 * w - h; }
+        } else { q.x = rand() * w; q.y = rand() * h; }
+        if (inMask(q.x, q.y)) break;
+      }
+      q.life = p.life * (0.4 + rand() * 0.6);
+      q.width = lerp(p.wMin, Math.max(p.wMin, p.wMax), rand() ** 2.2);
+      q.color = pickColor(q);
       return q;
     }
-    function resize() {
+    function resizePool() {
       while (particles.length < p.count) particles.push(spawn());
       particles.length = p.count;
     }
     function reset() {
       const { w, h, dpr } = app.size;
+      rand = app.rng(7);
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      ctx.fillStyle = PALETTES[p.palette].bg;
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = p.bg;
       ctx.fillRect(0, 0, w, h);
       particles = Array.from({ length: p.count }, () => spawn());
     }
 
     app.loop((t, dt) => {
-      const { w, h } = app.size;
+      const { w, h, dpr } = app.size, u = Math.min(w, h) / 800;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       if (p.fade > 0) {
+        ctx.globalCompositeOperation = 'source-over';
         ctx.globalAlpha = p.fade;
-        ctx.fillStyle = PALETTES[p.palette].bg;
+        ctx.fillStyle = p.bg;
         ctx.fillRect(0, 0, w, h);
       }
-      ctx.lineWidth = p.width;
-      ctx.lineCap = 'round';
-      ctx.globalAlpha = 0.55;
-      const sc = p.scale / 1000, k = dt * 60;
-      z += dt * 0.12 * p.drift;
+      ctx.globalCompositeOperation = p.blend;
+      ctx.lineCap = p.cap;
+      ctx.globalAlpha = p.alpha;
+      const k = dt * 60;
+      z += dt * 0.08 * p.drift;
       for (const q of particles) {
-        const a = noise(q.x * sc, q.y * sc, z) * Math.PI * 2 * p.curl;
+        const a = angle(q.x, q.y);
         const px = q.x, py = q.y;
-        q.x += Math.cos(a) * p.step * k;
-        q.y += Math.sin(a) * p.step * k;
+        q.x += Math.cos(a) * p.step * u * k;
+        q.y += Math.sin(a) * p.step * u * k;
+        q.life -= k;
+        if (q.life < 0 || q.x < 0 || q.x > w || q.y < 0 || q.y > h || !inMask(q.x, q.y)) { spawn(q); continue; }
+        ctx.lineWidth = q.width * u;
         ctx.strokeStyle = q.color;
         ctx.beginPath(); ctx.moveTo(px, py); ctx.lineTo(q.x, q.y); ctx.stroke();
-        if (--q.life < 0 || q.x < 0 || q.x > w || q.y < 0 || q.y > h) spawn(q);
       }
+      ctx.globalCompositeOperation = 'source-over';
       ctx.globalAlpha = 1;
     });
 
     reseed();
+    buildMask();
     reset();
   </script>
 </body>

@@ -1,11 +1,12 @@
 name: Session Cursor
 
 # Fenêtre de 24 h avant le reset mensuel de Cursor (le 12) : un passage toutes
-# les 3 h le 11 (UTC). Chaque passage enchaîne les outils jusqu'à ce que Cursor
-# refuse faute de quota, ou jusqu'à la limite de durée du job.
+# les 6 h le 11 (UTC), chacun aussi long que GitHub le permet (6 h). Chaque passage
+# enchaîne les outils jusqu'à ce que Cursor refuse faute de quota. Aucune limite de
+# temps par outil : la qualité prime sur la quantité.
 on:
   schedule:
-    - cron: '0 5,8,11,14,17,20,23 11 * *'
+    - cron: '0 0,6,12,18 11 * *'
   workflow_dispatch:
     inputs:
       max_tools:
@@ -27,7 +28,7 @@ permissions:
 jobs:
   build-tools:
     runs-on: ubuntu-latest
-    timeout-minutes: 175
+    timeout-minutes: 355
     env:
       CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
       GH_TOKEN: ${{ secrets.AGENT_GITHUB_TOKEN }}
@@ -69,7 +70,7 @@ jobs:
             echo "::group::Outil $i ($model)"
             set +e
             "$CLI" -p --force --model "$model" --output-format text \
-              "Lis AGENTS.md et réalise UNE itération complète de la boucle de travail (étapes 1 à 8) en tant qu'agent 'cursor'. Termine quand la PR est ouverte, ou supprime le dossier si l'outil ne peut pas être fini." \
+              "Lis AGENTS.md puis references/README.md, et réalise UNE itération complète de la boucle de travail (étapes 1 à 8) en tant qu'agent 'cursor', en suivant toute la méthode de la section « Prendre son temps ». Ne te presse pas : utilise autant de temps et de tokens qu'il faut pour un outil excellent, avec au moins trois tours de critique visuelle. Termine quand la PR est ouverte, ou supprime le dossier si l'outil ne peut pas être fini." \
               2>&1 | tee "run-$i.log"
             code=${PIPESTATUS[0]}
             set -e

@@ -10,90 +10,96 @@
   <canvas></canvas>
   <script src="../../assets/ui/atelier.js"></script>
   <script>
+    // Relief de bruit (fBM + crêtes, déformé) qu'on sculpte au pointeur, dans lequel on peut graver
+    // un texte, et dont on extrait les courbes de niveau (marching squares). Trois rendus : carte
+    // ombrée, lignes seules, aplats posterisés. Le relief évolue et la mer monte et descend.
     const canvas = document.querySelector('canvas');
     const ctx = canvas.getContext('2d');
-    let raf = 0;
-    const requestDraw = () => { if (!raf) raf = requestAnimationFrame(() => { raf = 0; draw(); }); };
+    const relief = document.createElement('canvas');
+    const rctx = relief.getContext('2d');
+    const type = document.createElement('canvas');
+    const tctx = type.getContext('2d', { willReadFrequently: true });
+    let seed = 1, field = null, sculpt = null, typeField = null, range = null, dirty = true, refresh = false;
 
     const app = Atelier.app({
       stage: canvas,
-      seed: 184293,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.1, vignette: 0.15 },
+      hint: 'Glissez pour soulever le relief · Maj pour creuser · molette pour la taille du pinceau',
       params: {
         'Relief': {
-          relief: { type: 'segmented', label: 'Type', value: 'melange', options: { melange: 'Mélange', collines: 'Collines', cretes: 'Crêtes' } },
-          scale: { type: 'range', label: 'Échelle', min: 0.8, max: 3.2, step: 0.05, value: 1.7 },
-          detail: { type: 'range', label: 'Détail', min: 1, max: 6, step: 1, value: 5 },
-          warp: { type: 'range', label: 'Déformation', min: 0, max: 1.4, step: 0.02, value: 0.7 },
-          sea: { type: 'range', label: 'Niveau mer', min: 0.15, max: 0.75, step: 0.01, value: 0.46 },
+          relief: { type: 'segmented', label: 'Type', value: 'melange', options: { melange: 'Mélange', collines: 'Collines', cretes: 'Crêtes', terrasses: 'Terrasses' } },
+          scale: { type: 'range', label: 'Échelle', min: 0.6, max: 5, step: 0.05, value: 1.7 },
+          detail: { type: 'range', label: 'Détail', min: 1, max: 6, step: 1, value: 4 },
+          warp: { type: 'range', label: 'Déformation', min: 0, max: 2, step: 0.02, value: 0.32 },
+          amp: { type: 'range', label: 'Amplitude', min: 0, max: 1, step: 0.01, value: 1 },
+          drift: { type: 'range', label: 'Évolution', min: 0, max: 1, step: 0.01, value: 0.12 },
+          res: { type: 'segmented', label: 'Précision', options: { 0.6: 'Fluide', 1: 'Normale', 1.8: 'Fine' }, value: 1 },
+        },
+        'Eau': {
+          sea: { type: 'range', label: 'Niveau', min: 0, max: 0.9, step: 0.01, value: 0.42 },
+          tide: { type: 'range', label: 'Marée', min: 0, max: 0.2, step: 0.005, value: 0.04 },
+          tideSpeed: { type: 'range', label: 'Rythme', min: 0.02, max: 1, step: 0.01, value: 0.12 },
         },
         'Courbes': {
-          curves: { type: 'range', label: 'Nombre', min: 6, max: 28, step: 1, value: 16 },
-          stroke: { type: 'range', label: 'Trait', min: 0.4, max: 3.5, step: 0.1, value: 1.2 },
-          shade: { type: 'range', label: 'Ombrage', min: 0, max: 1, step: 0.01, value: 0.78 },
+          style: { type: 'segmented', label: 'Rendu', options: { map: 'Carte', lines: 'Lignes', bands: 'Aplats' }, value: 'map' },
+          curves: { type: 'range', label: 'Nombre', min: 4, max: 60, step: 1, value: 18 },
+          major: { type: 'range', label: 'Maîtresse tous les', min: 2, max: 10, step: 1, value: 5 },
+          stroke: { type: 'range', label: 'Trait', min: 0.2, max: 6, step: 0.1, value: 1.2 },
+          shade: { type: 'range', label: 'Ombrage', min: 0, max: 1, step: 0.01, value: 0.75, show: (p) => p.style !== 'lines' },
+          light: { type: 'range', label: 'Lumière', min: 0, max: 360, step: 1, value: 315, show: (p) => p.style !== 'lines' },
           labels: { type: 'toggle', label: 'Cotes', value: true },
         },
         'Couleur': {
-          palette: { type: 'select', label: 'Palette', value: 'atlas', options: { atlas: 'Atlas', glacier: 'Glacier', desert: 'Désert', night: 'Nuit', ink: 'Encre' } },
+          paper: { type: 'color', label: 'Fond', value: '#e7d3b0' },
+          ink: { type: 'color', label: 'Encre', value: '#2a2118' },
+          land: { type: 'palette', label: 'Terres', value: ['#e9d8b4', '#7d9c4e', '#c6ac58', '#a6764e', '#f7f5f0'] },
+          deep: { type: 'color', label: 'Fond marin', value: '#0b3a46' },
+          shallow: { type: 'color', label: 'Haut-fond', value: '#8ccec4' },
+          waterInk: { type: 'color', label: 'Lignes d\'eau', value: '#e4f4f0' },
+        },
+        'Matière de marque': {
+          text: { type: 'text', label: 'Texte gravé', value: '', placeholder: 'ex. ATELIER' },
+          font: { type: 'font', label: 'Typo', options: { 'Inter': 'Inter', 'Georgia': 'Serif', 'Impact': 'Condensée' }, value: 'Inter', show: (p) => !!p.text },
+          textHeight: { type: 'range', label: 'Hauteur', min: -1, max: 1, step: 0.01, value: 0.45, show: (p) => !!p.text },
+          textSoft: { type: 'range', label: 'Douceur', min: 0, max: 1, step: 0.01, value: 0.35, show: (p) => !!p.text },
+        },
+        'Pinceau': {
+          brush: { type: 'range', label: 'Rayon', min: 0.02, max: 0.4, step: 0.005, value: 0.1 },
+          force: { type: 'range', label: 'Force', min: 0.005, max: 0.2, step: 0.005, value: 0.04 },
+          flatten: { type: 'button', label: 'Aplanir les retouches', action: () => { sculpt?.fill(0); dirty = true; } },
         },
       },
       presets: {
-        'Atlas': { palette: 'atlas', relief: 'melange', scale: 1.7, curves: 16, shade: 0.78, labels: true },
-        'Glacier': { palette: 'glacier', relief: 'cretes', scale: 1.2, curves: 22, shade: 0.9, labels: false },
-        'Dunes': { palette: 'desert', relief: 'collines', scale: 2.6, curves: 24, shade: 0.5, warp: 1.2, labels: false },
-        'Nuit': { palette: 'night', relief: 'melange', scale: 1.5, curves: 14, shade: 0.6, labels: true },
-        'Gravure': { palette: 'ink', relief: 'cretes', scale: 2, curves: 28, shade: 0.2, stroke: 0.8, labels: false },
+        'Atlas': {},
+        'Glacier': { relief: 'cretes', scale: 1.2, curves: 26, shade: 0.9, labels: false, paper: '#e7f1f4', ink: '#1a3144', land: ['#c6dce4', '#e8f0f2', '#ffffff'], deep: '#071422', shallow: '#82b8cc', waterInk: '#d7f1f8', sea: 0.3 },
+        'Lignes': { style: 'lines', relief: 'collines', scale: 1.6, curves: 42, major: 6, stroke: 0.9, labels: false, paper: '#0e0e10', ink: '#ff4d1a', waterInk: '#3d2bff', sea: 0.35, tide: 0.08, drift: 0.2 },
+        'Aplats': { style: 'bands', relief: 'collines', scale: 1.4, curves: 9, stroke: 1.6, shade: 0.35, labels: false, paper: '#f4efe6', ink: '#141414', land: ['#ff4d1a', '#ffb000', '#f4efe6', '#3d2bff'], deep: '#141414', shallow: '#3d2bff', waterInk: '#f4efe6', sea: 0.28 },
+        'Nuit': { relief: 'melange', curves: 16, shade: 0.6, paper: '#14182e', ink: '#f0d48a', land: ['#3a4c96', '#c6a05a', '#f6ecd2'], deep: '#07091a', shallow: '#2a3878', waterInk: '#a9bbee' },
+        'Terrasses': { relief: 'terrasses', style: 'bands', scale: 2, curves: 14, shade: 0.8, labels: false, paper: '#efe7d8', ink: '#3b2a1e', land: ['#d9c3a0', '#b98b5e', '#8a5a3c', '#efe7d8'], deep: '#2b4a52', shallow: '#7aa3a0', waterInk: '#efe7d8', sea: 0.2 },
+        'Logotype': { style: 'lines', text: 'ATELIER', textHeight: 0.5, textSoft: 0.45, amp: 0.4, detail: 2, scale: 2.4, warp: 0.4, curves: 48, major: 8, stroke: 0.8, labels: false, paper: '#f4efe6', ink: '#141414', waterInk: '#ff4d1a', sea: 0.36, tide: 0.03 },
       },
-      notes: "Le PNG garde l'ombrage, le SVG ne contient que les courbes.",
-      export: { png: true, svg: () => svgMarkup(canvas.width, canvas.height), name: 'topographie' },
-      onChange: requestDraw,
-      onSeed: (s) => { seed = s; requestDraw(); },
-      onResize: requestDraw,
+      export: { svg: () => svgMarkup(), name: 'topographie' },
+      pointer: {
+        down: (q) => paint(q),
+        drag: (q) => paint(q),
+        wheel: (q, dy) => app.set('brush', Math.max(0.02, Math.min(0.4, p.brush * (dy > 0 ? 0.9 : 1.1)))),
+      },
+      onChange(key) {
+        if (['text', 'font', 'textSoft', 'res', '*'].includes(key)) buildType();
+        if (key === 'res' || key === '*') sculpt = null;
+        dirty = true;
+      },
+      onSeed: (s) => { seed = s; dirty = true; },
+      onResize: () => { sculpt = null; buildType(); dirty = true; },
     });
     const p = app.params;
-    let seed = app.seed;
-
-    const relief = document.createElement('canvas');
-    const rctx = relief.getContext('2d');
+    seed = app.seed;
 
     const F2 = 0.5 * (Math.sqrt(3) - 1);
     const G2 = (3 - Math.sqrt(3)) / 6;
     const GRAD = [[1, 1], [-1, 1], [1, -1], [-1, -1], [1, 0], [-1, 0], [0, 1], [0, -1]];
-
-    const PALETTES = {
-      atlas: {
-        below: [[0, 7, 32, 44], [0.5, 14, 86, 98], [1, 140, 206, 196]],
-        above: [[0, 236, 220, 186], [0.14, 118, 156, 74], [0.38, 198, 172, 88], [0.6, 166, 118, 78], [0.8, 214, 206, 196], [1, 250, 248, 244]],
-        ink: '#2a2118', water: '#e4f4f0', coast: '#1a140e', paper: '#e7d3b0',
-        label: '#241c14', halo: 'rgba(255,248,236,.92)', waterLabel: '#f4fffc', waterHalo: 'rgba(6,32,40,.75)'
-      },
-      glacier: {
-        below: [[0, 7, 20, 34], [0.55, 22, 64, 96], [1, 130, 184, 204]],
-        above: [[0, 198, 220, 228], [0.4, 232, 240, 242], [1, 255, 255, 255]],
-        ink: '#1a3144', water: '#d7f1f8', coast: '#0e2433', paper: '#e7f1f4',
-        label: '#163044', halo: 'rgba(244,250,252,.92)', waterLabel: '#f5fcff', waterHalo: 'rgba(8,24,40,.7)'
-      },
-      desert: {
-        below: [[0, 122, 68, 46], [1, 214, 156, 116]],
-        above: [[0, 232, 196, 150], [0.4, 240, 214, 176], [0.75, 246, 230, 204], [1, 252, 248, 240]],
-        ink: '#5c3218', water: '#f6e6d4', coast: '#4a2816', paper: '#f0d8b4',
-        label: '#5c3218', halo: 'rgba(255,246,232,.92)', waterLabel: '#fff6ee', waterHalo: 'rgba(80,36,20,.65)'
-      },
-      night: {
-        below: [[0, 7, 9, 26], [1, 42, 56, 120]],
-        above: [[0, 58, 76, 150], [0.42, 198, 160, 90], [1, 246, 236, 210]],
-        ink: '#f0d48a', water: '#a9bbee', coast: '#ffe7a8', paper: '#14182e',
-        label: '#f6ecd2', halo: 'rgba(10,12,28,.78)', waterLabel: '#e4ecff', waterHalo: 'rgba(8,10,24,.7)'
-      },
-      ink: {
-        below: [[0, 168, 176, 172], [1, 214, 218, 214]],
-        above: [[0, 228, 222, 210], [0.5, 240, 234, 226], [1, 248, 245, 240]],
-        ink: '#1c1915', water: '#5e6a66', coast: '#12110e', paper: '#efeae2',
-        label: '#1c1915', halo: 'rgba(247,244,238,.92)', waterLabel: '#1c2422', waterHalo: 'rgba(236,240,238,.88)'
-      }
-    };
-
-    let cache = { key: '', H: null, cols: 0, rows: 0 };
-    
 
     function hash(ix, iy, s) {
       let n = Math.imul(ix | 0, 374761393) + Math.imul(iy | 0, 668265263) + Math.imul(s | 0, 1442695041);
@@ -158,98 +164,6 @@
         freq *= 2.07;
       }
       return sum / norm;
-    }
-
-    function sampleRelief(x, y, oct, warp, type) {
-      const wx = simplex(x * 0.55 + 1.7, y * 0.55, seed + 91);
-      const wy = simplex(x * 0.55 - 2.2, y * 0.55 + 4.4, seed + 157);
-      const px = x + wx * warp;
-      const py = y + wy * warp;
-      if (type === 'collines') return fbm(px, py, seed, oct);
-      if (type === 'cretes') return ridged(px, py, seed + 11, oct);
-      return fbm(px, py, seed, oct) * 0.58 + ridged(px, py, seed + 11, oct) * 0.42;
-    }
-
-    function ramp(stops, t) {
-      if (t <= stops[0][0]) return stops[0];
-      if (t >= stops[stops.length - 1][0]) return stops[stops.length - 1];
-      let i = 1;
-      while (stops[i][0] < t) i++;
-      const a = stops[i - 1], b = stops[i];
-      const f = (t - a[0]) / (b[0] - a[0] || 1);
-      return [0, a[1] + (b[1] - a[1]) * f, a[2] + (b[2] - a[2]) * f, a[3] + (b[3] - a[3]) * f];
-    }
-
-    function clampByte(v) {
-      return v < 0 ? 0 : v > 255 ? 255 : v | 0;
-    }
-
-    function getField(w, h) {
-      const scale = p.scale;
-      const oct = p.detail;
-      const warp = p.warp;
-      const type = p.relief;
-      const aspect = w / Math.max(1, h);
-      const target = 54000;
-      let cols = Math.max(64, Math.round(Math.sqrt(target * aspect)));
-      let rows = Math.max(64, Math.round(target / cols));
-      const key = [seed, scale, oct, warp, type, cols, rows].join('|');
-      if (cache.key === key) return cache;
-      const H = new Float32Array(cols * rows);
-      let min = Infinity, max = -Infinity;
-      for (let j = 0; j < rows; j++) {
-        const v = (j / (rows - 1) - 0.5) * scale;
-        for (let i = 0; i < cols; i++) {
-          const u = (i / (cols - 1) - 0.5) * scale * aspect;
-          const value = sampleRelief(u, v, oct, warp, type);
-          H[j * cols + i] = value;
-          if (value < min) min = value;
-          if (value > max) max = value;
-        }
-      }
-      const span = max - min || 1;
-      for (let i = 0; i < H.length; i++) H[i] = (H[i] - min) / span;
-      cache = { key, H, cols, rows };
-      return cache;
-    }
-
-    function paintRelief(H, cols, rows, sea, palette, shadeAmt) {
-      if (relief.width !== cols || relief.height !== rows) {
-        relief.width = cols;
-        relief.height = rows;
-      }
-      const img = rctx.createImageData(cols, rows);
-      const d = img.data;
-      const lx = -0.48, ly = -0.62, lz = 0.62;
-      const linv = 1 / Math.hypot(lx, ly, lz);
-      for (let j = 0; j < rows; j++) {
-        for (let i = 0; i < cols; i++) {
-          const h = H[j * cols + i];
-          const hl = H[j * cols + (i > 0 ? i - 1 : i)];
-          const hr = H[j * cols + (i + 1 < cols ? i + 1 : i)];
-          const ht = H[(j > 0 ? j - 1 : j) * cols + i];
-          const hb = H[(j + 1 < rows ? j + 1 : j) * cols + i];
-          const water = h < sea;
-          const damp = water ? 0.32 : 1;
-          const sx = (hr - hl) * cols * damp;
-          const sy = (hb - ht) * rows * damp;
-          const dz = 1.45;
-          const inv = 1 / Math.hypot(sx, sy, dz);
-          const nd = Math.max(0, (-sx * inv) * lx * linv + (-sy * inv) * ly * linv + (dz * inv) * lz * linv);
-          const lit = 0.4 + 0.6 * nd;
-          const f = (1 - shadeAmt) + shadeAmt * lit;
-          const warm = shadeAmt * (f - 0.76);
-          const base = water
-            ? ramp(palette.below, sea > 0.001 ? h / sea : 0)
-            : ramp(palette.above, sea < 0.999 ? (h - sea) / (1 - sea) : 1);
-          const o = (j * cols + i) * 4;
-          d[o] = clampByte(base[1] * f + warm * 20);
-          d[o + 1] = clampByte(base[2] * f + warm * 6);
-          d[o + 2] = clampByte(base[3] * f - warm * 12);
-          d[o + 3] = 255;
-        }
-      }
-      rctx.putImageData(img, 0, 0);
     }
 
     function smoothPoly(poly, closed) {
@@ -355,35 +269,8 @@
         else if (f > 1) f = 1;
         const x = (kind === 'h' ? i + f : i) / (cols - 1) * w;
         const y = (kind === 'h' ? j : j + f) / (rows - 1) * h;
-        return { k: kind + i + '_' + j, x, y };
+        return { k: (kind === 'h' ? 0 : 1) + 2 * (j * cols + i), x, y };
       }
-    }
-
-    function trace(lines) {
-      ctx.beginPath();
-      for (const { poly, closed } of lines) {
-        ctx.moveTo(poly[0][0], poly[0][1]);
-        for (let i = 1; i < poly.length; i++) ctx.lineTo(poly[i][0], poly[i][1]);
-        if (closed) ctx.closePath();
-      }
-    }
-
-    function strokeLines(lines, color, width, alpha, underlay) {
-      if (!lines.length) return;
-      trace(lines);
-      ctx.lineJoin = 'round';
-      ctx.lineCap = 'round';
-      if (underlay) {
-        ctx.globalAlpha = 0.35;
-        ctx.strokeStyle = underlay;
-        ctx.lineWidth = width + Math.max(1, width * 0.85);
-        ctx.stroke();
-      }
-      ctx.globalAlpha = alpha;
-      ctx.strokeStyle = color;
-      ctx.lineWidth = width;
-      ctx.stroke();
-      ctx.globalAlpha = 1;
     }
 
     function labelAnchor(poly, margin, w, h) {
@@ -408,84 +295,200 @@
       return best;
     }
 
-    function drawLabels(items, palette, dpr, w, h) {
-      const placed = [];
-      const minDist = 92 * dpr;
-      const margin = 64 * dpr;
-      ctx.font = `600 ${Math.round(12.5 * dpr)}px system-ui, sans-serif`;
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.lineJoin = 'round';
-      for (const item of items) {
-        for (const line of item.lines) {
-          if (line.len < 110 * dpr) continue;
-          const spot = labelAnchor(line.poly, margin, w, h);
-          if (!spot) continue;
-          if (placed.some((p) => Math.hypot(p[0] - spot.x, p[1] - spot.y) < minDist)) continue;
-          placed.push([spot.x, spot.y]);
-          const meters = Math.round((item.level - item.sea) * 900);
-          const text = meters + ' m';
-          const onWater = item.level < item.sea - 0.0001;
-          ctx.save();
-          ctx.translate(spot.x, spot.y);
-          ctx.rotate(spot.ang);
-          ctx.lineWidth = 4 * dpr;
-          ctx.strokeStyle = onWater ? palette.waterHalo : palette.halo;
-          ctx.strokeText(text, 0, 0);
-          ctx.fillStyle = onWater ? palette.waterLabel : palette.label;
-          ctx.fillText(text, 0, 0);
-          ctx.restore();
+
+    // ——— Champ de hauteur ———
+    function dims() {
+      const { w, h } = app.size, aspect = w / Math.max(1, h);
+      const target = 20000 * +p.res;
+      const cols = Math.max(48, Math.round(Math.sqrt(target * aspect)));
+      return { cols, rows: Math.max(48, Math.round(target / cols)) };
+    }
+
+    function sampleRelief(x, y, t) {
+      const oct = p.detail;
+      const wx = simplex(x * 0.55 + 1.7 + t * 0.6, y * 0.55, seed + 91);
+      const wy = simplex(x * 0.55 - 2.2, y * 0.55 + 4.4 - t * 0.6, seed + 157);
+      const px = x + wx * p.warp + t * 0.15, py = y + wy * p.warp;
+      if (p.relief === 'collines') return (fbm(px, py, seed, oct) + 1) / 2;
+      if (p.relief === 'cretes') return ridged(px, py, seed + 11, oct);
+      const m = ((fbm(px, py, seed, oct) + 1) / 2) * 0.58 + ridged(px, py, seed + 11, oct) * 0.42;
+      if (p.relief === 'terrasses') { const k = 7; const f = m * k, i = Math.floor(f), r = f - i; return (i + r ** 6) / k; }
+      return m;
+    }
+
+    function buildField(t) {
+      const { cols, rows } = dims(), aspect = app.size.w / Math.max(1, app.size.h);
+      if (!field || field.cols !== cols || field.rows !== rows) field = { cols, rows, H: new Float32Array(cols * rows), raw: new Float32Array(cols * rows) };
+      if (!sculpt || sculpt.length !== cols * rows) sculpt = new Float32Array(cols * rows);
+      const { H, raw } = field;
+      let min = Infinity, max = -Infinity;
+      for (let j = 0; j < rows; j++) {
+        const v = (j / (rows - 1) - 0.5) * p.scale;
+        for (let i = 0; i < cols; i++) {
+          const u = (i / (cols - 1) - 0.5) * p.scale * aspect;
+          const val = sampleRelief(u, v, t);
+          raw[j * cols + i] = val;
+          if (val < min) min = val;
+          if (val > max) max = val;
         }
+      }
+      // Normalisation lissée dans le temps : pas de pompage quand le relief évolue.
+      if (!range || dirty) range = { min, max }; else { range.min += (min - range.min) * 0.05; range.max += (max - range.max) * 0.05; }
+      const span = range.max - range.min || 1;
+      const tf = typeField && typeField.length === H.length ? typeField : null;
+      for (let k = 0; k < H.length; k++) {
+        let v = 0.5 + ((raw[k] - range.min) / span - 0.5) * p.amp + sculpt[k];
+        if (tf) v += tf[k] * p.textHeight;
+        H[k] = Math.max(0, Math.min(1, v));
       }
     }
 
-    function classify(H, cols, rows, w, h, sea) {
-      const n = p.curves;
-      const step = 1 / n;
-      const groups = { waterMinor: [], waterMajor: [], landMinor: [], landMajor: [], coast: [] };
-      const labels = [];
+    // Texte gravé dans le relief : rendu flou de la typo, ajouté à la hauteur.
+    function buildType() {
+      typeField = null;
+      if (!p.text) return;
+      const { cols, rows } = dims();
+      type.width = cols; type.height = rows;
+      tctx.clearRect(0, 0, cols, rows);
+      const fam = p.font.includes(' ') ? `"${p.font}"` : p.font;
+      let size = rows * 0.5;
+      tctx.font = `900 ${size}px ${fam}, sans-serif`;
+      const tw = tctx.measureText(p.text).width;
+      if (tw > cols * 0.86) size *= (cols * 0.86) / tw;
+      tctx.filter = `blur(${(p.textSoft * size * 0.08).toFixed(2)}px)`;
+      tctx.font = `900 ${size}px ${fam}, sans-serif`;
+      tctx.textAlign = 'center'; tctx.textBaseline = 'middle';
+      tctx.fillStyle = '#fff';
+      tctx.fillText(p.text, cols / 2, rows / 2 + size * 0.04);
+      tctx.filter = 'none';
+      const d = tctx.getImageData(0, 0, cols, rows).data;
+      typeField = new Float32Array(cols * rows);
+      for (let k = 0; k < typeField.length; k++) typeField[k] = d[k * 4 + 3] / 255;
+    }
+
+    // Pinceau : bosse gaussienne ajoutée (ou retirée avec Maj) au champ de retouches.
+    function paint(q) {
+      if (!field || !sculpt) return;
+      const { cols, rows } = field, { w, h } = app.size;
+      const cx = (q.x / w) * (cols - 1), cy = (q.y / h) * (rows - 1);
+      const r = p.brush * Math.max(cols, rows), sign = q.shift ? -1 : 1;
+      const r2 = r * r;
+      for (let j = Math.max(0, Math.floor(cy - r * 2)); j < Math.min(rows, Math.ceil(cy + r * 2)); j++) {
+        for (let i = Math.max(0, Math.floor(cx - r * 2)); i < Math.min(cols, Math.ceil(cx + r * 2)); i++) {
+          const d2 = (i - cx) ** 2 + (j - cy) ** 2;
+          sculpt[j * cols + i] += sign * p.force * Math.exp(-d2 / r2);
+        }
+      }
+      refresh = true;
+    }
+
+    // ——— Couleurs ———
+    const rgb = (hex) => { const n = parseInt(hex.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; };
+    function rampOf(list, t) {
+      const c = list.map(rgb), f = Math.max(0, Math.min(1, t)) * (c.length - 1), i = Math.min(c.length - 2, Math.floor(f)), u = f - i;
+      if (c.length === 1) return c[0];
+      return [0, 1, 2].map((k) => c[i][k] + (c[i + 1][k] - c[i][k]) * u);
+    }
+
+    function paintRelief(sea) {
+      const { H, cols, rows } = field;
+      if (relief.width !== cols || relief.height !== rows) { relief.width = cols; relief.height = rows; }
+      const img = rctx.createImageData(cols, rows), d = img.data;
+      const la = (p.light * Math.PI) / 180, lx = Math.cos(la), ly = Math.sin(la), lz = 0.7;
+      const linv = 1 / Math.hypot(lx, ly, lz);
+      const deep = rgb(p.deep), shallow = rgb(p.shallow), paper = rgb(p.paper);
+      const bands = p.style === 'bands', n = p.curves;
+      for (let j = 0; j < rows; j++) for (let i = 0; i < cols; i++) {
+        const k = j * cols + i;
+        let hgt = H[k];
+        if (bands) hgt = Math.floor(hgt * n) / n + 0.5 / n;
+        const water = H[k] < sea;
+        const hl = H[j * cols + (i > 0 ? i - 1 : i)], hr = H[j * cols + (i + 1 < cols ? i + 1 : i)];
+        const ht = H[(j > 0 ? j - 1 : j) * cols + i], hb = H[(j + 1 < rows ? j + 1 : j) * cols + i];
+        const damp = water ? 0.3 : 1;
+        const sx = (hr - hl) * cols * damp, sy = (hb - ht) * rows * damp, dz = 1.45;
+        const inv = 1 / Math.hypot(sx, sy, dz);
+        const nd = Math.max(0, ((-sx * lx - sy * ly) * inv + dz * inv * lz) * linv);
+        const f = p.style === 'lines' ? 1 : (1 - p.shade) + p.shade * (0.35 + 0.75 * nd);
+        let c;
+        if (water) { const u = sea > 0 ? hgt / sea : 0; c = [0, 1, 2].map((m) => deep[m] + (shallow[m] - deep[m]) * u); }
+        else c = rampOf(p.land, sea < 1 ? (hgt - sea) / (1 - sea) : 1);
+        if (p.style === 'lines') c = paper;
+        const o = k * 4;
+        d[o] = c[0] * f; d[o + 1] = c[1] * f; d[o + 2] = c[2] * f; d[o + 3] = 255;
+      }
+      rctx.putImageData(img, 0, 0);
+    }
+
+    function classify(sea, w, h) {
+      const { H, cols, rows } = field, n = p.curves, step = 1 / n;
+      const groups = { waterMinor: [], waterMajor: [], landMinor: [], landMajor: [], coast: [] }, labels = [];
       for (let k = 1; k < n; k++) {
         const level = k * step;
-        if (Math.abs(level - sea) < step * 0.55) continue;
+        if (Math.abs(level - sea) < step * 0.4) continue;
         const lines = contours(H, cols, rows, w, h, level);
-        const major = k % 5 === 0;
-        const water = level < sea;
+        const major = k % p.major === 0, water = level < sea;
         groups[water ? (major ? 'waterMajor' : 'waterMinor') : (major ? 'landMajor' : 'landMinor')].push(...lines);
-        if (major) labels.push({ lines, level, sea });
+        if (major) labels.push({ lines, level });
       }
-      const coast = contours(H, cols, rows, w, h, sea);
-      groups.coast = coast;
-      labels.push({ lines: coast, level: sea, sea });
+      if (sea > 0.001) { groups.coast = contours(H, cols, rows, w, h, sea); labels.push({ lines: groups.coast, level: sea }); }
       return { groups, labels };
     }
 
-    function draw() {
+    function strokeLines(lines, color, width, alpha) {
+      if (!lines.length) return;
+      ctx.beginPath();
+      for (const { poly, closed } of lines) {
+        ctx.moveTo(poly[0][0], poly[0][1]);
+        for (let i = 1; i < poly.length; i++) ctx.lineTo(poly[i][0], poly[i][1]);
+        if (closed) ctx.closePath();
+      }
+      ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+      ctx.globalAlpha = alpha; ctx.strokeStyle = color; ctx.lineWidth = width;
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+
+    function drawLabels(items, sea, u, w, h) {
+      const placed = [], fs = Math.round(11 * u);
+      ctx.font = `600 ${fs}px Inter, system-ui, sans-serif`;
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      for (const item of items) for (const line of item.lines) {
+        if (line.len < 110 * u) continue;
+        const spot = labelAnchor(line.poly, 56 * u, w, h);
+        if (!spot || placed.some((q) => Math.hypot(q[0] - spot.x, q[1] - spot.y) < 96 * u)) continue;
+        placed.push([spot.x, spot.y]);
+        const text = `${Math.round((item.level - sea) * 900)} m`;
+        ctx.save();
+        ctx.translate(spot.x, spot.y); ctx.rotate(spot.ang);
+        ctx.lineWidth = 4 * u; ctx.strokeStyle = p.paper; ctx.strokeText(text, 0, 0);
+        ctx.fillStyle = item.level < sea ? p.waterInk : p.ink; ctx.fillText(text, 0, 0);
+        ctx.restore();
+      }
+    }
+
+    let fieldTime = -1;
+    function render(t) {
       const w = canvas.width, h = canvas.height;
       if (w < 2 || h < 2) return;
+      const ft = t * p.drift * 0.25;
+      if (dirty || refresh || (p.drift > 0 && Math.abs(ft - fieldTime) > 1e-4) || !field) { buildField(ft); fieldTime = ft; }
+      dirty = false; refresh = false;
+      const sea = Math.max(0, Math.min(0.98, p.sea + Math.sin(t * Math.PI * 2 * p.tideSpeed) * p.tide));
       ctx.setTransform(1, 0, 0, 1, 0, 0);
-      ctx.globalAlpha = 1;
-      const { H, cols, rows } = getField(w, h);
-      const sea = Math.min(0.98, Math.max(0.02, p.sea || 0.46));
-      const palette = PALETTES[p.palette] || PALETTES.atlas;
-      paintRelief(H, cols, rows, sea, palette, p.shade || 0);
-      ctx.imageSmoothingEnabled = true;
-      ctx.imageSmoothingQuality = 'high';
+      paintRelief(sea);
+      ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high';
       ctx.drawImage(relief, 0, 0, w, h);
-      const g = ctx.createRadialGradient(w * 0.5, h * 0.46, Math.min(w, h) * 0.2, w * 0.5, h * 0.5, Math.max(w, h) * 0.72);
-      g.addColorStop(0, 'rgba(0,0,0,0)');
-      g.addColorStop(1, 'rgba(0,0,0,0.14)');
-      ctx.fillStyle = g;
-      ctx.fillRect(0, 0, w, h);
-
-      const dpr = app.size.dpr;
-      const base = (p.stroke || 1) * dpr;
-      const { groups, labels } = classify(H, cols, rows, w, h, sea);
-      strokeLines(groups.waterMinor, palette.water, base * 0.6, 0.42);
-      strokeLines(groups.waterMajor, palette.water, base * 1.15, 0.82, 'rgba(0,0,0,.25)');
-      strokeLines(groups.landMinor, palette.ink, base * 0.72, 0.55);
-      strokeLines(groups.landMajor, palette.ink, base * 1.6, 0.95, 'rgba(255,250,242,.55)');
-      strokeLines(groups.coast, palette.coast, base * 2.4, 1, 'rgba(255,248,236,.45)');
-      if (p.labels) drawLabels(labels, palette, dpr, w, h);
+      const u = Math.min(w, h) / 800, base = p.stroke * u;
+      const { groups, labels } = classify(sea, w, h);
+      const lines = p.style === 'lines';
+      strokeLines(groups.waterMinor, p.waterInk, base * 0.6, lines ? 0.7 : 0.45);
+      strokeLines(groups.waterMajor, p.waterInk, base * 1.2, 0.9);
+      strokeLines(groups.landMinor, p.ink, base * 0.75, lines ? 0.85 : 0.55);
+      strokeLines(groups.landMajor, p.ink, base * 1.7, 1);
+      strokeLines(groups.coast, lines ? p.waterInk : p.ink, base * 2.4, 1);
+      if (p.labels) drawLabels(labels, sea, u, w, h);
+      app.finish(ctx);
     }
 
     function pathData(lines) {
@@ -498,25 +501,28 @@
       return d;
     }
 
-    function svgMarkup(w, h) {
-      const { H, cols, rows } = getField(w, h);
-      const sea = Math.min(0.98, Math.max(0.02, p.sea || 0.46));
-      const palette = PALETTES[p.palette] || PALETTES.atlas;
-      const { groups } = classify(H, cols, rows, w, h, sea);
-      const sw = p.stroke || 1;
-      const group = (lines, color, width, opacity) =>
-        lines.length ? `<path d="${pathData(lines)}" fill="none" stroke="${color}" stroke-width="${width}" stroke-opacity="${opacity}" stroke-linecap="round" stroke-linejoin="round"/>` : '';
-      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">` +
-        `<rect width="${w}" height="${h}" fill="${palette.paper}"/>` +
-        group(groups.waterMinor, palette.water, sw * 0.6, 0.7) +
-        group(groups.waterMajor, palette.water, sw * 1.15, 0.9) +
-        group(groups.landMinor, palette.ink, sw * 0.72, 0.7) +
-        group(groups.landMajor, palette.ink, sw * 1.6, 1) +
-        group(groups.coast, palette.coast, sw * 2.4, 1) +
-        `</svg>`;
+    function svgMarkup() {
+      const w = canvas.width, h = canvas.height, u = Math.min(w, h) / 800, sw = p.stroke * u;
+      const sea = Math.max(0, Math.min(0.98, p.sea + Math.sin(app.time * Math.PI * 2 * p.tideSpeed) * p.tide));
+      const { groups } = classify(sea, w, h);
+      const g = (lines, color, width, op) => lines.length ? `<path d="${pathData(lines)}" fill="none" stroke="${color}" stroke-width="${width.toFixed(2)}" stroke-opacity="${op}" stroke-linecap="round" stroke-linejoin="round"/>` : '';
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><rect width="${w}" height="${h}" fill="${p.paper}"/>` +
+        g(groups.waterMinor, p.waterInk, sw * 0.6, 0.7) + g(groups.waterMajor, p.waterInk, sw * 1.2, 0.9) +
+        g(groups.landMinor, p.ink, sw * 0.75, 0.7) + g(groups.landMajor, p.ink, sw * 1.7, 1) + g(groups.coast, p.ink, sw * 2.4, 1) + '</svg>';
     }
 
-    draw();
+    // Le relief évolue lentement : si une image coûte cher, on en saute quelques-unes plutôt que de ralentir l'interface.
+    let cost = 0, since = 0;
+    buildType();
+    app.loop((t, dt) => {
+      since += 1000 / 60;
+      if (app.offline || dirty || refresh || since >= cost * 1.2) {
+        const t0 = performance.now();
+        render(t);
+        cost = cost * 0.8 + (performance.now() - t0) * 0.2;
+        since = 0;
+      }
+    });
   </script>
 </body>
 </html>

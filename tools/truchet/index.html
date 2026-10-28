@@ -7,121 +7,234 @@
   <link rel="stylesheet" href="../../assets/ui/atelier.css">
 </head>
 <body>
-  <canvas style="cursor: crosshair"></canvas>
+  <canvas></canvas>
   <script src="../../assets/ui/atelier.js"></script>
   <script>
+    // Pavage de Truchet multi-échelles (Christopher Carlson, Bridges 2018) : chaque tuile peut se
+    // subdiviser en quatre, avec inversion des couleurs à chaque niveau. Les rotations suivent un
+    // ressort (souple ou élastique) et se déclenchent au hasard, en vagues ou au pointeur.
     const canvas = document.querySelector('canvas');
     const ctx = canvas.getContext('2d');
-    let grid = [], cols = 0, rows = 0;
+    let tiles = [], budget = 0, rand = Math.random;
 
     const app = Atelier.app({
       stage: canvas,
       animate: true,
+      seed: true,
+      finish: { grain: 0.08, vignette: 0 },
+      hint: 'Glissez sur les tuiles pour les faire tourner · Maj pour les remettre droites · molette pour la densité',
       params: {
         'Tuiles': {
-          style: { type: 'select', label: 'Style', value: 'arcs', options: { arcs: 'Arcs', diagonal: 'Diagonales', maze: 'Labyrinthe', triangles: 'Triangles', circles: 'Quarts pleins' } },
-          size: { type: 'range', label: 'Taille', min: 16, max: 200, step: 2, value: 64 },
-          stroke: { type: 'range', label: 'Trait', min: 1, max: 48, step: 1, value: 12 },
-          bias: { type: 'range', label: 'Orientation', min: 0, max: 1, step: 0.05, value: 0.5 },
+          style: { type: 'select', label: 'Style', value: 'arcs', options: { arcs: 'Arcs', ribbon: 'Rubans', diagonal: 'Diagonales', triangles: 'Triangles', circles: 'Quarts pleins', dots: 'Points', cross: 'Croisements' } },
+          cols: { type: 'range', label: 'Colonnes', min: 2, max: 48, step: 1, value: 12 },
+          stroke: { type: 'range', label: 'Trait', min: 0.02, max: 0.6, step: 0.01, value: 0.2 },
+          cap: { type: 'segmented', label: 'Terminaison', options: { round: 'Ronde', butt: 'Nette' }, value: 'round' },
+          bias: { type: 'range', label: 'Orientation', min: 0, max: 1, step: 0.01, value: 0.5 },
+          gap: { type: 'range', label: 'Joint', min: 0, max: 0.3, step: 0.005, value: 0 },
+        },
+        'Multi-échelle': {
+          levels: { type: 'range', label: 'Niveaux', min: 1, max: 4, step: 1, value: 2 },
+          split: { type: 'range', label: 'Subdivision', min: 0, max: 1, step: 0.01, value: 0.28, show: (p) => p.levels > 1 },
+          invert: { type: 'toggle', label: 'Inverser par niveau', value: true, show: (p) => p.levels > 1 },
+          scaleStroke: { type: 'toggle', label: 'Trait proportionnel', value: true, show: (p) => p.levels > 1 },
         },
         'Mouvement': {
-          rate: { type: 'range', label: 'Rotations / s', min: 0, max: 60, step: 1, value: 12 },
-          ease: { type: 'range', label: 'Souplesse', min: 0.02, max: 0.4, step: 0.01, value: 0.12 },
+          mode: { type: 'segmented', label: 'Déclenchement', options: { random: 'Hasard', wave: 'Vague', radial: 'Onde', still: 'Pointeur' }, value: 'wave' },
+          rate: { type: 'range', label: 'Fréquence', min: 0, max: 4, step: 0.05, value: 0.6 },
+          spread: { type: 'range', label: 'Étalement', min: 0.1, max: 4, step: 0.05, value: 1.4, show: (p) => p.mode === 'wave' || p.mode === 'radial' },
+          stiff: { type: 'range', label: 'Raideur', min: 0.01, max: 0.5, step: 0.01, value: 0.09 },
+          damp: { type: 'range', label: 'Amorti', min: 0.4, max: 0.98, step: 0.01, value: 0.74 },
+          pulse: { type: 'range', label: 'Respiration', min: 0, max: 1, step: 0.01, value: 0.25 },
         },
         'Couleur': {
           bg: { type: 'color', label: 'Fond', value: '#111114' },
           fg: { type: 'color', label: 'Motif', value: '#ff5a36' },
+          fg2: { type: 'color', label: 'Second motif', value: '#f4efe6' },
+          colorMode: { type: 'segmented', label: 'Répartition', options: { solid: 'Uni', checker: 'Damier', level: 'Niveaux', gradient: 'Dégradé' }, value: 'level' },
+        },
+        'Pointeur': {
+          brush: { type: 'range', label: 'Rayon', min: 0.2, max: 6, step: 0.1, value: 1.2 },
+          scramble: { type: 'button', label: 'Tout faire tourner', action: () => tiles.forEach((t) => (t.target += 1 + Math.floor(rand() * 2))) },
         },
       },
       presets: {
-        'Corail': { style: 'arcs', size: 64, stroke: 12, bg: '#111114', fg: '#ff5a36', rate: 12 },
-        'Labyrinthe': { style: 'maze', size: 36, stroke: 6, bg: '#f2efe8', fg: '#1b1b1b', rate: 30 },
-        'Bauhaus': { style: 'circles', size: 110, bg: '#1d3fbb', fg: '#f7c948', rate: 6 },
-        'Signal': { style: 'triangles', size: 48, bg: '#0b0b0b', fg: '#e8ff3a', rate: 40 },
-        'Néon': { style: 'arcs', size: 90, stroke: 4, bg: '#08010f', fg: '#4cc9f0', rate: 20 },
+        'Corail': { style: 'arcs', cols: 12, stroke: 0.2, levels: 2, split: 0.28, bg: '#111114', fg: '#ff5a36', fg2: '#f4efe6', colorMode: 'level', mode: 'wave' },
+        'Carlson': { style: 'ribbon', cols: 6, stroke: 0.34, levels: 3, split: 0.45, invert: true, bg: '#f4efe6', fg: '#141414', fg2: '#141414', colorMode: 'solid', mode: 'radial', rate: 0.35, cap: 'butt' },
+        'Labyrinthe': { style: 'diagonal', cols: 32, stroke: 0.14, levels: 1, bg: '#f2efe8', fg: '#1b1b1b', colorMode: 'solid', mode: 'random', rate: 2.5, stiff: 0.2, damp: 0.6 },
+        'Bauhaus': { style: 'circles', cols: 7, levels: 2, split: 0.3, bg: '#1d3fbb', fg: '#f7c948', fg2: '#e63b2e', colorMode: 'checker', mode: 'wave', rate: 0.4, stiff: 0.05, damp: 0.86 },
+        'Signal': { style: 'triangles', cols: 18, levels: 2, split: 0.2, bg: '#0b0b0b', fg: '#e8ff3a', fg2: '#ffffff', colorMode: 'gradient', mode: 'random', rate: 3, stiff: 0.25, damp: 0.5 },
+        'Pointillé': { style: 'dots', cols: 20, stroke: 0.3, levels: 3, split: 0.35, bg: '#0e1a2b', fg: '#7fdbca', fg2: '#ff7a59', colorMode: 'level', mode: 'radial', rate: 0.8 },
+        'Tissage': { style: 'cross', cols: 14, stroke: 0.22, levels: 1, bg: '#2a1b3d', fg: '#f9c80e', fg2: '#f86624', colorMode: 'checker', mode: 'wave', rate: 0.5, spread: 2.5, cap: 'butt' },
       },
-      notes: 'Cliquez sur une tuile pour la faire pivoter.',
-      export: { png: true, video: true, svg: () => toSVG(), name: 'truchet' },
-      onChange(key) { if (['size', 'bias', 'style', '*'].includes(key)) build(); },
+      export: { svg: () => toSVG(), name: 'truchet' },
+      pointer: {
+        down: (q) => touch(q, true),
+        drag: (q) => touch(q, false),
+        wheel: (q, dy) => app.set('cols', Math.max(2, Math.min(48, p.cols + (dy > 0 ? 1 : -1)))),
+      },
+      onChange(key) { if (['cols', 'bias', 'style', 'levels', 'split', 'gap', '*'].includes(key)) build(); },
       onSeed: () => build(),
       onResize: () => build(),
     });
     const p = app.params;
 
-    // Chaque tuile a une orientation cible (quarts de tour) et un angle affiché qui la rejoint en douceur.
+    // ——— Construction : grille + subdivisions récursives ———
     function build() {
-      const r = app.rng();
-      cols = Math.ceil(app.size.w / p.size); rows = Math.ceil(app.size.h / p.size);
-      const four = p.style === 'triangles' || p.style === 'circles';
-      grid = Array.from({ length: cols * rows }, () => {
-        let o = r() < p.bias ? 1 : 0;
-        if (four) o = o * 2 + (r() < 0.5 ? 1 : 0);
-        return { target: o, angle: o };
-      });
+      rand = app.rng();
+      const { w, h } = app.size, s = w / p.cols, rows = Math.ceil(h / s);
+      const four = ['triangles', 'circles', 'dots'].includes(p.style);
+      tiles = [];
+      const add = (x, y, size, level, i, j) => {
+        if (level < p.levels - 1 && rand() < p.split * (level === 0 ? 1 : 0.7)) {
+          const hs = size / 2;
+          for (let k = 0; k < 4; k++) add(x + (k % 2) * hs, y + Math.floor(k / 2) * hs, hs, level + 1, i * 2 + (k % 2), j * 2 + Math.floor(k / 2));
+          return;
+        }
+        let o = rand() < p.bias ? 1 : 0;
+        if (four) o = o * 2 + (rand() < 0.5 ? 1 : 0);
+        tiles.push({ x, y, s: size, level, i, j, target: o, angle: o, v: 0, wave: null });
+      };
+      for (let j = 0; j < rows; j++) for (let i = 0; i < p.cols; i++) add(i * s, j * s, s, 0, i, j);
     }
 
-    function shape(c, s, style) {
+    // ——— Dessin d'une tuile centrée en (0, 0), de côté s ———
+    function shape(c, s, style, lw) {
       const h = s / 2;
       c.beginPath();
       switch (style) {
         case 'arcs':
           c.arc(-h, -h, h, 0, Math.PI / 2); c.moveTo(h, 0); c.arc(h, h, h, -Math.PI / 2, -Math.PI, true); c.stroke(); break;
+        case 'ribbon': {
+          // Arcs épais remplis : le ruban de Carlson, deux bandes concentriques par coin.
+          const r1 = h - lw / 2, r2 = h + lw / 2;
+          for (const [cx, cy, a0] of [[-h, -h, 0], [h, h, Math.PI]]) {
+            c.moveTo(cx + Math.cos(a0) * r2, cy + Math.sin(a0) * r2);
+            c.arc(cx, cy, r2, a0, a0 + Math.PI / 2);
+            c.arc(cx, cy, Math.max(0, r1), a0 + Math.PI / 2, a0, true);
+            c.closePath();
+          }
+          c.fill(); break;
+        }
         case 'diagonal': c.moveTo(-h, -h); c.lineTo(h, h); c.stroke(); break;
-        case 'maze': c.moveTo(-h, h); c.lineTo(h, -h); c.stroke(); break;
         case 'triangles': c.moveTo(-h, -h); c.lineTo(h, -h); c.lineTo(-h, h); c.closePath(); c.fill(); break;
         case 'circles':
           c.moveTo(-h, -h); c.arc(-h, -h, h, 0, Math.PI / 2); c.closePath();
           c.moveTo(h, h); c.arc(h, h, h, Math.PI, Math.PI * 1.5); c.closePath(); c.fill(); break;
+        case 'dots': {
+          const r = Math.max(0.5, lw * 0.9);
+          c.arc(-h * 0.5, -h * 0.5, r, 0, Math.PI * 2); c.moveTo(h * 0.5 + r, h * 0.5); c.arc(h * 0.5, h * 0.5, r, 0, Math.PI * 2);
+          c.moveTo(-h * 0.5 + r * 0.55, h * 0.5); c.arc(-h * 0.5, h * 0.5, r * 0.55, 0, Math.PI * 2); c.fill(); break;
+        }
+        case 'cross':
+          c.moveTo(-h, 0); c.lineTo(h, 0); c.stroke();
+          c.beginPath(); c.moveTo(0, -h); c.lineTo(0, -lw * 0.9); c.moveTo(0, lw * 0.9); c.lineTo(0, h); c.stroke(); break;
       }
     }
 
-    function draw() {
-      const { w, h, dpr } = app.size, s = p.size;
+    const mix = (a, b, t) => {
+      const pa = parseInt(a.slice(1), 16), pb = parseInt(b.slice(1), 16);
+      const ch = (s) => Math.round(((pa >> s) & 255) + (((pb >> s) & 255) - ((pa >> s) & 255)) * t);
+      return `rgb(${ch(16)},${ch(8)},${ch(0)})`;
+    };
+    function colors(t) {
+      const { w } = app.size;
+      let fg = p.fg, bg = p.bg;
+      if (p.colorMode === 'checker' && (t.i + t.j) % 2) fg = p.fg2;
+      if (p.colorMode === 'level' && t.level % 2) fg = p.fg2;
+      if (p.colorMode === 'gradient') fg = mix(p.fg, p.fg2, (t.x + t.s / 2) / w);
+      if (p.levels > 1 && p.invert && t.level % 2) [fg, bg] = [bg, fg];
+      return [fg, bg];
+    }
+
+    function draw(time) {
+      const { w, h, dpr } = app.size, base = w / p.cols;
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       ctx.fillStyle = p.bg; ctx.fillRect(0, 0, w, h);
-      ctx.strokeStyle = ctx.fillStyle = p.fg;
-      ctx.lineWidth = p.stroke; ctx.lineCap = 'round';
-      for (let j = 0; j < rows; j++) for (let i = 0; i < cols; i++) {
-        const t = grid[j * cols + i];
+      ctx.lineCap = p.cap;
+      const breathe = 1 + Math.sin(time * Math.PI * 2 * 0.25) * 0.35 * p.pulse;
+      for (const t of tiles) {
+        const [fg, bg] = colors(t);
+        const g = t.s * p.gap;
+        if (bg !== p.bg) { ctx.fillStyle = bg; ctx.fillRect(t.x + g / 2, t.y + g / 2, t.s - g, t.s - g); }
         ctx.save();
-        ctx.translate(i * s + s / 2, j * s + s / 2);
+        ctx.translate(t.x + t.s / 2, t.y + t.s / 2);
         ctx.rotate(t.angle * Math.PI / 2);
-        shape(ctx, s, p.style);
+        const s = t.s - g;
+        const lw = (p.scaleStroke ? t.s : base) * p.stroke * breathe;
+        ctx.lineWidth = lw;
+        ctx.strokeStyle = ctx.fillStyle = fg;
+        ctx.beginPath(); ctx.rect(-s / 2, -s / 2, s, s); ctx.clip();
+        shape(ctx, s, p.style, lw);
         ctx.restore();
       }
     }
 
-    let budget = 0;
-    app.loop((t, dt) => {
-      budget += p.rate * dt;
-      while (budget >= 1 && grid.length) { grid[Math.floor(Math.random() * grid.length)].target += 1; budget -= 1; }
-      const k = 1 - Math.pow(1 - p.ease, dt * 60);
-      for (const g of grid) g.angle += (g.target - g.angle) * k;
-      draw();
-    });
+    // ——— Pointeur : les tuiles sous le pinceau tournent d'un quart (ou reviennent droites avec Maj) ———
+    function touch(q, first) {
+      const r = (app.size.w / p.cols) * p.brush;
+      for (const t of tiles) {
+        const d = Math.hypot(t.x + t.s / 2 - q.x, t.y + t.s / 2 - q.y);
+        if (d > Math.max(r, t.s * 0.5)) continue;
+        if (q.shift) { t.target = Math.round(t.target / 4) * 4; continue; }
+        const now = performance.now();
+        if (!first && t.touched && now - t.touched < 450) continue;
+        t.touched = now;
+        t.target += 1;
+      }
+    }
 
-    canvas.addEventListener('click', (e) => {
-      const r = canvas.getBoundingClientRect();
-      const i = Math.floor((e.clientX - r.left) / p.size), j = Math.floor((e.clientY - r.top) / p.size);
-      const g = grid[j * cols + i];
-      if (g) { g.target += 1; if (!app.playing) { g.angle = g.target; draw(); } }
+    app.loop((time, dt) => {
+      const { w, h } = app.size;
+      if (p.mode === 'random') {
+        budget += p.rate * dt * Math.sqrt(tiles.length);
+        while (budget >= 1 && tiles.length) { tiles[Math.floor(rand() * tiles.length)].target += 1; budget -= 1; }
+      } else if (p.mode === 'wave' || p.mode === 'radial') {
+        // Un front traverse la composition à intervalles réguliers : chaque tuile tourne à son passage.
+        const diag = Math.hypot(w, h);
+        for (const t of tiles) {
+          const cx = t.x + t.s / 2, cy = t.y + t.s / 2;
+          const d = p.mode === 'wave' ? (cx + cy) / (w + h) : Math.hypot(cx - w / 2, cy - h / 2) / (diag / 2);
+          const n = Math.floor(time * p.rate - d * p.spread);
+          if (t.wave === null) t.wave = n;
+          if (n > t.wave) { t.target += n - t.wave; t.wave = n; }
+        }
+      }
+      // Ressort : raideur et amorti donnent un mouvement souple ou élastique (dépassement).
+      const steps = Math.max(1, Math.round(dt * 60));
+      for (let k = 0; k < steps; k++) for (const t of tiles) {
+        t.v = (t.v + (t.target - t.angle) * p.stiff) * p.damp;
+        t.angle += t.v;
+      }
+      draw(time);
+      app.finish(ctx);
     });
 
     function toSVG() {
-      const { w, h } = app.size, s = p.size, hs = s / 2;
-      const paths = {
-        arcs: `<path d="M0 ${-hs}A${hs} ${hs} 0 0 1 ${-hs} 0M${hs} 0A${hs} ${hs} 0 0 0 0 ${hs}" fill="none" stroke="${p.fg}"/>`,
-        diagonal: `<line x1="${-hs}" y1="${-hs}" x2="${hs}" y2="${hs}" stroke="${p.fg}"/>`,
-        maze: `<line x1="${-hs}" y1="${hs}" x2="${hs}" y2="${-hs}" stroke="${p.fg}"/>`,
-        triangles: `<path d="M${-hs} ${-hs}H${hs}L${-hs} ${hs}Z" fill="${p.fg}"/>`,
-        circles: `<path d="M${-hs} ${-hs}h${hs}a${hs} ${hs} 0 0 1 ${-hs} ${hs}Z M${hs} ${hs}h${-hs}a${hs} ${hs} 0 0 1 ${hs} ${-hs}Z" fill="${p.fg}"/>`,
+      const { w, h } = app.size, base = w / p.cols;
+      const R = (n) => +n.toFixed(2);
+      const body = (s, lw, fg) => {
+        const hs = s / 2;
+        const st = `fill="none" stroke="${fg}" stroke-width="${R(lw)}" stroke-linecap="${p.cap}"`;
+        switch (p.style) {
+          case 'arcs': return `<path d="M0 ${R(-hs)}A${R(hs)} ${R(hs)} 0 0 1 ${R(-hs)} 0M${R(hs)} 0A${R(hs)} ${R(hs)} 0 0 0 0 ${R(hs)}" ${st}/>`;
+          case 'ribbon': return `<path d="M0 ${R(-hs)}A${R(hs)} ${R(hs)} 0 0 1 ${R(-hs)} 0M${R(hs)} 0A${R(hs)} ${R(hs)} 0 0 0 0 ${R(hs)}" ${st.replace(`stroke-linecap="${p.cap}"`, 'stroke-linecap="butt"')}/>`;
+          case 'diagonal': return `<line x1="${R(-hs)}" y1="${R(-hs)}" x2="${R(hs)}" y2="${R(hs)}" ${st}/>`;
+          case 'triangles': return `<path d="M${R(-hs)} ${R(-hs)}H${R(hs)}L${R(-hs)} ${R(hs)}Z" fill="${fg}"/>`;
+          case 'circles': return `<path d="M${R(-hs)} ${R(-hs)}h${R(hs)}a${R(hs)} ${R(hs)} 0 0 1 ${R(-hs)} ${R(hs)}Z M${R(hs)} ${R(hs)}h${R(-hs)}a${R(hs)} ${R(hs)} 0 0 1 ${R(hs)} ${R(-hs)}Z" fill="${fg}"/>`;
+          case 'dots': { const r = Math.max(0.5, lw * 0.9); return `<g fill="${fg}"><circle cx="${R(-hs / 2)}" cy="${R(-hs / 2)}" r="${R(r)}"/><circle cx="${R(hs / 2)}" cy="${R(hs / 2)}" r="${R(r)}"/><circle cx="${R(-hs / 2)}" cy="${R(hs / 2)}" r="${R(r * 0.55)}"/></g>`; }
+          case 'cross': return `<path d="M${R(-hs)} 0H${R(hs)}M0 ${R(-hs)}V${R(-lw * 0.9)}M0 ${R(lw * 0.9)}V${R(hs)}" ${st}/>`;
+        }
+        return '';
       };
-      let out = '';
-      for (let j = 0; j < rows; j++) for (let i = 0; i < cols; i++) {
-        const a = Math.round(grid[j * cols + i].target) * 90;
-        out += `<g transform="translate(${i * s + hs} ${j * s + hs}) rotate(${a})">${paths[p.style]}</g>`;
-      }
-      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><rect width="${w}" height="${h}" fill="${p.bg}"/><g stroke-width="${p.stroke}" stroke-linecap="round">${out}</g></svg>`;
+      let out = '', defs = '';
+      tiles.forEach((t, n) => {
+        const [fg, bg] = colors(t);
+        const g = t.s * p.gap, s = t.s - g, lw = (p.scaleStroke ? t.s : base) * p.stroke;
+        if (bg !== p.bg) out += `<rect x="${R(t.x + g / 2)}" y="${R(t.y + g / 2)}" width="${R(s)}" height="${R(s)}" fill="${bg}"/>`;
+        defs += `<clipPath id="c${n}"><rect x="${R(-s / 2)}" y="${R(-s / 2)}" width="${R(s)}" height="${R(s)}"/></clipPath>`;
+        out += `<g transform="translate(${R(t.x + t.s / 2)} ${R(t.y + t.s / 2)}) rotate(${Math.round(t.target) * 90})" clip-path="url(#c${n})">${body(s, lw, fg)}</g>`;
+      });
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><defs>${defs}</defs><rect width="${w}" height="${h}" fill="${p.bg}"/>${out}</svg>`;
     }
 
     build();

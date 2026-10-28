@@ -339,6 +339,9 @@
       g.globalCompositeOperation = 'source-over';
       paintLayer(g, w, h, t, 0, scale);
       g.globalCompositeOperation = BLEND[p().fusion] || 'source-over';
+      // Seconde trame décalée à la main, comme un calque transparent qu'on fait glisser.
+      const u = Math.min(w, h);
+      g.translate(p().offX * u, p().offY * u);
       paintLayer(g, w, h, t, 1, scale);
       g.globalCompositeOperation = 'source-over';
     }
@@ -538,7 +541,7 @@
       const papier = hex(p().papier, '#f4efe6');
       const aplat = hex(p().aplat, '#141210');
       const mix = MIX[p().fusion] || 'normal';
-      const scene = `<rect width="${w}" height="${h}" fill="${papier}"/>${layerSVG(w, h, t, 0)}<g style="mix-blend-mode:${mix}">${layerSVG(w, h, t, 1)}</g>`;
+      const scene = `<rect width="${w}" height="${h}" fill="${papier}"/>${layerSVG(w, h, t, 0)}<g style="mix-blend-mode:${mix}" transform="translate(${f2(p().offX * Math.min(w, h))} ${f2(p().offY * Math.min(w, h))})">${layerSVG(w, h, t, 1)}</g>`;
       let defs = '';
       let body = scene;
       if (kind === 'titre') {
@@ -573,6 +576,7 @@
       text: 'ATELIER', masque: 'titre', approche: -0.046, corps: 1.12, sceau: 0.74,
     };
 
+    let grab = null;
     app = Atelier.app({
       stage: canvas,
       animate: true,
@@ -588,6 +592,8 @@
           branches: { type: 'range', label: 'Faisceaux', min: 8, max: 160, step: 1, value: 64, show: (q) => q.mode === 'rayons' },
           onde: { type: 'range', label: 'Ondulation', min: 0, max: 1, step: 0.01, value: 0, show: (q) => q.mode === 'traits' },
           oppose: { type: 'toggle', label: 'Sens opposés', value: true, show: (q) => q.mode === 'spirales' },
+          offX: { type: 'range', label: 'Glissement X', min: -0.2, max: 0.2, step: 0.001, value: 0 },
+          offY: { type: 'range', label: 'Glissement Y', min: -0.2, max: 0.2, step: 0.001, value: 0 },
         },
         'Couleur': {
           papier: { type: 'color', label: 'Papier', value: '#f4efe6' },
@@ -629,17 +635,20 @@
         },
       },
       notes: 'À vitesse 1, le motif boucle toutes les 6 secondes. Un logo importé remplace le texte comme forme.',
-      export: {
-        png: (scale) => {
-          const { w, h } = app.size;
-          const c = document.createElement('canvas');
-          c.width = Math.max(1, Math.round(w * scale));
-          c.height = Math.max(1, Math.round(h * scale));
-          render(c.getContext('2d'), w, h, scale, app.time, false);
-          return c;
+      hint: 'Glissez pour faire coulisser la seconde trame · molette pour la tourner',
+      pointer: {
+        down: (q) => { grab = { x: q.x, y: q.y, ox: p().offX, oy: p().offY }; },
+        drag: (q) => {
+          if (!grab) return;
+          const u = Math.min(app.size.w, app.size.h), lim = (v) => Math.max(-0.2, Math.min(0.2, +v.toFixed(3)));
+          app.set('offX', lim(grab.ox + (q.x - grab.x) / u));
+          app.set('offY', lim(grab.oy + (q.y - grab.y) / u));
         },
+        up: () => { grab = null; },
+        wheel: (q, dy) => app.set('delta', Math.max(0, Math.min(36, +(p().delta + (dy > 0 ? -0.5 : 0.5)).toFixed(1)))),
+      },
+      export: {
         svg: () => toSVG(),
-        video: true,
         name: 'moire',
       },
       onChange: () => paint(),

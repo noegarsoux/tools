@@ -2,9 +2,20 @@
   "slug": "harmonies",
   "title": "Harmonies de couleurs",
   "type": "color",
-  "description": "Générez une palette harmonieuse à partir d'une couleur de base (complémentaire, analogue, triade…) en OKLCH. Copiez les codes hex ou exportez en variables CSS.",
-  "tags": ["palette", "oklch", "css"],
+  "description": "Palettes OKLCH pilotées au pointeur, montrées en situation (affiche 60/30/10, carrés d'Albers, dégradés) et envoyées dans la charte de marque.",
+  "tags": [
+    "palette",
+    "oklch",
+    "css",
+    "albers",
+    "charte"
+  ],
   "author": "claude",
   "created": "2026-10-28",
-  "status": "finished"
+  "status": "finished",
+  "inspiration": [
+    "Josef Albers — Interaction of Color",
+    "Johannes Itten — contraste de quantité",
+    "Björn Ottosson — OKLab"
+  ]
 }

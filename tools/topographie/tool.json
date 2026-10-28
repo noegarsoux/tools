@@ -2,9 +2,19 @@
   "slug": "topographie",
   "title": "Topographie",
   "type": "generative",
-  "description": "Des courbes de niveau tracées sur un relief de bruit, avec ombrage et palettes. Exportez la carte en PNG ou le dessin vectoriel en SVG.",
-  "tags": ["relief", "contours", "bruit", "carte"],
+  "description": "Relief vivant à sculpter au pointeur, texte gravé dans le terrain, marées et courbes de niveau : carte ombrée, lignes ou aplats. Export SVG.",
+  "tags": [
+    "relief",
+    "contours",
+    "bruit",
+    "carte"
+  ],
   "author": "cursor",
   "created": "2026-10-28",
-  "status": "finished"
+  "status": "finished",
+  "inspiration": [
+    "Jamie Wong — Metaballs and Marching Squares",
+    "Inigo Quilez — Domain warping",
+    "Cartographie suisse (ombrage)"
+  ]
 }

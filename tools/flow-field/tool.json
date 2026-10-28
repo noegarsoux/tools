@@ -2,9 +2,19 @@
   "slug": "flow-field",
   "title": "Champ de flux",
   "type": "generative",
-  "description": "Des milliers de particules suivent un champ de bruit et tracent des lignes organiques. Réglez la densité, l'échelle du bruit et la palette, puis exportez en PNG.",
-  "tags": ["particules", "bruit", "lignes"],
+  "description": "Champ de flux à la Tyler Hobbs : marbre, spirale ou ondes, traits d'épaisseur variable, tourbillons posés à la souris et masque typographique.",
+  "tags": [
+    "flow-field",
+    "bruit",
+    "typographie",
+    "interactif"
+  ],
   "author": "claude",
   "created": "2026-10-28",
-  "status": "finished"
+  "status": "finished",
+  "inspiration": [
+    "Tyler Hobbs — Flow Fields",
+    "Inigo Quilez — Domain warping",
+    "The Nature of Code, ch. 5"
+  ]
 }

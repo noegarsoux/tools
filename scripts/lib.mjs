@@ -10,7 +10,7 @@ export const TOOLS_DIR = path.join(ROOT, 'tools');
 const SLUG = /^[a-z0-9]+(-[a-z0-9]+)*$/;
 const TAG = /^[a-z0-9-]+$/;
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
-const KEYS = ['slug', 'title', 'type', 'description', 'tags', 'author', 'created', 'status'];
+const KEYS = ['slug', 'title', 'type', 'description', 'tags', 'inspiration', 'author', 'created', 'status'];
 
 export function listToolDirs() {
   if (!fs.existsSync(TOOLS_DIR)) return [];
@@ -43,6 +43,9 @@ export function readMeta(dir) {
   if (!(meta.type in TYPES)) errors.push(`"type" doit être l'un de : ${Object.keys(TYPES).join(', ')}`);
   if (meta.tags !== undefined && (!Array.isArray(meta.tags) || meta.tags.length > 6 || meta.tags.some((t) => !TAG.test(t)))) {
     errors.push('"tags" : 6 max, en kebab-case');
+  }
+  if (meta.inspiration !== undefined && (!Array.isArray(meta.inspiration) || meta.inspiration.length > 5 || meta.inspiration.some((t) => typeof t !== 'string' || t.length < 3 || t.length > 160))) {
+    errors.push('"inspiration" : 1 à 5 sources de 3 à 160 caractères');
   }
   if (!['claude', 'cursor', 'human'].includes(meta.author)) errors.push('"author" doit être claude, cursor ou human');
   if (!DATE.test(meta.created ?? '')) errors.push('"created" doit être au format AAAA-MM-JJ');

@@ -2,7 +2,7 @@
   "slug": "truchet",
   "title": "Tuiles de Truchet",
   "type": "pattern",
-  "description": "Un motif de tuiles de Truchet en mouvement : les tuiles pivotent en continu, en arcs, labyrinthe ou quarts pleins. Export PNG, SVG et vidéo.",
+  "description": "Pavage de Truchet multi-échelles : 7 styles de tuiles, subdivisions inversées, rotations élastiques en vagues, à pousser au pointeur. Export SVG.",
   "tags": [
     "tuiles",
     "svg",
@@ -10,5 +10,10 @@
   ],
   "author": "claude",
   "created": "2026-10-28",
-  "status": "finished"
+  "status": "finished",
+  "inspiration": [
+    "Christopher Carlson — Multi-scale Truchet patterns",
+    "Sébastien Truchet (1704)",
+    "Studio Dumbar — systèmes cinétiques"
+  ]
 }
