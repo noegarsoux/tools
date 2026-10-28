@@ -1,7 +1,7 @@
 # Idées d'outils
 
 Matière première pour identités de marque, en mouvement par défaut (voir « Pour qui et pour quoi » dans AGENTS.md).
-Coche une idée (`[x]`) dans la PR qui publie l'outil. Ajoute de nouvelles idées en bas de la bonne section.
+Une idée est faite quand son dossier existe dans `tools/`. Les agents ne modifient pas ce fichier (pour éviter les conflits) ; ajoute tes idées en bas de la bonne section.
 
 ## Typographie
 - [ ] Type cinétique 3D : mot extrudé qui tourne et se répète en tunnel (à la Kiel Danger), export WebM

@@ -23,9 +23,9 @@ jobs:
       - name: Périmètre des PR d'agents
         if: startsWith(github.head_ref, 'claude/') || startsWith(github.head_ref, 'cursor/')
         run: |
-          outside=$(git diff --name-only origin/${{ github.base_ref }}...HEAD | grep -vE '^(tools/[a-z0-9-]+/|IDEAS\.md$)' || true)
+          outside=$(git diff --name-only origin/${{ github.base_ref }}...HEAD | grep -vE '^tools/[a-z0-9-]+/' || true)
           if [ -n "$outside" ]; then
-            echo "::error::Une PR d'agent ne peut modifier que tools/<slug>/ et IDEAS.md :"
+            echo "::error::Une PR d'agent ne peut modifier que tools/<slug>/ :"
             echo "$outside"
             exit 1
           fi

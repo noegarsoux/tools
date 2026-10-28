@@ -32,20 +32,20 @@ Un bon outil Atelier n'est donc pas une démo de code : c'est un **générateur 
 Répète ces étapes tant qu'il te reste du budget :
 
 1. **Synchroniser** : `git checkout main && git pull`. Lis `ls tools/` et `IDEAS.md` pour savoir ce qui existe déjà.
-2. **Choisir** une idée de `IDEAS.md` non cochée, ou une idée nouvelle qui n'est pas une variante cosmétique d'un outil existant (même mécanique avec d'autres couleurs = doublon).
+2. **Choisir** une idée de `IDEAS.md` qui n'a pas encore de dossier dans `tools/` ni de branche ouverte, ou une idée nouvelle qui n'est pas une variante cosmétique d'un outil existant (même mécanique avec d'autres couleurs = doublon).
 3. **Créer la branche** `<agent>/tool-<slug>` (ex. `claude/tool-voronoi`, `cursor/tool-voronoi`). Si la branche existe déjà sur `origin`, un autre agent travaille dessus : choisis une autre idée.
 4. **Générer le squelette** : `npm run new -- <slug> "<Titre>" <type> <claude|cursor>`.
 5. **Construire l'outil** dans `tools/<slug>/index.html` (voir la barre de qualité ci-dessous).
 6. **Valider** : `npm run validate -- <slug>`. Corrige jusqu'à ce que ce soit vert. Ce script génère aussi `thumbnail.jpg`.
 7. **Relire visuellement** : ouvre `tools/<slug>/thumbnail.jpg` et regarde-la. Si la miniature n'est pas belle ou ne montre pas ce que fait l'outil, améliore le rendu par défaut et relance `npm run validate -- <slug> --thumbs`.
-8. **Publier** : coche l'idée dans `IDEAS.md`, commit **uniquement** `tools/<slug>/` et `IDEAS.md`, pousse la branche et ouvre une PR intitulée `Outil : <Titre>`.
+8. **Publier** : commit **uniquement** `tools/<slug>/` (ne modifie pas `IDEAS.md` : plusieurs agents travaillent en parallèle et ce fichier créerait des conflits ; un outil existe dès que son dossier est sur `main`). Fais `git pull --rebase origin main` juste avant de pousser, pousse la branche et ouvre une PR intitulée `Outil : <Titre>`.
    (Avec `gh pr create`, ou l'outil GitHub de ta session si `gh` n'a pas accès à l'API GraphQL.)
    La CI revalide l'outil ; s'il passe, elle fusionne la PR elle-même et le site est republié. Si elle échoue, corrige et repousse sur la même branche.
 9. Reviens à l'étape 1.
 
 **Si tu ne peux pas finir un outil** (bloqué, budget presque épuisé) : supprime le dossier, ne pousse rien. Aucun brouillon sur `main`, jamais.
 
-Ne modifie pas le site (`index.html`, `assets/`, `scripts/`, `.github/`) pendant une session autonome : la CI refuse les PR d'agents qui touchent autre chose que `tools/` et `IDEAS.md`.
+Ne modifie pas le site (`index.html`, `assets/`, `scripts/`, `.github/`) pendant une session autonome : la CI refuse les PR d'agents qui touchent autre chose que `tools/`.
 
 ## Format d'un outil
 
