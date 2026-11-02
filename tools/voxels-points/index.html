@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Voxels de points</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Voxels de points : un cube de points en perspective. Chaque point vaut une case de la grille 3D ;
+    // sa taille suit la présence d'une forme à cet endroit (presque nulle dehors, pleine dedans).
+    // La forme est un logo extrudé ou un volume mathématique (tore, gyroïde, sphère creuse, nappe).
+    // Projection perspective, tri du plus loin au plus proche, rotation en boucle parfaite.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const PAPIER = PAL('papier'), NUIT = PAL('trame-nuit'), ACIDE = PAL('acide'), ORB = PAL('orbite');
+    const KB = PAL('kegelbahn'), LUZ = PAL('luzern'), P60 = PAL('papier-60'), BIEN = PAL('biennale');
+
+    let ready = false, userYaw = 0, userPitch = 0, velYaw = 0, velPitch = 0, drag = null, lastT = 0;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.04, vignette: 0 },
+      hint: 'Glissez pour faire tourner le cube · molette : perspective',
+      notes: 'Chaque point est une case d’une grille 3D. Sa taille dit si la forme passe par là : c’est une sculpture en pointillés, lisible seulement parce qu’elle tourne.',
+      params: {
+        'Forme': {
+          forme: { type: 'segmented', label: 'Volume', options: { logo: 'Logo', tore: 'Tore', gyroide: 'Gyroïde', sphere: 'Sphère', nappe: 'Nappe' }, value: 'tore' },
+          image: { type: 'file', label: 'Logo ou image', accept: 'image/*', show: (q) => q.forme === 'logo' },
+          extrusion: { type: 'range', label: 'Épaisseur d’extrusion', min: 0.05, max: 1, step: 0.01, value: 0.3, show: (q) => q.forme === 'logo' },
+          epaisseur: { type: 'range', label: 'Épaisseur de la paroi', min: 0.05, max: 1, step: 0.01, value: 0.45, show: (q) => q.forme !== 'logo' },
+          onde: { type: 'range', label: 'Onde qui traverse', min: 0, max: 1, step: 0.01, value: 0.35 },
+        },
+        'Grille': {
+          resolution: { type: 'range', label: 'Points par arête', min: 6, max: 30, step: 1, value: 17 },
+          tailleMin: { type: 'range', label: 'Taille hors forme', min: 0, max: 0.5, step: 0.01, value: 0.07 },
+          tailleMax: { type: 'range', label: 'Taille dans la forme', min: 0.2, max: 1.6, step: 0.01, value: 0.95 },
+          point: { type: 'segmented', label: 'Point', options: { rond: 'Rond', carre: 'Carré' }, value: 'rond' },
+          contour: { type: 'toggle', label: 'Liseré entre les points', value: true },
+        },
+        'Caméra': {
+          perspective: { type: 'range', label: 'Perspective', min: 0, max: 1.5, step: 0.01, value: 0.6 },
+          inclinaison: { type: 'range', label: 'Inclinaison', min: -90, max: 90, step: 1, value: 24 },
+          tours: { type: 'range', label: 'Tours par boucle', min: -3, max: 3, step: 1, value: 1 },
+          boucle: { type: 'range', label: 'Boucle (s)', min: 6, max: 60, step: 1, value: 16 },
+          zoom: { type: 'range', label: 'Taille du cube', min: 0.3, max: 1.2, step: 0.01, value: 0.7 },
+          brume: { type: 'range', label: 'Brume en profondeur', min: 0, max: 1, step: 0.01, value: 0.45 },
+        },
+        'Couleur': {
+          fond: { type: 'color', label: 'Fond', value: PAPIER[0] },
+          encre: { type: 'color', label: 'Forme', value: PAPIER[1] },
+          trame: { type: 'color', label: 'Points de la grille', value: PAPIER[1] },
+        },
+      },
+      presets: {
+        'Tore': {},
+        'Gyroïde': { forme: 'gyroide', epaisseur: 0.35, resolution: 20, tailleMax: 0.9, tailleMin: 0.08, onde: 0.25, inclinaison: 30 },
+        'Logo': { forme: 'logo', extrusion: 0.35, resolution: 22, tailleMax: 1.05, tailleMin: 0.1, onde: 0.3, inclinaison: 18 },
+        'Nuit': { forme: 'sphere', epaisseur: 0.3, fond: NUIT[0], encre: NUIT[1], trame: NUIT[2], resolution: 19, brume: 0.6, contour: true },
+        'Acide': { forme: 'gyroide', epaisseur: 0.55, fond: ACIDE[1], encre: ACIDE[2], trame: ACIDE[0], resolution: 14, tailleMax: 1.1, point: 'carre', inclinaison: 35, tours: -1 },
+        'Orbite': { forme: 'tore', fond: ORB[0], encre: ORB[1], trame: ORB[2], resolution: 21, tailleMin: 0.08, perspective: 0.8, inclinaison: 40, onde: 0.6 },
+        'Nappe': { forme: 'nappe', epaisseur: 0.3, fond: P60[0], encre: P60[1], trame: P60[1], resolution: 24, tailleMin: 0.06, tailleMax: 1.2, onde: 0, inclinaison: 28 },
+        'Kegelbahn': { forme: 'sphere', epaisseur: 0.5, fond: KB[0], encre: KB[1], trame: KB[2], resolution: 15, tailleMax: 1.15, point: 'carre', perspective: 0.9, onde: 0.5 },
+        'Biennale': { forme: 'tore', fond: BIEN[0], encre: BIEN[2], trame: BIEN[1], resolution: 26, tailleMin: 0.05, tailleMax: 1.25, perspective: 0.3, inclinaison: 70, onde: 0.45, contour: false },
+      },
+      brand(colors) {
+        return { fond: colors[0], encre: colors[1] || colors[0], trame: colors[2] || colors[1] || colors[0] };
+      },
+      pointer: {
+        down: (q) => { drag = { x: q.x, y: q.y }; velYaw = velPitch = 0; },
+        drag: (q) => {
+          if (!drag) return;
+          const u = Math.min(app.size.w, app.size.h), dx = (q.x - drag.x) / u, dy = (q.y - drag.y) / u;
+          userYaw += dx * 3.2; userPitch = Math.max(-1.4, Math.min(1.4, userPitch - dy * 3.2));
+          velYaw = dx * 3.2 * 60; velPitch = -dy * 3.2 * 60;
+          drag = { x: q.x, y: q.y };
+        },
+        up: () => { drag = null; },
+        wheel: (q, dy) => app.set('perspective', Math.max(0, Math.min(1.5, +(p.perspective - dy * 0.001).toFixed(2)))),
+      },
+      onChange(k) { if (ready && (k === 'image' || k === '*' || k === 'forme' || k === 'resolution')) maskDirty = true; },
+      onSeed() { userYaw = userPitch = velYaw = velPitch = 0; },
+      export: { name: 'voxels-de-points', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    // ——— Logo → masque N×N (adouci, pour des tailles intermédiaires sur les bords) ———
+    let maskDirty = true, mask = null, maskN = 0;
+    function buildMask(N) {
+      maskDirty = false; mask = null; maskN = N;
+      const img = p.image || app.logoImg;
+      if (p.forme !== 'logo' || !img) return;
+      const S = N * 4, cv = document.createElement('canvas'); cv.width = cv.height = S;
+      const x = cv.getContext('2d', { willReadFrequently: true });
+      x.fillStyle = '#fff'; x.fillRect(0, 0, S, S);
+      const iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height, k = S * 0.92 / Math.max(iw, ih);
+      x.drawImage(img, (S - iw * k) / 2, (S - ih * k) / 2, iw * k, ih * k);
+      const d = x.getImageData(0, 0, S, S).data;
+      mask = new Float32Array(N * N);
+      // Moyenne par case : la couverture de la case par le logo.
+      for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) {
+        let s = 0;
+        for (let b = 0; b < 4; b++) for (let a = 0; a < 4; a++) {
+          const o = ((j * 4 + b) * S + (i * 4 + a)) * 4;
+          s += 1 - (d[o] * 0.2126 + d[o + 1] * 0.7152 + d[o + 2] * 0.0722) / 255;
+        }
+        mask[j * N + i] = s / 16;
+      }
+    }
+
+    const sm = (e0, e1, x) => { const t = Math.min(1, Math.max(0, (x - e0) / (e1 - e0))); return t * t * (3 - 2 * t); };
+    // Tore incliné : on voit l'anneau, pas sa tranche.
+    function torus(x, y, z, r) {
+      const c = 0.6, s = -0.8, yy = y * c - z * s, zz = y * s + z * c;
+      return sm(r + 0.08, r - 0.08, Math.hypot(Math.hypot(x, zz) - 0.6, yy));
+    }
+    // Présence de la forme en (x, y, z) ∈ [-1, 1]³, entre 0 et 1.
+    function presence(x, y, z, i, j, N, ph) {
+      const th = p.epaisseur;
+      switch (p.forme) {
+        case 'tore': return torus(x, y, z, 0.12 + 0.3 * th);
+        case 'gyroide': {
+          const k = 3.2, g = Math.sin(k * x + ph) * Math.cos(k * y) + Math.sin(k * y) * Math.cos(k * z + ph) + Math.sin(k * z) * Math.cos(k * x);
+          const ball = sm(1.12, 0.9, Math.hypot(x, y, z));
+          return sm(th * 1.1 + 0.15, th * 1.1 - 0.15, Math.abs(g)) * ball;
+        }
+        case 'sphere': {
+          // Sphère creuse percée de trois tunnels.
+          const r = Math.hypot(x, y, z), shell = sm(0.1 + th * 0.25, th * 0.25 - 0.05, Math.abs(r - 0.78));
+          const holes = Math.min(Math.hypot(x, y), Math.hypot(y, z), Math.hypot(x, z));
+          return shell * sm(0.28, 0.4, holes);
+        }
+        case 'nappe': {
+          const h = 0.42 * Math.sin(2.4 * x + ph) * Math.cos(2.1 * z - ph);
+          return sm(0.1 + th * 0.25, th * 0.25 - 0.05, Math.abs(y - h));
+        }
+        default: {
+          // Logo extrudé : le masque est lu dans le plan (x, y), l'extrusion suit z.
+          if (!mask) return torus(x, y, z, 0.24);
+          const zin = sm(p.extrusion + 0.12, p.extrusion - 0.05, Math.abs(z));
+          return Math.min(1, mask[j * N + i] * 1.25) * zin;
+        }
+      }
+    }
+
+    // ——— Calcul des points projetés ———
+    function points(t) {
+      const { w, h } = app.size, U = Math.min(w, h);
+      const N = Math.round(p.resolution);
+      if (maskDirty || maskN !== N) buildMask(N);
+      const T = t / p.boucle, ph = TAU * T;
+      const yaw = TAU * p.tours * T + userYaw, pitch = p.inclinaison * Math.PI / 180 + userPitch;
+      const cy = Math.cos(yaw), sy = Math.sin(yaw), cp = Math.cos(pitch), sp = Math.sin(pitch);
+      const persp = p.perspective, D = persp > 0 ? 1 + 2.6 / persp : 1e9;
+      const half = U * p.zoom * 0.5, cell = 2 / (N - 1);
+      const out = [];
+      for (let k = 0; k < N; k++) for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) {
+        const x = -1 + i * cell, y = -1 + j * cell, z = -1 + k * cell;
+        let f = presence(x, y, z, i, j, N, ph);
+        if (p.onde > 0) {
+          // Onde qui traverse le cube : un nombre entier d'allers par boucle.
+          const wv = 0.5 + 0.5 * Math.sin(ph * 2 - (x + y * 0.6 + z * 0.3) * 3.2);
+          f *= 1 - p.onde * 0.85 * (1 - wv);
+        }
+        // Rotation : lacet autour de y, puis tangage autour de x.
+        const x1 = x * cy + z * sy, z1 = -x * sy + z * cy;
+        const y2 = y * cp - z1 * sp, z2 = y * sp + z1 * cp;
+        const s = persp > 0 ? D / (D + z2) : 1;
+        const size = (p.tailleMin + (p.tailleMax - p.tailleMin) * f) * cell * 0.5 * half * s;
+        if (size < 0.25) continue;
+        out.push({ X: w / 2 + x1 * half * s, Y: h / 2 + y2 * half * s, z: z2, r: size, f });
+      }
+      out.sort((a, b) => b.z - a.z);
+      return out;
+    }
+
+    // Couleur mélangée au fond selon la profondeur (brume), quantifiée pour limiter les changements de style.
+    const hexRgb = (hx) => { const n = parseInt(String(hx).slice(1, 7), 16); return [n >> 16 & 255, n >> 8 & 255, n & 255]; };
+    function shade(col, z) {
+      const a = hexRgb(col), b = hexRgb(p.fond), k = Math.round(Math.max(0, Math.min(1, (z + 1.2) / 2.4)) * p.brume * 0.75 * 8) / 8;
+      return `rgb(${a.map((v, i) => Math.round(v + (b[i] - v) * k)).join(',')})`;
+    }
+
+    function draw(t) {
+      const { w, h, dpr } = app.size;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = p.fond; ctx.fillRect(0, 0, w, h);
+      const pts = points(t), sq = p.point === 'carre';
+      let style = '';
+      ctx.lineWidth = Math.max(0.6, Math.min(w, h) * 0.0016);
+      ctx.strokeStyle = p.fond;
+      for (const q of pts) {
+        const inForm = q.f > 0.5, st = shade(inForm ? p.encre : p.trame, q.z);
+        if (st !== style) { ctx.fillStyle = style = st; }
+        ctx.beginPath();
+        if (sq) ctx.rect(q.X - q.r, q.Y - q.r, q.r * 2, q.r * 2);
+        else ctx.arc(q.X, q.Y, q.r, 0, TAU);
+        ctx.fill();
+        if (p.contour && inForm && q.r > 2) ctx.stroke();
+      }
+      app.finish(ctx);
+    }
+
+    function toSVG() {
+      const { w, h } = app.size, pts = points(lastT), sq = p.point === 'carre', f = (n) => +n.toFixed(2);
+      const sw = f(Math.max(0.6, Math.min(w, h) * 0.0016));
+      const els = pts.map((q) => {
+        const inForm = q.f > 0.5, fill = shade(inForm ? p.encre : p.trame, q.z);
+        const stroke = p.contour && inForm && q.r > 2 ? ` stroke="${p.fond}" stroke-width="${sw}"` : '';
+        return sq ? `<rect x="${f(q.X - q.r)}" y="${f(q.Y - q.r)}" width="${f(q.r * 2)}" height="${f(q.r * 2)}" fill="${fill}"${stroke}/>`
+          : `<circle cx="${f(q.X)}" cy="${f(q.Y)}" r="${f(q.r)}" fill="${fill}"${stroke}/>`;
+      });
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><rect width="100%" height="100%" fill="${p.fond}"/>${els.join('')}</svg>`;
+    }
+
+    ready = true;
+    app.loop((t, dt) => {
+      // Élan après un lancer, qui s'amortit.
+      if (!drag) {
+        const k = Math.exp(-(dt || 0) * 2.2);
+        userYaw += velYaw * (dt || 0) * 0.5; userPitch = Math.max(-1.4, Math.min(1.4, userPitch + velPitch * (dt || 0) * 0.5));
+        velYaw *= k; velPitch *= k;
+      }
+      lastT = t; draw(t);
+    });
+  </script>
+</body>
+</html>
