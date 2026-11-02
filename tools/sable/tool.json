@@ -1,0 +1,15 @@
+{
+  "slug": "sable",
+  "title": "Sable",
+  "type": "generative",
+  "description": "Des grains aux couleurs de la marque tombent, glissent et s’empilent en strates, dans un bocal, un sablier qui se retourne, une planche à clous ou sur le logo.",
+  "tags": ["sable", "automate", "strates", "pixels", "logo", "svg"],
+  "inspiration": [
+    "Automates cellulaires de sable tombant (falling sand)",
+    "Bouteilles de sable coloré en couches et sabliers",
+    "references/techniques.md ; palettes biennale, good-room, éventail, thermique"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
