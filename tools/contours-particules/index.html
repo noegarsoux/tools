@@ -1,0 +1,407 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Contours en particules</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Contours en particules : le contour d'un mot (ou d'un logo) est échantillonné en points réguliers ;
+    // chaque point devient un véhicule de Reynolds (The Nature of Code, ch. 5 et 6) qui revient vers sa
+    // place en freinant à l'arrivée. Des souffles réguliers dispersent tout, un vent de bruit les déporte,
+    // le pointeur les écarte ou les aspire. Les points d'un même contour peuvent rester liés par un fil
+    // élastique : la lettre se déchire et se recoud. Export SVG de l'instant.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const KB = PAL('kegelbahn'), BIEN = PAL('biennale'), MENTHE = PAL('menthe'), NUIT = PAL('trame-nuit'), P60 = PAL('papier-60');
+    const GR = PAL('good-room'), CODE = PAL('code'), ORB = PAL('orbite'), ACIDE = PAL('acide'), PG = PAL('papier-gris');
+    const FONTS = {
+      grotesque: "'Helvetica Neue', Helvetica, Arial, sans-serif",
+      serif: "Georgia, 'Times New Roman', Times, serif",
+      mono: "'Courier New', Courier, monospace",
+      etroite: "'Helvetica Neue', Helvetica, Arial, sans-serif",
+    };
+
+    let pending = false, burstSeed = 0.3, ptr = null, pressed = false, dirty = true, burstAt = -1e9, lastCycle = -1;
+    // Particules : position, vitesse, place, contour, lettre.
+    let N = 0, px, py, vx, vy, hx, hy, loopId, letter, loops = [], center = { x: 0, y: 0 }, built = { w: 0, h: 0 };
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.04, vignette: 0 },
+      hint: 'Survol : le pointeur écarte les points · appuyez pour les aspirer · touchez sans bouger pour un souffle · molette : rayon',
+      notes: 'Chaque point du contour revient vers sa place en freinant à l’arrivée (comportement d’arrivée de Reynolds). Les souffles dispersent tout, le vent déporte, le fil relie les points d’un même contour.',
+      params: {
+        'Texte': {
+          texte: { type: 'textarea', label: 'Texte (une ligne par retour)', value: 'ÉCLAT', rows: 2 },
+          police: { type: 'font', label: 'Police', options: { grotesque: 'Grotesque', serif: 'Sérif', mono: 'Machine', etroite: 'Étroite' }, value: 'grotesque' },
+          graisse: { type: 'segmented', label: 'Graisse', options: { 400: 'Normale', 700: 'Grasse', 900: 'Noire' }, value: '900' },
+          taille: { type: 'range', label: 'Taille', min: 0.2, max: 0.98, step: 0.01, value: 0.8 },
+          forme: { type: 'segmented', label: 'Forme', options: { texte: 'Texte', logo: 'Logo' }, value: 'texte' },
+          points: { type: 'segmented', label: 'Points', options: { contour: 'Contour', remplissage: 'Remplissage', tous: 'Les deux' }, value: 'contour' },
+          espacement: { type: 'range', label: 'Espacement (px)', min: 2, max: 24, step: 0.5, value: 6 },
+        },
+        'Mouvement': {
+          mode: { type: 'segmented', label: 'Mouvement', options: { souffle: 'Souffles', vent: 'Vent', calme: 'Calme' }, value: 'souffle' },
+          cycle: { type: 'range', label: 'Durée d’un cycle (s)', min: 2, max: 20, step: 0.5, value: 6 },
+          force: { type: 'range', label: 'Force du souffle', min: 0, max: 3, step: 0.01, value: 1.2 },
+          retour: { type: 'range', label: 'Retour', min: 0.1, max: 3, step: 0.01, value: 1 },
+          bruit: { type: 'range', label: 'Bruit', min: 0, max: 1, step: 0.01, value: 0.25 },
+          vitesse: { type: 'range', label: 'Vitesse maximale', min: 0.2, max: 3, step: 0.01, value: 1 },
+        },
+        'Pointeur': {
+          rayon: { type: 'range', label: 'Rayon', min: 0.03, max: 0.5, step: 0.005, value: 0.14 },
+          poussee: { type: 'range', label: 'Poussée', min: 0, max: 3, step: 0.01, value: 1.2 },
+        },
+        'Rendu': {
+          rendu: { type: 'segmented', label: 'Rendu', options: { points: 'Points', fil: 'Fil', traits: 'Traits', trainees: 'Traînées' }, value: 'points' },
+          taillePoint: { type: 'range', label: 'Taille des points', min: 0.3, max: 8, step: 0.1, value: 1.8 },
+          colorer: { type: 'segmented', label: 'Couleur', options: { unie: 'Unie', lettre: 'Par lettre', vitesse: 'Par vitesse' }, value: 'unie' },
+          fond: { type: 'color', label: 'Fond', value: KB[0] },
+          couleurs: { type: 'palette', label: 'Couleurs', value: [KB[3], KB[1], KB[2], KB[5]] },
+        },
+      },
+      presets: {
+        'Éclat': {},
+        'Fil': { rendu: 'fil', texte: 'FIL', espacement: 5, taillePoint: 0.6, mode: 'souffle', force: 0.8, cycle: 7, fond: P60[0], couleurs: [P60[1]], colorer: 'unie' },
+        'Vent': { mode: 'vent', bruit: 0.7, rendu: 'trainees', texte: 'VENT', espacement: 4, taillePoint: 1.2, fond: NUIT[0], couleurs: [NUIT[1], NUIT[2]], colorer: 'vitesse', graisse: '700' },
+        'Remplissage': { points: 'remplissage', espacement: 7, taillePoint: 2.6, texte: 'POINT', colorer: 'lettre', fond: BIEN[0], couleurs: [BIEN[2], BIEN[1], BIEN[3], BIEN[4]], force: 0.8 },
+        'Traits': { rendu: 'traits', mode: 'souffle', texte: 'ÉLAN', espacement: 5, taillePoint: 2, force: 1.1, cycle: 5, fond: ACIDE[1], couleurs: [ACIDE[2], ACIDE[3]], colorer: 'vitesse' },
+        'Code': { police: 'mono', graisse: '700', texte: 'CODE\nSOURCE', points: 'tous', espacement: 6, taillePoint: 1.6, rendu: 'points', colorer: 'lettre', fond: CODE[6], couleurs: [CODE[1], CODE[2], CODE[3], CODE[4], CODE[5]], mode: 'vent', bruit: 0.35 },
+        'Sérif': { police: 'serif', graisse: '700', texte: 'Matière', rendu: 'fil', espacement: 4, taillePoint: 0.5, fond: PG[0], couleurs: [PG[1], PG[2]], force: 0.6, retour: 0.7, cycle: 9 },
+        'Logo': { forme: 'logo', points: 'tous', espacement: 6, taillePoint: 2, fond: ORB[1], couleurs: [ORB[0], ORB[2]], colorer: 'vitesse', force: 1.4 },
+        'Menthe': { texte: 'calme', graisse: '400', mode: 'calme', rendu: 'points', espacement: 3.5, taillePoint: 1.1, fond: MENTHE[0], couleurs: [MENTHE[1], MENTHE[3]], colorer: 'vitesse', poussee: 2, rayon: 0.2 },
+        'Good Room': { texte: 'GOOD\nROOM', points: 'tous', espacement: 8, taillePoint: 3, colorer: 'lettre', fond: GR[0], couleurs: [GR[1], GR[2], GR[3], GR[4]], force: 1.2, cycle: 8, rendu: 'traits' },
+      },
+      brand(colors) {
+        const rest = colors.slice(1);
+        return { fond: colors[0], couleurs: (rest.length ? rest : ['#ffffff']).slice(0, 6) };
+      },
+      pointer: {
+        move: (q) => { ptr = { x: q.x, y: q.y }; },
+        down: (q) => { ptr = { x: q.x, y: q.y }; pressed = { x: q.x, y: q.y, moved: false }; },
+        drag: (q) => { ptr = { x: q.x, y: q.y }; if (pressed && Math.hypot(q.x - pressed.x, q.y - pressed.y) > 6) pressed.moved = true; },
+        up: () => { if (pressed && !pressed.moved) pending = true; pressed = false; },
+        wheel: (q, dy) => app.set('rayon', Math.max(0.03, Math.min(0.5, Math.round((p.rayon - dy * 0.0003) * 1000) / 1000))),
+      },
+      onChange(k) {
+        if (k === '*' || k === '_logo' || ['texte', 'police', 'graisse', 'taille', 'forme', 'points', 'espacement'].includes(k)) dirty = true;
+      },
+      onSeed() { dirty = true; },
+      export: { name: 'contours-particules', svg: () => toSVG() },
+    });
+    const p = app.params;
+    canvas.addEventListener('pointerleave', () => { if (!pressed) ptr = null; });
+    if (document.fonts) document.fonts.addEventListener('loadingdone', () => { dirty = true; });
+
+    // ——— Le mot en masque, puis ses contours (marching squares) ———
+    let logoCache = null;
+    function logoMask() {
+      const img = app.logoImg;
+      if (!img) return null;
+      if (logoCache && logoCache.img === img) return logoCache.cv;
+      const M = 1024, iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height, k = M / Math.max(iw, ih);
+      const cv = document.createElement('canvas'); cv.width = Math.max(1, Math.round(iw * k)); cv.height = Math.max(1, Math.round(ih * k));
+      const x = cv.getContext('2d', { willReadFrequently: true });
+      x.drawImage(img, 0, 0, cv.width, cv.height);
+      const im = x.getImageData(0, 0, cv.width, cv.height), d = im.data;
+      let clear = 0;
+      for (let i = 3; i < d.length; i += 4) if (d[i] < 128) clear++;
+      const useAlpha = clear > d.length / 4 * 0.1;
+      for (let i = 0; i < d.length; i += 4) {
+        const lum = (d[i] * 0.2126 + d[i + 1] * 0.7152 + d[i + 2] * 0.0722) / 255;
+        const v = useAlpha ? d[i + 3] / 255 : (1 - lum) * d[i + 3] / 255;
+        d[i] = d[i + 1] = d[i + 2] = 255; d[i + 3] = Math.round(v * 255);
+      }
+      x.putImageData(im, 0, 0);
+      logoCache = { img, cv };
+      return cv;
+    }
+    // Dessine le masque (blanc sur noir) et renvoie les boîtes des lettres, pour colorer par lettre.
+    function drawMask(c, W, H, k) {
+      c.setTransform(1, 0, 0, 1, 0, 0);
+      c.fillStyle = '#000'; c.fillRect(0, 0, W, H);
+      c.fillStyle = '#fff'; c.strokeStyle = '#fff';
+      const boxes = [], U = Math.min(W, H);
+      if (p.forme === 'logo') {
+        const m = logoMask();
+        if (m) {
+          const s = Math.min(W * p.taille, H * Math.min(0.9, p.taille * 1.1)) / Math.max(m.width, m.height);
+          c.drawImage(m, W / 2 - m.width * s / 2, H / 2 - m.height * s / 2, m.width * s, m.height * s);
+        } else {
+          const R = U * p.taille * 0.5;
+          c.lineWidth = R * 0.24; c.beginPath(); c.arc(W / 2, H / 2, R * 0.8, 0, TAU); c.stroke();
+          c.beginPath(); c.arc(W / 2, H / 2, R * 0.28, 0, TAU); c.fill();
+        }
+        return boxes;
+      }
+      const lines = String(p.texte || '').split('\n').map((s) => s.trim()).filter(Boolean);
+      if (!lines.length) return boxes;
+      const fam = p.police === 'AtelierBrand' ? "'AtelierBrand', sans-serif" : (FONTS[p.police] || FONTS.grotesque), wt = p.graisse;
+      const sx = p.police === 'etroite' ? 0.68 : 1;
+      c.font = `${wt} 100px ${fam}`;
+      let mw = 1;
+      for (const l of lines) mw = Math.max(mw, c.measureText(l).width * sx);
+      const lh = 0.92, size = Math.min(W * p.taille / mw * 100, H * Math.min(0.92, p.taille * 1.05) / (lines.length * lh));
+      c.font = `${wt} ${size}px ${fam}`;
+      c.textAlign = 'left'; c.textBaseline = 'middle';
+      lines.forEach((l, i) => {
+        const lw = c.measureText(l).width * sx, y = H / 2 + (i - (lines.length - 1) / 2) * size * lh + size * 0.04;
+        let x = W / 2 - lw / 2;
+        c.save(); c.translate(x, y); c.scale(sx, 1); c.fillText(l, 0, 0); c.restore();
+        // Boîtes des lettres (en coordonnées de scène) pour la couleur par lettre.
+        for (const ch of l) { const cw = c.measureText(ch).width * sx; if (ch.trim()) boxes.push({ x0: x / k, x1: (x + cw) / k, y: y / k, n: boxes.length }); x += cw; }
+      });
+      return boxes;
+    }
+    function contours(f, W, H, th) {
+      const GW = W + 2, GH = H + 2;
+      const g = (i, j) => (i < 1 || j < 1 || i > W || j > H ? 0 : f[(j - 1) * W + (i - 1)]);
+      const NH = GW * GH;
+      const adj = new Int32Array(NH * 4).fill(-1);
+      const qx = new Float32Array(NH * 2), qy = new Float32Array(NH * 2);
+      const link = (a, b) => { if (adj[a * 2] < 0) adj[a * 2] = b; else adj[a * 2 + 1] = b; if (adj[b * 2] < 0) adj[b * 2] = a; else adj[b * 2 + 1] = a; };
+      const hE = (i, j, a, b) => { const id = j * GW + i; qx[id] = i + (th - a) / (b - a); qy[id] = j; return id; };
+      const vE = (i, j, a, b) => { const id = NH + j * GW + i; qx[id] = i; qy[id] = j + (th - a) / (b - a); return id; };
+      for (let j = 0; j < GH - 1; j++) for (let i = 0; i < GW - 1; i++) {
+        const a = g(i, j), b = g(i + 1, j), c = g(i + 1, j + 1), d = g(i, j + 1);
+        const k = (a >= th) | ((b >= th) << 1) | ((c >= th) << 2) | ((d >= th) << 3);
+        if (k === 0 || k === 15) continue;
+        const e0 = () => hE(i, j, a, b), e2 = () => hE(i, j + 1, d, c), e3 = () => vE(i, j, a, d), e1 = () => vE(i + 1, j, b, c);
+        const mid = (a + b + c + d) / 4 >= th;
+        switch (k) {
+          case 1: case 14: link(e3(), e0()); break;
+          case 2: case 13: link(e0(), e1()); break;
+          case 3: case 12: link(e3(), e1()); break;
+          case 4: case 11: link(e1(), e2()); break;
+          case 6: case 9: link(e0(), e2()); break;
+          case 7: case 8: link(e3(), e2()); break;
+          case 5: if (mid) { link(e0(), e1()); link(e2(), e3()); } else { link(e3(), e0()); link(e1(), e2()); } break;
+          case 10: if (mid) { link(e3(), e0()); link(e1(), e2()); } else { link(e0(), e1()); link(e2(), e3()); } break;
+        }
+      }
+      const seen = new Uint8Array(NH * 2), out = [];
+      for (let s = 0; s < NH * 2; s++) {
+        if (seen[s] || adj[s * 2] < 0) continue;
+        const pts = [];
+        let prev = -1, cur = s;
+        while (cur >= 0 && !seen[cur]) {
+          seen[cur] = 1; pts.push([qx[cur] - 1, qy[cur] - 1]);
+          const n0 = adj[cur * 2], n1 = adj[cur * 2 + 1];
+          const nx = n0 !== prev && !seen[n0] ? n0 : n1;
+          prev = cur; cur = nx;
+        }
+        if (pts.length >= 4) out.push(pts);
+      }
+      return out;
+    }
+    // Rééchantillonne une boucle à pas constant.
+    function resample(pts, step) {
+      let L = 0;
+      for (let i = 0; i < pts.length; i++) { const a = pts[i], b = pts[(i + 1) % pts.length]; L += Math.hypot(b[0] - a[0], b[1] - a[1]); }
+      const n = Math.max(3, Math.round(L / step)), out = [], ds = L / n;
+      let acc = 0, i = 0, a = pts[0], b = pts[1 % pts.length], seg = Math.hypot(b[0] - a[0], b[1] - a[1]), t = 0;
+      for (let k = 0; k < n; k++) {
+        const target = k * ds;
+        while (acc + seg < target && i < pts.length) { acc += seg; i++; a = pts[i % pts.length]; b = pts[(i + 1) % pts.length]; seg = Math.hypot(b[0] - a[0], b[1] - a[1]); }
+        t = seg > 0 ? (target - acc) / seg : 0;
+        out.push([a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]);
+      }
+      return out;
+    }
+
+    function build() {
+      const { w, h } = app.size, k = 0.5, W = Math.max(8, Math.round(w * k)), H = Math.max(8, Math.round(h * k));
+      const cv = document.createElement('canvas'); cv.width = W; cv.height = H;
+      const c = cv.getContext('2d', { willReadFrequently: true });
+      const boxes = drawMask(c, W, H, k);
+      const d = c.getImageData(0, 0, W, H).data, f = new Float32Array(W * H);
+      for (let i = 0; i < f.length; i++) f[i] = d[i * 4] / 255;
+      const homes = [];
+      loops = [];
+      const r = app.rng(5);
+      if (p.points !== 'remplissage') {
+        for (const L of contours(f, W, H, 0.5)) {
+          const pts = resample(L.map(([x, y]) => [(x + 0.5) / k, (y + 0.5) / k]), p.espacement);
+          const start = homes.length;
+          for (const q of pts) homes.push([q[0], q[1], loops.length]);
+          loops.push([start, homes.length]);
+        }
+      }
+      if (p.points !== 'contour') {
+        // Remplissage : une grille décalée, un peu tremblée, à l'intérieur de la forme.
+        const s = p.espacement * (p.points === 'tous' ? 1.6 : 1.15);
+        for (let y = s / 2, row = 0; y < h; y += s * 0.866, row++) for (let x = (row % 2 ? s / 2 : 0) + s / 4; x < w; x += s) {
+          const jx = x + (r() - 0.5) * s * 0.3, jy = y + (r() - 0.5) * s * 0.3;
+          const i = Math.floor(jx * k), j = Math.floor(jy * k);
+          if (i >= 0 && j >= 0 && i < W && j < H && f[j * W + i] > 0.6) homes.push([jx, jy, -1]);
+        }
+      }
+      N = homes.length;
+      px = new Float32Array(N); py = new Float32Array(N); vx = new Float32Array(N); vy = new Float32Array(N);
+      hx = new Float32Array(N); hy = new Float32Array(N); loopId = new Int32Array(N); letter = new Int32Array(N);
+      let cx = 0, cy = 0;
+      for (let i = 0; i < N; i++) {
+        const [x, y, l] = homes[i];
+        hx[i] = x; hy[i] = y; loopId[i] = l; cx += x; cy += y;
+        // Départ : les points arrivent depuis tout le cadre.
+        px[i] = r() * w; py[i] = r() * h;
+        let best = 0, bd = 1e9;
+        for (const b of boxes) { const dd = x < b.x0 ? b.x0 - x : x > b.x1 ? x - b.x1 : 0; const dv = dd * 4 + Math.abs(y - b.y); if (dv < bd) { bd = dv; best = b.n; } }
+        letter[i] = best;
+      }
+      center = N ? { x: cx / N, y: cy / N } : { x: w / 2, y: h / 2 };
+      built = { w, h };
+      dirty = false;
+    }
+
+    // ——— Véhicules ———
+    const nz = (x, y, t) => Math.sin(x * 1.7 + t * 0.7 + Math.sin(y * 1.3 - t * 0.4) * 1.6) + Math.sin(y * 2.1 - t * 0.5 + Math.sin(x * 0.9 + t * 0.3) * 1.2);
+    let clock = 0;
+    function update(t, dt) {
+      const { w, h } = app.size, U = Math.min(w, h);
+      const vmax = U * 0.9 * p.vitesse, fmax = U * 6 * p.vitesse, slow = U * 0.12;
+      // Souffles : au début de chaque cycle, ou au toucher.
+      let home = 1, impulse = 0;
+      if (p.mode === 'souffle') {
+        const c = Math.floor(t / p.cycle);
+        if (c !== lastCycle) { if (lastCycle >= 0) pending = true; lastCycle = c; }
+      }
+      if (pending) { pending = false; impulse = 1; burstAt = t; burstSeed = (burstSeed * 1.618 + 0.77) % 7; }
+      const since = t - burstAt;
+      // Après un souffle, le retour reprend progressivement.
+      if (since >= 0) home = Math.min(1, Math.max(0, (since - 0.15) / Math.min(2.5, 0.3 * p.cycle)));
+      home = home * home;
+      const R = U * p.rayon, R2 = R * R, wind = p.mode === 'vent' ? 1 : 0.25, nb = p.bruit * U * 3.2 * wind;
+      const damp = Math.pow(0.12, dt);
+      const r = app.rng(Math.floor(t * 60));
+      for (let i = 0; i < N; i++) {
+        let ax = 0, ay = 0;
+        // Arrivée : vitesse souhaitée vers la place, freinée près du but.
+        const dx = hx[i] - px[i], dy = hy[i] - py[i], d = Math.hypot(dx, dy);
+        if (d > 0.01) {
+          const sp = vmax * Math.min(1, d / slow) * p.retour;
+          let sx = dx / d * sp - vx[i], sy = dy / d * sp - vy[i];
+          const m = Math.hypot(sx, sy), lim = fmax * p.retour;
+          if (m > lim) { sx *= lim / m; sy *= lim / m; }
+          ax += sx * home * 4; ay += sy * home * 4;
+        }
+        // Bruit : un vent qui ondule, plus fort en mode vent et pendant la dispersion.
+        if (nb > 0) {
+          const a = nz(px[i] / U * 2.2, py[i] / U * 2.2, t) * 1.6;
+          const g = nb * (wind + (1 - home) * 0.8);
+          ax += Math.cos(a) * g; ay += Math.sin(a) * g;
+        }
+        // Pointeur : il écarte, ou aspire quand on appuie.
+        if (ptr) {
+          const ex = px[i] - ptr.x, ey = py[i] - ptr.y, e2 = ex * ex + ey * ey;
+          if (e2 < R2 && e2 > 1e-4) {
+            const e = Math.sqrt(e2), k = (1 - e / R) ** 2 * U * 40 * p.poussee * (pressed ? -0.6 : 1);
+            ax += ex / e * k; ay += ey / e * k;
+          }
+        }
+        if (impulse) {
+          // Souffle : une poussée depuis le centre du mot, avec un peu de hasard.
+          const ox = px[i] - center.x, oy = py[i] - center.y, o = Math.hypot(ox, oy) + 1;
+          // Direction et force cohérentes d'un point à son voisin : la forme se déchire en lambeaux, pas en poussière.
+          const q = burstSeed;
+          const s = U * 0.7 * p.force * (0.75 + 0.35 * nz(hx[i] / U * 2.4 + q, hy[i] / U * 2.4 - q, q) + 0.15 * r());
+          const a = nz(hx[i] / U * 1.7 - q * 3, hy[i] / U * 1.7 + q, q * 2) * 0.55 + (r() - 0.5) * 0.15;
+          const ux = ox / o, uy = oy / o;
+          vx[i] += (ux * Math.cos(a) - uy * Math.sin(a)) * s; vy[i] += (ux * Math.sin(a) + uy * Math.cos(a)) * s;
+        }
+        vx[i] = (vx[i] + ax * dt) * damp; vy[i] = (vy[i] + ay * dt) * damp;
+        px[i] += vx[i] * dt; py[i] += vy[i] * dt;
+      }
+    }
+
+    // ——— Rendu ———
+    function colorOf(i, pal, U) {
+      if (p.colorer === 'lettre') return pal[letter[i] % pal.length];
+      if (p.colorer === 'vitesse') {
+        const s = Math.hypot(vx[i], vy[i]) / (U * 0.5);
+        return pal[Math.min(pal.length - 1, Math.floor(Math.min(0.999, s) * pal.length))];
+      }
+      return pal[0];
+    }
+    function draw(c, w, h, trails) {
+      const U = Math.min(w, h), pal = p.couleurs && p.couleurs.length ? p.couleurs : ['#ffffff'], r = p.taillePoint;
+      if (trails) { c.globalAlpha = 0.16; c.fillStyle = p.fond; c.fillRect(0, 0, w, h); c.globalAlpha = 1; }
+      else { c.fillStyle = p.fond; c.fillRect(0, 0, w, h); }
+      if (p.rendu === 'fil') {
+        // Fil : les points d'un même contour restent liés.
+        c.lineWidth = Math.max(0.4, r * 0.8); c.lineJoin = 'round';
+        for (let l = 0; l < loops.length; l++) {
+          const [a, b] = loops[l];
+          c.strokeStyle = p.colorer === 'unie' ? pal[0] : colorOf(a, pal, U);
+          c.beginPath();
+          for (let i = a; i < b; i++) (i === a ? c.moveTo(px[i], py[i]) : c.lineTo(px[i], py[i]));
+          c.closePath(); c.stroke();
+        }
+        // Les points du remplissage restent des points.
+        for (let i = 0; i < N; i++) if (loopId[i] < 0) { c.fillStyle = colorOf(i, pal, U); c.beginPath(); c.arc(px[i], py[i], r, 0, TAU); c.fill(); }
+        return;
+      }
+      if (p.rendu === 'traits') {
+        // Traits : chaque point tire un trait dans le sens de sa vitesse.
+        c.lineCap = 'round'; c.lineWidth = Math.max(0.8, r);
+        for (let i = 0; i < N; i++) {
+          c.strokeStyle = colorOf(i, pal, U);
+          const k = 0.05;
+          c.beginPath(); c.moveTo(px[i], py[i]); c.lineTo(px[i] - vx[i] * k - 0.01, py[i] - vy[i] * k); c.stroke();
+        }
+        return;
+      }
+      for (let i = 0; i < N; i++) {
+        c.fillStyle = colorOf(i, pal, U);
+        c.beginPath(); c.arc(px[i], py[i], r, 0, TAU); c.fill();
+      }
+    }
+
+    let lastDraw = null;
+    app.loop((t, dt) => {
+      clock = t;
+      const { w, h, dpr } = app.size;
+      if (dirty || built.w !== w || built.h !== h) build();
+      if (dt > 0) {
+        // Sous-pas : la physique reste stable même quand l'image ralentit.
+        const steps = Math.min(4, Math.ceil(dt / (1 / 60)));
+        for (let s = 0; s < steps; s++) update(t - dt + (s + 1) * dt / steps, Math.min(dt, 0.1) / steps);
+      }
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      draw(ctx, w, h, p.rendu === 'trainees' && dt > 0);
+      app.finish(ctx);
+    });
+
+    // ——— Export SVG : la position de chaque point à cet instant ———
+    function toSVG() {
+      const { w, h } = app.size, U = Math.min(w, h), pal = p.couleurs && p.couleurs.length ? p.couleurs : ['#ffffff'], f = (v) => +v.toFixed(1), r = p.taillePoint;
+      let body = '';
+      if (p.rendu === 'fil') {
+        for (const [a, b] of loops) {
+          let d = '';
+          for (let i = a; i < b; i++) d += (i === a ? 'M' : 'L') + f(px[i]) + ' ' + f(py[i]);
+          body += `<path d="${d}Z" fill="none" stroke="${p.colorer === 'unie' ? pal[0] : colorOf(a, pal, U)}" stroke-width="${f(Math.max(0.4, r * 0.8))}" stroke-linejoin="round"/>\n`;
+        }
+        for (let i = 0; i < N; i++) if (loopId[i] < 0) body += `<circle cx="${f(px[i])}" cy="${f(py[i])}" r="${f(r)}" fill="${colorOf(i, pal, U)}"/>\n`;
+      } else if (p.rendu === 'traits') {
+        for (let i = 0; i < N; i++) body += `<line x1="${f(px[i])}" y1="${f(py[i])}" x2="${f(px[i] - vx[i] * 0.05 - 0.01)}" y2="${f(py[i] - vy[i] * 0.05)}" stroke="${colorOf(i, pal, U)}" stroke-width="${f(Math.max(0.8, r))}" stroke-linecap="round"/>\n`;
+      } else {
+        // Points (et traînées, réduites à l'instant présent), groupés par couleur.
+        const groups = new Map();
+        for (let i = 0; i < N; i++) { const col = colorOf(i, pal, U); if (!groups.has(col)) groups.set(col, []); groups.get(col).push(i); }
+        for (const [col, ids] of groups) body += `<g fill="${col}">${ids.map((i) => `<circle cx="${f(px[i])}" cy="${f(py[i])}" r="${f(r)}"/>`).join('')}</g>\n`;
+      }
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">\n<rect width="100%" height="100%" fill="${p.fond}"/>\n${body}</svg>`;
+    }
+  </script>
+</body>
+</html>

@@ -1,0 +1,16 @@
+{
+  "slug": "contours-particules",
+  "title": "Contours en particules",
+  "type": "typography",
+  "description": "Le contour d'un mot ou d'un logo devient des points qui se dispersent en souffles, dérivent au vent, fuient le pointeur et reviennent à leur place.",
+  "tags": ["particules", "contour", "typographie", "steering", "svg", "logo"],
+  "inspiration": [
+    "Daniel Shiffman, The Nature of Code, chapitres 5 et 6 (comportement d'arrivée)",
+    "Craig Reynolds (1999), Steering Behaviors For Autonomous Characters",
+    "Typographies cinétiques en points des identités animées (references/identites.md)",
+    "Palettes kegelbahn, papier-60, trame-nuit, biennale, acide, code, papier-gris, orbite, menthe"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
