@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Hypercube</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Hypercube : un cube de dimension 3 à 6 qui tourne dans ses plans (dont ceux qui sortent de notre
+    // espace), projeté en perspective de dimension en dimension jusqu'au plan. Comme chez Manfred Mohr,
+    // on n'en montre qu'une partie des arêtes : le choix change avec le temps, la figure se défait et se
+    // recompose. Seul ou en planche, chaque case ayant sa propre rotation et son propre tirage.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const P60 = PAL('papier-60'), NUIT = PAL('trame-nuit'), KB = PAL('kegelbahn'), BIEN = PAL('biennale'), ORB = PAL('orbite');
+    const GR = PAL('good-room'), ACIDE = PAL('acide'), LU = PAL('luzern'), PHOTO = PAL('photocopie'), CODE = PAL('code');
+
+    let cube = null, cells = [], hover = null, drag = null, extra = [0, 0], lastT = 0, stamps = {};
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.03, vignette: 0 },
+      hint: 'Glissez pour tourner dans la quatrième dimension · survol : inclinaison · molette : zoom',
+      notes: 'Un cube de dimension n a 2ⁿ sommets et n·2ⁿ⁻¹ arêtes ; chaque arête suit l’une des n directions, d’où la coloration par direction. La projection divise par la profondeur une dimension après l’autre.',
+      params: {
+        'Cube': {
+          dimension: { type: 'segmented', label: 'Dimension', options: { 3: '3', 4: '4', 5: '5', 6: '6' }, value: '4' },
+          aretes: { type: 'range', label: 'Part des arêtes visibles', min: 0.05, max: 1, step: 0.01, value: 0.75 },
+          cycle: { type: 'range', label: 'Renouvellement des arêtes', min: 0, max: 1, step: 0.01, value: 0.2 },
+          perspective: { type: 'range', label: 'Perspective', min: 0, max: 1, step: 0.01, value: 0.55 },
+          zoom: { type: 'range', label: 'Zoom', min: 0.3, max: 2, step: 0.01, value: 1 },
+        },
+        'Disposition': {
+          disposition: { type: 'segmented', label: 'Disposition', options: { seul: 'Seul', planche: 'Planche' }, value: 'seul' },
+          colonnes: { type: 'range', label: 'Colonnes', min: 2, max: 10, step: 1, value: 5, show: (q) => q.disposition === 'planche' },
+          variation: { type: 'range', label: 'Variation entre cases', min: 0, max: 1, step: 0.01, value: 0.6, show: (q) => q.disposition === 'planche' },
+        },
+        'Mouvement': {
+          vitesse: { type: 'range', label: 'Vitesse de rotation', min: 0, max: 1.5, step: 0.01, value: 0.35 },
+          plans: { type: 'range', label: 'Plans en rotation', min: 1, max: 6, step: 1, value: 3 },
+        },
+        'Trait': {
+          epaisseur: { type: 'range', label: 'Épaisseur', min: 0.5, max: 8, step: 0.1, value: 2.2 },
+          profondeur: { type: 'range', label: 'Effet de profondeur', min: 0, max: 1, step: 0.01, value: 0.5 },
+          sommets: { type: 'segmented', label: 'Sommets', options: { aucun: 'Aucun', points: 'Points', logo: 'Logo' }, value: 'aucun' },
+          taille: { type: 'range', label: 'Taille des sommets', min: 1, max: 30, step: 0.5, value: 5, show: (q) => q.sommets !== 'aucun' },
+        },
+        'Couleur': {
+          fond: { type: 'color', label: 'Fond', value: P60[0] },
+          couleurs: { type: 'palette', label: 'Couleurs des directions', value: [P60[1], '#e5452a', P60[1], '#94928f'] },
+          coloration: { type: 'segmented', label: 'Coloration', options: { direction: 'Direction', uni: 'Uni', profondeur: 'Profondeur' }, value: 'direction' },
+        },
+      },
+      presets: {
+        'Tesseract': {},
+        'Planche': { disposition: 'planche', colonnes: 6, aretes: 0.45, epaisseur: 1.6, perspective: 0.45, coloration: 'uni', couleurs: [P60[1]], variation: 0.8 },
+        'Mohr': { dimension: '6', aretes: 0.22, cycle: 0.35, epaisseur: 3.2, perspective: 0.2, fond: '#ffffff', couleurs: ['#111111'], coloration: 'uni', zoom: 1.1 },
+        'Kegelbahn': { dimension: '5', aretes: 0.8, epaisseur: 2.4, fond: KB[0], couleurs: [KB[1], KB[2], KB[3], KB[4], KB[5]], perspective: 0.65 },
+        'Nuit': { dimension: '4', aretes: 1, cycle: 0, fond: NUIT[0], couleurs: [NUIT[1]], coloration: 'profondeur', epaisseur: 1.4, sommets: 'points', taille: 3, perspective: 0.8 },
+        'Biennale': { disposition: 'planche', colonnes: 4, dimension: '5', aretes: 0.5, fond: BIEN[0], couleurs: [BIEN[1], BIEN[2], BIEN[3], BIEN[4]], epaisseur: 2.6 },
+        'Logo': { dimension: '4', aretes: 0.7, sommets: 'logo', taille: 16, epaisseur: 1.4, fond: P60[0], couleurs: [P60[1], '#e5452a'], perspective: 0.5 },
+        'Orbite': { dimension: '3', aretes: 1, cycle: 0, disposition: 'planche', colonnes: 7, variation: 1, fond: ORB[0], couleurs: [ORB[1], ORB[2]], epaisseur: 1.8, coloration: 'direction' },
+        'Code': { dimension: '6', aretes: 0.5, fond: CODE[0], couleurs: CODE.slice(1, 7), epaisseur: 2, perspective: 0.7, plans: 5 },
+        'Acide': { dimension: '5', aretes: 0.35, cycle: 0.6, fond: ACIDE[2], couleurs: [ACIDE[1]], coloration: 'uni', epaisseur: 5, perspective: 0.35 },
+      },
+      brand(colors) {
+        const rest = colors.slice(1);
+        return { fond: colors[0], couleurs: (rest.length ? rest : ['#000000']).slice(0, 6) };
+      },
+      pointer: {
+        move: (q) => { hover = { x: q.x / app.size.w - 0.5, y: q.y / app.size.h - 0.5 }; },
+        down: (q) => { drag = { x: q.x, y: q.y, e: extra.slice() }; },
+        drag: (q) => {
+          if (!drag) return;
+          const U = Math.min(app.size.w, app.size.h);
+          extra = [drag.e[0] + (q.x - drag.x) / U * Math.PI, drag.e[1] + (q.y - drag.y) / U * Math.PI];
+        },
+        up: () => { drag = null; },
+        wheel: (q, dy) => app.set('zoom', Math.max(0.3, Math.min(2, +(p.zoom * Math.exp(-dy * 0.001)).toFixed(2)))),
+      },
+      onChange(k) {
+        if (k === 'dimension' || k === '*') build();
+        if (k === '*' || k === '_logo') stamps = {};
+      },
+      onSeed() { build(); },
+      export: { name: 'hypercube', svg: () => toSVG() },
+    });
+    const p = app.params;
+    canvas.addEventListener('pointerleave', () => { hover = null; });
+
+    // Sommets {-1, 1}ⁿ et arêtes (paires qui diffèrent d'un seul bit, avec leur direction).
+    function build() {
+      const D = +p.dimension, V = [], E = [];
+      for (let m = 0; m < 1 << D; m++) V.push(Array.from({ length: D }, (_, k) => (m >> k & 1 ? 1 : -1)));
+      for (let m = 0; m < 1 << D; m++) for (let k = 0; k < D; k++) if (!(m >> k & 1)) E.push([m, m | 1 << k, k]);
+      cube = { D, V, E };
+      // Les plans de rotation : toutes les paires d'axes, rangées dans un ordre tiré de la graine, en
+      // commençant par ceux qui sortent de l'espace 3D (les plus étranges à voir).
+      const r = app.rng(21), planes = [];
+      for (let i = 0; i < D; i++) for (let j = i + 1; j < D; j++) planes.push([i, j, (j >= 3 ? 0 : 1) + r() * 0.9]);
+      planes.sort((a, b) => a[2] - b[2]);
+      cube.planes = planes.map(([i, j]) => [i, j]);
+      cube.speeds = planes.map(() => (0.4 + r() * 0.8) * (r() < 0.5 ? -1 : 1));
+      // Cases de la planche : phase, tirage d'arêtes, vitesse propres.
+      cells = Array.from({ length: 100 }, () => ({ ph: r() * 100, sp: 0.7 + r() * 0.6, ranks: E.map(() => r()) }));
+      cube.ranks = E.map(() => r());
+    }
+
+    // Rotation : produit de rotations de Givens, puis projection perspective dimension par dimension.
+    function project(cell, t, cx, cy, size, vary) {
+      const { D, V, planes, speeds } = cube, n = Math.min(planes.length, Math.max(1, Math.round(p.plans)));
+      const ang = [];
+      const tt = t * p.vitesse * (vary ? cell.sp : 1) + (vary ? cell.ph : 0);
+      for (let k = 0; k < planes.length; k++) ang.push(k < n ? tt * speeds[k] * 0.6 : (vary ? cell.ph * (k + 1) : 0.35 * (k + 1)));
+      // Le glisser tourne dans les plans (x, w) et (y, w) ; le survol incline dans (x, z) et (y, z).
+      const tilt = hover && !vary ? [hover.x * 0.8, hover.y * 0.8] : [0, 0];
+      const P = [], persp = p.perspective;
+      for (const v0 of V) {
+        const v = v0.slice();
+        for (let k = 0; k < planes.length; k++) rot(v, planes[k][0], planes[k][1], ang[k]);
+        if (D > 3) { rot(v, 0, 3, extra[0]); rot(v, 1, 3, extra[1]); }
+        rot(v, 0, 2, tilt[0]); rot(v, 1, 2, tilt[1]);
+        // De n à 2 dimensions : chaque dimension supplémentaire divise les autres par sa profondeur.
+        let s = 1;
+        const z = v[2];
+        // La force est répartie entre les dimensions : un 6-cube ne s'emballe pas plus qu'un cube.
+        const kp = persp * 0.55 / Math.sqrt(Math.max(1, D - 2));
+        for (let d = D - 1; d >= 2; d--) {
+          const L = Math.sqrt(d + 1) * 1.6, f = 1 / (1 - kp * v[d] / L);
+          s *= f;
+          for (let k = 0; k < d; k++) v[k] *= f;
+        }
+        P.push({ x: cx + v[0] * size, y: cy + v[1] * size, z, s });
+      }
+      return P;
+    }
+    function rot(v, i, j, a) {
+      const c = Math.cos(a), s = Math.sin(a), x = v[i], y = v[j];
+      v[i] = c * x - s * y; v[j] = s * x + c * y;
+    }
+
+    // Les segments à tracer, triés du fond vers l'avant.
+    function segments(t) {
+      if (!cube || cube.D !== +p.dimension) build();
+      const { w, h } = app.size, U = Math.min(w, h), out = [], pts = [];
+      const cols = p.couleurs.length ? p.couleurs : ['#000000'];
+      const place = [];
+      if (p.disposition === 'planche') {
+        const c = Math.round(p.colonnes), cw = w / c, rows = Math.max(1, Math.round(h / cw)), ch = h / rows;
+        for (let j = 0; j < rows; j++) for (let i = 0; i < c; i++) place.push({ cx: (i + 0.5) * cw, cy: (j + 0.5) * ch, size: Math.min(cw, ch) * 0.2, k: j * c + i });
+      } else place.push({ cx: w / 2, cy: h / 2, size: U * 0.2, k: -1 });
+      const D = cube.D, sizeK = 1 / Math.sqrt(D / 3);
+      for (const pl of place) {
+        const vary = pl.k >= 0, cell = vary ? cells[pl.k % cells.length] : null;
+        const mix = vary ? p.variation : 0;
+        const P = project(cell || { ph: 0, sp: 1 }, t, pl.cx, pl.cy, pl.size * p.zoom * sizeK * (vary ? 1 : 1.25), vary && mix > 0);
+        const ranks = cube.E.map((_, e) => (cell ? cube.ranks[e] * (1 - mix) + cell.ranks[e] * mix : cube.ranks[e]));
+        const frac = p.aretes, shift = t * p.cycle * 0.08;
+        let zmin = Infinity, zmax = -Infinity;
+        for (const q of P) { zmin = Math.min(zmin, q.s); zmax = Math.max(zmax, q.s); }
+        cube.E.forEach(([a, b, k], e) => {
+          if (frac < 1 && ((ranks[e] + shift) % 1) >= frac) return;
+          const A = P[a], B = P[b], depth = zmax > zmin ? ((A.s + B.s) / 2 - zmin) / (zmax - zmin) : 0.5;
+          let col;
+          if (p.coloration === 'direction') col = cols[k % cols.length];
+          else if (p.coloration === 'profondeur') col = cols[Math.min(cols.length - 1, Math.floor(depth * cols.length))];
+          else col = cols[0];
+          out.push({ x1: A.x, y1: A.y, x2: B.x, y2: B.y, depth, col, wd: p.epaisseur * (1 - p.profondeur * 0.75 + p.profondeur * 0.75 * 2 * depth) * Math.sqrt(A.s * B.s) ** 0.5 });
+        });
+        if (p.sommets !== 'aucun') for (const q of P) pts.push({ x: q.x, y: q.y, s: p.taille * Math.sqrt(q.s), depth: zmax > zmin ? (q.s - zmin) / (zmax - zmin) : 0.5 });
+      }
+      out.sort((a, b) => a.depth - b.depth);
+      pts.sort((a, b) => a.depth - b.depth);
+      return { out, pts };
+    }
+
+    function logoStamp(col) {
+      if (stamps[col]) return stamps[col];
+      const S = 128, cv = document.createElement('canvas'); cv.width = cv.height = S;
+      const x = cv.getContext('2d'), img = app.logoImg;
+      if (img) {
+        const iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height, k = S / Math.max(iw, ih);
+        x.drawImage(img, (S - iw * k) / 2, (S - ih * k) / 2, iw * k, ih * k);
+        x.globalCompositeOperation = 'source-in'; x.fillStyle = col; x.fillRect(0, 0, S, S);
+      } else {
+        x.fillStyle = col;
+        x.beginPath(); x.arc(S / 2, S / 2, S * 0.48, 0, TAU); x.arc(S / 2, S / 2, S * 0.32, 0, TAU, true); x.fill();
+        x.beginPath(); x.arc(S / 2, S / 2, S * 0.18, 0, TAU); x.fill();
+      }
+      return (stamps[col] = cv);
+    }
+
+    function draw(t) {
+      const { w, h, dpr } = app.size, { out, pts } = segments(t);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = p.fond; ctx.fillRect(0, 0, w, h);
+      ctx.lineCap = 'round';
+      for (const s of out) {
+        ctx.strokeStyle = s.col; ctx.lineWidth = Math.max(0.3, s.wd);
+        ctx.beginPath(); ctx.moveTo(s.x1, s.y1); ctx.lineTo(s.x2, s.y2); ctx.stroke();
+      }
+      const cols = p.couleurs.length ? p.couleurs : ['#000000'], pc = cols[cols.length > 1 ? 1 : 0];
+      for (const q of pts) {
+        if (p.sommets === 'logo') { const st = logoStamp(pc); ctx.drawImage(st, q.x - q.s, q.y - q.s, q.s * 2, q.s * 2); }
+        else {
+          ctx.fillStyle = pc; ctx.beginPath(); ctx.arc(q.x, q.y, q.s / 2, 0, TAU); ctx.fill();
+        }
+      }
+    }
+
+    function toSVG() {
+      const { w, h } = app.size, { out, pts } = segments(lastT), f = (v) => +v.toFixed(2);
+      const cols = p.couleurs.length ? p.couleurs : ['#000000'], pc = cols[cols.length > 1 ? 1 : 0];
+      let s = `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">\n<rect width="100%" height="100%" fill="${p.fond}"/>\n<g fill="none" stroke-linecap="round">\n`;
+      for (const q of out) s += `<line x1="${f(q.x1)}" y1="${f(q.y1)}" x2="${f(q.x2)}" y2="${f(q.y2)}" stroke="${q.col}" stroke-width="${f(Math.max(0.3, q.wd))}"/>\n`;
+      s += '</g>\n';
+      for (const q of pts) {
+        if (p.sommets === 'logo') {
+          // Le logo vectoriel n'est pas connu ici : la marque par défaut (anneau et point) le remplace.
+          s += `<g fill="${pc}"><path fill-rule="evenodd" d="M${f(q.x - q.s * 0.96)} ${f(q.y)}a${f(q.s * 0.96)} ${f(q.s * 0.96)} 0 1 0 ${f(q.s * 1.92)} 0a${f(q.s * 0.96)} ${f(q.s * 0.96)} 0 1 0 ${f(-q.s * 1.92)} 0zM${f(q.x - q.s * 0.64)} ${f(q.y)}a${f(q.s * 0.64)} ${f(q.s * 0.64)} 0 1 0 ${f(q.s * 1.28)} 0a${f(q.s * 0.64)} ${f(q.s * 0.64)} 0 1 0 ${f(-q.s * 1.28)} 0z"/><circle cx="${f(q.x)}" cy="${f(q.y)}" r="${f(q.s * 0.36)}"/></g>\n`;
+        } else s += `<circle cx="${f(q.x)}" cy="${f(q.y)}" r="${f(q.s / 2)}" fill="${pc}"/>\n`;
+      }
+      return s + '</svg>';
+    }
+
+    build();
+    app.loop((t) => { lastT = t; draw(t); app.finish(ctx); });
+  </script>
+</body>
+</html>

@@ -1,0 +1,15 @@
+{
+  "slug": "hypercube",
+  "title": "Hypercube",
+  "type": "shapes",
+  "description": "Des cubes de dimension 3 à 6 qui tournent hors de notre espace, projetés en perspective, seuls ou en planche, avec une partie de leurs arêtes.",
+  "tags": ["hypercube", "tesseract", "projection", "mohr", "svg", "lignes"],
+  "inspiration": [
+    "Manfred Mohr, P-197, Cubic Limit et les œuvres sur l'hypercube de dimension 6",
+    "A. Michael Noll, Hypercube (1965)",
+    "references/artistes.md ; palettes papier-60, kegelbahn, biennale, orbite, code, acide"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
