@@ -1,0 +1,15 @@
+{
+  "slug": "entrelacs",
+  "title": "Entrelacs",
+  "type": "pattern",
+  "description": "Des rubans tressés dessus-dessous sur une grille ; chaque barrière les fait rebondir et dessine le nœud, dans un cadre, un cercle, une croix ou le logo.",
+  "tags": ["entrelacs", "noeud", "tresse", "rubans", "logo", "svg"],
+  "inspiration": [
+    "Méthode de la grille pour les entrelacs insulaires (George Bain, Celtic Art, 1951)",
+    "Enluminures des évangéliaires de Kells et de Lindisfarne",
+    "references/techniques.md ; palettes papier-60, biennale, kegelbahn, éventail"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}

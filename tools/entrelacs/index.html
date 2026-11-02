@@ -1,0 +1,336 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Entrelacs</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Entrelacs : méthode de la grille. Les rubans courent en diagonale entre les milieux des côtés
+    // de chaque case et se croisent sur ces milieux, dessus puis dessous en alternance. Une barrière
+    // posée sur un côté fait rebondir les rubans au lieu de les croiser : c'est elle qui dessine le nœud.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const P60 = PAL('papier-60'), BIEN = PAL('biennale'), MENTHE = PAL('menthe'), KB = PAL('kegelbahn'), GR = PAL('good-room'), THER = PAL('thermique');
+    const NUIT = PAL('trame-nuit'), LUZ = PAL('luzern'), SALON = PAL('salon'), EVT = PAL('eventail'), PYR = PAL('pyramides'), CODE = PAL('code');
+    // Côtés d'une case : 0 gauche, 1 haut, 2 droite, 3 bas.
+    const OPP = [2, 3, 0, 1], DI = [-1, 0, 1, 0], DJ = [0, -1, 0, 1];
+
+    let G = null, knot = null, pulses = [], hover = null, drag = null, gen = 0, nextChange = 0, maskCache = null, maskKey = null, flow = 0;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.03, vignette: 0 },
+      hint: 'Touchez un côté pour poser ou retirer une barrière · glissez pour en tracer · le pointeur déforme la grille · molette : nombre de cases',
+      notes: 'Méthode de la grille : chaque milieu de côté est un croisement. Une barrière y fait rebondir les deux rubans ; chaque boucle fermée reçoit sa couleur.',
+      params: {
+        'Forme': {
+          forme: { type: 'select', label: 'Forme', options: { cadre: 'Cadre', cercle: 'Cercle', croix: 'Croix', logo: 'Logo' }, value: 'cadre' },
+          image: { type: 'file', label: 'Logo', accept: 'image/*', show: (q) => q.forme === 'logo' },
+          cases: { type: 'range', label: 'Cases en largeur', min: 3, max: 30, step: 1, value: 10 },
+          motif: { type: 'select', label: 'Barrières', options: { tresse: 'Tresse simple', symetrie: 'Symétrie quadruple', hasard: 'Hasard', croisillons: 'Croisillons', bandes: 'Bandes' }, value: 'symetrie' },
+          densite: { type: 'range', label: 'Densité des barrières', min: 0, max: 0.7, step: 0.01, value: 0.22 },
+        },
+        'Ruban': {
+          largeur: { type: 'range', label: 'Largeur', min: 0.1, max: 0.6, step: 0.01, value: 0.34 },
+          contour: { type: 'range', label: 'Contour', min: 0, max: 6, step: 0.25, value: 1.75 },
+          ecart: { type: 'range', label: 'Écart aux croisements', min: 0, max: 10, step: 0.5, value: 3 },
+          style: { type: 'select', label: 'Remplissage', options: { uni: 'Uni', rayures: 'Rayures qui filent', double: 'Double trait' }, value: 'uni' },
+        },
+        'Mouvement': {
+          flux: { type: 'range', label: 'Vitesse des rayures', min: -3, max: 3, step: 0.05, value: 0.8 },
+          ondulation: { type: 'range', label: 'Ondulation de la grille', min: 0, max: 1, step: 0.01, value: 0.25 },
+          changement: { type: 'range', label: 'Nouvelle barrière toutes les (s)', min: 0, max: 10, step: 0.5, value: 2.5 },
+        },
+        'Couleur': {
+          fond: { type: 'color', label: 'Fond', value: P60[0] },
+          trait: { type: 'color', label: 'Contour', value: P60[1] },
+          couleurs: { type: 'palette', label: 'Une couleur par boucle', value: ['#e5452a', '#f2b0c8', '#f2e640', '#4b6cf0'] },
+        },
+      },
+      presets: {
+        'Enluminure': {},
+        'Tresse': { motif: 'tresse', cases: 8, fond: BIEN[0], trait: BIEN[1], couleurs: [BIEN[2]], style: 'rayures', largeur: 0.38 },
+        'Biennale': { motif: 'hasard', densite: 0.3, cases: 12, fond: BIEN[0], trait: BIEN[1], couleurs: [BIEN[2], BIEN[3], BIEN[4]] },
+        'Cercle': { forme: 'cercle', motif: 'symetrie', cases: 14, densite: 0.18, fond: KB[0], trait: KB[0], couleurs: [KB[1], KB[2], KB[3], KB[4], KB[5]], contour: 0, ecart: 4, largeur: 0.4 },
+        'Croix': { forme: 'croix', motif: 'symetrie', cases: 18, densite: 0.25, fond: '#e9e4d6', trait: EVT[0], couleurs: [EVT[3], EVT[1], EVT[2], EVT[4]], contour: 2 },
+        'Logo': { forme: 'logo', motif: 'tresse', cases: 26, fond: P60[0], trait: P60[1], couleurs: ['#e5452a', P60[0]], largeur: 0.36, contour: 1.25, ecart: 2, ondulation: 0.1 },
+        'Néon': { motif: 'croisillons', cases: 9, densite: 0.4, fond: NUIT[0], trait: NUIT[0], couleurs: [GR[1], GR[2], GR[3], GR[4]], style: 'double', contour: 0, ecart: 5, largeur: 0.3 },
+        'Menthe': { motif: 'bandes', cases: 11, densite: 0.5, fond: MENTHE[0], trait: MENTHE[1], couleurs: [MENTHE[2], MENTHE[3], MENTHE[0]], style: 'rayures', largeur: 0.42 },
+        'Thermique': { forme: 'cercle', motif: 'hasard', cases: 10, densite: 0.35, fond: THER[0], trait: THER[1], couleurs: [THER[2], THER[3], THER[4], THER[5]], largeur: 0.46, contour: 2.5, ondulation: 0.5 },
+        'Luzern': { motif: 'symetrie', cases: 7, densite: 0.3, fond: LUZ[0], trait: LUZ[3], couleurs: [LUZ[4], LUZ[2], LUZ[1]], largeur: 0.36, contour: 3, ecart: 5, ondulation: 0.4 },
+        'Salon': { motif: 'croisillons', cases: 13, densite: 0.3, fond: SALON[0], trait: SALON[1], couleurs: [SALON[2], SALON[3], SALON[4]], style: 'rayures', largeur: 0.32 },
+        'Code': { forme: 'croix', motif: 'hasard', cases: 21, densite: 0.28, fond: CODE[0], trait: CODE[6], couleurs: [CODE[1], CODE[2], CODE[3], CODE[4], CODE[5]], largeur: 0.3, contour: 1.25, ecart: 2 },
+      },
+      brand(colors) {
+        const c = colors.slice(1).length ? colors.slice(1) : ['#111111'];
+        const lum = (h) => { const n = parseInt(h.slice(1), 16); return ((n >> 16) & 255) * 0.299 + ((n >> 8) & 255) * 0.587 + (n & 255) * 0.114; };
+        const dark = c.slice().sort((a, b) => lum(a) - lum(b))[0];
+        return { fond: colors[0], trait: dark, couleurs: c.filter((x) => x !== dark).concat(c.length > 1 ? [] : [colors[0]]).slice(0, 7) };
+      },
+      pointer: {
+        move: (q) => { hover = { x: q.x, y: q.y }; },
+        down: (q) => { drag = { x: q.x, y: q.y, moved: false, done: new Set() }; },
+        drag: (q) => {
+          hover = { x: q.x, y: q.y };
+          if (!drag) return;
+          if (Math.hypot(q.x - drag.x, q.y - drag.y) > 6) drag.moved = true;
+          if (!drag.moved) return;
+          // Trace des barrières le long du geste.
+          const e = nearestEdge(q.x, q.y);
+          if (e && !drag.done.has(e.key)) { drag.done.add(e.key); if (!e.on()) { e.set(1); pulses.push({ X: e.X, Y: e.Y, t: 0 }); rebuild(); } }
+        },
+        up: (q) => {
+          if (drag && !drag.moved) { const e = nearestEdge(q.x, q.y); if (e) { e.set(e.on() ? 0 : 1); pulses.push({ X: e.X, Y: e.Y, t: 0 }); rebuild(); } }
+          drag = null; nextChange = (app.time || 0) + Math.max(4, p.changement * 2);
+        },
+        wheel: (q, dy) => app.set('cases', Math.max(3, Math.min(30, p.cases + (dy > 0 ? -1 : 1)))),
+      },
+      onChange(k) {
+        if (['forme', 'image', 'cases', 'motif', 'densite', '*'].includes(k)) { setup(); rebuild(true); }
+        else if (k === 'couleurs') rebuild(true);
+      },
+      onSeed() { gen++; setup(); rebuild(true); },
+      export: { name: 'entrelacs', svg: () => toSVG() },
+    });
+    const p = app.params;
+    canvas.addEventListener('pointerleave', () => { hover = null; });
+
+    // ——— Formes ———
+    function logoMask() {
+      const img = p.image || app.logoImg, key = img ? (img.src || 'c') : 'demo';
+      if (key === maskKey) return maskCache;
+      maskKey = key;
+      const M = 200, c = document.createElement('canvas'); c.width = c.height = M; const x = c.getContext('2d', { willReadFrequently: true });
+      if (img) { const iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height, k = M * 0.96 / Math.max(iw, ih); x.drawImage(img, (M - iw * k) / 2, (M - ih * k) / 2, iw * k, ih * k); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(100, 100, 96, 0, TAU); x.arc(100, 100, 50, 0, TAU, true); x.fill('evenodd'); x.fillRect(88, 4, 24, 192); }
+      const d = x.getImageData(0, 0, M, M).data, a = new Uint8Array(M * M);
+      let transp = 0; for (let i = 3; i < d.length; i += 16) if (d[i] < 128) transp++;
+      const useA = transp > d.length / 16 * 0.05;
+      for (let i = 0; i < M * M; i++) { const l = (d[i * 4] * 0.2126 + d[i * 4 + 1] * 0.7152 + d[i * 4 + 2] * 0.0722) / 255; a[i] = (useA ? d[i * 4 + 3] > 128 : d[i * 4 + 3] > 128 && l < 0.5) ? 1 : 0; }
+      maskCache = { M, a };
+      return maskCache;
+    }
+
+    // ——— Grille, cases actives et barrières ———
+    function setup() {
+      const { w, h } = app.size; if (!w) return;
+      const nx = Math.round(p.cases), ny = Math.max(2, Math.round(nx * h / w)), c = Math.min(w * 0.9 / nx, h * 0.9 / ny);
+      const ox = (w - nx * c) / 2, oy = (h - ny * c) / 2, act = new Uint8Array(nx * ny);
+      for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+        // Coordonnées en cases depuis le centre, ramenées au plus petit côté.
+        const m = Math.min(nx, ny), au = (i + 0.5 - nx / 2) / m, av = (j + 0.5 - ny / 2) / m;
+        let on = 1;
+        if (p.forme === 'cercle') on = Math.hypot(au, av) < 0.5 ? 1 : 0;
+        else if (p.forme === 'croix') { const k = 0.17; on = (Math.abs(au) < k || Math.abs(av) < k) && Math.abs(au) < 0.5 && Math.abs(av) < 0.5 ? 1 : 0; }
+        else if (p.forme === 'logo') {
+          const L = logoMask(), Z = Math.min(nx, ny), mu = (i + 0.5 - (nx - Z) / 2) / Z, mv = (j + 0.5 - (ny - Z) / 2) / Z;
+          on = mu >= 0 && mv >= 0 && mu < 1 && mv < 1 && L.a[Math.floor(mv * L.M) * L.M + Math.floor(mu * L.M)] ? 1 : 0;
+        }
+        act[j * nx + i] = on;
+      }
+      // Barrières : hE[(j)*nx+i] = côté haut de la case (i, j) ; vE[j*(nx+1)+i] = côté gauche.
+      const hE = new Uint8Array(nx * (ny + 1)), vE = new Uint8Array((nx + 1) * ny), r = app.rng(97 + gen * 131), d = p.densite;
+      const setH = (i, j, val) => { if (i >= 0 && i < nx && j >= 0 && j <= ny) hE[j * nx + i] = val; };
+      const setV = (i, j, val) => { if (i >= 0 && i <= nx && j >= 0 && j < ny) vE[j * (nx + 1) + i] = val; };
+      if (p.motif === 'hasard') { for (let k = 0; k < hE.length; k++) hE[k] = r() < d ? 1 : 0; for (let k = 0; k < vE.length; k++) vE[k] = r() < d ? 1 : 0; }
+      else if (p.motif === 'symetrie') {
+        // Une graine par quart, recopiée en miroir horizontal et vertical.
+        for (let j = 0; j <= Math.ceil(ny / 2); j++) for (let i = 0; i < Math.ceil(nx / 2); i++) if (r() < d) { const val = 1; setH(i, j, val); setH(nx - 1 - i, j, val); setH(i, ny - j, val); setH(nx - 1 - i, ny - j, val); }
+        for (let j = 0; j < Math.ceil(ny / 2); j++) for (let i = 0; i <= Math.ceil(nx / 2); i++) if (r() < d) { const val = 1; setV(i, j, val); setV(nx - i, j, val); setV(i, ny - 1 - j, val); setV(nx - i, ny - 1 - j, val); }
+      } else if (p.motif === 'croisillons') {
+        // Petites croix de barrières autour de nœuds réguliers.
+        const s = 3;
+        for (let j = 1; j < ny; j += s) for (let i = 1; i < nx; i += s) if (r() < d * 2.2) { setH(i - 1, j, 1); setH(i, j, 1); setV(i, j - 1, 1); setV(i, j, 1); }
+      } else if (p.motif === 'bandes') {
+        for (let j = 2; j < ny; j += 3) for (let i = 0; i < nx; i++) if (r() < 0.35 + d) setH(i, j, 1);
+      }
+      G = { nx, ny, c, ox, oy, act, hE, vE };
+    }
+    const isAct = (i, j) => i >= 0 && j >= 0 && i < G.nx && j < G.ny && G.act[j * G.nx + i] === 1;
+    // Le côté s de la case (i, j) est-il une barrière ? (bord de forme ou barrière posée)
+    function barrier(i, j, s) {
+      const ni = i + DI[s], nj = j + DJ[s];
+      if (!isAct(ni, nj)) return true;
+      if (s === 0) return G.vE[j * (G.nx + 1) + i] === 1;
+      if (s === 2) return G.vE[j * (G.nx + 1) + i + 1] === 1;
+      if (s === 1) return G.hE[j * G.nx + i] === 1;
+      return G.hE[(j + 1) * G.nx + i] === 1;
+    }
+    // Côté intérieur le plus proche du pointeur (pour poser ou retirer une barrière).
+    function nearestEdge(x, y) {
+      if (!G) return null;
+      const u = (x - G.ox) / G.c, v = (y - G.oy) / G.c, fi = Math.floor(u), fj = Math.floor(v), fu = u - fi, fv = v - fj;
+      let best = null, bd = 0.32;
+      const cand = [[fi, fj, 'h', Math.abs(fv)], [fi, fj + 1, 'h', Math.abs(1 - fv)], [fi, fj, 'v', Math.abs(fu)], [fi + 1, fj, 'v', Math.abs(1 - fu)]];
+      for (const [i, j, t, d] of cand) {
+        if (d > bd) continue;
+        if (t === 'h' && isAct(i, j) && isAct(i, j - 1)) { best = { key: 'h' + i + ',' + j, X: 2 * i + 1, Y: 2 * j, on: () => G.hE[j * G.nx + i] === 1, set: (val) => { G.hE[j * G.nx + i] = val; } }; bd = d; }
+        if (t === 'v' && isAct(i, j) && isAct(i - 1, j)) { best = { key: 'v' + i + ',' + j, X: 2 * i, Y: 2 * j + 1, on: () => G.vE[j * (G.nx + 1) + i] === 1, set: (val) => { G.vE[j * (G.nx + 1) + i] = val; } }; bd = d; }
+      }
+      return best;
+    }
+
+    // ——— Parcours des rubans ———
+    // Une arête de losange relie deux côtés voisins d'une case ; chaque arête est parcourue une fois.
+    const dkey = (a, b) => (a + b === 1 ? 0 : a + b === 3 ? (Math.min(a, b) === 1 ? 1 : 3) : 2); // {0,1}→0 {1,2}→1 {2,3}→2 {3,0}→3
+    function trace() {
+      const { nx, ny } = G, used = new Uint8Array(nx * ny * 4), loops = [];
+      for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+        if (!isAct(i, j)) continue;
+        for (let k = 0; k < 4; k++) {
+          if (used[(j * nx + i) * 4 + k]) continue;
+          // Arête k relie les côtés k et (k+1)%4 ; on part de k vers k+1.
+          let ci = i, cj = j, from = k, to = (k + 1) % 4;
+          const pts = [], guard = nx * ny * 8;
+          for (let n = 0; n < guard; n++) {
+            used[(cj * nx + ci) * 4 + dkey(from, to)] = 1;
+            const bar = barrier(ci, cj, to);
+            // Point du milieu du côté atteint (coordonnées doublées), croisement ou rebond.
+            const X = 2 * ci + 1 + DI[to], Y = 2 * cj + 1 + DJ[to];
+            const sx = DI[to] - DI[from], sy = DJ[to] - DJ[from]; // direction diagonale de l'arête parcourue
+            pts.push({ X, Y, cross: !bar, over: !bar && ((X % 2 === 0) === (sx * sy < 0)) });
+            const nfrom = bar ? to : OPP[to], nto = OPP[from];
+            if (!bar) { ci += DI[to]; cj += DJ[to]; }
+            from = nfrom; to = nto;
+            if (ci === i && cj === j && from === k && to === (k + 1) % 4) break;
+          }
+          loops.push(pts);
+        }
+      }
+      // Couleur stable : tirée du plus petit croisement de la boucle, pour qu'une barrière ne
+      // recolore que les boucles qu'elle touche.
+      for (const L of loops) { let m = Infinity; for (const q of L) m = Math.min(m, q.Y * 4096 + q.X); L.hue = ((m * 2654435761) >>> 0) % 9973; }
+      return loops;
+    }
+    function rebuild(instant) {
+      if (!G) setup(); if (!G) return;
+      if (instant) pulses = [];
+      knot = trace();
+    }
+
+    // ——— Géométrie animée ———
+    function warp(X, Y, t) {
+      const { c, ox, oy } = G;
+      let x = ox + X * c / 2, y = oy + Y * c / 2;
+      const a = p.ondulation * c * 0.35;
+      if (a > 0) { x += Math.sin(y * 0.011 + t * 0.7) * a + Math.sin((x + y) * 0.007 - t * 0.5) * a * 0.6; y += Math.cos(x * 0.009 - t * 0.6) * a + Math.sin((x - y) * 0.006 + t * 0.4) * a * 0.6; }
+      if (hover) { const dx = x - hover.x, dy = y - hover.y, R = c * 2.4, d2 = (dx * dx + dy * dy) / (R * R), k = Math.exp(-d2 * 1.6) * 0.55 * c; const d = Math.sqrt(dx * dx + dy * dy) || 1; x += dx / d * k; y += dy / d * k; }
+      return [x, y];
+    }
+    function geom(loops, t) {
+      return loops.map((L) => {
+        const P = L.map((q) => warp(q.X, q.Y, t)), n = P.length, M = [];
+        for (let k = 0; k < n; k++) { const a = P[k], b = P[(k + 1) % n]; M.push([(a[0] + b[0]) / 2, (a[1] + b[1]) / 2]); }
+        // Longueur cumulée (pour que les rayures se raccordent aux croisements).
+        const S = [0];
+        for (let k = 0; k < n; k++) {
+          const m0 = M[(k - 1 + n) % n], c = P[k], m1 = M[k];
+          let len = 0, px = m0[0], py = m0[1];
+          for (let s = 1; s <= 4; s++) { const u = s / 4, v = 1 - u, x = v * v * m0[0] + 2 * v * u * c[0] + u * u * m1[0], y = v * v * m0[1] + 2 * v * u * c[1] + u * u * m1[1]; len += Math.hypot(x - px, y - py); px = x; py = y; }
+          S.push(S[k] + len);
+        }
+        return { L, P, M, S };
+      });
+    }
+
+    function drawKnot(g, loops, alpha, t, toSvg) {
+      if (!loops || !loops.length) return '';
+      const c = G.c, W = c * p.largeur, ow = p.contour, gap = p.ecart, cols = p.couleurs.length ? p.couleurs : ['#888'];
+      const Gm = geom(loops, t), dash = Math.max(4, W * 1.1), off = -flow * W * 2;
+      const loopPath = (q) => { const { P, M } = q, n = P.length; let s = `M${M[n - 1][0]} ${M[n - 1][1]}`; for (let k = 0; k < n; k++) s += `Q${P[k][0]} ${P[k][1]} ${M[k][0]} ${M[k][1]}`; return s + 'Z'; };
+      const piece = (q, k) => { const n = q.P.length, m0 = q.M[(k - 1 + n) % n]; return `M${m0[0]} ${m0[1]}Q${q.P[k][0]} ${q.P[k][1]} ${q.M[k][0]} ${q.M[k][1]}`; };
+      // Couches d'un morceau de ruban : contour, couleur, puis rayures ou filet central.
+      const layers = (col, startLen) => {
+        const out = [];
+        if (ow > 0) out.push({ col: p.trait, w: W + ow * 2 });
+        out.push({ col, w: W });
+        if (p.style === 'rayures') out.push({ col: p.trait, w: W * 0.55, dash: [dash * 0.45, dash * 0.55], off: off - (startLen || 0) });
+        if (p.style === 'double') out.push({ col: p.fond, w: Math.max(1, W * 0.34) });
+        return out;
+      };
+      let svg = '';
+      const stroke = (d, ly, cap) => {
+        if (toSvg) {
+          const f = (v) => Math.round(v * 10) / 10, dd = d.replace(/-?\d+\.?\d*(e-?\d+)?/g, (m) => f(+m));
+          svg += `<path d="${dd}" fill="none" stroke="${ly.col}" stroke-width="${f(ly.w)}" stroke-linecap="${cap}" stroke-linejoin="round"${ly.dash ? ` stroke-dasharray="${f(ly.dash[0])} ${f(ly.dash[1])}" stroke-dashoffset="${f(-ly.off)}"` : ''}${alpha < 1 ? ` opacity="${f(alpha)}"` : ''}/>\n`;
+          return;
+        }
+        g.strokeStyle = ly.col; g.lineWidth = ly.w; g.lineCap = cap; g.lineJoin = 'round';
+        if (ly.dash) { g.setLineDash(ly.dash); g.lineDashOffset = -ly.off; } else g.setLineDash([]);
+        g.stroke(new Path2D(d));
+      };
+      g && (g.globalAlpha = alpha);
+      // 1. Boucles complètes.
+      Gm.forEach((q) => { const d = loopPath(q); for (const ly of layers(cols[q.L.hue % cols.length], 0)) stroke(d, ly, 'round'); });
+      // 2. Passages dessus : on ouvre un écart puis on redessine le ruban.
+      Gm.forEach((q) => {
+        q.L.forEach((pt, k) => {
+          if (!pt.cross || !pt.over) return;
+          const d = piece(q, k);
+          // L'écart ne couvre que le voisinage du croisement : ses bouts restent sous le ruban redessiné,
+          // sans liseré aux raccords.
+          const n = q.P.length, P = q.P[k], half = W / 2 + ow + gap + 1.5;
+          const cut = (m) => { const dx = m[0] - P[0], dy = m[1] - P[1], L = Math.hypot(dx, dy) || 1, f = Math.min(0.92, half / L); return [P[0] + dx * f, P[1] + dy * f]; };
+          const a = cut(q.M[(k - 1 + n) % n]), b = cut(q.M[k]);
+          stroke(`M${a[0]} ${a[1]}L${P[0]} ${P[1]}L${b[0]} ${b[1]}`, { col: p.fond, w: W + ow * 2 + gap * 2 }, 'butt');
+          // Le contour est un peu plus court que la couleur : ses bouts disparaissent dessous.
+          const trim = (m) => { const dx = P[0] - m[0], dy = P[1] - m[1], L = Math.hypot(dx, dy) || 1, f = Math.min(0.3, 1.5 / L); return [m[0] + dx * f, m[1] + dy * f]; };
+          const t0 = trim(q.M[(k - 1 + n) % n]), t1 = trim(q.M[k]), dShort = `M${t0[0]} ${t0[1]}Q${P[0]} ${P[1]} ${t1[0]} ${t1[1]}`;
+          for (const ly of layers(cols[q.L.hue % cols.length], q.S[k])) stroke(ly.col === p.trait && !ly.dash ? dShort : d, ly, 'butt');
+        });
+      });
+      if (g) { g.globalAlpha = 1; g.setLineDash([]); }
+      return svg;
+    }
+
+    app.loop((t, dt) => {
+      const { w, h, dpr } = app.size;
+      dt = Math.min(0.05, dt || 0);
+      if (!G || !knot) { setup(); rebuild(true); }
+      flow += dt * p.flux;
+      for (const q of pulses) q.t += dt;
+      pulses = pulses.filter((q) => q.t < 0.7);
+      // Le nœud évolue seul : une barrière apparaît ou disparaît (en miroir pour la symétrie).
+      if (p.changement > 0 && t > nextChange) {
+        nextChange = t + p.changement;
+        const r = Math.random, { nx, ny } = G;
+        // La densité de barrières reste proche du réglage : on en ajoute si trop peu, on en retire sinon.
+        let on = 0, all = 0;
+        for (let j = 0; j <= ny; j++) for (let i = 0; i < nx; i++) if (isAct(i, j) && isAct(i, j - 1)) { all++; on += G.hE[j * nx + i]; }
+        for (let j = 0; j < ny; j++) for (let i = 0; i <= nx; i++) if (isAct(i, j) && isAct(i - 1, j)) { all++; on += G.vE[j * (nx + 1) + i]; }
+        const want = (on / Math.max(1, all)) < (p.motif === 'tresse' ? 0.05 : p.densite * 0.8) ? 1 : 0;
+        for (let tries = 0; tries < 80; tries++) {
+          const horiz = r() < 0.5, i = Math.floor(r() * (horiz ? nx : nx + 1)), j = Math.floor(r() * (horiz ? ny + 1 : ny));
+          const ok = horiz ? isAct(i, j) && isAct(i, j - 1) : isAct(i, j) && isAct(i - 1, j);
+          if (!ok || (horiz ? G.hE[j * nx + i] : G.vE[j * (nx + 1) + i]) === want) continue;
+          if (horiz) { const val = G.hE[j * nx + i] ? 0 : 1; const all = p.motif === 'symetrie' ? [[i, j], [nx - 1 - i, j], [i, ny - j], [nx - 1 - i, ny - j]] : [[i, j]]; for (const [a, b] of all) if (isAct(a, b) && isAct(a, b - 1)) { G.hE[b * nx + a] = val; pulses.push({ X: 2 * a + 1, Y: 2 * b, t: 0 }); } }
+          else { const val = G.vE[j * (nx + 1) + i] ? 0 : 1; const all = p.motif === 'symetrie' ? [[i, j], [nx - i, j], [i, ny - 1 - j], [nx - i, ny - 1 - j]] : [[i, j]]; for (const [a, b] of all) if (isAct(a, b) && isAct(a - 1, b)) { G.vE[b * (nx + 1) + a] = val; pulses.push({ X: 2 * a, Y: 2 * b + 1, t: 0 }); } }
+          rebuild(); break;
+        }
+      }
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = p.fond; ctx.fillRect(0, 0, w, h);
+      drawKnot(ctx, knot, 1, t);
+      // Un anneau signale chaque barrière qui vient de changer.
+      ctx.strokeStyle = p.trait; ctx.lineWidth = 1.5;
+      if (!app.thumbnail) for (const q of pulses) { const [x, y] = warp(q.X, q.Y, t), k = q.t / 0.7; ctx.globalAlpha = (1 - k) * 0.9; ctx.beginPath(); ctx.arc(x, y, G.c * (0.15 + k * 0.6), 0, TAU); ctx.stroke(); }
+      ctx.globalAlpha = 1;
+      app.finish(ctx);
+    });
+
+    function toSVG() {
+      const { w, h } = app.size;
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">\n<rect width="100%" height="100%" fill="${p.fond}"/>\n${drawKnot(null, knot, 1, app.time || 0, true)}</svg>`;
+    }
+  </script>
+</body>
+</html>
