@@ -1,0 +1,15 @@
+{
+  "slug": "typo-liquide",
+  "title": "Typo liquide",
+  "type": "typography",
+  "description": "Un mot qui fond et ondule en gardant des bords nets : domain warp seuillé, coulures, pointeur qui remue le liquide, reflet, ombre, contour, export SVG.",
+  "tags": ["liquide", "domain-warp", "typographie", "webgl", "svg", "motion"],
+  "inspiration": [
+    "Titre noir qui coule et ondule en restant lisible (moodboard 24)",
+    "Inigo Quilez, Domain Warping ; champs de distance seuillés (Valve, 2007)",
+    "references/moodboard.md ; palettes papier, kegelbahn, menthe, biennale, acide, luzern, thermique, orbite"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
