@@ -1,0 +1,271 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Particle Life</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Particle Life : des espèces de particules, une par couleur de la charte. Chaque espèce attire ou
+    // repousse chacune des autres selon une matrice (non symétrique : A peut poursuivre B qui le fuit).
+    // De près, tout le monde se repousse. De ces règles simples naissent des cellules, des chaînes,
+    // des vers et des membranes qui se poursuivent. Le monde est un tore : ce qui sort revient.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const NUIT = PAL('trame-nuit'), KB = PAL('kegelbahn'), GR = PAL('good-room'), BIEN = PAL('biennale'), P60 = PAL('papier-60');
+    const LU = PAL('luzern'), BIT = PAL('bitmap'), ORB = PAL('orbite'), MENTHE = PAL('menthe'), PIX = PAL('pixels');
+
+    const MAXN = 4000;
+    const X = new Float32Array(MAXN), Y = new Float32Array(MAXN), VX = new Float32Array(MAXN), VY = new Float32Array(MAXN);
+    const S = new Uint8Array(MAXN), TX = new Float32Array(MAXN), TY = new Float32Array(MAXN);
+    let n = 0, K = 0, M = [], W = 0, Hh = 0, ptr = null, stir = null, targets = null, hoverM = null;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0, vignette: 0 },
+      hint: 'Glissez pour remuer · survol : les particules s’écartent · molette : rayon d’interaction · le dé tire une nouvelle matrice',
+      notes: 'La matrice dit, pour chaque couple d’espèces, si la première est attirée (positif) ou repoussée (négatif) par la seconde. Affichée en bas à gauche, une case cliquée change de signe ; le dé en tire une nouvelle.',
+      params: {
+        'Règles': {
+          especes: { type: 'range', label: 'Espèces', min: 2, max: 6, step: 1, value: 5 },
+          symetrie: { type: 'range', label: 'Symétrie de la matrice', min: 0, max: 1, step: 0.01, value: 0 },
+          rayon: { type: 'range', label: 'Rayon d’interaction', min: 0.03, max: 0.25, step: 0.005, value: 0.12 },
+          proche: { type: 'range', label: 'Répulsion de contact', min: 0.1, max: 0.6, step: 0.01, value: 0.3 },
+          force: { type: 'range', label: 'Force', min: 0.2, max: 3, step: 0.01, value: 1 },
+          friction: { type: 'range', label: 'Frottement', min: 0.02, max: 0.5, step: 0.01, value: 0.1 },
+          matrice: { type: 'toggle', label: 'Afficher la matrice', value: false },
+          nouvelle: { type: 'button', label: 'Nouvelle matrice', action: () => app.reseed() },
+        },
+        'Particules': {
+          nombre: { type: 'range', label: 'Nombre', min: 200, max: 4000, step: 50, value: 2000 },
+          taille: { type: 'range', label: 'Taille', min: 0.5, max: 6, step: 0.1, value: 2 },
+          trainee: { type: 'range', label: 'Traînée', min: 0, max: 0.95, step: 0.01, value: 0.55 },
+          logo: { type: 'range', label: 'Attache au logo', min: 0, max: 1, step: 0.01, value: 0 },
+        },
+        'Couleur': {
+          fond: { type: 'color', label: 'Fond', value: NUIT[0] },
+          couleurs: { type: 'palette', label: 'Espèces', value: [KB[1], KB[2], KB[3], KB[5], '#f5f5f5', KB[4]] },
+        },
+      },
+      presets: {
+        'Cellules': {},
+        'Membranes': { seed: 4217, especes: 3, rayon: 0.12, proche: 0.25, friction: 0.08, nombre: 2200, taille: 1.6, fond: P60[0], couleurs: [P60[1], '#e5452a', '#94928f'], trainee: 0.3 },
+        'Poursuite': { seed: 777, especes: 4, rayon: 0.08, force: 1.4, friction: 0.06, nombre: 1400, taille: 2.4, fond: GR[0], couleurs: [GR[1], GR[2], GR[3], GR[4]], trainee: 0.8 },
+        'Symétrique': { seed: 1312, especes: 5, symetrie: 1, rayon: 0.07, friction: 0.12, nombre: 2600, taille: 1.8, fond: BIEN[0], couleurs: [BIEN[1], BIEN[2], BIEN[3], BIEN[4], '#888888'], trainee: 0 },
+        'Logo': { seed: 2024, especes: 3, rayon: 0.06, force: 0.8, nombre: 3000, taille: 1.6, logo: 0.7, fond: P60[0], couleurs: [P60[1], '#e5452a', '#94928f'], trainee: 0.2 },
+        'Luzern': { seed: 9001, especes: 4, rayon: 0.1, nombre: 1800, taille: 2.2, fond: LU[3], couleurs: [LU[0], LU[1], LU[2], LU[4]], trainee: 0.7 },
+        'Bitmap': { seed: 31, especes: 4, rayon: 0.09, nombre: 1200, taille: 4, fond: BIT[0], couleurs: [BIT[1], BIT[2], BIT[3], BIT[4]], trainee: 0, proche: 0.45 },
+        'Orbite': { seed: 58, especes: 2, rayon: 0.15, force: 1.2, nombre: 1500, taille: 2, fond: ORB[0], couleurs: [ORB[1], ORB[2]], trainee: 0.6 },
+        'Menthe': { seed: 610, especes: 3, rayon: 0.11, friction: 0.2, nombre: 3000, taille: 1.4, fond: MENTHE[0], couleurs: [MENTHE[1], MENTHE[3], MENTHE[2]], trainee: 0.4 },
+        'Pixels': { seed: 4444, especes: 6, rayon: 0.07, nombre: 2400, taille: 2.6, fond: '#111111', couleurs: PIX.slice(0, 6), trainee: 0.85, force: 1.6 },
+      },
+      brand(colors) {
+        const rest = colors.slice(1);
+        return { fond: colors[0], couleurs: (rest.length ? rest : ['#ffffff']).slice(0, 6), especes: Math.max(2, Math.min(6, rest.length || 2)) };
+      },
+      pointer: {
+        move: (q) => {
+          ptr = { x: q.x, y: q.y };
+          hoverM = matrixCell(q.x, q.y);
+        },
+        down: (q) => {
+          const c = matrixCell(q.x, q.y);
+          if (c) { M[c[0]][c[1]] = M[c[0]][c[1]] > 0 ? -Math.max(0.3, Math.abs(M[c[0]][c[1]])) : Math.max(0.3, Math.abs(M[c[0]][c[1]])); return; }
+          stir = { x: q.x, y: q.y, vx: 0, vy: 0 };
+        },
+        drag: (q) => { if (stir) { stir.vx = q.x - stir.x; stir.vy = q.y - stir.y; stir.x = q.x; stir.y = q.y; } ptr = { x: q.x, y: q.y }; },
+        up: () => { stir = null; },
+        wheel: (q, dy) => app.set('rayon', Math.max(0.03, Math.min(0.25, +(p.rayon * Math.exp(-dy * 0.001)).toFixed(3)))),
+      },
+      onChange(k) {
+        if (k === 'especes' || k === 'symetrie') matrix();
+        if (k === 'nombre' || k === 'especes') populate(false);
+        if (k === '*' || k === '_logo') { matrix(); populate(true); targets = null; }
+      },
+      onSeed() { matrix(); populate(true); },
+      onResize() { const o = { w: W, h: Hh }; W = app.size.w; Hh = app.size.h; for (let i = 0; i < n; i++) { X[i] *= W / o.w; Y[i] *= Hh / o.h; } targets = null; },
+      export: { name: 'particle-life', svg: () => toSVG() },
+    });
+    const p = app.params;
+    canvas.addEventListener('pointerleave', () => { ptr = null; hoverM = null; });
+    W = app.size.w; Hh = app.size.h;
+
+    // Matrice d'attraction tirée de la graine, mélangée à sa version symétrique.
+    function matrix() {
+      const r = app.rng(5), k = Math.round(p.especes);
+      const R = Array.from({ length: 6 }, () => Array.from({ length: 6 }, () => r() * 2 - 1));
+      M = Array.from({ length: k }, (_, i) => Array.from({ length: k }, (_, j) => {
+        const s = p.symetrie, v = (1 - s) * R[i][j] + s * (R[i][j] + R[j][i]) / 2;
+        return i === j ? Math.max(v, 0.2) : v; // une espèce se tient un peu : des amas plutôt qu'une poussière
+      }));
+      K = k;
+    }
+
+    function populate(all) {
+      const r = app.rng(9), N = Math.round(p.nombre), k = Math.round(p.especes);
+      const from = all ? 0 : Math.min(n, N);
+      for (let i = from; i < N; i++) { X[i] = r() * W; Y[i] = r() * Hh; VX[i] = VY[i] = 0; }
+      for (let i = 0; i < N; i++) S[i] = i % k;
+      n = N;
+    }
+
+    // Cibles du logo : des points tirés dans la silhouette, une par particule.
+    function buildTargets() {
+      const G = 300, cv = document.createElement('canvas'), U = Math.min(W, Hh);
+      cv.width = cv.height = G;
+      const x = cv.getContext('2d', { willReadFrequently: true }), img = app.logoImg;
+      x.fillStyle = '#000';
+      if (img) {
+        const iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height, k = G * 0.9 / Math.max(iw, ih);
+        x.drawImage(img, (G - iw * k) / 2, (G - ih * k) / 2, iw * k, ih * k);
+      } else {
+        x.beginPath(); x.arc(G / 2, G / 2, G * 0.45, 0, TAU); x.arc(G / 2, G / 2, G * 0.3, 0, TAU, true); x.fill();
+        x.beginPath(); x.arc(G / 2, G / 2, G * 0.16, 0, TAU); x.fill();
+      }
+      const d = x.getImageData(0, 0, G, G).data, pts = [];
+      for (let j = 0; j < G; j++) for (let i = 0; i < G; i++) if (d[(j * G + i) * 4 + 3] > 128) pts.push(i, j);
+      const r = app.rng(13), sc = U * 0.8 / G;
+      for (let i = 0; i < MAXN; i++) {
+        const k = (r() * pts.length / 2 | 0) * 2;
+        TX[i] = W / 2 + (pts[k] - G / 2 + r()) * sc; TY[i] = Hh / 2 + (pts[k + 1] - G / 2 + r()) * sc;
+      }
+      targets = true;
+    }
+
+    // ——— Simulation : grille de voisinage sur un tore ———
+    let cellStart = null, cellIdx = null, order = null;
+    function step(dt) {
+      const U = Math.min(W, Hh), R = p.rayon * U, beta = p.proche, kF = p.force * R * 6;
+      const fr = Math.pow(0.5, dt / p.friction);
+      const cx = Math.max(1, Math.floor(W / R)), cy = Math.max(1, Math.floor(Hh / R)), cw = W / cx, ch = Hh / cy, nc = cx * cy;
+      if (!cellStart || cellStart.length < nc + 1) cellStart = new Int32Array(nc + 1);
+      if (!cellIdx) { cellIdx = new Int32Array(MAXN); order = new Int32Array(MAXN); }
+      cellStart.fill(0, 0, nc + 1);
+      for (let i = 0; i < n; i++) { const c = Math.min(cy - 1, (Y[i] / ch) | 0) * cx + Math.min(cx - 1, (X[i] / cw) | 0); cellIdx[i] = c; cellStart[c + 1]++; }
+      for (let c = 0; c < nc; c++) cellStart[c + 1] += cellStart[c];
+      const fill = cellStart.slice(0, nc);
+      for (let i = 0; i < n; i++) order[fill[cellIdx[i]]++] = i;
+      const lg = p.logo, pr = ptr, st = stir, R2 = R * R;
+      if (lg > 0 && !targets) buildTargets();
+      for (let i = 0; i < n; i++) {
+        const xi = X[i], yi = Y[i], si = S[i], row = M[si] || M[0];
+        let fx = 0, fy = 0;
+        const gx = (xi / cw) | 0, gy = (yi / ch) | 0;
+        for (let oy = -1; oy <= 1; oy++) {
+          const yy = (gy + oy + cy) % cy;
+          for (let ox = -1; ox <= 1; ox++) {
+            const c = yy * cx + (gx + ox + cx) % cx;
+            for (let q = cellStart[c], e = cellStart[c + 1]; q < e; q++) {
+              const j = order[q];
+              if (j === i) continue;
+              let dx = X[j] - xi, dy = Y[j] - yi;
+              if (dx > W / 2) dx -= W; else if (dx < -W / 2) dx += W;
+              if (dy > Hh / 2) dy -= Hh; else if (dy < -Hh / 2) dy += Hh;
+              const d2 = dx * dx + dy * dy;
+              if (d2 >= R2 || d2 < 1e-6) continue;
+              const d = Math.sqrt(d2), r = d / R;
+              const f = r < beta ? r / beta - 1 : (row[S[j]] || 0) * (1 - Math.abs(2 * r - 1 - beta) / (1 - beta));
+              fx += dx / d * f; fy += dy / d * f;
+            }
+          }
+        }
+        fx *= kF; fy *= kF;
+        // Attache au logo : un ressort doux vers une cible de la silhouette.
+        if (lg > 0) { fx += (TX[i] - xi) * lg * 120; fy += (TY[i] - yi) * lg * 120; }
+        // Pointeur : souffle au survol, entraînement au glisser.
+        if (pr) {
+          const dx = xi - pr.x, dy = yi - pr.y, d2 = dx * dx + dy * dy, L = U * 0.12;
+          if (d2 < L * L * 4) {
+            const w = Math.exp(-d2 / (L * L));
+            if (st) { fx += st.vx * w * 240; fy += st.vy * w * 240; }
+            else { const d = Math.sqrt(d2) + 1; fx += dx / d * w * R * 40; fy += dy / d * w * R * 40; }
+          }
+        }
+        VX[i] = VX[i] * fr + fx * dt; VY[i] = VY[i] * fr + fy * dt;
+      }
+      for (let i = 0; i < n; i++) {
+        X[i] += VX[i] * dt; Y[i] += VY[i] * dt;
+        if (X[i] < 0) X[i] += W; else if (X[i] >= W) X[i] -= W;
+        if (Y[i] < 0) Y[i] += Hh; else if (Y[i] >= Hh) Y[i] -= Hh;
+        if (!(X[i] >= 0 && X[i] < W)) X[i] = W / 2;
+        if (!(Y[i] >= 0 && Y[i] < Hh)) Y[i] = Hh / 2;
+      }
+      if (st) { st.vx *= 0.6; st.vy *= 0.6; }
+    }
+
+    // ——— Rendu ———
+    function draw(full) {
+      const { dpr } = app.size, cols = p.couleurs.length ? p.couleurs : ['#ffffff'];
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.globalAlpha = full ? 1 : 1 - p.trainee;
+      ctx.fillStyle = p.fond; ctx.fillRect(0, 0, W, Hh);
+      ctx.globalAlpha = 1;
+      const r = p.taille;
+      for (let s = 0; s < K; s++) {
+        ctx.fillStyle = cols[s % cols.length];
+        ctx.beginPath();
+        for (let i = 0; i < n; i++) {
+          if (S[i] !== s) continue;
+          if (r < 1.6) ctx.rect(X[i] - r, Y[i] - r, r * 2, r * 2);
+          else { ctx.moveTo(X[i] + r, Y[i]); ctx.arc(X[i], Y[i], r, 0, TAU); }
+        }
+        ctx.fill();
+      }
+      if (p.matrice) drawMatrix(cols);
+    }
+
+    // La matrice, en bas à gauche : une ligne par espèce qui agit, une colonne par espèce visée.
+    // Rouge-orangé : attraction ; bleu : répulsion ; l'intensité suit la valeur. Sans texte.
+    function mGeom() { const c = Math.max(10, Math.min(22, Math.min(W, Hh) * 0.035)); return { c, x0: 16 + c, y0: Hh - 16 - c * (K + 1) }; }
+    function matrixCell(x, y) {
+      if (!p.matrice) return null;
+      const { c, x0, y0 } = mGeom(), i = Math.floor((y - y0 - c) / c), j = Math.floor((x - x0) / c);
+      return i >= 0 && j >= 0 && i < K && j < K ? [i, j] : null;
+    }
+    function drawMatrix(cols) {
+      const { c, x0, y0 } = mGeom();
+      ctx.fillStyle = p.fond; ctx.globalAlpha = 0.85; ctx.fillRect(x0 - c - 6, y0 - 6, c * (K + 1) + 12, c * (K + 1) + 12); ctx.globalAlpha = 1;
+      for (let s = 0; s < K; s++) {
+        ctx.fillStyle = cols[s % cols.length];
+        ctx.beginPath(); ctx.arc(x0 + c * s + c / 2, y0 + c / 2, c * 0.28, 0, TAU); ctx.fill();
+        ctx.beginPath(); ctx.arc(x0 - c / 2, y0 + c * (s + 1) + c / 2, c * 0.28, 0, TAU); ctx.fill();
+      }
+      for (let i = 0; i < K; i++) for (let j = 0; j < K; j++) {
+        const v = M[i][j], a = Math.min(1, Math.abs(v));
+        ctx.fillStyle = v >= 0 ? `rgba(232,96,52,${0.15 + 0.85 * a})` : `rgba(72,108,252,${0.15 + 0.85 * a})`;
+        ctx.fillRect(x0 + c * j + 1, y0 + c * (i + 1) + 1, c - 2, c - 2);
+        if (hoverM && hoverM[0] === i && hoverM[1] === j) { ctx.strokeStyle = cols[i % cols.length]; ctx.lineWidth = 2; ctx.strokeRect(x0 + c * j + 1, y0 + c * (i + 1) + 1, c - 2, c - 2); }
+      }
+    }
+
+    function toSVG() {
+      const cols = p.couleurs.length ? p.couleurs : ['#ffffff'], r = +p.taille.toFixed(2), f = (v) => +v.toFixed(1);
+      let s = `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${Hh}" viewBox="0 0 ${W} ${Hh}">\n<rect width="100%" height="100%" fill="${p.fond}"/>\n`;
+      for (let k = 0; k < K; k++) {
+        let d = '';
+        for (let i = 0; i < n; i++) if (S[i] === k) d += `M${f(X[i] - r)} ${f(Y[i])}a${r} ${r} 0 1 0 ${2 * r} 0a${r} ${r} 0 1 0 ${-2 * r} 0z`;
+        s += `<path fill="${cols[k % cols.length]}" d="${d}"/>\n`;
+      }
+      return s + '</svg>';
+    }
+
+    matrix(); populate(true);
+    // Préchauffage : les structures ont le temps de se former avant la première image.
+    for (let i = 0; i < (app.thumbnail ? 600 : 160); i++) step(1 / 60);
+    let first = true;
+    app.loop((t, dt) => {
+      if (dt > 0) { const h = Math.min(dt, 1 / 30); step(h); }
+      draw(first || dt === 0); first = false;
+      app.finish(ctx);
+    });
+  </script>
+</body>
+</html>
