@@ -1,0 +1,269 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Crêtes</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Crêtes : des lignes empilées soulevées par un relief (pics, bruit, montagnes, ondes ou logo),
+    // dessinées de l'arrière vers l'avant ; chaque ligne masque celles qui sont derrière elle.
+    // La perspective passe de l'empilement à plat au survol d'un terrain qui défile.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const P60 = PAL('papier-60'), BIEN = PAL('biennale'), MENTHE = PAL('menthe'), KB = PAL('kegelbahn'), GR = PAL('good-room'), THER = PAL('thermique');
+    const NUIT = PAL('trame-nuit'), LUZ = PAL('luzern'), SALON = PAL('salon'), ORB = PAL('orbite'), PYR = PAL('pyramides'), ACIDE = PAL('acide');
+
+    let hover = null, drag = null, bumps = [], ripples = [], hov = 0, maskCache = null, maskKey = null, scroll = 0, evo = 0;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.03, vignette: 0 },
+      hint: 'Le pointeur soulève une colline · glissez pour sculpter des reliefs · touchez pour une onde · molette : nombre de lignes',
+      notes: 'Chaque ligne est remplie du fond jusqu’à sa base avant d’être tracée : dessinées de l’arrière vers l’avant, les plus proches cachent les plus lointaines.',
+      params: {
+        'Relief': {
+          source: { type: 'select', label: 'Relief', options: { pics: 'Pics au centre', bruit: 'Collines', montagnes: 'Montagnes', ondes: 'Ondes', logo: 'Logo' }, value: 'pics' },
+          image: { type: 'file', label: 'Logo', accept: 'image/*', show: (q) => q.source === 'logo' },
+          hauteur: { type: 'range', label: 'Hauteur', min: 0, max: 3, step: 0.05, value: 1 },
+          detail: { type: 'range', label: 'Détail', min: 0.5, max: 6, step: 0.1, value: 2.2 },
+          fenetre: { type: 'range', label: 'Largeur de la zone haute', min: 0.1, max: 1, step: 0.01, value: 0.42 },
+        },
+        'Lignes': {
+          lignes: { type: 'range', label: 'Nombre de lignes', min: 10, max: 160, step: 1, value: 64 },
+          perspective: { type: 'range', label: 'Perspective', min: 0, max: 1, step: 0.01, value: 0 },
+          epaisseur: { type: 'range', label: 'Épaisseur du trait', min: 0.3, max: 5, step: 0.1, value: 1.4 },
+          marge: { type: 'range', label: 'Marge', min: 0, max: 0.35, step: 0.01, value: 0.16 },
+        },
+        'Mouvement': {
+          vitesse: { type: 'range', label: 'Défilement', min: -2, max: 2, step: 0.05, value: 0 },
+          houle: { type: 'range', label: 'Évolution du relief', min: 0, max: 2, step: 0.05, value: 0.35 },
+        },
+        'Rendu': {
+          remplissage: { type: 'select', label: 'Remplissage', options: { fond: 'Fond (lignes cachées)', bandes: 'Bandes de couleur', aucun: 'Aucun (transparent)' }, value: 'fond' },
+          couleur: { type: 'select', label: 'Couleur du trait', options: { unie: 'Unie', profondeur: 'Selon la profondeur', hauteur: 'Selon la hauteur' }, value: 'unie' },
+        },
+        'Couleur': {
+          fond: { type: 'color', label: 'Fond', value: '#0b0b0b' },
+          trait: { type: 'color', label: 'Trait', value: '#f2f2f0' },
+          couleurs: { type: 'palette', label: 'Couleurs (bandes, dégradés)', value: [BIEN[2], BIEN[3], BIEN[4]] },
+        },
+      },
+      presets: {
+        'Pulsar': {},
+        'Papier': { fond: P60[0], trait: P60[1], lignes: 72, epaisseur: 1.2 },
+        'Terrain': { source: 'montagnes', perspective: 0.85, lignes: 90, vitesse: 0.6, hauteur: 1.3, detail: 2.5, fond: NUIT[0], trait: NUIT[1], marge: 0.04, epaisseur: 1, couleur: 'profondeur', couleurs: [NUIT[1], NUIT[2]] },
+        'Logo': { source: 'logo', lignes: 80, hauteur: 1, fond: P60[0], trait: P60[1], houle: 0.25, epaisseur: 1.2, marge: 0.1 },
+        'Biennale': { source: 'bruit', remplissage: 'bandes', lignes: 26, hauteur: 1.4, detail: 1.6, fond: BIEN[0], trait: BIEN[1], couleurs: [BIEN[2], BIEN[3], BIEN[4], BIEN[0]], epaisseur: 2, marge: 0.08, fenetre: 0.9 },
+        'Ondes': { source: 'ondes', lignes: 70, perspective: 0.55, hauteur: 0.9, fond: MENTHE[1], trait: MENTHE[2], marge: 0.06, houle: 0.8, couleur: 'hauteur', couleurs: [MENTHE[3], MENTHE[2], MENTHE[0]] },
+        'Kegelbahn': { source: 'pics', lignes: 48, fond: KB[0], trait: KB[1], couleur: 'profondeur', couleurs: [KB[2], KB[1], KB[3]], epaisseur: 2, hauteur: 1.2 },
+        'Thermique': { source: 'montagnes', remplissage: 'bandes', lignes: 34, perspective: 0.6, vitesse: 0.35, fond: THER[0], trait: THER[1], couleurs: [THER[2], THER[3], THER[5], THER[4]], hauteur: 1.1, marge: 0.03, epaisseur: 1.6 },
+        'Luzern': { source: 'bruit', lignes: 40, fond: LUZ[0], trait: LUZ[3], couleur: 'hauteur', couleurs: [LUZ[3], LUZ[1], LUZ[4]], epaisseur: 2.4, hauteur: 1.05, fenetre: 0.7 },
+        'Salon': { source: 'ondes', remplissage: 'bandes', lignes: 22, fond: SALON[0], trait: SALON[1], couleurs: [SALON[2], SALON[3], SALON[4]], epaisseur: 2.2, hauteur: 1.2, marge: 0.1 },
+        'Orbite': { source: 'pics', lignes: 110, perspective: 0.35, fond: ORB[2], trait: ORB[1], epaisseur: 0.8, hauteur: 0.8, detail: 3.5, couleur: 'hauteur', couleurs: [ORB[1], ORB[0]] },
+        'Acide': { source: 'logo', remplissage: 'bandes', lignes: 46, perspective: 0.4, fond: ACIDE[1], trait: ACIDE[1], couleurs: [ACIDE[2], ACIDE[3]], hauteur: 1.3, epaisseur: 1.5, marge: 0.08 },
+      },
+      brand(colors) {
+        const c = colors.slice(1).length ? colors.slice(1) : ['#111111'];
+        return { fond: colors[0], trait: c[0], couleurs: (c.length > 1 ? c.slice(1) : c).slice(0, 6) };
+      },
+      pointer: {
+        move: (q) => { hover = { x: q.x, y: q.y }; },
+        down: (q) => { drag = { x: q.x, y: q.y, moved: false, last: 0 }; },
+        drag: (q) => {
+          hover = { x: q.x, y: q.y };
+          if (!drag) return;
+          if (Math.hypot(q.x - drag.x, q.y - drag.y) > 6) drag.moved = true;
+          if (!drag.moved) return;
+          // Sculpte : dépose des collines le long du geste (elles s'affaissent lentement).
+          const uv = toUV(q.x, q.y), now = app.time || 0;
+          if (uv && now - drag.last > 0.03) { drag.last = now; bumps.push({ u: uv[0], v: uv[1] + scroll, a: 1, t: 0 }); if (bumps.length > 60) bumps.shift(); }
+        },
+        up: (q) => {
+          if (drag && !drag.moved) { const uv = toUV(q.x, q.y); if (uv) { ripples.push({ u: uv[0], v: uv[1], t: 0 }); if (ripples.length > 4) ripples.shift(); } }
+          drag = null;
+        },
+        wheel: (q, dy) => app.set('lignes', Math.max(10, Math.min(160, p.lignes + (dy > 0 ? -4 : 4)))),
+      },
+      onChange(k) { if (k === 'source' || k === 'image') maskKey = null; },
+      onSeed() { bumps = []; ripples = []; },
+      export: { name: 'cretes', svg: () => toSVG() },
+    });
+    const p = app.params;
+    canvas.addEventListener('pointerleave', () => { hover = null; });
+
+    // ——— Bruit de gradient 2D ———
+    const PERM = new Uint8Array(512);
+    function seedNoise(r) { const a = [...Array(256).keys()]; for (let i = 255; i > 0; i--) { const j = Math.floor(r() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } for (let i = 0; i < 512; i++) PERM[i] = a[i & 255]; }
+    const grad = (h, x, y) => { const g = h & 7; const u = g < 4 ? x : y, v = g < 4 ? y : x; return ((g & 1) ? -u : u) + ((g & 2) ? -2 * v : 2 * v); };
+    function noise(x, y) {
+      const X = Math.floor(x), Y = Math.floor(y), xf = x - X, yf = y - Y, xi = X & 255, yi = Y & 255;
+      const u = xf * xf * (3 - 2 * xf), v = yf * yf * (3 - 2 * yf);
+      const a = PERM[PERM[xi] + yi], b = PERM[PERM[xi + 1] + yi], c = PERM[PERM[xi] + yi + 1], d = PERM[PERM[xi + 1] + yi + 1];
+      const x1 = grad(a, xf, yf) + u * (grad(b, xf - 1, yf) - grad(a, xf, yf)), x2 = grad(c, xf, yf - 1) + u * (grad(d, xf - 1, yf - 1) - grad(c, xf, yf - 1));
+      return (x1 + v * (x2 - x1)) * 0.35;
+    }
+    let seeded = -1;
+
+    // ——— Logo en carte de hauteur ———
+    function logoMap() {
+      const img = p.image || app.logoImg, key = img ? (img.src || 'c') : 'demo';
+      if (key === maskKey && maskCache) return maskCache;
+      maskKey = key;
+      const M = 160, c = document.createElement('canvas'); c.width = c.height = M; const x = c.getContext('2d', { willReadFrequently: true });
+      x.fillStyle = '#fff'; x.fillRect(0, 0, M, M);
+      if (img) { const iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height, k = M * 0.86 / Math.max(iw, ih); x.drawImage(img, (M - iw * k) / 2, (M - ih * k) / 2, iw * k, ih * k); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(80, 80, 66, 0, TAU); x.arc(80, 80, 34, 0, TAU, true); x.fill('evenodd'); x.fillRect(72, 8, 16, 144); }
+      const d = x.getImageData(0, 0, M, M).data, a = new Float32Array(M * M);
+      let transp = 0; for (let i = 3; i < d.length; i += 16) if (d[i] < 128) transp++;
+      const useA = img && transp > d.length / 16 * 0.05;
+      for (let i = 0; i < M * M; i++) { const l = (d[i * 4] * 0.2126 + d[i * 4 + 1] * 0.7152 + d[i * 4 + 2] * 0.0722) / 255; a[i] = useA ? d[i * 4 + 3] / 255 : 1 - l; }
+      // Léger adoucissement pour des flancs inclinés.
+      const b = new Float32Array(M * M);
+      for (let y = 0; y < M; y++) for (let xx = 0; xx < M; xx++) { let s = 0, n = 0; for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) { const X = xx + dx, Y = y + dy; if (X >= 0 && Y >= 0 && X < M && Y < M) { s += a[Y * M + X]; n++; } } b[y * M + xx] = s / n; }
+      maskCache = { M, a: b };
+      return maskCache;
+    }
+
+    // ——— Relief h(u, v) ≥ 0, u en travers, v en profondeur (0 devant, 1 au fond) ———
+    function height(u, v, t) {
+      const det = p.detail, vs = v + scroll, e = evo;
+      let h = 0;
+      switch (p.source) {
+        case 'pics': {
+          // Fenêtre centrale + pics de bruit, comme un relevé de pulsar.
+          const wdw = Math.exp(-Math.pow((u - 0.5) / (p.fenetre * 0.5), 2) * 2.2);
+          const n = noise(u * det * 4, vs * det * 3 + e) * 0.6 + noise(u * det * 9 + 7, vs * det * 6 - e * 1.3) * 0.4;
+          h = wdw * Math.max(0, n * 1.4 + 0.25) ** 1.6 * 1.6;
+          break;
+        }
+        case 'bruit': {
+          const wdw = Math.exp(-Math.pow((u - 0.5) / (p.fenetre * 0.5), 2) * 1.2);
+          h = wdw * (0.5 + noise(u * det, vs * det + e * 0.5) * 0.9 + noise(u * det * 2.3 + 3, vs * det * 2.3 - e * 0.4) * 0.4);
+          break;
+        }
+        case 'montagnes': {
+          let a = 0.55, f = det, s = 0;
+          for (let o = 0; o < 4; o++) { s += a * (1 - Math.abs(noise(u * f + o * 13, vs * f + e * 0.3 * (o + 1)) * 2)); a *= 0.5; f *= 2.1; }
+          h = Math.max(0, s - 0.35) * 1.3 * (0.35 + 0.65 * Math.exp(-Math.pow((u - 0.5) / (p.fenetre * 0.6 + 0.2), 2)));
+          break;
+        }
+        case 'ondes': {
+          const d = Math.hypot(u - 0.5, (v - 0.5) * 1.2);
+          h = (0.5 + 0.5 * Math.sin(d * det * 9 - e * 3)) * Math.exp(-d * 2.2) * 0.9;
+          break;
+        }
+        case 'logo': {
+          const L = logoMap(), x = Math.floor(u * L.M), y = Math.floor((1 - v) * L.M);
+          const m = x >= 0 && y >= 0 && x < L.M && y < L.M ? L.a[y * L.M + x] : 0;
+          h = m * 0.55 + Math.max(0, noise(u * det * 3, vs * det * 3 + e)) * 0.12 * (0.4 + m);
+          break;
+        }
+      }
+      // Colline sous le pointeur, collines sculptées, ondes.
+      if (hov > 0.001 && hover && hover.uv) { const du = u - hover.uv[0], dv = v - hover.uv[1]; h += hov * 0.55 * Math.exp(-(du * du + dv * dv) / 0.006); }
+      // Les collines sculptées se cumulent sans dépasser une crête raisonnable.
+      let sb = 0; for (const b of bumps) { const du = u - b.u, dv = vs - b.v; sb += b.a * 0.18 * Math.exp(-(du * du + dv * dv) / 0.0025); }
+      if (sb > 0) h += 0.5 * Math.tanh(sb / 0.5);
+      for (const r of ripples) { const d = Math.hypot(u - r.u, v - r.v), k = (d - r.t * 0.35) / 0.03; if (k > -3 && k < 3) h += 0.3 * Math.exp(-r.t * 0.9) * Math.exp(-k * k * 0.5) * (1 + Math.cos(k * 2)) * 0.5; }
+      return h;
+    }
+
+    // ——— Projection : ligne i (v) → base, largeur, échelle ———
+    function frame(w, h) {
+      const N = Math.round(p.lignes), m = p.marge, P = p.perspective, S = Math.min(w, h);
+      const top = h * (m + 0.08 + P * 0.18), bot = h * (1 - m * 0.6), amp = S * 0.32 * p.hauteur;
+      return { N, P, top, bot, amp, w, h, m };
+    }
+    function lineGeom(F, i) {
+      const v = F.N > 1 ? i / (F.N - 1) : 0;
+      // Profondeur projetée : en perspective les lignes lointaines se resserrent.
+      const z = 1 + v * F.P * 3, pv = F.P > 0 ? (1 - 1 / z) / (1 - 1 / (1 + F.P * 3)) : v;
+      const base = F.bot - (F.bot - F.top) * pv, sc = 1 / z, half = F.w * (0.5 - F.m * 0.5) * (F.P > 0 ? Math.max(sc, 0.25) * (1 + F.P * 0.6) : 1);
+      return { v, base, x0: F.w / 2 - Math.min(F.w * 0.5 + 2, half), x1: F.w / 2 + Math.min(F.w * 0.5 + 2, half), ampK: F.P > 0 ? Math.max(sc, 0.2) * (1 + F.P * 0.3) : 1 };
+    }
+    function toUV(x, y) {
+      const { w, h } = app.size; if (!w) return null;
+      const F = frame(w, h);
+      let best = -1, bd = Infinity, bg = null;
+      for (let i = 0; i < F.N; i++) { const g = lineGeom(F, i), d = Math.abs(g.base - y - F.amp * g.ampK * 0.15); if (d < bd) { bd = d; best = i; bg = g; } }
+      if (best < 0) return null;
+      return [Math.min(1, Math.max(0, (x - bg.x0) / (bg.x1 - bg.x0))), bg.v];
+    }
+
+    function build(w, h, t) {
+      const F = frame(w, h), lines = [], cols = p.couleurs.length ? p.couleurs : [p.trait];
+      const M = Math.max(60, Math.min(260, Math.round(w / 4)));
+      for (let i = F.N - 1; i >= 0; i--) {
+        const g = lineGeom(F, i), pts = new Float32Array((M + 1) * 2);
+        let hmax = 0;
+        for (let k = 0; k <= M; k++) {
+          const u = k / M, hh = height(u, g.v, t);
+          pts[k * 2] = g.x0 + (g.x1 - g.x0) * u; pts[k * 2 + 1] = g.base - hh * F.amp * g.ampK;
+          if (hh > hmax) hmax = hh;
+        }
+        let stroke = p.trait;
+        if (p.couleur === 'profondeur') stroke = mixPal(cols, g.v);
+        else if (p.couleur === 'hauteur') stroke = mixPal(cols, Math.min(1, hmax / 1.1));
+        lines.push({ pts, base: g.base, fill: p.remplissage === 'bandes' ? cols[i % cols.length] : p.fond, stroke });
+      }
+      return lines;
+    }
+    const hex = (c) => { const n = parseInt(c.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; };
+    function mixPal(cols, t) {
+      if (cols.length === 1) return cols[0];
+      const f = Math.min(0.9999, Math.max(0, t)) * (cols.length - 1), i = Math.floor(f), k = f - i, a = hex(cols[i]), b = hex(cols[i + 1]);
+      return 'rgb(' + a.map((x, j) => Math.round(x + (b[j] - x) * k)).join(',') + ')';
+    }
+
+    app.loop((t, dt) => {
+      const { w, h, dpr } = app.size;
+      dt = Math.min(0.05, dt || 0);
+      if (seeded !== app.seed) { seeded = app.seed; seedNoise(app.rng(41)); }
+      scroll += dt * p.vitesse * 0.15; evo += dt * p.houle * 0.3;
+      if (hover) { hover.uv = toUV(hover.x, hover.y); hov += (1 - hov) * Math.min(1, dt * 3); } else hov += (0 - hov) * Math.min(1, dt * 2);
+      for (const b of bumps) { b.t += dt; b.a = Math.max(0, 1 - Math.max(0, b.t - 6) / 6); }
+      bumps = bumps.filter((b) => b.a > 0);
+      for (const r of ripples) r.t += dt;
+      ripples = ripples.filter((r) => r.t < 4);
+      const L = build(w, h, t);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = p.fond; ctx.fillRect(0, 0, w, h);
+      ctx.lineJoin = 'round'; ctx.lineCap = 'round'; ctx.lineWidth = p.epaisseur;
+      for (const l of L) {
+        const q = l.pts, n = q.length;
+        if (p.remplissage !== 'aucun') {
+          ctx.beginPath(); ctx.moveTo(q[0], l.base + 1);
+          for (let k = 0; k < n; k += 2) ctx.lineTo(q[k], q[k + 1]);
+          ctx.lineTo(q[n - 2], l.base + 1); ctx.closePath();
+          ctx.fillStyle = l.fill; ctx.fill();
+        }
+        ctx.beginPath(); ctx.moveTo(q[0], q[1]);
+        for (let k = 2; k < n; k += 2) ctx.lineTo(q[k], q[k + 1]);
+        ctx.strokeStyle = l.stroke; ctx.stroke();
+      }
+      app.finish(ctx);
+    });
+
+    function toSVG() {
+      const { w, h } = app.size, f = (v) => Math.round(v * 10) / 10, L = build(w, h, app.time || 0), out = [];
+      for (const l of L) {
+        const q = l.pts, n = q.length;
+        let d = 'M' + f(q[0]) + ' ' + f(q[1]);
+        for (let k = 2; k < n; k += 2) d += 'L' + f(q[k]) + ' ' + f(q[k + 1]);
+        if (p.remplissage !== 'aucun') out.push(`<path d="M${f(q[0])} ${f(l.base + 1)}${d.replace(/^M/, 'L')}L${f(q[n - 2])} ${f(l.base + 1)}Z" fill="${l.fill}"/>`);
+        out.push(`<path d="${d}" fill="none" stroke="${l.stroke}" stroke-width="${p.epaisseur}" stroke-linejoin="round" stroke-linecap="round"/>`);
+      }
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">\n<rect width="100%" height="100%" fill="${p.fond}"/>\n${out.join('\n')}\n</svg>`;
+    }
+  </script>
+</body>
+</html>

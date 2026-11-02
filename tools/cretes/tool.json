@@ -1,0 +1,15 @@
+{
+  "slug": "cretes",
+  "title": "Crêtes",
+  "type": "generative",
+  "description": "Des lignes empilées soulevées par des pics, des collines, des montagnes, des ondes ou le logo ; les plus proches cachent les autres, en plan ou en perspective.",
+  "tags": ["lignes", "relief", "terrain", "perspective", "logo", "svg"],
+  "inspiration": [
+    "Relevé du pulsar CP 1919 (Harold Craft, 1970) et pochette d’Unknown Pleasures (Peter Saville, 1979)",
+    "Algorithme du peintre pour les lignes cachées",
+    "references/techniques.md ; palettes trame-nuit, papier-60, biennale, thermique"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
