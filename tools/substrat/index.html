@@ -1,0 +1,308 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Substrat</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Substrat : des fissures qui poussent en ligne droite et repartent perpendiculairement les unes
+    // des autres, d'après Substrate de Jared Tarbell. Chaque pixel fissuré garde l'angle de sa fissure :
+    // une fissure s'arrête quand elle en croise une autre et en fait naître deux nouvelles, branchées
+    // à angle droit sur un point déjà fissuré. Le long de chaque fissure, un « peintre de sable » lâche des
+    // grains de couleur vers l'espace libre : les lavis de couleur suivent le découpage.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2, DEG = Math.PI / 180, EMPTY = 1e4, WALL = 2e4;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const P60 = PAL('papier-60'), NUIT = PAL('trame-nuit'), BIEN = PAL('biennale'), KB = PAL('kegelbahn');
+    const PYR = PAL('pyramides'), MENTHE = PAL('menthe'), ACIDE = PAL('acide'), TH = PAL('thermique'), SALON = PAL('salon');
+
+    let ready = false, dirty = true, cracks = [], grid = null, W = 0, H = 0, K = 1, img = null, buf = null, bctx = null;
+    let cells = [], lines = [], born = 0, cycleT = 0, drag = null, rnd = Math.random, mask = null;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.05, vignette: 0 },
+      hint: 'Cliquez pour lancer une fissure · glissez pour choisir sa direction · molette : vitesse de croissance',
+      notes: 'Une fissure avance en ligne droite jusqu’à en rencontrer une autre ; elle en fait alors naître de nouvelles, branchées à angle droit. Le long de chaque fissure, des grains de couleur glissent vers l’espace libre.',
+      params: {
+        'Croissance': {
+          graines: { type: 'range', label: 'Fissures de départ', min: 1, max: 40, step: 1, value: 6 },
+          maximum: { type: 'range', label: 'Fissures actives au plus', min: 10, max: 400, step: 1, value: 70 },
+          vitesse: { type: 'range', label: 'Vitesse de croissance', min: 1, max: 30, step: 1, value: 2 },
+          branchement: { type: 'segmented', label: 'Branchement', options: { 90: '90°', 60: '60°', libre: 'Libre' }, value: '90' },
+          orientation: { type: 'segmented', label: 'Orientation des graines', options: { libre: 'Libre', droite: 'Orthogonale', rayons: 'Rayons' }, value: 'libre' },
+          deviation: { type: 'range', label: 'Écart d’angle (°)', min: 0, max: 12, step: 0.1, value: 2 },
+          courbure: { type: 'range', label: 'Courbure', min: 0, max: 1, step: 0.01, value: 0 },
+        },
+        'Peinture': {
+          sable: { type: 'range', label: 'Grains de sable', min: 0, max: 1, step: 0.01, value: 0.6 },
+          lavis: { type: 'range', label: 'Opacité du lavis', min: 0.02, max: 1, step: 0.01, value: 0.35 },
+          trait: { type: 'range', label: 'Épaisseur du trait', min: 0.3, max: 3, step: 0.05, value: 0.9 },
+          encrage: { type: 'range', label: 'Densité du trait', min: 0.05, max: 1, step: 0.01, value: 0.7 },
+        },
+        'Cadre': {
+          cadre: { type: 'segmented', label: 'Cadre', options: { plein: 'Plein', marge: 'Marge', cercle: 'Cercle', logo: 'Logo' }, value: 'plein' },
+          boucle: { type: 'range', label: 'Recommencer après (s)', min: 10, max: 180, step: 1, value: 45 },
+        },
+        'Couleur': {
+          fond: { type: 'color', label: 'Fond', value: P60[0] },
+          encre: { type: 'color', label: 'Encre des fissures', value: P60[1] },
+          couleurs: { type: 'palette', label: 'Couleurs du sable', value: [PYR[2], PYR[3], PYR[4], PYR[5], PYR[1]] },
+        },
+      },
+      presets: {
+        'Substrat': {},
+        'Ville': { orientation: 'droite', deviation: 0, branchement: '90', graines: 3, sable: 0.4, fond: BIEN[0], encre: BIEN[1], couleurs: [BIEN[2], BIEN[3], BIEN[4]], lavis: 0.45 },
+        'Nuit': { fond: NUIT[0], encre: NUIT[1], couleurs: ['#5b5b5b', NUIT[2], '#d0d0d0'], sable: 0.8, lavis: 0.25, trait: 0.6 },
+        'Craquelure': { branchement: 'libre', deviation: 6, courbure: 0.35, graines: 20, sable: 0.2, trait: 1.4, encrage: 1, fond: '#e9e2d3', encre: '#2a2520', couleurs: ['#b9ab90', '#8f7f66'] },
+        'Rayons': { orientation: 'rayons', cadre: 'cercle', graines: 14, fond: KB[0], encre: '#f4f1ea', couleurs: [KB[1], KB[3], KB[2]], sable: 0.7, lavis: 0.3 },
+        'Menthe': { cadre: 'marge', fond: MENTHE[0], encre: MENTHE[1], couleurs: [MENTHE[3], MENTHE[2], '#ffffff'], courbure: 0.15, sable: 0.75 },
+        'Logo': { cadre: 'logo', graines: 10, fond: SALON[0], encre: SALON[1], couleurs: [SALON[2], SALON[3], SALON[4]], sable: 0.65 },
+        'Thermique': { fond: TH[0], encre: '#1c1c2a', couleurs: [TH[1], TH[2], TH[3], TH[4], TH[5]], graines: 12, sable: 0.9, lavis: 0.5, trait: 0.5 },
+        'Trait seul': { sable: 0, trait: 1.2, encrage: 1, fond: ACIDE[0], encre: ACIDE[1], graines: 4 },
+      },
+      brand(colors) {
+        const rest = colors.slice(1);
+        return { fond: colors[0], encre: colors[1] || colors[0], couleurs: (rest.length > 1 ? rest.slice(1) : rest.length ? rest : ['#888888']).slice(0, 6) };
+      },
+      pointer: {
+        down: (q) => { drag = { x: q.x, y: q.y, x1: q.x, y1: q.y }; },
+        drag: (q) => { if (drag) { drag.x1 = q.x; drag.y1 = q.y; } },
+        up: () => {
+          if (!drag || !grid) return;
+          const d = Math.hypot(drag.x1 - drag.x, drag.y1 - drag.y);
+          const a = d > 6 ? Math.atan2(drag.y1 - drag.y, drag.x1 - drag.x) / DEG : rnd() * 360;
+          const x = drag.x * K, y = drag.y * K;
+          // Le geste lance deux fissures opposées, comme une cassure nette.
+          plantSeed(x, y, a); addCrack(x, y, a); addCrack(x, y, a + 180);
+          cycleT = 0;
+          drag = null;
+        },
+        wheel: (q, dy) => app.set('vitesse', Math.max(1, Math.min(30, Math.round(p.vitesse - dy * 0.01)))),
+      },
+      onChange(k) {
+        if (!ready) return;
+        if (['*', 'graines', 'branchement', 'orientation', 'cadre', 'fond', '_logo'].includes(k)) dirty = true;
+      },
+      onSeed() { dirty = true; },
+      export: { name: 'substrat', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    const hex = (h) => { const n = parseInt(String(h).slice(1, 7), 16) || 0; return [n >> 16 & 255, n >> 8 & 255, n & 255]; };
+
+    // ——— Cadre : les cellules hors du cadre sont des murs ———
+    let logoCache = null;
+    function logoMask(size) {
+      const img0 = app.logoImg;
+      const cv = document.createElement('canvas'); cv.width = cv.height = size;
+      const x = cv.getContext('2d', { willReadFrequently: true });
+      if (img0) {
+        const iw = img0.naturalWidth || img0.width, ih = img0.naturalHeight || img0.height, k = size / Math.max(iw, ih);
+        x.drawImage(img0, (size - iw * k) / 2, (size - ih * k) / 2, iw * k, ih * k);
+        const d = x.getImageData(0, 0, size, size).data, out = new Uint8Array(size * size);
+        let clear = 0;
+        for (let i = 3; i < d.length; i += 4) if (d[i] < 128) clear++;
+        const useAlpha = clear > size * size * 0.1;
+        for (let i = 0; i < out.length; i++) {
+          const lum = (d[i * 4] * 0.2126 + d[i * 4 + 1] * 0.7152 + d[i * 4 + 2] * 0.0722) / 255;
+          out[i] = (useAlpha ? d[i * 4 + 3] > 128 : (lum < 0.5 && d[i * 4 + 3] > 128)) ? 1 : 0;
+        }
+        return out;
+      }
+      // Sans logo : un disque percé d'un anneau, la marque par défaut de l'atelier.
+      const out = new Uint8Array(size * size), c = size / 2;
+      for (let j = 0; j < size; j++) for (let i = 0; i < size; i++) {
+        const r = Math.hypot(i - c, j - c) / c;
+        out[j * size + i] = (r < 0.98 && !(r > 0.62 && r < 0.74)) ? 1 : 0;
+      }
+      return out;
+    }
+    function inside(x, y) {
+      if (p.cadre === 'plein') return true;
+      const U = Math.min(W, H);
+      if (p.cadre === 'marge') { const m = U * 0.08; return x > m && y > m && x < W - m && y < H - m; }
+      if (p.cadre === 'cercle') return Math.hypot(x - W / 2, y - H / 2) < U * 0.44;
+      const s = mask.size, i = Math.floor((x - mask.x) / mask.k), j = Math.floor((y - mask.y) / mask.k);
+      return i >= 0 && j >= 0 && i < s && j < s && mask.v[j * s + i] === 1;
+    }
+
+    // ——— Mise en place ———
+    function setup() {
+      const { w, h, dpr } = app.size;
+      K = Math.min(dpr, Math.sqrt(4.2e6 / (w * h)));
+      W = Math.max(8, Math.round(w * K)); H = Math.max(8, Math.round(h * K));
+      rnd = app.rng(Math.floor(born++ * 7919));
+      grid = new Float32Array(W * H).fill(EMPTY);
+      if (p.cadre === 'logo') {
+        const U = Math.min(W, H), size = 360, k = U * 0.8 / size;
+        mask = { size, k, x: W / 2 - size * k / 2, y: H / 2 - size * k / 2, v: logoMask(size) };
+      }
+      if (p.cadre !== 'plein') for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) if (!inside(x + 0.5, y + 0.5)) grid[y * W + x] = WALL;
+      if (!buf || buf.width !== W || buf.height !== H) { buf = document.createElement('canvas'); buf.width = W; buf.height = H; bctx = buf.getContext('2d'); }
+      const bg = hex(p.fond);
+      img = bctx.createImageData(W, H);
+      const d = img.data;
+      for (let i = 0; i < d.length; i += 4) { d[i] = bg[0]; d[i + 1] = bg[1]; d[i + 2] = bg[2]; d[i + 3] = 255; }
+      cracks = []; lines = []; cells = []; cycleT = 0;
+      // Graines : des points fissurés à angle donné ; les premières fissures en partent.
+      const n = p.graines, U = Math.min(W, H);
+      for (let i = 0; i < n; i++) {
+        let x, y, tries = 0;
+        do { x = rnd() * W; y = rnd() * H; } while (grid[(y | 0) * W + (x | 0)] === WALL && ++tries < 400);
+        let a = rnd() * 360;
+        if (p.orientation === 'droite') a = Math.floor(rnd() * 4) * 90;
+        else if (p.orientation === 'rayons') a = Math.atan2(y - H / 2, x - W / 2) / DEG + 90;
+        plantSeed(x, y, a);
+      }
+      for (let i = 0; i < n; i++) findStart();
+      dirty = false;
+      // Un court pré-roulage : les premières fissures sont déjà tracées quand l'image apparaît.
+      grow(app.thumbnail ? 2200 : 400);
+      void U;
+    }
+    function plantSeed(x, y, a) {
+      const i = (y | 0) * W + (x | 0);
+      if (x >= 0 && y >= 0 && x < W && y < H && grid[i] !== WALL) { if (grid[i] === EMPTY) cells.push(i); grid[i] = ((a % 360) + 360) % 360; }
+    }
+
+    function addCrack(x, y, a) {
+      if (cracks.length >= p.maximum) return;
+      const cols = p.couleurs && p.couleurs.length ? p.couleurs : ['#888888'];
+      const c = {
+        x, y, a, x0: x, y0: y,
+        curve: (rnd() - 0.5) * p.courbure * 0.6,
+        col: hex(cols[Math.floor(rnd() * cols.length)]),
+        gain: rnd() * 0.1, side: rnd() < 0.5 ? 1 : -1,
+      };
+      // Départ un peu décalé pour ne pas se heurter à sa propre graine.
+      c.x += 0.61 * Math.cos(a * DEG); c.y += 0.61 * Math.sin(a * DEG);
+      cracks.push(c);
+    }
+    function findStart() {
+      // Un point déjà fissuré au hasard, puis une branche à angle droit (ou 60°, ou libre).
+      // (la liste des pixels fissurés évite de chercher au hasard dans une image presque vide)
+      if (!cells.length) return;
+      const ci = cells[Math.floor(rnd() * cells.length)], x = ci % W, y = (ci / W) | 0;
+      const base = grid[y * W + x], dev = (rnd() * 2 - 1) * p.deviation;
+      const br = p.branchement === 'libre' ? 30 + rnd() * 120 : +p.branchement;
+      const a = base + (rnd() < 0.5 ? -br : br) + dev;
+      addCrack(x + 0.5, y + 0.5, a);
+    }
+
+    // ——— Peinture dans le tampon ———
+    function blend(x, y, c, a) {
+      x |= 0; y |= 0;
+      if (x < 0 || y < 0 || x >= W || y >= H || a <= 0) return;
+      const i = (y * W + x) * 4, d = img.data;
+      d[i] += (c[0] - d[i]) * a; d[i + 1] += (c[1] - d[i + 1]) * a; d[i + 2] += (c[2] - d[i + 2]) * a;
+    }
+    function dot(x, y, r, c, a) {
+      if (r <= 0.75) { blend(x, y, c, a); return; }
+      const R = Math.ceil(r);
+      for (let j = -R; j <= R; j++) for (let i = -R; i <= R; i++) if (i * i + j * j <= r * r) blend(x + i, y + j, c, a);
+    }
+    // Le peintre de sable (Tarbell) : des grains semés entre la fissure et le premier obstacle,
+    // denses près de la fissure, avec un étalement qui dérive lentement.
+    function sand(c) {
+      if (p.sable <= 0) return;
+      const t = (c.a + 90 * c.side) * DEG, dx = Math.cos(t) * 0.81, dy = Math.sin(t) * 0.81;
+      let rx = c.x, ry = c.y, n = 0;
+      while (n < 4000) {
+        rx += dx; ry += dy; n++;
+        const ix = rx | 0, iy = ry | 0;
+        if (ix < 0 || iy < 0 || ix >= W || iy >= H) break;
+        if (grid[iy * W + ix] !== EMPTY) break;
+      }
+      c.gain = Math.max(0, Math.min(1, c.gain + (rnd() - 0.5) * 0.1));
+      const grains = Math.round(8 + 56 * p.sable), w = c.gain / (grains - 1), op = p.lavis;
+      for (let i = 0; i < grains; i++) {
+        const a = (0.1 - i / (grains * 10)) * op * 2.5;
+        const s = Math.sin(Math.sin(i * w));
+        blend(c.x + (rx - c.x) * s, c.y + (ry - c.y) * s, c.col, a);
+      }
+    }
+
+    function stepCrack(c, ink) {
+      const r = c.a * DEG;
+      c.x += 0.42 * Math.cos(r); c.y += 0.42 * Math.sin(r);
+      c.a += c.curve;
+      const z = 0.33, cx = (c.x + (rnd() * 2 - 1) * z) | 0, cy = (c.y + (rnd() * 2 - 1) * z) | 0;
+      sand(c);
+      dot(c.x + (rnd() * 2 - 1) * z, c.y + (rnd() * 2 - 1) * z, p.trait * K * 0.6, ink, 0.85 * p.encrage);
+      if (cx < 0 || cy < 0 || cx >= W || cy >= H) return false;
+      const g = grid[cy * W + cx], a = ((c.a % 360) + 360) % 360;
+      if (g === EMPTY) { grid[cy * W + cx] = a; cells.push(cy * W + cx); return true; }
+      if (g === WALL) return false;
+      let diff = Math.abs(g - a); diff = Math.min(diff, 360 - diff);
+      // Les fissures courbes traversent leurs propres pixels : on tolère un écart plus large.
+      return diff <= 2 + Math.abs(c.curve) * 4;
+    }
+
+    function grow(n) {
+      const ink = hex(p.encre);
+      for (let s = 0; s < n; s++) {
+        for (let i = cracks.length - 1; i >= 0; i--) {
+          const c = cracks[i];
+          if (!stepCrack(c, ink)) {
+            lines.push([c.x0, c.y0, c.x, c.y, c.curve]);
+            cracks.splice(i, 1);
+            findStart(); findStart();
+          }
+        }
+        if (!cracks.length) for (let i = 0; i < 3; i++) findStart();
+      }
+    }
+
+    // ——— SVG : les fissures seules, en traits (les lavis de sable sont un rendu raster) ———
+    function toSVG() {
+      const { w, h } = app.size, k = 1 / K, f = (v) => (v * k).toFixed(1);
+      const all = lines.concat(cracks.map((c) => [c.x0, c.y0, c.x, c.y, c.curve]));
+      let path = '';
+      for (const [x0, y0, x1, y1, cu] of all) {
+        if (Math.abs(cu) < 1e-4) path += `M${f(x0)} ${f(y0)}L${f(x1)} ${f(y1)}`;
+        else {
+          // Fissure courbe : un arc de cercle (courbure constante).
+          const len = Math.hypot(x1 - x0, y1 - y0), turns = Math.abs(cu) * (len / 0.42) * DEG;
+          const R = len / (2 * Math.sin(Math.min(Math.PI - 0.01, turns / 2) || 0.001));
+          path += `M${f(x0)} ${f(y0)}A${f(R)} ${f(R)} 0 ${turns > Math.PI ? 1 : 0} ${cu > 0 ? 1 : 0} ${f(x1)} ${f(y1)}`;
+        }
+      }
+      return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}"><rect width="100%" height="100%" fill="${p.fond}"/><path d="${path}" fill="none" stroke="${p.encre}" stroke-width="${(p.trait * 0.6 * 1.6).toFixed(2)}" stroke-linecap="round"/></svg>`;
+    }
+
+    function render(t, dt) {
+      const { w, h, dpr } = app.size;
+      const k2 = Math.min(dpr, Math.sqrt(4.2e6 / (w * h)));
+      if (dirty || !grid || Math.round(w * k2) !== W || Math.round(h * k2) !== H) setup();
+      if (dt > 0) {
+        grow(Math.round(p.vitesse * K));
+        cycleT += dt;
+        if (cycleT > p.boucle) setup();
+      }
+      bctx.putImageData(img, 0, 0);
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.imageSmoothingEnabled = true;
+      ctx.drawImage(buf, 0, 0, canvas.width, canvas.height);
+      // Aperçu du geste : la direction de la future fissure.
+      if (drag) {
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        ctx.strokeStyle = p.encre; ctx.lineWidth = 1; ctx.setLineDash([3, 4]);
+        ctx.beginPath(); ctx.moveTo(drag.x, drag.y); ctx.lineTo(drag.x1, drag.y1); ctx.stroke(); ctx.setLineDash([]);
+      }
+      app.finish(ctx);
+    }
+
+    ready = true;
+    app.loop((t, dt) => render(t, dt));
+  </script>
+</body>
+</html>

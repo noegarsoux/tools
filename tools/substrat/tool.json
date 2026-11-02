@@ -1,0 +1,15 @@
+{
+  "slug": "substrat",
+  "title": "Substrat",
+  "type": "generative",
+  "description": "Des fissures droites qui poussent et repartent à angle droit les unes des autres, bordées de lavis de sable aux couleurs de la marque.",
+  "tags": ["fissures", "croissance", "tarbell", "lavis", "svg", "logo"],
+  "inspiration": [
+    "Jared Tarbell, Substrate (2003)",
+    "references/physique-maths.md : fissures et craquelures",
+    "Palettes papier-60, pyramides, biennale, kegelbahn, menthe, salon, thermique"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
