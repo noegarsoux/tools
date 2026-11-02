@@ -1,0 +1,15 @@
+{
+  "slug": "halftone-cmjn",
+  "title": "Halftone CMJN",
+  "type": "filter",
+  "description": "Une image séparée en cyan, magenta, jaune et noir, chaque encre tramée sur sa grille tournée : formes de points, moiré volontaire et repérage déréglé.",
+  "tags": ["halftone", "cmjn", "trame", "impression", "moire", "svg"],
+  "inspiration": [
+    "Offset quadrichromie : angles 15, 75, 0 et 45 degrés, retrait de sous-couleur",
+    "Roy Lichtenstein et les points Ben-Day ; impressions risographie",
+    "references/techniques.md ; palettes kegelbahn, good-room, biennale, luzern, salon, thermique"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
