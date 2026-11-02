@@ -1,0 +1,269 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Écho de plaques</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Écho de plaques : un bloc de texte sur plaque, répété à intervalles réguliers le long de la
+    // trajectoire récente d'une tête qui suit le pointeur (ou un tracé automatique) avec un ressort.
+    // Les copies alternent de couleur, tournent et changent d'échelle pas à pas.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2, DEG = Math.PI / 180;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const BIEN = PAL('biennale'), KB = PAL('kegelbahn'), SALON = PAL('salon'), ACIDE = PAL('acide'), LUZ = PAL('luzern');
+    const P60 = PAL('papier-60'), MENTHE = PAL('menthe'), GR = PAL('good-room'), ORB = PAL('orbite'), THERM = PAL('thermique');
+    const FONTS = {
+      grotesque: "'Helvetica Neue', Helvetica, Arial, sans-serif",
+      serif: "Georgia, 'Times New Roman', Times, serif",
+      mono: "'Courier New', Courier, monospace",
+      arrondie: "'Arial Rounded MT Bold', 'Helvetica Rounded', 'Nunito', 'Varela Round', 'Helvetica Neue', Arial, sans-serif",
+    };
+    const H = 1 / 120;
+
+    let trail = [], head = null, vel = { x: 0, y: 0 }, acc = 0, simT = 0, lastMove = -99, target = null;
+    let tap = null, colorShift = 0, plateCache = null, needReset = true, sizeKey = '';
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.04, vignette: 0 },
+      hint: 'Bougez : les plaques suivent votre tracé · touchez pour décaler les couleurs · molette : nombre de copies',
+      notes: 'La tête suit le pointeur avec un ressort ; les copies se posent à intervalles réguliers sur son trajet récent. Sans pointeur, la tête suit un tracé en boucle.',
+      params: {
+        'Texte': {
+          texte: { type: 'textarea', label: 'Texte de la plaque', value: 'BIENNALE\nDE L’AFFICHE\n12—27 JUIN', rows: 4 },
+          police: { type: 'font', label: 'Police', options: { grotesque: 'Grotesque', serif: 'Sérif', mono: 'Machine', arrondie: 'Arrondie' }, value: 'grotesque' },
+          graisse: { type: 'segmented', label: 'Graisse', options: { 400: 'Normale', 700: 'Grasse', 900: 'Noire' }, value: '700' },
+          alignement: { type: 'segmented', label: 'Alignement', options: { left: 'Gauche', center: 'Centre', right: 'Droite' }, value: 'left' },
+          interlignage: { type: 'range', label: 'Interlignage', min: 0.8, max: 1.6, step: 0.01, value: 1.02 },
+        },
+        'Plaque': {
+          corps: { type: 'range', label: 'Corps du texte', min: 0.015, max: 0.12, step: 0.001, value: 0.055 },
+          marge: { type: 'range', label: 'Marge intérieure', min: 0, max: 1.5, step: 0.01, value: 0.45 },
+          arrondi: { type: 'range', label: 'Arrondi', min: 0, max: 1, step: 0.01, value: 0 },
+          contour: { type: 'toggle', label: 'Plaques en contour', value: false },
+        },
+        'Écho': {
+          copies: { type: 'range', label: 'Copies', min: 2, max: 60, step: 1, value: 14 },
+          ecart: { type: 'range', label: 'Écart entre copies', min: 0.04, max: 1.6, step: 0.01, value: 0.32 },
+          rotation: { type: 'range', label: 'Rotation par copie (°)', min: -12, max: 12, step: 0.1, value: 2.2 },
+          suivi: { type: 'range', label: 'Suivre la direction', min: 0, max: 1, step: 0.01, value: 0.15 },
+          echelle: { type: 'range', label: 'Échelle par copie', min: -0.06, max: 0.06, step: 0.001, value: -0.012 },
+          ordre: { type: 'segmented', label: 'Dessus', options: { tete: 'Tête', queue: 'Queue' }, value: 'tete' },
+          fondu: { type: 'range', label: 'Fondu de la traîne', min: 0, max: 1, step: 0.01, value: 0 },
+        },
+        'Trajet': {
+          trajet: { type: 'segmented', label: 'Tracé automatique', options: { huit: 'Huit', ellipse: 'Ellipse', lissajous: 'Lissajous', vague: 'Vague' }, value: 'huit' },
+          amplitude: { type: 'range', label: 'Amplitude', min: 0.05, max: 0.5, step: 0.005, value: 0.3 },
+          cycle: { type: 'range', label: 'Durée d’une boucle (s)', min: 3, max: 40, step: 0.5, value: 11 },
+          ressort: { type: 'range', label: 'Souplesse du ressort', min: 0, max: 1, step: 0.01, value: 0.45 },
+        },
+        'Couleur': {
+          fond: { type: 'color', label: 'Fond', value: BIEN[0] },
+          couleurs: { type: 'palette', label: 'Plaques (en alternance)', value: [BIEN[3], BIEN[4], BIEN[2]] },
+          encre: { type: 'color', label: 'Texte', value: BIEN[1] },
+          defilement: { type: 'range', label: 'Défilement des couleurs', min: 0, max: 6, step: 0.05, value: 0.8 },
+        },
+      },
+      presets: {
+        'Biennale': {},
+        'Cascade': { copies: 26, ecart: 0.12, rotation: 0.6, echelle: 0, trajet: 'vague', amplitude: 0.38, ressort: 0.2, defilement: 2 },
+        'Tourbillon': { copies: 40, ecart: 0.1, rotation: 9, echelle: -0.018, trajet: 'ellipse', amplitude: 0.18, texte: 'TOUR\nBILLON', graisse: '900', fond: KB[0], couleurs: [KB[1], KB[2], KB[3], KB[5]], encre: KB[0], defilement: 3 },
+        'Contours': { contour: true, copies: 22, ecart: 0.2, rotation: 1.5, fond: P60[0], couleurs: [P60[1]], encre: P60[1], trajet: 'lissajous', fondu: 0.6, texte: 'ÉCHO\nÉCHO' },
+        'Salon': { texte: 'SALON\nDU MOTIF', police: 'arrondie', arrondi: 0.6, marge: 0.6, fond: SALON[0], couleurs: [SALON[2], SALON[3], SALON[4]], encre: SALON[1], copies: 12, ecart: 0.45, rotation: -3, echelle: 0.02 },
+        'Acide': { texte: 'RAVE\nRAVE\nRAVE', police: 'mono', graisse: '700', fond: ACIDE[1], couleurs: [ACIDE[2], ACIDE[3], ACIDE[0]], encre: ACIDE[1], copies: 30, ecart: 0.16, rotation: 0, suivi: 1, echelle: 0, trajet: 'huit', cycle: 7, ressort: 0.7 },
+        'Luzern': { texte: 'LUZERN\nFESTIVAL', graisse: '900', alignement: 'center', fond: LUZ[2], couleurs: [LUZ[0], LUZ[1], LUZ[4]], encre: LUZ[3], copies: 18, ecart: 0.28, rotation: 4, echelle: -0.025, ordre: 'queue' },
+        'Menthe': { texte: 'jardin\nd’été', police: 'serif', graisse: '400', fond: MENTHE[0], couleurs: [MENTHE[2], MENTHE[3]], encre: MENTHE[1], copies: 10, ecart: 0.6, rotation: -1.5, arrondi: 0.25, trajet: 'ellipse', amplitude: 0.26, cycle: 16 },
+        'Good Room': { texte: 'GOOD\nROOM', graisse: '900', corps: 0.07, fond: GR[0], couleurs: [GR[1], GR[2], GR[3], GR[4]], encre: GR[0], copies: 34, ecart: 0.08, rotation: 1, echelle: 0.004, trajet: 'lissajous', amplitude: 0.34, defilement: 4 },
+        'Orbite': { texte: 'ORBITE\n—\nCONFÉRENCE', police: 'serif', graisse: '700', alignement: 'center', fond: ORB[1], couleurs: [ORB[0], ORB[2]], encre: ORB[1], copies: 16, ecart: 0.24, rotation: 22 / 16, suivi: 0.6, trajet: 'ellipse', arrondi: 1, marge: 0.9 },
+      },
+      brand(colors) {
+        const rest = colors.slice(1);
+        return { fond: colors[0], couleurs: (rest.length > 1 ? rest.slice(1) : rest.length ? rest : ['#ffffff']).slice(0, 6), encre: rest[0] || '#111111' };
+      },
+      pointer: {
+        move: (q) => { if (q.inside !== false) { target = { x: q.x, y: q.y }; lastMove = simT; } },
+        down: (q) => { target = { x: q.x, y: q.y }; lastMove = simT; tap = { x: q.x, y: q.y, moved: false }; },
+        drag: (q) => { target = { x: q.x, y: q.y }; lastMove = simT; if (tap && Math.hypot(q.x - tap.x, q.y - tap.y) > 6) tap.moved = true; },
+        up: () => { if (tap && !tap.moved) colorShift += 1; tap = null; },
+        wheel: (q, dy) => app.set('copies', Math.max(2, Math.min(60, Math.round(p.copies - dy * 0.02)))),
+      },
+      onChange(k) {
+        if (k === '*' || ['texte', 'police', 'graisse', 'interlignage', 'corps', 'marge', 'alignement', '_logo'].includes(k)) plateCache = null;
+        if (k === '*' || k === 'trajet' || k === 'amplitude') needReset = true;
+      },
+      onSeed() { needReset = true; },
+      export: { name: 'echo-de-plaques', svg: () => toSVG() },
+    });
+    const p = app.params;
+    if (document.fonts) document.fonts.addEventListener('loadingdone', () => { plateCache = null; });
+
+    function family() { return p.police === 'AtelierBrand' ? "'AtelierBrand', sans-serif" : (FONTS[p.police] || FONTS.grotesque); }
+
+    // ——— Plaque : mesure du bloc de texte ———
+    function plate() {
+      const { w, h } = app.size, key = w + 'x' + h;
+      if (plateCache && plateCache.key === key) return plateCache;
+      const fs = Math.min(w, h) * p.corps;
+      const lines = String(p.texte || '').split('\n');
+      ctx.save();
+      ctx.font = `${p.graisse} ${fs}px ${family()}`;
+      const widths = lines.map((l) => ctx.measureText(l).width);
+      ctx.restore();
+      const lh = fs * p.interlignage, pad = fs * p.marge;
+      const tw = Math.max(fs * 0.5, ...widths), th = lh * lines.length;
+      plateCache = { key, fs, lines, widths, lh, pad, W: tw + pad * 2, H: th + pad * 2, tw, th };
+      return plateCache;
+    }
+
+    // ——— Tracé automatique ———
+    function auto(t) {
+      const { w, h } = app.size, A = Math.min(w, h) * p.amplitude, u = (t / p.cycle) * TAU + seedPh;
+      switch (p.trajet) {
+        case 'ellipse': return { x: w / 2 + Math.cos(u) * A * 1.35, y: h / 2 + Math.sin(u) * A * 0.85 };
+        case 'lissajous': return { x: w / 2 + Math.sin(u * 2) * A * 1.3, y: h / 2 + Math.sin(u * 3 + 0.6) * A };
+        case 'vague': { const x = ((u / TAU) % 1 + 1) % 1; return { x: w * (0.08 + 0.84 * (x < 0.5 ? x * 2 : 2 - x * 2)), y: h / 2 + Math.sin(u * 3) * A }; }
+        default: return { x: w / 2 + Math.sin(u) * A * 1.5, y: h / 2 + Math.sin(u * 2) * A * 0.75 };
+      }
+    }
+    let seedPh = 0;
+
+    // ——— Simulation de la tête ———
+    function step(h) {
+      simT += h;
+      const idle = simT - lastMove > 1.8 || !target;
+      const tg = idle ? auto(simT) : target;
+      // Ressort amorti : raideur et amortissement selon la souplesse.
+      const k = 260 - p.ressort * 230, c = 2 * Math.sqrt(k) * (1.05 - p.ressort * 0.75);
+      vel.x += ((tg.x - head.x) * k - vel.x * c) * h;
+      vel.y += ((tg.y - head.y) * k - vel.y * c) * h;
+      head.x += vel.x * h; head.y += vel.y * h;
+      const last = trail[trail.length - 1];
+      if (!last || Math.hypot(head.x - last.x, head.y - last.y) > 0.6) trail.push({ x: head.x, y: head.y });
+      const maxLen = 9000;
+      if (trail.length > maxLen) trail.splice(0, trail.length - maxLen);
+      colorShift += p.defilement * h;
+    }
+    function reset() {
+      needReset = false;
+      seedPh = app.rng(9)() * TAU;
+      simT = 0; trail = []; target = null; lastMove = -99; colorShift = 0;
+      head = auto(0); vel = { x: 0, y: 0 };
+      sizeKey = app.size.w + 'x' + app.size.h;
+      // On pré-calcule quelques secondes de trajet pour ouvrir sur une traîne complète.
+      for (let i = 0; i < 120 * 5; i++) step(H);
+    }
+
+    // Positions des copies : à intervalles réguliers en remontant la traîne depuis la tête.
+    function copies() {
+      const P = plate(), N = p.copies, gap = Math.max(2, p.ecart * P.H);
+      const out = [];
+      let i = trail.length - 1, need = 0, run = 0;
+      if (i < 0) return out;
+      let prev = trail[i];
+      out.push({ x: prev.x, y: prev.y, ang: tangent(i) });
+      need = gap;
+      for (i = trail.length - 2; i >= 0 && out.length < N; i--) {
+        const q = trail[i], d = Math.hypot(q.x - prev.x, q.y - prev.y);
+        while (run + d >= need && out.length < N) {
+          const f = d > 0 ? (need - run) / d : 0;
+          out.push({ x: prev.x + (q.x - prev.x) * f, y: prev.y + (q.y - prev.y) * f, ang: tangent(i) });
+          need += gap;
+        }
+        run += d; prev = q;
+      }
+      // Si la traîne est trop courte (tête immobile), les copies restantes s'empilent sur la dernière.
+      while (out.length < N) out.push({ ...out[out.length - 1] });
+      return out;
+    }
+    function tangent(i) {
+      const a = trail[Math.max(0, i - 6)], b = trail[Math.min(trail.length - 1, i + 6)];
+      return Math.atan2(b.y - a.y, b.x - a.x);
+    }
+
+    // ——— Scène : emit(copie) du fond vers l'avant ———
+    function scene(emit) {
+      const P = plate(), C = copies(), N = C.length;
+      const cols = p.couleurs && p.couleurs.length ? p.couleurs : ['#ffffff'];
+      const items = C.map((c, j) => {
+        // Angle : direction lissée (repliée pour garder le texte lisible) + rotation par copie.
+        let ta = c.ang;
+        if (ta > Math.PI / 2) ta -= Math.PI; else if (ta < -Math.PI / 2) ta += Math.PI;
+        const ang = ta * p.suivi + j * p.rotation * DEG;
+        const sc = Math.max(0.05, 1 + j * p.echelle);
+        const ci = Math.floor(((j - colorShift) % cols.length + cols.length) % cols.length);
+        const alpha = 1 - p.fondu * (N > 1 ? j / (N - 1) : 0);
+        return { x: c.x, y: c.y, ang, sc, color: cols[ci], alpha, j };
+      });
+      const order = p.ordre === 'tete' ? items.slice().reverse() : items;
+      for (const it of order) emit(it, P);
+    }
+
+    // ——— Rendu canvas ———
+    function drawPlate(c, it, P) {
+      const r = Math.min(P.W, P.H) * 0.5 * p.arrondi;
+      c.beginPath(); c.roundRect(-P.W / 2, -P.H / 2, P.W, P.H, r);
+      if (p.contour) {
+        c.fillStyle = p.fond; c.fill();
+        c.lineWidth = Math.max(1, P.fs * 0.06); c.strokeStyle = it.color; c.stroke();
+      } else { c.fillStyle = it.color; c.fill(); }
+      c.fillStyle = p.contour ? it.color : p.encre;
+      c.textAlign = p.alignement; c.textBaseline = 'middle';
+      const x0 = p.alignement === 'left' ? -P.tw / 2 : p.alignement === 'right' ? P.tw / 2 : 0;
+      P.lines.forEach((l, k) => c.fillText(l, x0, -P.th / 2 + P.lh * (k + 0.5) + P.fs * 0.04));
+    }
+    app.loop((t, dt) => {
+      const { w, h, dpr } = app.size;
+      if (needReset || sizeKey !== w + 'x' + h) { plateCache = null; reset(); }
+      acc += Math.min(0.05, dt || 0.016);
+      let n = 0;
+      while (acc >= H && n < 8) { step(H); acc -= H; n++; }
+      if (n === 8) acc = 0;
+
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = p.fond;
+      ctx.fillRect(0, 0, w, h);
+      const P = plate();
+      ctx.font = `${p.graisse} ${P.fs}px ${family()}`;
+      scene((it) => {
+        const ca = Math.cos(it.ang) * it.sc, sa = Math.sin(it.ang) * it.sc;
+        ctx.setTransform(ca * dpr, sa * dpr, -sa * dpr, ca * dpr, it.x * dpr, it.y * dpr);
+        ctx.globalAlpha = Math.max(0, it.alpha);
+        drawPlate(ctx, it, P);
+      });
+      ctx.globalAlpha = 1;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      app.finish(ctx);
+    });
+
+    // ——— Export SVG ———
+    function toSVG() {
+      const { w, h } = app.size;
+      const f = (v) => Math.round(v * 100) / 100;
+      const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      const P = plate(), r = Math.min(P.W, P.H) * 0.5 * p.arrondi;
+      const anchor = p.alignement === 'left' ? 'start' : p.alignement === 'right' ? 'end' : 'middle';
+      const x0 = p.alignement === 'left' ? -P.tw / 2 : p.alignement === 'right' ? P.tw / 2 : 0;
+      let body = '';
+      scene((it) => {
+        const rect = p.contour
+          ? `<rect x="${f(-P.W / 2)}" y="${f(-P.H / 2)}" width="${f(P.W)}" height="${f(P.H)}" rx="${f(r)}" fill="${p.fond}" stroke="${it.color}" stroke-width="${f(Math.max(1, P.fs * 0.06))}"/>`
+          : `<rect x="${f(-P.W / 2)}" y="${f(-P.H / 2)}" width="${f(P.W)}" height="${f(P.H)}" rx="${f(r)}" fill="${it.color}"/>`;
+        const txt = P.lines.map((l, k) => `<text x="${f(x0)}" y="${f(-P.th / 2 + P.lh * (k + 0.5) + P.fs * 0.04)}">${esc(l)}</text>`).join('');
+        body += `<g transform="translate(${f(it.x)} ${f(it.y)}) rotate(${f(it.ang / DEG)}) scale(${Math.round(it.sc * 1000) / 1000})"${it.alpha < 1 ? ` opacity="${f(Math.max(0, it.alpha))}"` : ''}>${rect}<g fill="${p.contour ? it.color : p.encre}">${txt}</g></g>\n`;
+      });
+      const fam = family().replace(/"/g, "'");
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">\n<rect width="100%" height="100%" fill="${p.fond}"/>\n<g font-family="${fam}" font-weight="${p.graisse}" font-size="${f(P.fs)}" text-anchor="${anchor}" dominant-baseline="central">\n${body}</g>\n</svg>`;
+    }
+  </script>
+</body>
+</html>
