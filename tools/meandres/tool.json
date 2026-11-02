@@ -1,0 +1,15 @@
+{
+  "slug": "meandres",
+  "title": "Méandres",
+  "type": "motion",
+  "description": "Une rivière qui serpente : ses boucles grandissent, se recoupent en bras morts, et chaque ancien lit reste sur la plaine en couches colorées, façon cartes de Fisk.",
+  "tags": ["riviere", "meandres", "carte", "simulation", "lignes", "svg"],
+  "inspiration": [
+    "Harold N. Fisk, Geological Investigation of the Alluvial Valley of the Lower Mississippi River (1944)",
+    "Howard et Knutson, Sufficient conditions for river meandering: a simulation approach (1984)",
+    "Relevés lidar des plaines alluviales, barres de méandre et bras morts"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
