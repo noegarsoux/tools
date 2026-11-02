@@ -1,0 +1,16 @@
+{
+  "slug": "pendulum-wave",
+  "title": "Pendulum wave",
+  "type": "motion",
+  "description": "Une rangée de pendules aux périodes accordées : vagues, doubles rangées et réalignement exact en fin de cycle, caméra en orbite, traînées, masses au logo, export SVG.",
+  "tags": ["pendule", "physique", "onde", "3d", "boucle", "svg"],
+  "inspiration": [
+    "physique-maths.md — pendules (pendulum wave)",
+    "Harvard Natural Sciences Lecture Demonstrations — Pendulum Waves",
+    "Richard Berg, American Journal of Physics (1991) — pendulum wave",
+    "Palettes trame-nuit, papier-60, orbite, kegelbahn, menthe, acide, pixels, biennale"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
