@@ -1,0 +1,363 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Identité pilotée par les données</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Identité pilotée par les données : une série de valeurs dessine la marque (rayons, anneau, barres,
+    // grille, ruban, fleur). Plusieurs séries = une famille de marques ; l'animation passe de l'une à l'autre.
+    // Les données viennent d'un jeu intégré, d'un CSV importé, ou se modifient au pointeur.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const BIEN = PAL('biennale'), KB = PAL('kegelbahn'), SALON = PAL('salon'), GR = PAL('good-room'), LUZ = PAL('luzern');
+    const P60 = PAL('papier-60'), MENTHE = PAL('menthe'), ORB = PAL('orbite'), THER = PAL('thermique'), GLY = PAL('glyphes'), PYR = PAL('pyramides');
+
+    // Jeux intégrés (plusieurs séries chacun) : valeurs indicatives.
+    const SETS = {
+      climat: [ // températures moyennes mensuelles : quatre villes
+        [5, 6, 9, 12, 16, 19, 21, 21, 17, 13, 8, 5], [-3, -3, 0, 5, 11, 15, 17, 16, 11, 6, 1, -2],
+        [14, 15, 18, 22, 25, 27, 28, 28, 26, 24, 19, 15], [23, 23, 22, 19, 16, 13, 12, 13, 15, 18, 20, 22],
+      ],
+      semaine: [[62, 70, 74, 80, 95, 40, 22], [30, 45, 52, 60, 58, 88, 96], [80, 82, 79, 81, 78, 20, 15], [12, 18, 25, 40, 70, 95, 60], [50, 48, 55, 53, 51, 49, 52]],
+      journee: [
+        [2, 1, 1, 1, 2, 6, 18, 42, 60, 48, 40, 44, 58, 50, 42, 44, 52, 70, 64, 40, 26, 16, 8, 4],
+        [10, 6, 4, 3, 3, 4, 8, 14, 20, 26, 32, 38, 42, 44, 46, 48, 52, 58, 66, 72, 70, 60, 40, 22],
+        [0, 0, 0, 0, 0, 2, 10, 30, 70, 90, 95, 92, 60, 88, 94, 90, 70, 30, 10, 4, 2, 1, 0, 0],
+        [30, 34, 36, 35, 30, 24, 20, 18, 16, 18, 22, 26, 30, 32, 30, 26, 22, 20, 22, 28, 34, 38, 36, 32],
+      ],
+      croissance: [[10, 12, 15, 19, 24, 30, 37, 45, 54, 64], [40, 42, 41, 44, 43, 45, 47, 46, 48, 50], [60, 52, 45, 40, 38, 37, 39, 44, 52, 63], [5, 9, 20, 34, 46, 54, 59, 62, 64, 65], [30, 50, 25, 55, 20, 60, 15, 65, 10, 70]],
+    };
+
+    let data = null, cur = 0, prev = 0, trans = 1, lastSwitch = 0, clock = 0, edit = null, hover = null, csv = null;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.04, vignette: 0 },
+      hint: 'Glissez sur la marque pour modifier une valeur · touchez pour passer à la série suivante · molette : amplitude',
+      notes: 'Importez un CSV : chaque ligne de nombres devient une série (ou chaque colonne s’il n’y a qu’une ou deux colonnes). Les valeurs sont ramenées entre le minimum et le maximum du jeu. Glissez sur la marque pour corriger une valeur à la main.',
+      params: {
+        'Données': {
+          donnees: { type: 'select', label: 'Jeu de données', options: { climat: 'Climat (12 mois, 4 villes)', semaine: 'Semaine (7 jours)', journee: 'Journée (24 heures)', croissance: 'Croissance (10 ans)', hasard: 'Au hasard', csv: 'Fichier CSV' }, value: 'climat' },
+          fichier: { type: 'file', label: 'Fichier CSV', accept: '.csv,text/csv,text/plain', button: 'Importer un CSV…', show: (q) => q.donnees === 'csv' },
+          valeurs: { type: 'range', label: 'Nombre de valeurs', min: 3, max: 48, step: 1, value: 16, show: (q) => q.donnees === 'hasard' },
+          duree: { type: 'range', label: 'Durée d’une série (s)', min: 0.8, max: 10, step: 0.1, value: 2.6 },
+          zero: { type: 'toggle', label: 'Partir de zéro', value: false },
+        },
+        'Marque': {
+          forme: { type: 'select', label: 'Forme', options: { rayons: 'Rayons', anneau: 'Anneau', barres: 'Barres', grille: 'Grille', ruban: 'Ruban', fleur: 'Fleur' }, value: 'rayons' },
+          disposition: { type: 'segmented', label: 'Disposition', options: { seul: 'Une marque', planche: 'Planche' }, value: 'seul' },
+          lissage: { type: 'range', label: 'Lissage', min: 0, max: 1, step: 0.01, value: 0.7, show: (q) => q.forme === 'rayons' || q.forme === 'ruban' },
+          base: { type: 'range', label: 'Base', min: 0, max: 0.8, step: 0.01, value: 0.16 },
+          amplitude: { type: 'range', label: 'Amplitude', min: 0.3, max: 1.4, step: 0.01, value: 1 },
+          epaisseur: { type: 'range', label: 'Épaisseur', min: 0.1, max: 1, step: 0.01, value: 0.75 },
+          creux: { type: 'toggle', label: 'Cœur évidé', value: false, show: (q) => q.forme === 'rayons' || q.forme === 'fleur' },
+          rotation: { type: 'range', label: 'Rotation (°)', min: -180, max: 180, step: 1, value: -90 },
+        },
+        'Couleur': {
+          fond: { type: 'color', label: 'Fond', value: BIEN[0] },
+          encre: { type: 'color', label: 'Encre', value: BIEN[1] },
+          accents: { type: 'palette', label: 'Accents', value: [BIEN[2], BIEN[3], BIEN[4]] },
+          modeCouleur: { type: 'segmented', label: 'Couleur', options: { encre: 'Encre', valeur: 'Par valeur', serie: 'Par série' }, value: 'encre' },
+        },
+      },
+      presets: {
+        'Climat': {},
+        'Anneau': { forme: 'anneau', donnees: 'journee', fond: KB[0], encre: KB[5], accents: [KB[2], KB[3], KB[1]], modeCouleur: 'valeur', base: 0.45, epaisseur: 0.8 },
+        'Barres': { forme: 'barres', donnees: 'journee', fond: P60[0], encre: P60[1], base: 0.08, epaisseur: 0.6 },
+        'Planche': { disposition: 'planche', forme: 'anneau', donnees: 'journee', fond: SALON[0], encre: SALON[1], accents: [SALON[2], SALON[3], SALON[4]], modeCouleur: 'serie', base: 0.38, epaisseur: 0.85 },
+        'Grille': { forme: 'grille', donnees: 'hasard', valeurs: 36, fond: GR[0], encre: GR[1], accents: [GR[2], GR[3], GR[4], GR[1]], modeCouleur: 'valeur', epaisseur: 0.9, duree: 1.8 },
+        'Ruban': { forme: 'ruban', donnees: 'croissance', fond: LUZ[4], encre: LUZ[1], accents: [LUZ[0], LUZ[2]], lissage: 0.9, base: 0.06, amplitude: 1.2 },
+        'Fleur': { forme: 'fleur', donnees: 'climat', fond: MENTHE[0], encre: MENTHE[3], accents: [MENTHE[1], MENTHE[2]], creux: false, base: 0.15 },
+        'Orbite': { forme: 'anneau', donnees: 'climat', fond: ORB[1], encre: ORB[0], accents: [ORB[2]], base: 0.6, epaisseur: 0.5, modeCouleur: 'encre', duree: 3.5 },
+        'Thermique': { forme: 'rayons', donnees: 'journee', fond: THER[0], encre: THER[1], accents: [THER[2], THER[3], THER[4], THER[5]], modeCouleur: 'serie', lissage: 0, base: 0.35, creux: true },
+        'Glyphes': { disposition: 'planche', forme: 'fleur', donnees: 'hasard', valeurs: 9, fond: GLY[1], encre: GLY[0], accents: [GLY[2], GLY[3], GLY[4], GLY[5], GLY[6]], modeCouleur: 'serie', creux: false },
+        'Pyramides': { disposition: 'planche', forme: 'barres', donnees: 'croissance', fond: PYR[0], encre: PYR[6], accents: [PYR[2], PYR[3], PYR[4], PYR[5]], modeCouleur: 'serie', epaisseur: 0.7 },
+      },
+      brand(colors) {
+        return { fond: colors[0], encre: colors[1] || '#111111', accents: (colors.slice(2).length ? colors.slice(2) : [colors[1] || '#111111']).slice(0, 6) };
+      },
+      pointer: {
+        move: (q) => { hover = { x: q.x, y: q.y }; },
+        down: (q) => { edit = { x: q.x, y: q.y, moved: false, idx: -1 }; },
+        drag: (q) => {
+          if (!edit) return;
+          if (Math.hypot(q.x - edit.x, q.y - edit.y) > 5) edit.moved = true;
+          if (edit.moved) editAt(q.x, q.y);
+        },
+        up: () => { if (edit && !edit.moved) nextSeries(); edit = null; },
+        wheel: (q, dy) => app.set('amplitude', Math.max(0.3, Math.min(1.4, +(p.amplitude - dy * 0.0008).toFixed(3)))),
+      },
+      onChange(k) {
+        if (k === 'fichier' && p.fichier) {
+          // Certains systèmes donnent au CSV un type non textuel : on lit alors le fichier nous-mêmes.
+          Promise.resolve(typeof p.fichier === 'string' ? p.fichier : p.fichier.text ? p.fichier.text() : '').then((txt) => {
+            csv = parseCSV(txt); data = null; cur = prev = 0; trans = 1;
+            if (p.donnees !== 'csv') app.set('donnees', 'csv');
+          });
+        }
+        if (k === 'donnees' || k === 'valeurs' || k === '*') { data = null; cur = prev = 0; trans = 1; lastSwitch = clock; }
+      },
+      onSeed() { if (p.donnees === 'hasard') data = null; },
+      export: { name: 'identite-donnees', svg: () => toSVG() },
+    });
+    const p = app.params;
+    canvas.addEventListener('pointerleave', () => { hover = null; });
+
+    // ——— Données ———
+    function parseCSV(text) {
+      const rows = String(text).split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+      const semi = rows.some((r) => r.includes(';'));
+      const num = (c) => { const v = parseFloat(c.replace(/\s/g, '').replace(semi ? ',' : '\u0000', '.')); return Number.isFinite(v) ? v : NaN; };
+      let M = rows.map((r) => r.split(semi ? ';' : /[,\t]/).map(num)).filter((r) => r.some((v) => !Number.isNaN(v)));
+      if (!M.length) return null;
+      // Une première colonne d'étiquettes (années, numéros) hors de l'échelle des autres est écartée.
+      const cols = Math.max(...M.map((r) => r.length));
+      if (cols >= 4 && M.length >= 2) {
+        const c0 = M.map((r) => r[0]).filter((v) => !Number.isNaN(v));
+        let lo = Infinity, hi = -Infinity;
+        for (const r of M) for (let i = 1; i < r.length; i++) if (!Number.isNaN(r[i])) { lo = Math.min(lo, r[i]); hi = Math.max(hi, r[i]); }
+        if (!c0.length || c0.every((v) => v > hi || v < lo)) M = M.map((r) => r.slice(1));
+      }
+      M = M.map((r) => r.filter((v) => !Number.isNaN(v))).filter((r) => r.length);
+      if (Math.max(...M.map((r) => r.length)) >= 3) return M.filter((r) => r.length >= 3);
+      const out = [];
+      for (let c = 0; c < 2; c++) out.push(M.map((r) => r[c]).filter((v) => v != null));
+      return out.filter((s) => s.length >= 3);
+    }
+    function build() {
+      let series;
+      if (p.donnees === 'hasard') {
+        const r = app.rng(9), n = Math.round(p.valeurs);
+        series = Array.from({ length: 6 }, () => { let v = r(); return Array.from({ length: n }, () => (v = Math.max(0, Math.min(1, v + (r() - 0.5) * 0.7)))); });
+      } else if (p.donnees === 'csv') series = csv && csv.length ? csv : SETS.climat;
+      else series = SETS[p.donnees] || SETS.climat;
+      let lo = Infinity, hi = -Infinity;
+      for (const s of series) for (const v of s) { lo = Math.min(lo, v); hi = Math.max(hi, v); }
+      if (p.zero) lo = Math.min(0, lo);
+      const n = Math.max(...series.map((s) => s.length));
+      // Normalisation 0..1 ; les séries courtes sont complétées par répétition.
+      data = series.map((s) => Array.from({ length: n }, (_, i) => (s[i % s.length] - lo) / ((hi - lo) || 1)));
+    }
+    function nextSeries() { if (!data || data.length < 2) return; prev = cur; cur = (cur + 1) % data.length; trans = 0; lastSwitch = clock; }
+    function current() {
+      const A = data[prev], B = data[cur], e = trans < 1 ? trans * trans * (3 - 2 * trans) : 1;
+      return A.map((a, i) => a + (B[i] - a) * e);
+    }
+
+    // ——— Géométrie commune ———
+    function colOf(v, i, si) {
+      const A = p.accents && p.accents.length ? p.accents : [p.encre];
+      if (p.modeCouleur === 'serie') return si === 0 ? p.encre : A[(si - 1) % A.length];
+      if (p.modeCouleur === 'valeur') { const P = [p.encre, ...A]; return P[Math.min(P.length - 1, Math.floor(v * P.length * 0.999))]; }
+      return p.encre;
+    }
+    // Spline cardinale fermée (ou ouverte), mélangée au polygone selon le lissage.
+    function spline(pts, closed, smooth, steps) {
+      const n = pts.length / 2, out = [];
+      const P = (i) => { const k = closed ? ((i % n) + n) % n : Math.max(0, Math.min(n - 1, i)); return [pts[k * 2], pts[k * 2 + 1]]; };
+      const segs = closed ? n : n - 1;
+      for (let i = 0; i < segs; i++) {
+        const [x0, y0] = P(i - 1), [x1, y1] = P(i), [x2, y2] = P(i + 1), [x3, y3] = P(i + 2);
+        for (let s = 0; s < steps; s++) {
+          const t = s / steps, t2 = t * t, t3 = t2 * t;
+          const cx = 0.5 * (2 * x1 + (-x0 + x2) * t + (2 * x0 - 5 * x1 + 4 * x2 - x3) * t2 + (-x0 + 3 * x1 - 3 * x2 + x3) * t3);
+          const cy = 0.5 * (2 * y1 + (-y0 + y2) * t + (2 * y0 - 5 * y1 + 4 * y2 - y3) * t2 + (-y0 + 3 * y1 - 3 * y2 + y3) * t3);
+          const lx = x1 + (x2 - x1) * t, ly = y1 + (y2 - y1) * t;
+          out.push(lx + (cx - lx) * smooth, ly + (cy - ly) * smooth);
+        }
+      }
+      if (!closed) out.push(pts[(n - 1) * 2], pts[(n - 1) * 2 + 1]);
+      return out;
+    }
+    function circlePts(cx, cy, r, N = 96) { const q = []; for (let i = 0; i < N; i++) { const a = (i / N) * TAU; q.push(cx + Math.cos(a) * r, cy - Math.sin(a) * r); } return q; }
+
+    // Dessine une marque dans le carré (cx, cy, R = demi-côté) à partir des valeurs vals.
+    function mark(pen, cx, cy, R, vals, si, t) {
+      const n = vals.length, b = p.base, A = p.amplitude, rot = p.rotation * Math.PI / 180, th = p.epaisseur;
+      const rad = (v) => R * (b + (1 - b) * Math.min(1.25, v * A)) * 0.92;
+      switch (p.forme) {
+        case 'anneau': {
+          const gap = (TAU / n) * (1 - th) * 0.6;
+          for (let i = 0; i < n; i++) {
+            const a0 = rot + (i / n) * TAU + gap / 2, a1 = rot + ((i + 1) / n) * TAU - gap / 2, r0 = R * b * 0.92, r1 = Math.max(r0 + 1, rad(vals[i]));
+            const q = [], N = Math.max(4, Math.ceil((a1 - a0) / 0.05));
+            for (let s = 0; s <= N; s++) { const a = a0 + (a1 - a0) * (s / N); q.push(cx + Math.cos(a) * r1, cy + Math.sin(a) * r1); }
+            for (let s = N; s >= 0; s--) { const a = a0 + (a1 - a0) * (s / N); q.push(cx + Math.cos(a) * r0, cy + Math.sin(a) * r0); }
+            pen.poly([q], colOf(vals[i], i, si));
+          }
+          break;
+        }
+        case 'barres': {
+          // Barres symétriques autour de l'axe horizontal, comme une forme d'onde.
+          const w = (R * 1.84) / n, x0 = cx - R * 0.92;
+          for (let i = 0; i < n; i++) {
+            const hh = Math.max(w * 0.2, R * 0.92 * (b + (1 - b) * Math.min(1.1, vals[i] * A)));
+            const bw = w * th, x = x0 + i * w + (w - bw) / 2, r = Math.min(bw / 2, hh);
+            pen.rrect(x, cy - hh, bw, hh * 2, r, colOf(vals[i], i, si));
+          }
+          break;
+        }
+        case 'grille': {
+          const c = Math.ceil(Math.sqrt(n)), rows = Math.ceil(n / c), cs = (R * 1.84) / Math.max(c, rows);
+          const x0 = cx - (cs * c) / 2, y0 = cy - (cs * rows) / 2;
+          for (let i = 0; i < n; i++) {
+            const gx = i % c, gy = Math.floor(i / c), r = cs * 0.5 * th * (b + (1 - b) * Math.min(1.15, vals[i] * A));
+            pen.poly([circlePts(x0 + (gx + 0.5) * cs, y0 + (gy + 0.5) * cs, Math.max(0.3, r), 40)], colOf(vals[i], i, si));
+          }
+          break;
+        }
+        case 'ruban': {
+          const x0 = cx - R * 0.92, w = R * 1.84, top = [], bot = [];
+          for (let i = 0; i < n; i++) {
+            const x = x0 + (n > 1 ? (i / (n - 1)) * w : w / 2), hh = R * 0.6 * th * (b + (1 - b) * Math.min(1.2, vals[i] * A));
+            const wave = Math.sin(rot + i / n * TAU) * R * 0.18;
+            top.push(x, cy + wave - hh); bot.push(x, cy + wave + hh);
+          }
+          const T = spline(top, false, p.lissage, 10), Bt = spline(bot, false, p.lissage, 10), q = [...T];
+          for (let i = Bt.length - 2; i >= 0; i -= 2) q.push(Bt[i], Bt[i + 1]);
+          pen.poly([q], colOf(0.5, 0, si));
+          break;
+        }
+        case 'fleur': {
+          // Un pétale par valeur ; la longueur suit la valeur.
+          for (let i = 0; i < n; i++) {
+            const a = rot + (i / n) * TAU, L = rad(vals[i]), wdt = Math.min(L * 0.5, (TAU / n) * L * 0.42 * (0.4 + th));
+            const q = [], N = 28;
+            for (let s = 0; s <= N; s++) {
+              const u = s / N, along = L * u, side = Math.sin(u * Math.PI) * wdt * (1 - u * 0.3);
+              q.push(cx + Math.cos(a) * along - Math.sin(a) * side, cy + Math.sin(a) * along + Math.cos(a) * side);
+            }
+            for (let s = N; s >= 0; s--) {
+              const u = s / N, along = L * u, side = -Math.sin(u * Math.PI) * wdt * (1 - u * 0.3);
+              q.push(cx + Math.cos(a) * along - Math.sin(a) * side, cy + Math.sin(a) * along + Math.cos(a) * side);
+            }
+            pen.poly([q], colOf(vals[i], i, si));
+          }
+          if (p.creux) pen.poly([circlePts(cx, cy, R * Math.max(0.06, b * 0.5))], p.fond);
+          break;
+        }
+        default: { // rayons : contour radial
+          const pts = [];
+          for (let i = 0; i < n; i++) { const a = rot + (i / n) * TAU, r = rad(vals[i]); pts.push(cx + Math.cos(a) * r, cy + Math.sin(a) * r); }
+          const q = spline(pts, true, p.lissage, 14);
+          const rings = [q];
+          if (p.creux && b > 0.02) rings.push(circlePts(cx, cy, R * b * 0.92 * 0.62));
+          const avg = vals.reduce((s, v) => s + v, 0) / n;
+          pen.poly(rings, colOf(avg, 0, si));
+          // Fentes : un rayon de fond par valeur, plus large quand l'épaisseur baisse.
+          if (th < 0.98) for (let i = 0; i < n; i++) {
+            const a = rot + (i / n) * TAU, half = Math.min(0.45, (1 - th) * 0.35) * (TAU / n), L = R * 1.3, r0 = R * Math.max(0.04, b * 0.25);
+            pen.poly([[cx + Math.cos(a) * r0, cy + Math.sin(a) * r0, cx + Math.cos(a - half) * L, cy + Math.sin(a - half) * L, cx + Math.cos(a + half) * L, cy + Math.sin(a + half) * L]], p.fond);
+          }
+          // Repères : un point par valeur sur le contour, en couleur d'accent quand on édite.
+          if (p.disposition === 'seul') for (let i = 0; i < n; i++) {
+            const on = edit && edit.idx === i;
+            if (on) pen.poly([circlePts(pts[i * 2], pts[i * 2 + 1], Math.max(3, R * 0.025), 24)], (p.accents && p.accents[0]) || p.encre);
+          }
+        }
+      }
+    }
+
+    // ——— Scène ———
+    function layoutSeul(w, h) { const R = Math.min(w, h) * 0.4; return { cx: w / 2, cy: h / 2, R }; }
+    function scene(pen, w, h, t) {
+      if (!data) build();
+      if (p.disposition === 'planche') {
+        const k = data.length, C = Math.ceil(Math.sqrt(k * (w / h))), Rw = Math.ceil(k / C), cs = Math.min(w / (C + 0.4), h / (Rw + 0.4));
+        const x0 = (w - cs * C) / 2, y0 = (h - cs * Rw) / 2;
+        for (let s = 0; s < k; s++) {
+          const gx = s % C, gy = Math.floor(s / C), cx = x0 + (gx + 0.5) * cs, cy = y0 + (gy + 0.5) * cs;
+          // Chaque marque respire ; la série courante est soulignée d'un trait.
+          const vals = data[s].map((v, i) => v * (1 + 0.06 * Math.sin(t * 1.6 + i * 0.7 + s)));
+          const on = s === cur, sc = on ? 1 : 0.92;
+          mark(pen, cx, cy, cs * 0.47 * sc, vals, s, t);
+          if (on) pen.rect(cx - cs * 0.3, cy + cs * 0.46, cs * 0.6, Math.max(1.5, cs * 0.012), p.encre);
+        }
+        return;
+      }
+      const { cx, cy, R } = layoutSeul(w, h);
+      const vals = current().map((v, i) => v * (1 + 0.025 * Math.sin(t * 2 + i * 0.9)));
+      mark(pen, cx, cy, R, vals, cur, t);
+      // Rythme de la famille : un trait par série, celui de la série courante s'allonge.
+      const k = data.length;
+      if (k > 1) for (let s = 0; s < k; s++) {
+        const on = s === cur ? (trans < 1 ? trans : 1) : s === prev && trans < 1 ? 1 - trans : 0;
+        const L = 10 + 26 * on, x = w / 2 + (s - (k - 1) / 2) * 44 - L / 2;
+        pen.rect(x, h - Math.max(44, h * 0.09), L, 3, p.encre);
+      }
+    }
+
+    // ——— Édition au pointeur ———
+    function editAt(x, y) {
+      if (!data || p.disposition === 'planche') return;
+      const { w, h } = app.size, { cx, cy, R } = layoutSeul(w, h), n = data[cur].length, b = p.base, A = p.amplitude;
+      if (trans < 1) { trans = 1; prev = cur; }
+      let i, v;
+      if (p.forme === 'barres' || p.forme === 'ruban') {
+        const u = (x - (cx - R * 0.92)) / (R * 1.84);
+        i = Math.max(0, Math.min(n - 1, p.forme === 'ruban' ? Math.round(u * (n - 1)) : Math.floor(u * n)));
+        const k = p.forme === 'ruban' ? R * 0.6 * p.epaisseur : R * 0.92;
+        v = (Math.abs(y - cy) / k - b) / (1 - b) / A;
+      } else if (p.forme === 'grille') {
+        const c = Math.ceil(Math.sqrt(n)), rows = Math.ceil(n / c), cs = (R * 1.84) / Math.max(c, rows);
+        const gx = Math.floor((x - (cx - (cs * c) / 2)) / cs), gy = Math.floor((y - (cy - (cs * rows) / 2)) / cs);
+        if (gx < 0 || gy < 0 || gx >= c || gy >= rows) return;
+        i = Math.min(n - 1, gy * c + gx);
+        v = (data[cur][i] + 0.04 * (edit.y - y > 0 ? 1 : -1));
+        edit.y = y;
+      } else {
+        const rot = p.rotation * Math.PI / 180, a = Math.atan2(y - cy, x - cx) - rot;
+        i = ((Math.round((a / TAU) * n) % n) + n) % n;
+        v = (Math.hypot(x - cx, y - cy) / (R * 0.92) - b) / (1 - b) / A;
+      }
+      data[cur][i] = Math.max(0, Math.min(1, v));
+      edit.idx = i;
+      lastSwitch = clock;
+    }
+
+    // ——— Stylo canvas ———
+    function canvasPen(c) {
+      return {
+        poly(rings, col) { c.fillStyle = col; c.beginPath(); for (const q of rings) { c.moveTo(q[0], q[1]); for (let i = 2; i < q.length; i += 2) c.lineTo(q[i], q[i + 1]); c.closePath(); } c.fill('evenodd'); },
+        rect(x, y, w, h, col) { c.fillStyle = col; c.fillRect(x, y, w, h); },
+        rrect(x, y, w, h, r, col) { c.fillStyle = col; c.beginPath(); c.roundRect(x, y, w, h, Math.max(0, r)); c.fill(); },
+      };
+    }
+
+    app.loop((t, dt) => {
+      const { w, h, dpr } = app.size;
+      dt = Math.min(0.05, dt || 0);
+      clock = t;
+      if (!data) build();
+      if (!edit && t - lastSwitch > p.duree + 0.9) nextSeries();
+      if (trans < 1) trans = Math.min(1, trans + dt / 0.9);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = p.fond; ctx.fillRect(0, 0, w, h);
+      scene(canvasPen(ctx), w, h, t);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      app.finish(ctx);
+    });
+
+    // ——— Export SVG ———
+    function toSVG() {
+      const { w, h } = app.size, out = [], f = (v) => Math.round(v * 100) / 100;
+      scene({
+        poly(rings, col) { const d = rings.map((q) => { let s = 'M' + f(q[0]) + ' ' + f(q[1]); for (let i = 2; i < q.length; i += 2) s += 'L' + f(q[i]) + ' ' + f(q[i + 1]); return s + 'Z'; }).join(''); out.push(`<path d="${d}" fill="${col}" fill-rule="evenodd"/>`); },
+        rect(x, y, w2, h2, col) { out.push(`<rect x="${f(x)}" y="${f(y)}" width="${f(w2)}" height="${f(h2)}" fill="${col}"/>`); },
+        rrect(x, y, w2, h2, r, col) { out.push(`<rect x="${f(x)}" y="${f(y)}" width="${f(w2)}" height="${f(h2)}" rx="${f(Math.max(0, r))}" fill="${col}"/>`); },
+      }, w, h, clock);
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">\n<rect width="100%" height="100%" fill="${p.fond}"/>\n${out.join('\n')}\n</svg>`;
+    }
+  </script>
+</body>
+</html>
