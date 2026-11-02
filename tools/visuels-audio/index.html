@@ -1,0 +1,334 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Visuels audio</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Visuels audio : un fichier son (ou le micro, ou un rythme interne) est découpé en bandes de fréquences
+    // (échelle logarithmique), lissées attaque / relâche, normalisées par un gain automatique.
+    // Ces bandes pilotent un système graphique : arcs, rayons, grille, crêtes, forme, bandes.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const BIEN = PAL('biennale'), KB = PAL('kegelbahn'), SALON = PAL('salon'), GR = PAL('good-room'), LUZ = PAL('luzern');
+    const P60 = PAL('papier-60'), MENTHE = PAL('menthe'), ORB = PAL('orbite'), ACIDE = PAL('acide'), THER = PAL('thermique'), NUIT = PAL('trame-nuit');
+    const MAXB = 48, HIST = 72;
+
+    let env = new Float32Array(MAXB), peak = new Float32Array(MAXB).fill(0.25), hist = [], histT = 0, impulse = 0, spin = 0, drag = null, pat = [];
+    let audio = { ctx: null, an: null, gain: null, src: null, file: null, buf: null, freq: null, live: false };
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.04, vignette: 0 },
+      hint: 'Touchez pour frapper un temps · glissez : rotation et sensibilité · molette : nombre de bandes',
+      notes: 'Sans son importé, un rythme interne (grosse caisse, caisse claire, charleston, basse, nappe) pilote l’image : il suit le tempo choisi. Importez un fichier audio ou activez le micro pour piloter le système par le vôtre. La vidéo exportée ne contient pas le son.',
+      params: {
+        'Son': {
+          audio: { type: 'file', label: 'Fichier audio', accept: 'audio/*', button: 'Importer un son…' },
+          micro: { type: 'button', label: 'Écouter le micro', action: () => startMic() },
+          lecture: { type: 'toggle', label: 'Lecture', value: true },
+          volume: { type: 'range', label: 'Volume', min: 0, max: 1, step: 0.01, value: 0.8 },
+          tempo: { type: 'range', label: 'Tempo du rythme interne', min: 60, max: 180, step: 1, value: 112 },
+        },
+        'Analyse': {
+          bandes: { type: 'range', label: 'Bandes', min: 4, max: MAXB, step: 1, value: 16 },
+          sensibilite: { type: 'range', label: 'Sensibilité', min: 0.2, max: 3, step: 0.01, value: 1.1 },
+          attaque: { type: 'range', label: 'Attaque', min: 0.05, max: 1, step: 0.01, value: 0.6 },
+          relache: { type: 'range', label: 'Relâche', min: 0.01, max: 0.5, step: 0.01, value: 0.12 },
+        },
+        'Système': {
+          systeme: { type: 'select', label: 'Système', options: { arcs: 'Arcs', rayons: 'Rayons', grille: 'Grille', cretes: 'Crêtes', forme: 'Forme', bandes: 'Bandes' }, value: 'arcs' },
+          symetrie: { type: 'range', label: 'Symétrie', min: 1, max: 8, step: 1, value: 2, show: (q) => q.systeme === 'rayons' || q.systeme === 'forme' },
+          epaisseur: { type: 'range', label: 'Épaisseur', min: 0.1, max: 1, step: 0.01, value: 0.55 },
+          ampleur: { type: 'range', label: 'Ampleur', min: 0.3, max: 1.5, step: 0.01, value: 1 },
+          historique: { type: 'range', label: 'Mémoire', min: 6, max: HIST, step: 1, value: 28, show: (q) => q.systeme === 'grille' || q.systeme === 'cretes' || q.systeme === 'forme' },
+          rotation: { type: 'range', label: 'Rotation', min: -1, max: 1, step: 0.01, value: 0.15 },
+        },
+        'Couleur': {
+          fond: { type: 'color', label: 'Fond', value: BIEN[1] },
+          couleurs: { type: 'palette', label: 'Couleurs des bandes', value: [BIEN[2], BIEN[3], BIEN[4], BIEN[0]] },
+        },
+      },
+      presets: {
+        'Biennale': {},
+        'Rayons': { systeme: 'rayons', fond: KB[0], couleurs: [KB[1], KB[2], KB[3], KB[4], KB[5]], bandes: 24, symetrie: 4, epaisseur: 0.7, tempo: 124 },
+        'Grille': { systeme: 'grille', fond: P60[0], couleurs: [P60[1]], bandes: 20, historique: 14, epaisseur: 0.8, tempo: 100 },
+        'Crêtes': { systeme: 'cretes', fond: NUIT[0], couleurs: [NUIT[1]], bandes: 40, historique: 36, epaisseur: 0.25, ampleur: 1.2 },
+        'Forme': { systeme: 'forme', fond: SALON[0], couleurs: [SALON[2], SALON[3], SALON[4], SALON[1]], bandes: 12, symetrie: 3, historique: 10, epaisseur: 0.5 },
+        'Bandes': { systeme: 'bandes', fond: LUZ[4], couleurs: [LUZ[0], LUZ[1], LUZ[2], LUZ[3]], bandes: 8, epaisseur: 1, tempo: 128 },
+        'Good Room': { systeme: 'arcs', fond: GR[0], couleurs: [GR[1], GR[2], GR[3], GR[4]], bandes: 10, epaisseur: 0.8, rotation: 0.4, tempo: 132 },
+        'Menthe': { systeme: 'forme', fond: MENTHE[0], couleurs: [MENTHE[1], MENTHE[3]], bandes: 24, symetrie: 6, historique: 16, epaisseur: 0.2, rotation: -0.2 },
+        'Thermique': { systeme: 'grille', fond: THER[0], couleurs: [THER[1], THER[2], THER[3], THER[4], THER[5]], bandes: 28, historique: 18, epaisseur: 0.95, tempo: 90 },
+        'Orbite': { systeme: 'rayons', fond: ORB[1], couleurs: [ORB[0], ORB[2]], bandes: 36, symetrie: 1, epaisseur: 0.35, ampleur: 1.3, rotation: 0.05 },
+        'Acide': { systeme: 'cretes', fond: ACIDE[1], couleurs: [ACIDE[2], ACIDE[3]], bandes: 32, historique: 22, epaisseur: 0.5, tempo: 140 },
+      },
+      brand(colors) {
+        return { fond: colors[0], couleurs: (colors.slice(1).length ? colors.slice(1) : ['#ffffff']).slice(0, 7) };
+      },
+      pointer: {
+        down: (q) => { drag = { x: q.x, y: q.y, r: p.rotation, s: p.sensibilite, moved: false }; },
+        drag: (q) => {
+          if (!drag) return;
+          if (Math.hypot(q.x - drag.x, q.y - drag.y) > 6) drag.moved = true;
+          if (!drag.moved) return;
+          const { w, h } = app.size;
+          app.set('rotation', Math.max(-1, Math.min(1, +(drag.r + (q.x - drag.x) / w * 2).toFixed(2))));
+          app.set('sensibilite', Math.max(0.2, Math.min(3, +(drag.s - (q.y - drag.y) / h * 3).toFixed(2))));
+        },
+        up: () => { if (drag && !drag.moved) impulse = 1; drag = null; },
+        wheel: (q, dy) => app.set('bandes', Math.max(4, Math.min(MAXB, Math.round(p.bandes + (dy > 0 ? -1 : 1))))),
+      },
+      onChange(k) {
+        if (k === 'audio') loadAudio(p.audio);
+        if (k === 'lecture' && audio.ctx) { if (p.lecture) audio.ctx.resume(); else audio.ctx.suspend(); }
+        if (k === 'volume' && audio.gain) audio.gain.gain.value = p.volume;
+      },
+      onSeed() { reseed(); },
+      export: { name: 'visuels-audio', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    function reseed() {
+      const r = app.rng(5);
+      // Motifs du rythme interne : 16 pas par mesure, 4 mesures.
+      pat = Array.from({ length: 4 }, () => ({
+        kick: Array.from({ length: 16 }, (_, i) => i % 4 === 0 || (r() < 0.18 && i % 2 === 0)),
+        snare: Array.from({ length: 16 }, (_, i) => i % 8 === 4 || r() < 0.06),
+        hat: Array.from({ length: 16 }, (_, i) => i % 2 === 0 || r() < 0.4),
+        bass: Array.from({ length: 16 }, () => (r() < 0.45 ? 0.08 + r() * 0.16 : -1)),
+        lead: Array.from({ length: 16 }, () => (r() < 0.3 ? 0.5 + r() * 0.25 : -1)),
+      }));
+    }
+    reseed();
+
+    // ——— Sources audio ———
+    function ensureCtx() {
+      if (audio.ctx) return audio.ctx;
+      const C = window.AudioContext || window.webkitAudioContext;
+      if (!C) return null;
+      audio.ctx = new C();
+      audio.an = audio.ctx.createAnalyser(); audio.an.fftSize = 2048; audio.an.smoothingTimeConstant = 0.5;
+      audio.gain = audio.ctx.createGain(); audio.gain.gain.value = p.volume;
+      audio.an.connect(audio.gain); audio.gain.connect(audio.ctx.destination);
+      audio.freq = new Float32Array(audio.an.frequencyBinCount);
+      return audio.ctx;
+    }
+    function stopSource() { try { audio.src && audio.src.stop && audio.src.stop(); } catch (e) { /* déjà arrêtée */ } try { audio.src && audio.src.disconnect(); } catch (e) { /* rien */ } audio.src = null; audio.live = false; }
+    async function loadAudio(file) {
+      if (!file || !(file instanceof Blob)) return;
+      const c = ensureCtx(); if (!c) return;
+      try {
+        const buf = await c.decodeAudioData(await file.arrayBuffer());
+        stopSource();
+        const s = c.createBufferSource(); s.buffer = buf; s.loop = true; s.connect(audio.an); s.start();
+        audio.src = s; audio.live = true; audio.gain.gain.value = p.volume;
+        if (p.lecture) c.resume();
+      } catch (e) { audio.live = false; }
+    }
+    async function startMic() {
+      const c = ensureCtx(); if (!c || !navigator.mediaDevices) return;
+      try {
+        const st = await navigator.mediaDevices.getUserMedia({ audio: true });
+        stopSource();
+        const s = c.createMediaStreamSource(st); s.connect(audio.an);
+        audio.gain.gain.value = 0; // pas de retour du micro dans les haut-parleurs
+        audio.src = s; audio.live = true; c.resume();
+      } catch (e) { /* micro refusé */ }
+    }
+
+    // ——— Bandes : analyse réelle ou rythme interne ———
+    const gauss = (x, c, w) => Math.exp(-((x - c) * (x - c)) / (2 * w * w));
+    function synthBands(t, B, out) {
+      const beat = 60 / (p.tempo || 112) / 4, step = Math.max(0, t || 0) / beat, si = Math.floor(step), fr = step - si;
+      const bi = Math.floor(si / 16) % pat.length, bar = pat[bi], k = si % 16, prevBar = pat[(bi + pat.length - 1) % pat.length];
+      // Enveloppes : chaque frappe décroît depuis son pas (on regarde aussi le pas précédent).
+      const hit = (arr, decay) => { let v = 0; for (let d = 0; d < 3; d++) { const kk = (k - d + 16) % 16, bb = d > k ? prevBar : bar; if (bb && arr(bb)[kk]) v = Math.max(v, Math.exp(-(fr + d) * decay)); } return v; };
+      const kick = hit((b) => b.kick, 2.6), snare = hit((b) => b.snare, 3.2), hat = hit((b) => b.hat, 6);
+      let bassF = -1, bassE = 0, leadF = -1, leadE = 0;
+      for (let d = 0; d < 6; d++) { const kk = (k - d + 16) % 16; if (bar.lead[kk] > 0) { leadF = bar.lead[kk]; leadE = Math.exp(-(fr + d) * 0.6); break; } }
+      for (let d = 0; d < 4; d++) { const kk = (k - d + 16) % 16; if (bar.bass[kk] > 0) { bassF = bar.bass[kk]; bassE = Math.exp(-(fr + d) * 0.9); break; } }
+      const pad = 0.5 + 0.5 * Math.sin(t * 0.7), pad2 = 0.5 + 0.5 * Math.sin(t * 0.43 + 1.3);
+      for (let i = 0; i < B; i++) {
+        const x = (i + 0.5) / B;
+        let v = kick * gauss(x, 0.06, 0.07) * 1.1 + (bassF > 0 ? bassE * gauss(x, bassF, 0.05) * 0.85 : 0)
+          + snare * (gauss(x, 0.42, 0.12) * 0.8 + gauss(x, 0.66, 0.16) * 0.45) + (leadF > 0 ? leadE * (gauss(x, leadF, 0.035) * 0.8 + gauss(x, leadF + 0.09, 0.03) * 0.35) : 0) + hat * gauss(x, 0.88, 0.08) * 0.7
+          + 0.18 * pad * gauss(x, 0.33, 0.1) + 0.14 * pad2 * gauss(x, 0.55, 0.12) + 0.04 * Math.sin(t * 3 + i);
+        out[i] = Math.max(0, v);
+      }
+    }
+    function realBands(B, out) {
+      const an = audio.an, f = audio.freq, sr = audio.ctx.sampleRate, n = f.length;
+      an.getFloatFrequencyData(f);
+      const lo = 30, hi = Math.min(16000, sr / 2);
+      for (let i = 0; i < B; i++) {
+        const f0 = lo * Math.pow(hi / lo, i / B), f1 = lo * Math.pow(hi / lo, (i + 1) / B);
+        let a = Math.floor(f0 / (sr / 2) * n), b = Math.max(a + 1, Math.ceil(f1 / (sr / 2) * n)), s = 0;
+        for (let j = a; j < b && j < n; j++) s += Math.pow(10, f[j] / 20);
+        const db = 20 * Math.log10(s / (b - a) + 1e-9);
+        out[i] = Math.max(0, (db + 85) / 60);
+      }
+    }
+    const raw = new Float32Array(MAXB);
+    function analyse(t, dt) {
+      const B = Math.round(p.bandes);
+      if (audio.live && audio.ctx && audio.ctx.state === 'running') realBands(B, raw); else synthBands(t, B, raw);
+      const k = Math.min(1, dt * 60);
+      for (let i = 0; i < B; i++) {
+        // Gain automatique : chaque bande se compare à son maximum récent.
+        peak[i] = Math.max(raw[i], peak[i] * Math.pow(0.5, dt / 4), 0.12);
+        let x = Math.min(1.4, raw[i] / peak[i] * p.sensibilite * 0.8) + impulse * 0.6 * (1 - i / B * 0.5);
+        x = Math.min(1.5, x);
+        env[i] += (x - env[i]) * (x > env[i] ? p.attaque : p.relache) * k;
+      }
+      impulse = Math.max(0, impulse - dt * 3);
+      histT += dt;
+      if (histT > 1 / 24) { histT = 0; hist.unshift(Float32Array.from(env.subarray(0, B))); if (hist.length > HIST) hist.length = HIST; }
+    }
+
+    // ——— Systèmes, dessinés au stylo (canvas ou SVG) ———
+    function colAt(i) { const P = p.couleurs && p.couleurs.length ? p.couleurs : ['#fff']; return P[((i % P.length) + P.length) % P.length]; }
+    function scene(pen, w, h, t) {
+      const B = Math.round(p.bandes), m = Math.min(w, h), cx = w / 2, cy = h / 2, A = p.ampleur, th = p.epaisseur;
+      const rot = spin;
+      const E = (i) => env[Math.max(0, Math.min(B - 1, i))];
+      switch (p.systeme) {
+        case 'rayons': {
+          const S = Math.round(p.symetrie), n = B * S, R0 = m * 0.14, Rm = m * 0.34 * A;
+          for (let k = 0; k < n; k++) {
+            const seg = Math.floor(k / B), j = k % B, i = seg % 2 ? B - 1 - j : j; // miroir d'un secteur à l'autre
+            const a = rot + (k / n) * TAU, da = (TAU / n) * th * 0.5;
+            const r1 = R0 + Rm * Math.min(1.05, E(i));
+            pen.poly([cx + Math.cos(a - da) * R0, cy + Math.sin(a - da) * R0, cx + Math.cos(a - da) * r1, cy + Math.sin(a - da) * r1, cx + Math.cos(a + da) * r1, cy + Math.sin(a + da) * r1, cx + Math.cos(a + da) * R0, cy + Math.sin(a + da) * R0], colAt(i));
+          }
+          pen.circle(cx, cy, R0 * (0.55 + 0.35 * E(0)), colAt(0));
+          break;
+        }
+        case 'grille': {
+          const H = Math.round(p.historique), cs = Math.min((w * 0.86) / B, (h * 0.86) / H), x0 = cx - (cs * B) / 2, y0 = cy - (cs * H) / 2;
+          for (let r = 0; r < H; r++) {
+            const row = hist[r]; if (!row) break;
+            for (let i = 0; i < B; i++) {
+              const v = Math.min(1.2, row[i] || 0) * A, s = cs * 0.5 * th * Math.min(1.15, v);
+              if (s < 0.4) continue;
+              const x = x0 + (i + 0.5) * cs, y = y0 + (r + 0.5) * cs;
+              if ((i + r) % 2 === 0 && th > 0.6) pen.rect(x - s, y - s, s * 2, s * 2, colAt(i));
+              else pen.circle(x, y, s, colAt(i));
+            }
+          }
+          break;
+        }
+        case 'cretes': {
+          const H = Math.round(p.historique), x0 = w * 0.12, x1 = w * 0.88, top = h * 0.2, bot = h * 0.86, gap = (bot - top) / Math.max(1, H - 1), amp = Math.min(gap * 6, h * 0.16) * A;
+          // Du fond vers l'avant : chaque crête masque celles qui sont derrière.
+          for (let r = H - 1; r >= 0; r--) {
+            const row = hist[r]; if (!row) continue;
+            const y = top + (H - 1 - r) * gap, N = 120, pts = [];
+            for (let s = 0; s <= N; s++) {
+              const u = s / N, x = x0 + (x1 - x0) * u;
+              // Position dans le spectre, symétrique autour du centre (les graves au milieu).
+              const q = Math.abs(u - 0.5) * 2 * (B - 1), i0 = Math.floor(q), f = q - i0;
+              const v = (row[i0] || 0) * (1 - f) + (row[Math.min(B - 1, i0 + 1)] || 0) * f;
+              const win = Math.pow(Math.sin(u * Math.PI), 1.5);
+              pts.push(x, y - Math.min(1.3, v) * amp * win);
+            }
+            pen.poly([...pts, x1, y + gap * 0.2, x0, y + gap * 0.2], p.fond);
+            pen.stroke(pts, colAt(r), Math.max(0.6, th * 4));
+          }
+          break;
+        }
+        case 'forme': {
+          const H = Math.min(Math.round(p.historique), hist.length), S = Math.round(p.symetrie), R = m * 0.24;
+          for (let r = H - 1; r >= 0; r--) {
+            const row = hist[r]; if (!row) continue;
+            const sc = 1 + (r / Math.max(1, H)) * 0.7, N = 180, pts = [];
+            for (let s = 0; s < N; s++) {
+              const a = (s / N) * TAU;
+              // Les bandes se répartissent sur l'angle, en miroir et répétées par symétrie.
+              let u = ((a * S) / TAU) % 1; u = u < 0.5 ? u * 2 : (1 - u) * 2;
+              const q = u * (B - 1), i0 = Math.floor(q), f = q - i0;
+              const v = (row[i0] || 0) * (1 - f) + (row[Math.min(B - 1, i0 + 1)] || 0) * f;
+              const rr = R * sc * (0.75 + 0.45 * Math.min(1.1, v) * A);
+              pts.push(cx + Math.cos(a + rot) * rr, cy + Math.sin(a + rot) * rr);
+            }
+            if (r === 0) pen.poly(pts, colAt(0));
+            else pen.stroke([...pts, pts[0], pts[1]], colAt(r), Math.max(0.6, th * 5 * (1 - r / (H + 1))));
+          }
+          break;
+        }
+        case 'bandes': {
+          // Bandes horizontales : la hauteur de chacune suit son énergie, la pile remplit la scène.
+          // Les frontières sont partagées (et légèrement inclinées), la première et la dernière débordent.
+          let tot = 0; for (let i = 0; i < B; i++) tot += 0.15 + Math.min(1.3, E(i)) * A;
+          const yb = [0];
+          for (let i = 0; i < B; i++) yb.push(yb[i] + ((0.15 + Math.min(1.3, E(i)) * A) / tot) * h);
+          const sk = (j) => (j === 0 || j === B ? 0 : Math.sin(rot + j * 0.4) * h * 0.05 * E(j - 1));
+          for (let i = 0; i < B; i++) {
+            const hh = yb[i + 1] - yb[i], g = hh * (1 - th) * 0.5;
+            const t0 = i === 0 ? -2 : yb[i] + g, t1 = i === B - 1 ? h + 2 : yb[i + 1] - g;
+            pen.poly([-2, t0 - sk(i) / 2, w + 2, t0 + sk(i) / 2, w + 2, t1 + sk(i + 1) / 2, -2, t1 - sk(i + 1) / 2], colAt(i));
+          }
+          break;
+        }
+        default: { // arcs
+          const R0 = m * 0.08, Rm = m * 0.44, ring = (Rm - R0) / B;
+          for (let i = 0; i < B; i++) {
+            const r = R0 + (i + 0.5) * ring, wdt = ring * th * 0.95, ext = Math.min(1, 0.04 + E(i) * 0.9 * A) * TAU;
+            const a0 = rot * (1 + i * 0.35) + i * 0.9 + t * 0.12 * (i % 2 ? 1 : -1) * Math.abs(p.rotation) * 3;
+            pen.arc(cx, cy, r, a0, a0 + ext, wdt, colAt(i));
+          }
+        }
+      }
+    }
+
+    // ——— Stylo canvas ———
+    function canvasPen(c) {
+      return {
+        rect(x, y, w, h, col) { c.fillStyle = col; c.fillRect(x, y, w, h); },
+        circle(x, y, r, col) { c.fillStyle = col; c.beginPath(); c.arc(x, y, Math.max(0, r), 0, TAU); c.fill(); },
+        poly(q, col) { c.fillStyle = col; c.beginPath(); c.moveTo(q[0], q[1]); for (let i = 2; i < q.length; i += 2) c.lineTo(q[i], q[i + 1]); c.closePath(); c.fill(); },
+        stroke(q, col, lw) { c.strokeStyle = col; c.lineWidth = lw; c.lineJoin = 'round'; c.lineCap = 'round'; c.beginPath(); c.moveTo(q[0], q[1]); for (let i = 2; i < q.length; i += 2) c.lineTo(q[i], q[i + 1]); c.stroke(); },
+        arc(x, y, r, a0, a1, lw, col) { c.strokeStyle = col; c.lineWidth = lw; c.lineCap = 'butt'; c.beginPath(); c.arc(x, y, r, a0, a1); c.stroke(); },
+      };
+    }
+
+    app.loop((t, dt) => {
+      const { w, h, dpr } = app.size;
+      dt = Math.min(0.05, dt || 0);
+      spin += dt * p.rotation * 0.8;
+      analyse(t, dt);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = p.fond; ctx.fillRect(0, 0, w, h);
+      scene(canvasPen(ctx), w, h, t);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      app.finish(ctx);
+    });
+
+    // ——— Export SVG ———
+    function toSVG() {
+      const { w, h } = app.size, out = [];
+      const f = (v) => Math.round(v * 100) / 100, P = (q) => { let s = ''; for (let i = 0; i < q.length; i += 2) s += (i ? ' ' : '') + f(q[i]) + ',' + f(q[i + 1]); return s; };
+      scene({
+        rect: (x, y, w2, h2, col) => out.push(`<rect x="${f(x)}" y="${f(y)}" width="${f(w2)}" height="${f(h2)}" fill="${col}"/>`),
+        circle: (x, y, r, col) => out.push(`<circle cx="${f(x)}" cy="${f(y)}" r="${f(Math.max(0, r))}" fill="${col}"/>`),
+        poly: (q, col) => out.push(`<polygon points="${P(q)}" fill="${col}"/>`),
+        stroke: (q, col, lw) => out.push(`<polyline points="${P(q)}" fill="none" stroke="${col}" stroke-width="${f(lw)}" stroke-linecap="round" stroke-linejoin="round"/>`),
+        arc: (x, y, r, a0, a1, lw, col) => {
+          if (a1 - a0 >= TAU - 1e-3) { out.push(`<circle cx="${f(x)}" cy="${f(y)}" r="${f(r)}" fill="none" stroke="${col}" stroke-width="${f(lw)}"/>`); return; }
+          const large = a1 - a0 > Math.PI ? 1 : 0;
+          out.push(`<path d="M${f(x + Math.cos(a0) * r)} ${f(y + Math.sin(a0) * r)}A${f(r)} ${f(r)} 0 ${large} 1 ${f(x + Math.cos(a1) * r)} ${f(y + Math.sin(a1) * r)}" fill="none" stroke="${col}" stroke-width="${f(lw)}"/>`);
+        },
+      }, w, h, app.time || 0);
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">\n<rect width="100%" height="100%" fill="${p.fond}"/>\n${out.join('\n')}\n</svg>`;
+    }
+  </script>
+</body>
+</html>

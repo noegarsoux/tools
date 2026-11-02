@@ -1,0 +1,15 @@
+{
+  "slug": "visuels-audio",
+  "title": "Visuels audio",
+  "type": "motion",
+  "description": "Un fichier son, le micro ou un rythme interne découpé en bandes de fréquences qui pilotent un système : arcs, rayons, grille, crêtes, forme, bandes.",
+  "tags": ["audio", "motion", "identite", "spectre", "rythme", "svg"],
+  "inspiration": [
+    "Identités sonores et visualisations de spectre des labels et festivals",
+    "Analyse FFT en bandes logarithmiques (Web Audio, AnalyserNode)",
+    "references/identites.md ; palettes biennale, kegelbahn, salon, good-room, luzern, thermique"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
