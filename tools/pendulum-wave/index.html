@@ -1,0 +1,262 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pendulum wave</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Une rangée de pendules simples dont les périodes sont réglées pour qu'en un cycle Γ le pendule n
+    // fasse exactement N₀ + n oscillations : Tₙ = Γ / (N₀ + n), longueur Lₙ = g·(Tₙ / 2π)².
+    // Partis alignés, ils se déphasent, forment des vagues, des doubles et triples rangées, puis se
+    // réalignent au bout de Γ secondes : la boucle est exacte. Petits angles : θₙ(t) = A·cos(2π t / Tₙ).
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2, G = 9.81;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const NUIT = PAL('trame-nuit'), P60 = PAL('papier-60'), KB = PAL('kegelbahn'), ORB = PAL('orbite'), ACIDE = PAL('acide');
+    const MENTHE = PAL('menthe'), PIX = PAL('pixels'), SALON = PAL('salon'), BIEN = PAL('biennale');
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: false,
+      finish: { grain: 0.08, vignette: 0.16 },
+      hint: 'Glissez pour tourner autour des pendules · Maj : déplacer · molette : zoom',
+      notes: 'Le pendule n fait N₀ + n oscillations pendant le cycle Γ (la durée de boucle). Sa période vaut Tₙ = Γ / (N₀ + n) et sa longueur Lₙ = g·(Tₙ/2π)². Tous partent alignés à t = 0 et se réalignent exactement à t = Γ. À Γ/2 ils forment deux rangées, à Γ/3 trois, etc.',
+      params: {
+        'Pendules': {
+          nombre: { type: 'range', label: 'Nombre de pendules', min: 4, max: 64, step: 1, value: 40 },
+          n0: { type: 'range', label: 'Oscillations du plus long N₀', min: 4, max: 80, step: 1, value: 30 },
+          boucle: { type: 'range', label: 'Cycle Γ (s)', min: 10, max: 120, step: 1, value: 40 },
+          amplitude: { type: 'range', label: 'Amplitude A (°)', min: 2, max: 40, step: 0.5, value: 18 },
+          longueurs: { type: 'segmented', label: 'Longueurs', options: { reelles: 'Réelles', egales: 'Égales' }, value: 'reelles' },
+          ecart: { type: 'range', label: 'Écart entre pendules', min: 0.2, max: 3, step: 0.01, value: 1 },
+          decalage: { type: 'range', label: 'Instant de départ (fraction de Γ)', min: 0, max: 1, step: 0.001, value: 0.25 },
+        },
+        'Vue': {
+          lacet: { type: 'range', label: 'Lacet (°)', min: -180, max: 180, step: 1, value: -35 },
+          tangage: { type: 'range', label: 'Tangage (°)', min: -90, max: 90, step: 1, value: 25 },
+          perspective: { type: 'range', label: 'Perspective', min: 0, max: 1, step: 0.01, value: 0.6 },
+          zoom: { type: 'range', label: 'Zoom', min: 0.3, max: 3, step: 0.01, value: 1 },
+          cx: { type: 'range', label: 'Centre X', min: -0.5, max: 0.5, step: 0.005, value: 0 },
+          cy: { type: 'range', label: 'Centre Y', min: -0.5, max: 0.5, step: 0.005, value: 0 },
+          orbite: { type: 'range', label: 'Tours de caméra par cycle', min: -2, max: 2, step: 1, value: 0 },
+        },
+        'Rendu': {
+          forme: { type: 'segmented', label: 'Masses', options: { disque: 'Disque', carre: 'Carré', losange: 'Losange', logo: 'Logo' }, value: 'disque' },
+          image: { type: 'file', label: 'Logo ou image', accept: 'image/*', show: (q) => q.forme === 'logo' },
+          taille: { type: 'range', label: 'Taille des masses', min: 0.002, max: 0.08, step: 0.0005, value: 0.016 },
+          fils: { type: 'range', label: 'Épaisseur des fils', min: 0, max: 4, step: 0.05, value: 0.5 },
+          barre: { type: 'toggle', label: 'Barre de suspension', value: true },
+          trainee: { type: 'range', label: 'Traînée (s)', min: 0, max: 3, step: 0.01, value: 0.8 },
+          style: { type: 'segmented', label: 'Style de traînée', options: { ligne: 'Ligne', points: 'Points' }, value: 'ligne', show: (q) => q.trainee > 0 },
+          ombre: { type: 'range', label: 'Ombre au sol', min: 0, max: 1, step: 0.01, value: 0 },
+          relief: { type: 'range', label: 'Profondeur (taille)', min: 0, max: 1, step: 0.01, value: 0.6 },
+        },
+        'Couleur': {
+          fond: { type: 'color', label: 'Fond', value: NUIT[0] },
+          encre: { type: 'color', label: 'Fils et barre', value: NUIT[2] },
+          coloration: { type: 'segmented', label: 'Coloration', options: { une: 'Une', rang: 'Rang', alternee: 'Alternée', vitesse: 'Vitesse' }, value: 'rang' },
+          palette: { type: 'palette', label: 'Palette', value: [NUIT[1], ACIDE[2]], show: (q) => q.coloration !== 'une' },
+          masse: { type: 'color', label: 'Masses', value: NUIT[1], show: (q) => q.coloration === 'une' },
+        },
+      },
+      presets: {
+        'Vague nuit': {},
+        'Vue de dessus': { lacet: 90, tangage: 90, perspective: 0, zoom: 1, nombre: 36, n0: 30, trainee: 0.9, style: 'points', taille: 0.016, fils: 0, barre: false, ombre: 0, coloration: 'rang', fond: P60[0], encre: P60[1], palette: [P60[1], P60[1]], amplitude: 22, ecart: 1, decalage: 0.37 },
+        'De face': { lacet: 0, tangage: 0, perspective: 0.3, zoom: 1, nombre: 20, n0: 15, trainee: 0, fils: 0.5, taille: 0.03, barre: true, ombre: 0, coloration: 'alternee', fond: ORB[0], encre: ORB[1], palette: [ORB[1], ORB[2]], amplitude: 25, decalage: 0.2 },
+        'Kegelbahn': { forme: 'carre', nombre: 16, n0: 12, lacet: -60, tangage: 35, perspective: 0.6, taille: 0.04, fils: 1.4, trainee: 0, ombre: 0.5, coloration: 'rang', fond: KB[0], encre: KB[1], palette: KB.slice(1), amplitude: 20, decalage: 0.25 },
+        'Traînées': { nombre: 48, n0: 40, taille: 0.006, fils: 0.25, trainee: 2.2, style: 'ligne', barre: false, ombre: 0, lacet: -20, tangage: 60, perspective: 0.3, coloration: 'vitesse', fond: MENTHE[1], encre: MENTHE[3], palette: [MENTHE[3], MENTHE[2], MENTHE[0]], amplitude: 28, decalage: 0.15 },
+        'Losanges acides': { forme: 'losange', nombre: 28, n0: 24, lacet: 25, tangage: 15, perspective: 0.7, taille: 0.03, fils: 0.6, trainee: 0.3, ombre: 0.6, coloration: 'alternee', fond: ACIDE[0], encre: ACIDE[1], palette: [ACIDE[1], ACIDE[2]], amplitude: 16, decalage: 0.5 },
+        'Pixels': { forme: 'carre', nombre: 40, n0: 20, lacet: 90, tangage: 90, perspective: 0, zoom: 1, taille: 0.02, fils: 0, barre: false, trainee: 0.6, style: 'points', ombre: 0, coloration: 'rang', fond: PIX[0], encre: PIX[0], palette: PIX.slice(1), amplitude: 30, decalage: 0.29 },
+        'Orbite lente': { nombre: 30, n0: 18, orbite: 1, lacet: -45, tangage: 20, perspective: 0.5, taille: 0.018, fils: 0.5, trainee: 0.8, coloration: 'rang', fond: BIEN[0], encre: BIEN[1], palette: [BIEN[1], BIEN[2], BIEN[3]], amplitude: 20, ombre: 0.4 },
+      },
+      brand(colors) {
+        return { fond: colors[0], encre: colors[1] || colors[0], masse: colors[2] || colors[1] || colors[0], palette: colors.length > 1 ? colors.slice(1) : colors };
+      },
+      pointer: {
+        down: (q) => { drag = { x: q.x, y: q.y, lacet: p.lacet, tangage: p.tangage, cx: p.cx, cy: p.cy }; },
+        drag: (q) => {
+          if (!drag) return;
+          const u = Math.min(app.size.w, app.size.h), dx = (q.x - drag.x) / u, dy = (q.y - drag.y) / u;
+          if (q.shift) { app.set('cx', clamp(drag.cx + dx, -0.5, 0.5)); app.set('cy', clamp(drag.cy + dy, -0.5, 0.5)); }
+          else {
+            let l = drag.lacet + dx * 180; l = ((l + 180) % 360 + 360) % 360 - 180;
+            app.set('lacet', Math.round(l)); app.set('tangage', Math.round(clamp(drag.tangage + dy * 180, -90, 90)));
+          }
+        },
+        up: () => { drag = null; },
+        wheel: (q, dy) => app.set('zoom', clamp(p.zoom * Math.exp(-dy * 0.0012), 0.3, 3)),
+      },
+      export: { name: 'pendulum-wave', svg: () => exportSVG() },
+    });
+    const p = app.params;
+    let drag = null;
+    const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
+    const hex = (c) => { const n = parseInt(c.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; };
+    const rgb = (a) => `rgb(${a[0] | 0},${a[1] | 0},${a[2] | 0})`;
+    function ramp(pal, u) {
+      if (pal.length === 1) return hex(pal[0]);
+      const f = clamp(u, 0, 1) * (pal.length - 1), i = Math.min(pal.length - 2, Math.floor(f)), k = f - i;
+      const a = hex(pal[i]), b = hex(pal[i + 1]);
+      return [a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k, a[2] + (b[2] - a[2]) * k];
+    }
+
+    // ——— Physique ———
+    function pendulums() {
+      const N = p.nombre, Gm = p.boucle, list = [];
+      const Tmax = Gm / p.n0, Lmax = G * (Tmax / TAU) ** 2;
+      for (let n = 0; n < N; n++) {
+        const T = Gm / (p.n0 + n), L = G * (T / TAU) ** 2;
+        list.push({ n, T, L, Lr: p.longueurs === 'reelles' ? L / Lmax : 1 });
+      }
+      return { list, Lmax };
+    }
+    // Position d'une masse au temps t, dans le repère monde (unité = longueur du plus long pendule).
+    function bob(P, t, N) {
+      const th = p.amplitude * Math.PI / 180 * Math.cos(TAU * t / P.T);
+      const z = zOf(P.n, N);
+      return [P.Lr * Math.sin(th), -P.Lr * Math.cos(th), z, th];
+    }
+
+    // ——— Caméra ———
+    // Cadrage automatique : la boîte englobante projetée des pivots et des masses (aux deux extrêmes
+    // de l'amplitude) est ajustée au cadre, puis le zoom et le décalage de l'utilisateur s'appliquent.
+    function camera(t) {
+      const { w, h } = app.size, u = Math.min(w, h);
+      const yaw = (p.lacet + 360 * p.orbite * t / p.boucle) * Math.PI / 180, pit = p.tangage * Math.PI / 180;
+      const cy = Math.cos(yaw), sy = Math.sin(yaw), cp = Math.cos(pit), sp = Math.sin(pit);
+      const dist = 2.2 + (1 - p.perspective) * 30;
+      const raw = (x, y, z) => {
+        const x1 = x * cy - z * sy, z1 = x * sy + z * cy;
+        const y2 = y * cp - z1 * sp, z2 = y * sp + z1 * cp;
+        const k = dist / (dist + z2);
+        return [x1 * k, -y2 * k, z2, k];
+      };
+      const P = pendulums(), N = P.list.length, A = p.amplitude * Math.PI / 180;
+      let x0 = 1e9, x1 = -1e9, y0 = 1e9, y1 = -1e9;
+      const add = (q) => { if (q[0] < x0) x0 = q[0]; if (q[0] > x1) x1 = q[0]; if (q[1] < y0) y0 = q[1]; if (q[1] > y1) y1 = q[1]; };
+      for (const P0 of P.list) {
+        const z = zOf(P0.n, N);
+        add(raw(0, 0, z));
+        for (const a of [-A, 0, A]) add(raw(P0.Lr * Math.sin(a), -P0.Lr * Math.cos(a), z));
+      }
+      const bw = Math.max(1e-3, x1 - x0), bh = Math.max(1e-3, y1 - y0);
+      const scale = Math.min(w * 0.8 / bw, h * 0.74 / bh) * p.zoom, mx = (x0 + x1) / 2, my = (y0 + y1) / 2;
+      return (x, y, z) => {
+        const q = raw(x, y, z);
+        return [w / 2 + p.cx * u + (q[0] - mx) * scale, h / 2 + p.cy * u + (q[1] - my) * scale, q[2], q[3]];
+      };
+    }
+    function zOf(n, N) { return (n - (N - 1) / 2) * p.ecart * 2.2 / Math.max(1, N - 1); }
+
+    // ——— Dessin (canvas ou SVG) ———
+    let logoImg = null;
+    function draw(t0, sink) {
+      const { w, h } = app.size, u = Math.min(w, h);
+      const t = t0 + p.decalage * p.boucle;
+      const P = pendulums(), N = P.list.length, cam = camera(t0);
+      const pal = p.palette && p.palette.length ? p.palette : [p.masse];
+      const items = [];
+      const sizeAt = (k) => p.taille * u * (1 - p.relief + p.relief * k * 1.0);
+      const colorOf = (P0, th) => {
+        if (p.coloration === 'une') return p.masse;
+        if (p.coloration === 'alternee') return pal[P0.n % pal.length];
+        if (p.coloration === 'rang') return rgb(ramp(pal, N === 1 ? 0 : P0.n / (N - 1)));
+        // Vitesse : maximale au point bas (θ = 0).
+        return rgb(ramp(pal, 1 - Math.abs(th) / (p.amplitude * Math.PI / 180)));
+      };
+      // Barre de suspension.
+      if (p.barre) {
+        const zA = zOf(0, N), zB = -zA;
+        const a = cam(0, 0, zA - 0.05), b = cam(0, 0, zB + 0.05);
+        items.push({ z: Math.max(a[2], b[2]) + 100, draw: () => sink.line([[a[0], a[1]], [b[0], b[1]]], p.encre, Math.max(1, p.fils * 3 * u / 1000), 1) });
+      }
+      for (const P0 of P.list) {
+        const [x, y, z, th] = bob(P0, t, N);
+        const piv = cam(0, 0, z), m = cam(x, y, z), col = colorOf(P0, th), r = sizeAt(m[3]);
+        // Ombre au sol (plan y = −1.1) : ellipse aplatie, toujours derrière.
+        if (p.ombre > 0) {
+          const s = cam(x, -1.12, z), s2 = cam(x + 0.05, -1.12, z + 0.05);
+          items.push({ z: 1e6, draw: () => sink.shadow(s[0], s[1], r * 1.1, Math.abs(s2[1] - s[1]) / (Math.abs(s2[0] - s[0]) + 1e-6), p.ombre) });
+        }
+        if (p.trainee > 0) {
+          const M = Math.max(4, Math.round(p.trainee * 40)), pts = [];
+          for (let k = 0; k <= M; k++) { const tk = t - p.trainee * k / M; const b = bob(P0, tk, N); const q = cam(b[0], b[1], b[2]); pts.push([q[0], q[1], 1 - k / M, q[3]]); }
+          items.push({ z: m[2] + 0.001, draw: () => sink.trail(pts, col, r) });
+        }
+        if (p.fils > 0) items.push({ z: m[2] + 0.0005, draw: () => sink.line([[piv[0], piv[1]], [m[0], m[1]]], p.encre, p.fils * u / 1000, 1) });
+        items.push({ z: m[2], draw: () => sink.mass(m[0], m[1], r, col, th) });
+      }
+      // Du plus loin au plus proche.
+      items.sort((a, b) => b.z - a.z);
+      for (const it of items) it.draw();
+    }
+
+    function shapePath(c, x, y, r) {
+      c.beginPath();
+      if (p.forme === 'carre') c.rect(x - r, y - r, 2 * r, 2 * r);
+      else if (p.forme === 'losange') { c.moveTo(x, y - r * 1.25); c.lineTo(x + r * 1.25, y); c.lineTo(x, y + r * 1.25); c.lineTo(x - r * 1.25, y); c.closePath(); }
+      else c.arc(x, y, r, 0, TAU);
+    }
+    const canvasSink = {
+      line(pts, col, wdt, a) { ctx.globalAlpha = a; ctx.strokeStyle = col; ctx.lineWidth = wdt; ctx.beginPath(); ctx.moveTo(pts[0][0], pts[0][1]); for (const q of pts.slice(1)) ctx.lineTo(q[0], q[1]); ctx.stroke(); ctx.globalAlpha = 1; },
+      shadow(x, y, r, flat, a) { ctx.globalAlpha = 0.35 * a; ctx.fillStyle = '#000'; ctx.beginPath(); ctx.ellipse(x, y, r, Math.max(0.5, r * Math.min(1, flat)), 0, 0, TAU); ctx.fill(); ctx.globalAlpha = 1; },
+      trail(pts, col, r) {
+        ctx.fillStyle = ctx.strokeStyle = col;
+        if (p.style === 'points') {
+          for (let i = 1; i < pts.length; i++) { const q = pts[i]; ctx.globalAlpha = q[2] * 0.9; ctx.beginPath(); ctx.arc(q[0], q[1], Math.max(0.4, r * 0.35 * (0.3 + 0.7 * q[2])), 0, TAU); ctx.fill(); }
+        } else {
+          for (let i = 1; i < pts.length; i++) { const a = pts[i - 1], b = pts[i]; ctx.globalAlpha = b[2] * 0.85; ctx.lineWidth = Math.max(0.4, r * 0.9 * b[2]); ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.stroke(); }
+        }
+        ctx.globalAlpha = 1;
+      },
+      mass(x, y, r, col, th) {
+        const img = p.forme === 'logo' ? (p.image || app.logoImg) : null;
+        if (img) {
+          const iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height, k = 2 * r / Math.max(iw, ih);
+          ctx.drawImage(img, x - iw * k / 2, y - ih * k / 2, iw * k, ih * k);
+          return;
+        }
+        ctx.fillStyle = col; shapePath(ctx, x, y, r); ctx.fill();
+      },
+    };
+
+    app.loop((t) => {
+      const { w, h, dpr } = app.size;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.globalAlpha = 1; ctx.fillStyle = p.fond; ctx.fillRect(0, 0, w, h);
+      ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+      draw(t, canvasSink);
+      app.finish(ctx);
+    });
+
+    function exportSVG() {
+      const { w, h } = app.size, f = (v) => Math.round(v * 100) / 100, out = [`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}">`, `<rect width="${w}" height="${h}" fill="${p.fond}"/>`];
+      draw(app.time, {
+        line(pts, col, wdt, a) { out.push(`<path d="M${pts.map((q) => `${f(q[0])} ${f(q[1])}`).join('L')}" stroke="${col}" stroke-width="${f(wdt)}" stroke-linecap="round" fill="none"${a < 1 ? ` stroke-opacity="${f(a)}"` : ''}/>`); },
+        shadow(x, y, r, flat, a) { out.push(`<ellipse cx="${f(x)}" cy="${f(y)}" rx="${f(r)}" ry="${f(Math.max(0.5, r * Math.min(1, flat)))}" fill="#000" fill-opacity="${f(0.35 * a)}"/>`); },
+        trail(pts, col, r) {
+          for (let i = 1; i < pts.length; i++) {
+            const a = pts[i - 1], b = pts[i];
+            if (p.style === 'points') out.push(`<circle cx="${f(b[0])}" cy="${f(b[1])}" r="${f(Math.max(0.4, r * 0.35 * (0.3 + 0.7 * b[2])))}" fill="${col}" fill-opacity="${f(b[2] * 0.9)}"/>`);
+            else out.push(`<path d="M${f(a[0])} ${f(a[1])}L${f(b[0])} ${f(b[1])}" stroke="${col}" stroke-width="${f(Math.max(0.4, r * 0.9 * b[2]))}" stroke-linecap="round" stroke-opacity="${f(b[2] * 0.85)}"/>`);
+          }
+        },
+        mass(x, y, r, col) {
+          if (p.forme === 'carre') out.push(`<rect x="${f(x - r)}" y="${f(y - r)}" width="${f(2 * r)}" height="${f(2 * r)}" fill="${col}"/>`);
+          else if (p.forme === 'losange') out.push(`<path d="M${f(x)} ${f(y - r * 1.25)}L${f(x + r * 1.25)} ${f(y)}L${f(x)} ${f(y + r * 1.25)}L${f(x - r * 1.25)} ${f(y)}Z" fill="${col}"/>`);
+          else out.push(`<circle cx="${f(x)}" cy="${f(y)}" r="${f(r)}" fill="${col}"/>`);
+        },
+      });
+      out.push('</svg>');
+      return out.join('\n');
+    }
+  </script>
+</body>
+</html>
