@@ -1,0 +1,15 @@
+{
+  "slug": "penrose",
+  "title": "Pavage de Penrose",
+  "type": "pattern",
+  "description": "Un pavage apériodique de losanges construit par multigrille de de Bruijn (symétrie 5, 7, 8, 9 ou 12) ; un glissement lent fait basculer les tuiles.",
+  "tags": ["penrose", "pavage", "aperiodique", "de-bruijn", "svg", "logo"],
+  "inspiration": [
+    "Roger Penrose, pavage P3 (1974)",
+    "N. G. de Bruijn, Algebraic theory of Penrose's non-periodic tilings (1981)",
+    "references/physique-maths.md (pavages) ; palettes papier-60, biennale, kegelbahn, good-room, luzern"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
