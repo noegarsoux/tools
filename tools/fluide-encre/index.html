@@ -1,0 +1,462 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Fluide d’encre</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Fluide d'encre : « Stable Fluids » (Jos Stam, 1999) sur le GPU.
+    // Chaque pas : advection semi-lagrangienne de la vitesse, confinement de vorticité (les petits
+    // tourbillons ne s'éteignent pas trop vite), poussée de l'encre (plus dense que l'eau, elle tombe),
+    // projection (on résout l'équation de Poisson de la pression par itérations de Jacobi puis on
+    // retire son gradient : le fluide reste incompressible), enfin advection de l'encre.
+    // L'encre est stockée en absorbance (loi de Beer-Lambert) : deux encres qui se superposent
+    // s'assombrissent comme de vrais pigments ; en mode lumière, c'est l'inverse (émission).
+    const canvas = document.querySelector('canvas');
+    const gl = canvas.getContext('webgl2', { alpha: false, antialias: false, depth: false, stencil: false, preserveDrawingBuffer: false });
+    gl.getExtension('EXT_color_buffer_float');
+    gl.getExtension('OES_texture_float_linear');
+    const TAU = Math.PI * 2, STEP = 1 / 60, JACOBI = 20;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const BITMAP = PAL('bitmap'), THERM = PAL('thermique'), GOOD = PAL('good-room'), KB = PAL('kegelbahn');
+    const LUZ = PAL('luzern'), ORB = PAL('orbite'), MENTHE = PAL('menthe'), PAP = PAL('papier-60'), PYR = PAL('pyramides');
+
+    let ready = false, needReset = false, prevPtr = null, strokeIdx = 0, acc = 0, simT = 0;
+    const pending = []; // éclaboussures du pointeur à injecter au prochain pas
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.05, vignette: 0.12 },
+      hint: 'Glissez pour verser l’encre et pousser l’eau · molette : taille de la goutte',
+      notes: 'Une vraie simulation de fluide incompressible (Stable Fluids). L’encre est plus dense que l’eau : avec « Chute », elle tombe en panaches et se déroule en champignons, comme une goutte d’encre de Chine dans un verre. Les couleurs se mélangent comme des pigments (absorbance), ou comme de la lumière en mode lumière.',
+      params: {
+        'Fluide': {
+          resolution: { type: 'segmented', label: 'Finesse', options: { 128: 'Grosse', 192: 'Moyenne', 288: 'Fine' }, value: '192' },
+          inertie: { type: 'range', label: 'Inertie de l’eau', min: 0, max: 1, step: 0.01, value: 0.82 },
+          vorticite: { type: 'range', label: 'Tourbillons', min: 0, max: 60, step: 0.5, value: 18 },
+          chute: { type: 'range', label: 'Chute de l’encre', min: -1, max: 1, step: 0.01, value: 0.35 },
+          courant: { type: 'range', label: 'Courants', min: 0, max: 1, step: 0.01, value: 0.25 },
+        },
+        'Encre': {
+          sources: { type: 'segmented', label: 'Sources', options: { gouttes: 'Gouttes', jets: 'Jets', ronde: 'Ronde', soufflerie: 'Soufflerie', aucune: 'Aucune' }, value: 'gouttes' },
+          nombre: { type: 'range', label: 'Nombre de sources', min: 1, max: 8, step: 1, value: 5 },
+          debit: { type: 'range', label: 'Quantité d’encre', min: 0.05, max: 2, step: 0.01, value: 1 },
+          force: { type: 'range', label: 'Force', min: 0, max: 2, step: 0.01, value: 0.8 },
+          taille: { type: 'range', label: 'Taille des gouttes', min: 0.005, max: 0.12, step: 0.001, value: 0.05 },
+          persistance: { type: 'range', label: 'Persistance de l’encre', min: 0, max: 1, step: 0.01, value: 0.9 },
+        },
+        'Rendu': {
+          mode: { type: 'segmented', label: 'Mélange', options: { encre: 'Pigment', lumiere: 'Lumière' }, value: 'encre' },
+          densite: { type: 'range', label: 'Densité', min: 0.2, max: 3, step: 0.01, value: 1.2 },
+          relief: { type: 'range', label: 'Relief', min: 0, max: 1, step: 0.01, value: 0.25 },
+        },
+        'Obstacle': {
+          obstacle: { type: 'segmented', label: 'Obstacle', options: { aucun: 'Aucun', cercle: 'Cercle', logo: 'Logo' }, value: 'aucun' },
+          image: { type: 'file', label: 'Logo ou image', accept: 'image/*', show: (q) => q.obstacle === 'logo' },
+          tailleObstacle: { type: 'range', label: 'Taille de l’obstacle', min: 0.1, max: 0.9, step: 0.01, value: 0.42, show: (q) => q.obstacle !== 'aucun' },
+        },
+        'Couleur': {
+          fond: { type: 'color', label: 'Fond', value: '#efede6' },
+          palette: { type: 'palette', label: 'Encres', value: [BITMAP[3], BITMAP[2], BITMAP[1], BITMAP[4]] },
+        },
+      },
+      presets: {
+        'Encre': {},
+        'Encre de Chine': { fond: PAP[0], palette: ['#141414', '#2b2b31'], sources: 'gouttes', nombre: 3, chute: 0.7, vorticite: 22, debit: 0.9, taille: 0.03, relief: 0.15, densite: 1.6 },
+        'Marbrure': { fond: BITMAP[0], palette: [BITMAP[3], BITMAP[2]], sources: 'ronde', nombre: 4, chute: 0, vorticite: 34, inertie: 0.95, persistance: 0.92, debit: 0.8, densite: 2, force: 1.1, taille: 0.04, relief: 0.3 },
+        'Fumée': { mode: 'lumiere', fond: '#0d0d10', palette: ['#e8e4dc', '#9a98aa'], sources: 'jets', nombre: 3, chute: -0.6, vorticite: 26, debit: 1, force: 0.6, taille: 0.035, persistance: 0.75, relief: 0.15, densite: 1.7, courant: 0.5 },
+        'Thermique': { mode: 'lumiere', fond: '#0e0f1a', palette: [THERM[2], THERM[1], THERM[3]], sources: 'jets', nombre: 3, chute: 0, vorticite: 20, debit: 1, force: 1.2, taille: 0.03, persistance: 0.8, densite: 1.8, relief: 0.2 },
+        'Good Room': { mode: 'lumiere', fond: GOOD[0], palette: GOOD.slice(1), sources: 'ronde', nombre: 4, vorticite: 28, chute: 0, inertie: 0.9, persistance: 0.95, debit: 0.55, relief: 0.3 },
+        'Luzern': { fond: LUZ[4], palette: [LUZ[0], LUZ[1], LUZ[2]], sources: 'gouttes', nombre: 5, chute: 0.45, vorticite: 16, debit: 0.8, taille: 0.04, relief: 0.2 },
+        'Orbite': { fond: ORB[2], palette: [ORB[0], ORB[1]], sources: 'jets', nombre: 3, chute: 0.15, vorticite: 30, force: 1.4, debit: 1.4, densite: 2.4, taille: 0.022, relief: 0.35 },
+        'Menthe': { fond: MENTHE[0], palette: [MENTHE[3], MENTHE[1], MENTHE[2]], sources: 'gouttes', nombre: 6, chute: 0.25, vorticite: 12, debit: 0.5, taille: 0.05, persistance: 0.95, relief: 0.3 },
+        'Logo': { obstacle: 'logo', tailleObstacle: 0.5, sources: 'soufflerie', nombre: 6, chute: 0, vorticite: 20, force: 1, inertie: 0.9, persistance: 0.9, debit: 1.2, densite: 1.6, taille: 0.03, relief: 0.15, courant: 0, fond: '#f2efe8', palette: [PYR[2], PYR[6], PYR[5], PYR[4]] },
+      },
+      brand(colors) {
+        // Fond sombre : les encres deviennent lumière (sinon elles disparaîtraient dans le noir).
+        const n = parseInt(String(colors[0]).slice(1, 7), 16), L = (0.2126 * (n >> 16 & 255) + 0.7152 * (n >> 8 & 255) + 0.0722 * (n & 255)) / 255;
+        return { fond: colors[0], palette: colors.length > 1 ? colors.slice(1) : colors, mode: L < 0.4 ? 'lumiere' : 'encre' };
+      },
+      pointer: {
+        down: (q) => { prevPtr = { x: q.x, y: q.y }; strokeIdx++; },
+        drag: (q) => {
+          if (!prevPtr) { prevPtr = { x: q.x, y: q.y }; return; }
+          pending.push({ x: q.x, y: q.y, dx: q.x - prevPtr.x, dy: q.y - prevPtr.y, c: strokeIdx });
+          prevPtr = { x: q.x, y: q.y };
+        },
+        up: () => { prevPtr = null; },
+        wheel: (q, dy) => app.set('taille', Math.max(0.005, Math.min(0.12, +(p.taille * Math.exp(-dy * 0.0015)).toFixed(3)))),
+      },
+      onChange(k) {
+        if (!ready) return;
+        // Nouvelle palette, nouvelles sources : on repart d'une eau propre (une seule fois par image).
+        if (k === '*' || ['resolution', 'mode', 'palette', 'sources', 'fond'].includes(k)) needReset = true;
+        if (k === '*' || k === 'obstacle' || k === 'image' || k === 'tailleObstacle') obstDirty = true;
+      },
+      onSeed() { if (ready) needReset = true; },
+      export: { name: 'fluide-encre' },
+    });
+    const p = app.params;
+
+    // ——— GPU ———
+    const VS = `#version 300 es
+    in vec2 a; out vec2 vUv;
+    void main() { vUv = a * 0.5 + 0.5; gl_Position = vec4(a, 0., 1.); }`;
+    const HEAD = `#version 300 es
+    precision highp float; precision highp sampler2D;
+    in vec2 vUv; out vec4 o; uniform vec2 uTex;`;
+    const FS = {
+      advect: `${HEAD}
+        uniform sampler2D uVel, uSrc, uObs; uniform float uDt, uDecay; uniform vec2 uVelTex;
+        void main() {
+          // La vitesse est en texels de simulation par seconde, quelle que soit la grille advectée.
+          vec2 v = texture(uVel, vUv).xy;
+          vec4 r = texture(uSrc, vUv - uDt * v * uVelTex) / (1. + uDecay * uDt);
+          o = r * (1. - texture(uObs, vUv).r);
+        }`,
+      splat: `${HEAD}
+        uniform sampler2D uSrc; uniform vec2 uPt; uniform vec3 uVal; uniform float uR, uAsp, uSx;
+        void main() {
+          vec2 d = vUv - uPt; d.x *= uAsp / uSx;
+          float e = dot(d, d) / uR;
+          // Profil « super-gaussien » : goutte pleine au centre, bord net.
+          o = texture(uSrc, vUv) + vec4(uVal * exp(-e * e * 0.7 - e * 0.3), 0.);
+        }`,
+      curl: `${HEAD}
+        uniform sampler2D uVel;
+        void main() {
+          float L = texture(uVel, vUv - vec2(uTex.x, 0.)).y, R = texture(uVel, vUv + vec2(uTex.x, 0.)).y;
+          float B = texture(uVel, vUv - vec2(0., uTex.y)).x, T = texture(uVel, vUv + vec2(0., uTex.y)).x;
+          o = vec4(0.5 * (R - L - T + B), 0., 0., 1.);
+        }`,
+      vort: `${HEAD}
+        uniform sampler2D uVel, uCurl, uDye; uniform float uConf, uDt, uFall, uCur, uTime, uSeed, uWind; uniform vec2 uAsp;
+        void main() {
+          float L = texture(uCurl, vUv - vec2(uTex.x, 0.)).r, R = texture(uCurl, vUv + vec2(uTex.x, 0.)).r;
+          float B = texture(uCurl, vUv - vec2(0., uTex.y)).r, T = texture(uCurl, vUv + vec2(0., uTex.y)).r;
+          float C = texture(uCurl, vUv).r;
+          vec2 f = 0.5 * vec2(abs(T) - abs(B), abs(R) - abs(L));
+          f = f / (length(f) + 1e-4) * uConf * C * vec2(1., -1.);
+          vec2 v = texture(uVel, vUv).xy + f * uDt;
+          // Poussée : l'encre, plus dense que l'eau, tombe (ou monte si la chute est négative).
+          vec3 k = texture(uDye, vUv).rgb;
+          v.y -= uFall * (k.r + k.g + k.b) * uDt * 60.;
+          // Courants : un champ lent, sans divergence (rotationnel d'une fonction de courant), qui brasse l'eau.
+          if (uCur > 0.) {
+            vec2 q = vUv * uAsp * 3.;
+            float t = uTime * 0.25;
+            vec2 c = vec2(0.);
+            c += vec2(cos(q.y * 1.3 + t + uSeed) , -cos(q.x * 1.1 - t * 0.8 + uSeed * 1.7));
+            c += 0.6 * vec2(cos(q.y * 2.3 - t * 1.3 + q.x * 0.7 + uSeed * 2.3), -cos(q.x * 2.1 + t * 1.1 + q.y * 0.5));
+            v += c * uCur * 60. * uDt;
+          }
+          // Soufflerie : un courant régulier entre par la gauche.
+          if (uWind > 0.) v = mix(v, vec2(uWind, 0.), smoothstep(0.06, 0.0, vUv.x) * 0.6);
+          o = vec4(clamp(v, -2000., 2000.), 0., 1.);
+        }`,
+      div: `${HEAD}
+        uniform sampler2D uVel, uObs; uniform float uOpen;
+        vec2 vel(vec2 uv) {
+          // Bords et obstacle : la vitesse normale est réfléchie (paroi étanche).
+          // En soufflerie, les bords gauche et droit sont ouverts : l'eau entre et ressort.
+          vec2 v = texture(uVel, uv).xy;
+          if (uOpen > 0. && (uv.x < 0. || uv.x > 1.)) return texture(uVel, vUv).xy;
+          if (uv.x < 0. || uv.x > 1. || uv.y < 0. || uv.y > 1.) return -texture(uVel, vUv).xy;
+          return mix(v, -texture(uVel, vUv).xy, texture(uObs, uv).r);
+        }
+        void main() {
+          float L = vel(vUv - vec2(uTex.x, 0.)).x, R = vel(vUv + vec2(uTex.x, 0.)).x;
+          float B = vel(vUv - vec2(0., uTex.y)).y, T = vel(vUv + vec2(0., uTex.y)).y;
+          o = vec4(0.5 * (R - L + T - B), 0., 0., 1.);
+        }`,
+      press: `${HEAD}
+        uniform sampler2D uP, uDiv; uniform float uOpen;
+        void main() {
+          float L = texture(uP, vUv - vec2(uTex.x, 0.)).r, R = texture(uP, vUv + vec2(uTex.x, 0.)).r;
+          if (uOpen > 0. && vUv.x + uTex.x > 1.) R = 0.;
+          float B = texture(uP, vUv - vec2(0., uTex.y)).r, T = texture(uP, vUv + vec2(0., uTex.y)).r;
+          o = vec4((L + R + B + T - texture(uDiv, vUv).r) * 0.25, 0., 0., 1.);
+        }`,
+      grad: `${HEAD}
+        uniform sampler2D uP, uVel, uObs;
+        void main() {
+          float L = texture(uP, vUv - vec2(uTex.x, 0.)).r, R = texture(uP, vUv + vec2(uTex.x, 0.)).r;
+          float B = texture(uP, vUv - vec2(0., uTex.y)).r, T = texture(uP, vUv + vec2(0., uTex.y)).r;
+          vec2 v = texture(uVel, vUv).xy - 0.5 * vec2(R - L, T - B);
+          o = vec4(v * (1. - texture(uObs, vUv).r), 0., 1.);
+        }`,
+      scale: `${HEAD}
+        uniform sampler2D uSrc; uniform float uK;
+        void main() { o = texture(uSrc, vUv) * uK; }`,
+      show: `${HEAD}
+        uniform sampler2D uDye, uObs; uniform vec3 uBg; uniform int uLight;
+        uniform float uDens, uRelief, uGrain, uVig, uFrame; uniform vec2 uDyeTex, uRes;
+        // Grain : hachage entier (PCG 2D), sans les rayures du hachage par sinus.
+        float hash(vec2 q, float f) {
+          uvec2 v = uvec2(q) + uvec2(uint(f) * 747796405u, uint(f) * 2891336453u);
+          v = v * 1664525u + 1013904223u; v.x += v.y * 1664525u; v.y += v.x * 1664525u; v ^= v >> 16u;
+          v.x += v.y * 1664525u; v.y += v.x * 1664525u; v ^= v >> 16u;
+          return float(v.x) / 4294967295.;
+        }
+        vec3 toLin(vec3 c) { return pow(c, vec3(2.2)); }
+        void main() {
+          vec3 k = texture(uDye, vUv).rgb * uDens;
+          // Relief : le gradient de la quantité d'encre éclaire la surface comme un lavis épais.
+          float s = 0.;
+          if (uRelief > 0.) {
+            float L = dot(texture(uDye, vUv - vec2(uDyeTex.x, 0.)).rgb, vec3(1.)), R = dot(texture(uDye, vUv + vec2(uDyeTex.x, 0.)).rgb, vec3(1.));
+            float B = dot(texture(uDye, vUv - vec2(0., uDyeTex.y)).rgb, vec3(1.)), T = dot(texture(uDye, vUv + vec2(0., uDyeTex.y)).rgb, vec3(1.));
+            vec3 n = normalize(vec3((L - R) * uDens, (B - T) * uDens, 0.35));
+            s = dot(n, normalize(vec3(-0.5, 0.6, 0.62))) - 0.62;
+          }
+          vec3 bg = toLin(uBg), c;
+          if (uLight == 0) c = bg * exp(-k);
+          else c = 1. - (1. - bg) * exp(-k);
+          c *= 1. + uRelief * s * 1.6;
+          c = pow(clamp(c, 0., 1.), vec3(1. / 2.2));
+          vec2 uv = vUv * 2. - 1.;
+          c *= 1. - uVig * 0.85 * smoothstep(0.35, 1.3, length(uv));
+          c += (hash(gl_FragCoord.xy, uFrame) - 0.5) * uGrain * 0.22;
+          o = vec4(c, 1.);
+        }`,
+    };
+    function sh(type, src) { const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s); if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s)); return s; }
+    const vs = sh(gl.VERTEX_SHADER, VS);
+    const P = {};
+    for (const [name, src] of Object.entries(FS)) {
+      const pr = gl.createProgram();
+      gl.attachShader(pr, vs); gl.attachShader(pr, sh(gl.FRAGMENT_SHADER, src));
+      gl.bindAttribLocation(pr, 0, 'a'); gl.linkProgram(pr);
+      if (!gl.getProgramParameter(pr, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(pr));
+      const loc = {};
+      P[name] = { pr, u: (n) => (n in loc ? loc[n] : (loc[n] = gl.getUniformLocation(pr, n))) };
+    }
+    const vao = gl.createVertexArray(); gl.bindVertexArray(vao);
+    const vbuf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, vbuf);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+
+    function tex(w, h, internal = gl.RGBA16F, fmt = gl.RGBA, type = gl.HALF_FLOAT, data = null) {
+      const t = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, t);
+      gl.texImage2D(gl.TEXTURE_2D, 0, internal, w, h, 0, fmt, type, data);
+      for (const k of [gl.TEXTURE_MIN_FILTER, gl.TEXTURE_MAG_FILTER]) gl.texParameteri(gl.TEXTURE_2D, k, gl.LINEAR);
+      for (const k of [gl.TEXTURE_WRAP_S, gl.TEXTURE_WRAP_T]) gl.texParameteri(gl.TEXTURE_2D, k, gl.CLAMP_TO_EDGE);
+      return t;
+    }
+    function target(w, h) {
+      const t = tex(w, h), fb = gl.createFramebuffer();
+      gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, t, 0);
+      gl.viewport(0, 0, w, h); gl.clearColor(0, 0, 0, 1); gl.clear(gl.COLOR_BUFFER_BIT);
+      return { t, fb, w, h };
+    }
+    function pair(w, h) {
+      const s = { a: target(w, h), b: target(w, h), w, h };
+      s.swap = () => { const x = s.a; s.a = s.b; s.b = x; };
+      return s;
+    }
+    const free = (o) => { if (!o) return; for (const x of [o.a, o.b, o].filter((z) => z && z.fb)) { gl.deleteFramebuffer(x.fb); gl.deleteTexture(x.t); } };
+
+    // Passe : lie les textures (nom → texture), fixe les uniformes, dessine dans la cible.
+    function pass(prog, out, texs, uni = {}) {
+      const g = P[prog];
+      gl.useProgram(g.pr);
+      let unit = 0;
+      for (const [n, t] of Object.entries(texs)) { gl.activeTexture(gl.TEXTURE0 + unit); gl.bindTexture(gl.TEXTURE_2D, t); gl.uniform1i(g.u(n), unit++); }
+      for (const [n, v] of Object.entries(uni)) {
+        const l = g.u(n);
+        if (Array.isArray(v)) (v.length === 2 ? gl.uniform2fv : gl.uniform3fv).call(gl, l, v);
+        else if (Number.isInteger(v) && n.startsWith('uLight')) gl.uniform1i(l, v);
+        else gl.uniform1f(l, v);
+      }
+      if (out) { gl.bindFramebuffer(gl.FRAMEBUFFER, out.fb); gl.viewport(0, 0, out.w, out.h); gl.uniform2f(g.u('uTex'), 1 / out.w, 1 / out.h); }
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+    }
+
+    let vel, dye, prs, dv, crl, obs, obsTex, simW = 0, simH = 0, dyeW = 0, dyeH = 0, obstDirty = true, lastSize = '';
+
+    // ——— Obstacle : cercle ou logo, rastérisé à la résolution de la simulation ———
+    let logoKey = null;
+    function buildObstacle() {
+      obstDirty = false;
+      const cv = document.createElement('canvas'); cv.width = simW; cv.height = simH;
+      const x = cv.getContext('2d', { willReadFrequently: true });
+      x.fillStyle = '#000'; x.fillRect(0, 0, simW, simH);
+      const S = Math.min(simW, simH) * p.tailleObstacle, img = p.image || app.logoImg;
+      if (p.obstacle === 'cercle' || (p.obstacle === 'logo' && !img)) {
+        x.fillStyle = '#fff'; x.beginPath(); x.arc(simW / 2, simH / 2, S / 2, 0, TAU); x.fill();
+      } else if (p.obstacle === 'logo') {
+        const iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height, k = S / Math.max(iw, ih);
+        const w = iw * k, h = ih * k;
+        // Logo sombre sur fond clair ou transparent : on garde les pixels « encrés ».
+        const t = document.createElement('canvas'); t.width = Math.ceil(w); t.height = Math.ceil(h);
+        const tx = t.getContext('2d', { willReadFrequently: true });
+        tx.fillStyle = '#fff'; tx.fillRect(0, 0, t.width, t.height); tx.drawImage(img, 0, 0, w, h);
+        const d = tx.getImageData(0, 0, t.width, t.height);
+        for (let i = 0; i < d.data.length; i += 4) {
+          const l = 255 - (d.data[i] * 0.2126 + d.data[i + 1] * 0.7152 + d.data[i + 2] * 0.0722);
+          const v = l > 90 ? 255 : 0; d.data[i] = d.data[i + 1] = d.data[i + 2] = v; d.data[i + 3] = 255;
+        }
+        tx.putImageData(d, 0, 0);
+        x.globalCompositeOperation = 'lighter';
+        x.drawImage(t, (simW - w) / 2, (simH - h) / 2);
+      }
+      const px = x.getImageData(0, 0, simW, simH).data, m = new Uint8Array(simW * simH);
+      // Lignes inversées : la texture GL commence en bas.
+      for (let j = 0; j < simH; j++) for (let i = 0; i < simW; i++) m[(simH - 1 - j) * simW + i] = p.obstacle === 'aucun' ? 0 : px[(j * simW + i) * 4];
+      gl.bindTexture(gl.TEXTURE_2D, obsTex);
+      gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, simW, simH, 0, gl.RED, gl.UNSIGNED_BYTE, m);
+    }
+
+    function reset() {
+      const { w, h } = app.size;
+      const R = +p.resolution, k = R / Math.max(w, h);
+      simW = Math.max(16, Math.round(w * k)); simH = Math.max(16, Math.round(h * k));
+      const D = Math.min(1024, R * 4), kd = D / Math.max(w, h);
+      dyeW = Math.max(16, Math.round(w * kd)); dyeH = Math.max(16, Math.round(h * kd));
+      for (const o of [vel, dye, prs]) free(o);
+      for (const o of [dv, crl]) if (o) { gl.deleteFramebuffer(o.fb); gl.deleteTexture(o.t); }
+      vel = pair(simW, simH); prs = pair(simW, simH); dye = pair(dyeW, dyeH);
+      dv = target(simW, simH); crl = target(simW, simH);
+      if (!obsTex) obsTex = tex(1, 1, gl.R8, gl.RED, gl.UNSIGNED_BYTE, new Uint8Array([0]));
+      buildObstacle();
+      lastSize = `${w}x${h}`;
+      simT = 0; acc = 0;
+      salvo();
+      // Préchauffe : la scène s'ouvre déjà encrée.
+      for (let i = 0, n = p.sources === 'soufflerie' ? 200 : 90; i < n; i++) step(STEP);
+    }
+
+    // ——— Sources automatiques (déterministes : fonctions du temps de simulation et de la graine) ———
+    const rgb = (hx) => { const n = parseInt(String(hx).slice(1, 7), 16); return [(n >> 16 & 255) / 255, (n >> 8 & 255) / 255, (n & 255) / 255]; };
+    const lin = (c) => c.map((v) => v ** 2.2);
+    // Absorbance (pigment) ou émission (lumière) qui reproduit la couleur c à quantité 1.
+    function inkOf(hex, amount) {
+      const c = lin(rgb(hex));
+      return (p.mode === 'lumiere' ? c.map((v) => -Math.log(Math.max(0.02, 1 - v))) : c.map((v) => -Math.log(Math.max(0.02, v)))).map((v) => v * amount);
+    }
+    const hash = (n) => { const s = Math.sin(n * 127.1 + app.seed * 0.0131) * 43758.5453; return s - Math.floor(s); };
+
+    function splat(x, y, vx, vy, ink, r, sx = 1) {
+      // x, y en uv (0..1, y vers le haut) ; v en texels de simulation par seconde ; sx étire la goutte en x.
+      const asp = simW / simH;
+      if (vx || vy) { pass('splat', vel.b, { uSrc: vel.a.t }, { uPt: [x, y], uVal: [vx, vy, 0], uR: r * r, uAsp: asp, uSx: sx }); vel.swap(); }
+      if (ink) { pass('splat', dye.b, { uSrc: dye.a.t }, { uPt: [x, y], uVal: ink, uR: r * r, uAsp: asp, uSx: sx }); dye.swap(); }
+    }
+
+    // Respiration des sources : chaque jet s'ouvre et se ferme à son rythme (bouffées plutôt qu'un flot continu).
+    const pulse = (i) => { const v = Math.sin(simT * (0.55 + 0.4 * hash(i + 31)) + hash(i + 17) * TAU) * 0.5 + 0.5; return Math.max(0, (v - 0.45) / 0.55); };
+
+    function sources(dt) {
+      const n = p.nombre | 0, pal = p.palette.length ? p.palette : ['#000000'], F = p.force * Math.max(simW, simH), asp = simW / simH;
+      const r = p.taille, q = p.debit * dt * 6;
+      if (p.sources === 'jets') {
+        // Jets qui partent du bord et balaient lentement, chacun de sa couleur.
+        for (let i = 0; i < n; i++) {
+          const a0 = TAU * (i / n + hash(i) * 0.15), sw = Math.sin(simT * (0.35 + 0.25 * hash(i + 9)) + hash(i + 3) * TAU) * 0.6;
+          const ex = 0.5 + Math.cos(a0) * 0.4, ey = 0.5 + Math.sin(a0) * 0.4;
+          const dir = a0 + Math.PI + sw;
+          const x = Math.min(0.97, Math.max(0.03, 0.5 + (ex - 0.5) * 0.98)), y = Math.min(0.97, Math.max(0.03, ey));
+          const on = pulse(i);
+          if (on > 0.01) splat(x, y, Math.cos(dir) * F * 0.9 * on, Math.sin(dir) * F * 0.9 * on, inkOf(pal[i % pal.length], q * 0.45 * on), r * 0.8);
+        }
+      } else if (p.sources === 'ronde') {
+        // Sources qui tournent autour du centre en poussant tangentiellement : marbrure.
+        for (let i = 0; i < n; i++) {
+          const a = TAU * i / n + simT * 0.4 * (i % 2 ? -1 : 1) * (0.6 + hash(i) * 0.6), rr = 0.18 + 0.16 * hash(i + 5);
+          const x = 0.5 + Math.cos(a) * rr / asp, y = 0.5 + Math.sin(a) * rr, s = i % 2 ? -1 : 1;
+          const on = 0.35 + 0.65 * pulse(i + 20);
+          splat(x, y, -Math.sin(a) * F * 0.5 * s, Math.cos(a) * F * 0.5 * s, inkOf(pal[i % pal.length], q * 0.6 * on), r);
+        }
+      } else if (p.sources === 'soufflerie') {
+        // Filets d'encre réguliers dans le courant : ils dessinent le sillage de l'obstacle.
+        const m = Math.max(2, n * 2);
+        for (let j = 0; j < m; j++) {
+          const y = (j + 0.5) / m + Math.sin(simT * 0.7 + j) * 0.004;
+          splat(0.02, y, 0, 0, inkOf(pal[j % pal.length], q * 1.2), r * 0.32, 2.2);
+        }
+      } else if (p.sources === 'gouttes') {
+        // Gouttes déposées par vagues régulières, à des endroits tirés de la graine.
+        const period = 3 / Math.max(1, n);
+        const k0 = Math.floor((simT - dt) / period), k1 = Math.floor(simT / period);
+        for (let k = k0 + 1; k <= k1; k++) {
+          const x = 0.12 + 0.76 * hash(k * 3.1), y = 0.55 + 0.38 * hash(k * 7.7), a = (hash(k * 1.9) - 0.5) * 1.2 - Math.PI / 2;
+          const col = pal[k % pal.length];
+          splat(x, y, Math.cos(a) * F * 0.5, Math.sin(a) * F * 0.5, inkOf(col, p.debit * 1.4), r * (0.8 + hash(k * 4.3) * 0.7));
+        }
+      }
+    }
+
+    // Première salve : de l'encre déjà répartie dans le cadre, pour que l'ouverture soit composée.
+    function salvo() {
+      if (p.sources === 'aucune' || p.sources === 'soufflerie') return;
+      const n = p.nombre | 0, pal = p.palette.length ? p.palette : ['#000000'], F = p.force * Math.max(simW, simH);
+      const m = Math.max(4, n * 2);
+      for (let i = 0; i < m; i++) {
+        const x = 0.1 + 0.8 * ((i + hash(i * 5.3 + 0.7) * 0.8) / m), y = 0.2 + 0.7 * hash(i * 2.9 + 0.3);
+        const a = TAU * hash(i * 8.1 + 0.11);
+        const v = p.sources === 'gouttes' ? [0, -F * 0.6] : [Math.cos(a) * F * 0.8, Math.sin(a) * F * 0.8];
+        splat(x, y, v[0], v[1], inkOf(pal[i % pal.length], p.debit * 1.2), p.taille * (0.8 + hash(i * 3.7) * 0.8));
+      }
+    }
+
+    function step(dt) {
+      simT += dt;
+      // Gestes du pointeur
+      const { w, h } = app.size;
+      for (const e of pending.splice(0)) {
+        const pal = p.palette.length ? p.palette : ['#000000'];
+        const sc = Math.max(simW, simH) / Math.max(w, h);
+        const vx = e.dx * sc / dt * 0.5, vy = -e.dy * sc / dt * 0.5;
+        const len = Math.hypot(e.dx, e.dy);
+        splat(e.x / w, 1 - e.y / h, vx, vy, inkOf(pal[e.c % pal.length], p.debit * Math.min(1.5, 0.25 + len * 0.02)), p.taille);
+      }
+      if (p.sources !== 'aucune') sources(dt);
+      const obsT = obsTex, wind = p.sources === 'soufflerie';
+      pass('curl', crl, { uVel: vel.a.t });
+      const A = Math.max(simW, simH);
+      pass('vort', vel.b, { uVel: vel.a.t, uCurl: crl.t, uDye: dye.a.t }, { uConf: p.vorticite, uDt: dt, uFall: p.chute * 0.9, uCur: p.courant, uTime: simT, uSeed: (app.seed % 997) * 0.37, uAsp: [simW / A, simH / A], uWind: wind ? p.force * A * 0.5 : 0 }); vel.swap();
+      pass('div', dv, { uVel: vel.a.t, uObs: obsT }, { uOpen: wind ? 1 : 0 });
+      pass('scale', prs.b, { uSrc: prs.a.t }, { uK: 0.8 }); prs.swap();
+      for (let i = 0; i < JACOBI; i++) { pass('press', prs.b, { uP: prs.a.t, uDiv: dv.t }, { uOpen: wind ? 1 : 0 }); prs.swap(); }
+      pass('grad', vel.b, { uP: prs.a.t, uVel: vel.a.t, uObs: obsT }); vel.swap();
+      const vDecay = (1 - p.inertie) * 3, dDecay = (1 - p.persistance) * 1.5;
+      const vt = [1 / simW, 1 / simH];
+      pass('advect', vel.b, { uVel: vel.a.t, uSrc: vel.a.t, uObs: obsT }, { uDt: dt, uDecay: vDecay, uVelTex: vt }); vel.swap();
+      // L'encre est advectée sur sa propre grille (plus fine) avec la vitesse de la simulation.
+      pass('advect', dye.b, { uVel: vel.a.t, uSrc: dye.a.t, uObs: obsT }, { uDt: dt, uDecay: dDecay, uVelTex: vt });
+      dye.swap();
+    }
+
+    let frame = 0;
+    function render(t, dt) {
+      const { w, h } = app.size;
+      if (needReset || `${w}x${h}` !== lastSize) { needReset = false; reset(); }
+      if (obstDirty) buildObstacle();
+      // Pas fixes : la simulation ne dépend que de dt, image par image, même à l'export vidéo.
+      acc = Math.min(acc + (dt || 0), STEP * 4);
+      while (acc >= STEP) { step(STEP); acc -= STEP; }
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.viewport(0, 0, canvas.width, canvas.height);
+      const g = P.show;
+      gl.useProgram(g.pr);
+      gl.uniform1i(g.u('uLight'), p.mode === 'lumiere' ? 1 : 0);
+      pass('show', null, { uDye: dye.a.t, uObs: obsTex }, {
+        uBg: rgb(p.fond), uDens: p.densite, uRelief: p.relief, uGrain: p.grain ?? 0, uVig: p.vignette ?? 0,
+        uFrame: (frame++) % 997, uDyeTex: [1 / dyeW, 1 / dyeH], uRes: [canvas.width, canvas.height],
+      });
+    }
+    ready = true;
+    app.loop((t, dt) => render(t, dt));
+  </script>
+</body>
+</html>

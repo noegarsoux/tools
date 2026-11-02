@@ -1,0 +1,15 @@
+{
+  "slug": "fluide-encre",
+  "title": "Fluide d’encre",
+  "type": "webgl",
+  "description": "De l'encre de marque versée dans l'eau : une vraie simulation de fluide où les gouttes tombent en panaches, tourbillonnent et contournent le logo.",
+  "tags": ["fluide", "encre", "simulation", "webgl", "marbrure", "logo"],
+  "inspiration": [
+    "Jos Stam, « Stable Fluids », SIGGRAPH 1999 (références physique-maths, fluides)",
+    "Gouttes d'encre de Chine dans l'eau, panaches et instabilités de Rayleigh-Taylor",
+    "Palettes bitmap, thermique, good-room, luzern, orbite, menthe, pyramides"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
