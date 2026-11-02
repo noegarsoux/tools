@@ -1,0 +1,15 @@
+{
+  "slug": "craquelures",
+  "title": "Craquelures",
+  "type": "motion",
+  "description": "Une couche qui sèche et se fend : réseau de ressorts accroché au support, fissures en T, plaques aux bords soulevés, en boue, kintsugi doré ou trait d'encre.",
+  "tags": ["fissures", "craquelure", "kintsugi", "physique", "logo", "svg"],
+  "inspiration": [
+    "Bohn, Pauchard et Couder, Hierarchical crack pattern as formed by successive domain divisions (2005)",
+    "Kintsugi, réparation japonaise à la laque et à l'or",
+    "Sols argileux desséchés, craquelures des émaux et des peintures anciennes"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
