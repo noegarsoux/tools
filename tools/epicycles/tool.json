@@ -1,0 +1,15 @@
+{
+  "slug": "epicycles",
+  "title": "Épicycles",
+  "type": "motion",
+  "description": "Le contour d'une forme, d'un logo ou d'un dessin à main levée redessiné par une chaîne de cercles qui tournent : sa série de Fourier, du flou aux angles nets.",
+  "tags": ["fourier", "epicycles", "contour", "logo", "boucle", "svg"],
+  "inspiration": [
+    "Transformées de Fourier : une forme dessinée par des épicycles (références physique-maths)",
+    "3Blue1Brown, séries de Fourier et cercles tournants",
+    "Palettes papier-60, orbite, biennale, kegelbahn, menthe, luzern, photocopie"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
