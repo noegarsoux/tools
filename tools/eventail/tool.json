@@ -1,0 +1,21 @@
+{
+  "slug": "eventail",
+  "title": "Éventail",
+  "type": "shapes",
+  "description": "Une forme (arc, feuille, vague en S) ou un logo répété autour d'un pivot mobile, par pas de rotation, d'échelle et de couleur : éventails, rosaces et spirales en boucle.",
+  "tags": [
+    "eventail",
+    "rotation",
+    "repetition",
+    "spirale",
+    "logo",
+    "svg"
+  ],
+  "inspiration": [
+    "Moodboard de Noé, fiche 21 — éventail de lettres en bandes sur fond brun",
+    "Palettes eventail, orbite, kegelbahn, papier-60, biennale, luzern, acide, pyramides"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
