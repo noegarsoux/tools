@@ -1,0 +1,15 @@
+{
+  "slug": "dunes",
+  "title": "Dunes",
+  "type": "motion",
+  "description": "Désert du modèle de Werner : plaques de sable emportées par le vent, barkhanes en croissant ou cordons transverses qui avancent, relief éclairé, logo qui s'érode.",
+  "tags": ["dunes", "sable", "automate", "relief", "logo", "svg"],
+  "inspiration": [
+    "Bas T. Werner, Eolian dunes: computer simulations and attractor interpretation (1995)",
+    "Ralph Bagnold, The Physics of Blown Sand and Desert Dunes (1941)",
+    "Photographies aériennes des barkhanes ; palettes pyramides et éventail"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
