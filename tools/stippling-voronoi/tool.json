@@ -1,0 +1,15 @@
+{
+  "slug": "stippling-voronoi",
+  "title": "Stippling Voronoï",
+  "type": "generative",
+  "description": "Un logo, une image ou des formes en mouvement rendus en points par relaxation de Lloyd pondérée : points, carrés, traits ou tracé continu.",
+  "tags": ["stippling", "voronoi", "points", "lloyd", "svg", "logo"],
+  "inspiration": [
+    "Adrian Secord (2002), Weighted Voronoi Stippling",
+    "Kaplan et Bosch (2005), TSP Art : le tracé continu",
+    "references/techniques.md ; palettes papier-60, biennale, menthe, kegelbahn, luzern, orbite"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
