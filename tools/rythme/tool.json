@@ -1,0 +1,16 @@
+{
+  "slug": "rythme",
+  "title": "Rythme BPM",
+  "type": "motion",
+  "description": "Un séquenceur de 16 pas à quatre pistes dont la partition est l'image : rythmes euclidiens, formes de marque qui battent au tempo, son facultatif.",
+  "tags": ["rythme", "bpm", "sequenceur", "euclidien", "motion", "svg"],
+  "inspiration": [
+    "Godfried Toussaint (2005), The Euclidean Algorithm Generates Traditional Musical Rhythms",
+    "Identités sonores et animées pilotées par le tempo (references/identites.md)",
+    "Boîtes à rythmes à 16 pas (Roland TR-808) ; partitions graphiques",
+    "Palettes kegelbahn, biennale, menthe, good-room, acide, papier-60, orbite, salon, pixels"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
