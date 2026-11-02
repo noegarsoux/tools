@@ -1,0 +1,309 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Bitmap raccord</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Taches organiques en gros pixels, raccordables. Un bruit fractal périodique (le réseau du bruit
+    // se referme sur lui-même à chaque bord de tuile) est seuillé en plusieurs niveaux, quantifié en
+    // pixels, puis contouré. La troisième dimension du bruit est périodique aussi : l'animation boucle.
+    // Le pinceau peint dans la tuile : ce qu'on dessine se répète dans toutes les tuiles.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const tileCv = document.createElement('canvas'), tctx = tileCv.getContext('2d');
+    const TAU = Math.PI * 2, BR = 128;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const BIT = PAL('bitmap'), NUIT = PAL('trame-nuit'), KB = PAL('kegelbahn'), MENTHE = PAL('menthe'), GLY = PAL('glyphes');
+    const SALON = PAL('salon'), PIX = PAL('pixels'), P60 = PAL('papier-60'), ACIDE = PAL('acide');
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: 3,
+      finish: { grain: 0.06, vignette: 0.08 },
+      hint: 'Glissez pour peindre des taches (Maj : gommer) · le dessin se répète dans chaque tuile · molette : taille des pixels',
+      notes: 'Le bruit est périodique sur la tuile : les bords se raccordent exactement, la tuile exportée se répète sans couture. L’échelle est le nombre de cellules du bruit par tuile, l’évolution le nombre de cellules parcourues dans le temps pendant une boucle.',
+      params: {
+        'Motif': {
+          pixels: { type: 'range', label: 'Pixels par tuile', min: 6, max: 128, step: 1, value: 40 },
+          repetitions: { type: 'range', label: 'Tuiles sur le petit côté', min: 1, max: 8, step: 1, value: 2 },
+          echelle: { type: 'range', label: 'Échelle du bruit', min: 1, max: 10, step: 1, value: 3 },
+          octaves: { type: 'range', label: 'Octaves', min: 1, max: 5, step: 1, value: 3 },
+          rugosite: { type: 'range', label: 'Rugosité', min: 0.2, max: 0.8, step: 0.01, value: 0.5 },
+          warp: { type: 'range', label: 'Déformation', min: 0, max: 2, step: 0.01, value: 0.6 },
+          densite: { type: 'range', label: 'Densité d’encre', min: 0.05, max: 0.95, step: 0.005, value: 0.45 },
+          niveaux: { type: 'range', label: 'Niveaux', min: 1, max: 6, step: 1, value: 3 },
+          ecart: { type: 'range', label: 'Écart des niveaux', min: 0.01, max: 0.2, step: 0.001, value: 0.07, show: (q) => q.niveaux > 1 },
+        },
+        'Pixels': {
+          pixel: { type: 'segmented', label: 'Forme', options: { carre: 'Carré', rond: 'Rond', arrondi: 'Arrondi', croix: 'Croix' }, value: 'carre' },
+          jour: { type: 'range', label: 'Espace entre pixels', min: 0, max: 0.45, step: 0.01, value: 0 },
+          contour: { type: 'segmented', label: 'Contour', options: { aucun: 'Aucun', trait: 'Trait', pixel: 'Pixels' }, value: 'trait' },
+          epaisseur: { type: 'range', label: 'Épaisseur du trait', min: 0.05, max: 0.6, step: 0.01, value: 0.22, show: (q) => q.contour === 'trait' },
+          entre: { type: 'toggle', label: 'Contour entre les niveaux', value: true, show: (q) => q.contour !== 'aucun' },
+        },
+        'Mouvement': {
+          boucle: { type: 'range', label: 'Boucle (s)', min: 2, max: 40, step: 0.5, value: 12 },
+          evolution: { type: 'range', label: 'Évolution', min: 0, max: 6, step: 1, value: 1 },
+          defilX: { type: 'range', label: 'Défilement X (tuiles)', min: -3, max: 3, step: 1, value: 0 },
+          defilY: { type: 'range', label: 'Défilement Y (tuiles)', min: -3, max: 3, step: 1, value: 0 },
+          saccade: { type: 'range', label: 'Images par seconde', min: 0, max: 24, step: 1, value: 0 },
+        },
+        'Pinceau': {
+          rayon: { type: 'range', label: 'Rayon', min: 0.02, max: 0.3, step: 0.005, value: 0.08 },
+          force: { type: 'range', label: 'Force', min: 0.05, max: 1, step: 0.01, value: 0.35 },
+          effacer: { type: 'button', label: 'Effacer le dessin', action: () => { brush.fill(0); } },
+        },
+        'Couleur': {
+          fond: { type: 'color', label: 'Fond', value: BIT[0] },
+          palette: { type: 'palette', label: 'Encres (par niveau)', value: [BIT[2], BIT[3], BIT[4]] },
+          trait: { type: 'color', label: 'Contour', value: BIT[1], show: (q) => q.contour !== 'aucun' },
+        },
+      },
+      presets: {
+        'Bitmap': {},
+        'Taches noires': { pixels: 28, repetitions: 3, echelle: 2, octaves: 3, warp: 0.9, densite: 0.4, niveaux: 1, pixel: 'carre', contour: 'pixel', fond: BIT[0], palette: [BIT[1]], trait: BIT[1], evolution: 1 },
+        'Nuit points': { pixels: 48, repetitions: 2, echelle: 3, octaves: 3, warp: 0.8, densite: 0.5, niveaux: 3, ecart: 0.06, pixel: 'rond', jour: 0.15, contour: 'aucun', fond: NUIT[0], palette: [NUIT[2], NUIT[1], ACIDE[2]], evolution: 2 },
+        'Kegelbahn': { pixels: 24, repetitions: 2, echelle: 3, octaves: 2, warp: 1.2, densite: 0.6, niveaux: 5, ecart: 0.06, pixel: 'carre', contour: 'trait', epaisseur: 0.16, entre: true, fond: KB[0], palette: KB.slice(1), trait: KB[0], evolution: 1 },
+        'Menthe arrondie': { pixels: 36, repetitions: 2, echelle: 3, octaves: 3, warp: 0.9, densite: 0.5, niveaux: 2, ecart: 0.08, pixel: 'arrondi', jour: 0.06, contour: 'aucun', fond: MENTHE[0], palette: [MENTHE[3], MENTHE[1]], evolution: 1 },
+        'Glyphes': { pixels: 24, repetitions: 3, echelle: 3, octaves: 2, warp: 0.8, densite: 0.55, niveaux: 4, ecart: 0.08, pixel: 'croix', jour: 0.08, contour: 'aucun', fond: GLY[1], palette: [GLY[2], GLY[3], GLY[4], GLY[6]], evolution: 1, saccade: 8 },
+        'Salon': { pixels: 18, repetitions: 3, echelle: 3, octaves: 2, warp: 0.7, densite: 0.5, niveaux: 3, ecart: 0.1, pixel: 'arrondi', jour: 0.1, contour: 'aucun', fond: SALON[0], palette: [SALON[2], SALON[3], SALON[4]], evolution: 1, defilX: 1 },
+        'Papier fin': { pixels: 72, repetitions: 2, echelle: 4, octaves: 4, warp: 1, densite: 0.42, niveaux: 2, ecart: 0.03, pixel: 'carre', contour: 'trait', epaisseur: 0.3, entre: false, fond: P60[0], palette: [P60[0], P60[1]], trait: P60[1], evolution: 2 },
+      },
+      brand(colors) {
+        return { fond: colors[0], palette: colors.length > 2 ? colors.slice(2).concat(colors[1]) : colors.slice(1).length ? colors.slice(1) : colors, trait: colors[1] || colors[0] };
+      },
+      pointer: {
+        down: (q) => paint(q),
+        drag: (q) => paint(q),
+        wheel: (q, dy) => app.set('pixels', Math.round(Math.min(128, Math.max(6, p.pixels * Math.exp(dy * 0.0015) + (dy > 0 ? 1 : -1))))),
+      },
+      export: {
+        name: 'bitmap-raccord',
+        svg: () => exportSVG(false),
+        extra: {
+          'Tuile PNG': (a) => { const cv = tileCanvas(app.time, 16); cv.toBlob((b) => a.download(`bitmap-raccord-tuile-${app.seed}.png`, b), 'image/png'); },
+          'Tuile SVG': (a) => a.download(`bitmap-raccord-tuile-${app.seed}.svg`, new Blob([exportSVG(true)], { type: 'image/svg+xml' })),
+        },
+      },
+    });
+    const p = app.params;
+    const brush = new Float32Array(BR * BR);
+
+    const hex = (c) => { const n = parseInt(c.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; };
+
+    // ——— Bruit de valeur 3D périodique (réseau replié sur lui-même) ———
+    let perm = new Uint8Array(512), permSeed = null;
+    function reseed() {
+      const r = app.rng(17), a = new Uint8Array(256);
+      for (let i = 0; i < 256; i++) a[i] = i;
+      for (let i = 255; i > 0; i--) { const j = Math.floor(r() * (i + 1)); const t = a[i]; a[i] = a[j]; a[j] = t; }
+      for (let i = 0; i < 512; i++) perm[i] = a[i & 255];
+      permSeed = app.seed;
+    }
+    const fade = (t) => t * t * t * (t * (t * 6 - 15) + 10);
+    const mod = (a, n) => ((a % n) + n) % n;
+    function vnoise(x, y, z, px, py, pz) {
+      const xi = Math.floor(x), yi = Math.floor(y), zi = Math.floor(z);
+      const fx = fade(x - xi), fy = fade(y - yi), fz = fade(z - zi);
+      const h = (i, j, k) => perm[perm[perm[mod(i, px) & 255] + (mod(j, py) & 255)] + (mod(k, pz) & 255)] / 255;
+      const x0 = xi, x1 = xi + 1, y0 = yi, y1 = yi + 1, z0 = zi, z1 = zi + 1;
+      const l = (a, b, t) => a + (b - a) * t;
+      return l(l(l(h(x0, y0, z0), h(x1, y0, z0), fx), l(h(x0, y1, z0), h(x1, y1, z0), fx), fy),
+               l(l(h(x0, y0, z1), h(x1, y0, z1), fx), l(h(x0, y1, z1), h(x1, y1, z1), fx), fy), fz);
+    }
+    // fbm périodique : chaque octave double la fréquence et la période, la tuile reste raccordable.
+    function fbm(u, v, z) {
+      let s = 0, a = 1, n = 0, f = p.echelle;
+      const pz = Math.max(1, p.evolution);
+      for (let o = 0; o < p.octaves; o++) {
+        s += a * vnoise(u * f, v * f, z + o * 7.3, f, f, pz); n += a;
+        a *= p.rugosite; f *= 2;
+      }
+      return s / n;
+    }
+
+    // Niveau de chaque pixel de la tuile au temps t.
+    function levels(t) {
+      if (permSeed !== app.seed) reseed();
+      const G = p.pixels, L = new Uint8Array(G * G);
+      let tt = t;
+      if (p.saccade > 0) tt = Math.floor(t * p.saccade) / p.saccade;
+      const z = p.evolution * tt / p.boucle;
+      const base = 1 - p.densite;
+      for (let j = 0; j < G; j++) for (let i = 0; i < G; i++) {
+        let u = (i + 0.5) / G, v = (j + 0.5) / G;
+        if (p.warp > 0) {
+          const wu = fbm(u + 0.37, v + 0.71, z + 3.1) - 0.5, wv = fbm(u + 0.13, v + 0.53, z + 5.7) - 0.5;
+          u += wu * p.warp / p.echelle; v += wv * p.warp / p.echelle;
+        }
+        let n = fbm(u, v, z);
+        // Contraste : le bruit de valeur est resserré autour de 0,5.
+        n = 0.5 + (n - 0.5) * 2.2;
+        const bi = Math.floor(mod((i + 0.5) / G, 1) * BR), bj = Math.floor(mod((j + 0.5) / G, 1) * BR);
+        n += brush[bj * BR + bi];
+        let lv = 0;
+        for (let k = 0; k < p.niveaux; k++) if (n > base + k * p.ecart) lv = k + 1;
+        L[j * G + i] = lv;
+      }
+      return L;
+    }
+
+    // ——— Rendu d'une tuile ———
+    function drawTile(c, L, G, cs) {
+      const pal = p.palette.length ? p.palette : ['#000000'];
+      const ink = (lv) => pal[(lv - 1) % pal.length];
+      c.fillStyle = p.fond; c.fillRect(0, 0, G * cs, G * cs);
+      const at = (i, j) => L[mod(j, G) * G + mod(i, G)];
+      // Contour en pixels : anneau d'un pixel autour de l'encre.
+      if (p.contour === 'pixel') {
+        c.fillStyle = p.trait;
+        for (let j = 0; j < G; j++) for (let i = 0; i < G; i++) {
+          if (at(i, j) !== 0) continue;
+          let edge = false;
+          for (let dj = -1; dj <= 1 && !edge; dj++) for (let di = -1; di <= 1; di++) if ((di || dj) && at(i + di, j + dj) > 0) { edge = true; break; }
+          if (edge) cellShape(c, i * cs, j * cs, cs);
+        }
+      }
+      for (let lv = 1; lv <= p.niveaux; lv++) {
+        c.fillStyle = ink(lv);
+        for (let j = 0; j < G; j++) for (let i = 0; i < G; i++) if (L[j * G + i] === lv) cellShape(c, i * cs, j * cs, cs);
+      }
+      if (p.contour === 'trait') {
+        const lw = Math.max(1, p.epaisseur * cs);
+        c.fillStyle = p.trait;
+        for (let j = 0; j < G; j++) for (let i = 0; i < G; i++) {
+          const a = at(i, j), r = at(i + 1, j), b = at(i, j + 1);
+          const diff = (x, y) => x !== y && (p.entre || x === 0 || y === 0);
+          if (diff(a, r)) { c.fillRect((i + 1) * cs - lw / 2, j * cs - lw / 2, lw, cs + lw); if (i === G - 1) c.fillRect(-lw / 2, j * cs - lw / 2, lw, cs + lw); }
+          if (diff(a, b)) { c.fillRect(i * cs - lw / 2, (j + 1) * cs - lw / 2, cs + lw, lw); if (j === G - 1) c.fillRect(i * cs - lw / 2, -lw / 2, cs + lw, lw); }
+        }
+      }
+    }
+    function cellShape(c, x, y, cs) {
+      const g = p.jour * cs, s = cs - 2 * g;
+      if (p.pixel === 'carre') { c.fillRect(x + g, y + g, s, s); return; }
+      c.beginPath();
+      if (p.pixel === 'rond') c.arc(x + cs / 2, y + cs / 2, s / 2, 0, TAU);
+      else if (p.pixel === 'arrondi') c.roundRect(x + g, y + g, s, s, s * 0.32);
+      else { const k = s * 0.32; c.rect(x + g + (s - k) / 2, y + g, k, s); c.rect(x + g, y + g + (s - k) / 2, s, k); }
+      c.fill();
+    }
+    function tileCanvas(t, cs) {
+      const G = p.pixels, cv = document.createElement('canvas'); cv.width = cv.height = G * cs;
+      drawTile(cv.getContext('2d'), levels(t), G, cs);
+      return cv;
+    }
+
+    // Taille d'une tuile à l'écran : pixels entiers en pixels de l'appareil, pour des bords nets.
+    function tileGeom() {
+      const { w, h, dpr } = app.size, u = Math.min(w, h), G = p.pixels;
+      const csDev = Math.max(1, Math.round(u / p.repetitions / G * dpr));
+      return { G, csDev, tileDev: csDev * G, tile: csDev * G / dpr };
+    }
+
+    app.loop((t) => {
+      const { w, h, dpr } = app.size, g = tileGeom();
+      if (tileCv.width !== g.tileDev) { tileCv.width = tileCv.height = g.tileDev; }
+      tctx.setTransform(1, 0, 0, 1, 0, 0);
+      drawTile(tctx, levels(t), g.G, g.csDev);
+      // Défilement en tuiles entières par boucle : boucle parfaite. Tuiles centrées dans le cadre.
+      const ph = t / p.boucle;
+      const ox = ((w / 2 - g.tile / 2 + p.defilX * ph * g.tile) % g.tile + g.tile) % g.tile - g.tile;
+      const oy = ((h / 2 - g.tile / 2 + p.defilY * ph * g.tile) % g.tile + g.tile) % g.tile - g.tile;
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.imageSmoothingEnabled = false;
+      const sx = Math.round(ox * dpr), sy = Math.round(oy * dpr);
+      for (let y = sy; y < canvas.height; y += g.tileDev) for (let x = sx; x < canvas.width; x += g.tileDev) ctx.drawImage(tileCv, x, y);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      app.finish(ctx);
+    });
+
+    // ——— Pinceau : on peint dans l'espace de la tuile (avec repli), le dessin se répète partout ———
+    function paint(q) {
+      const { w, h } = app.size, g = tileGeom(), ph = app.time / p.boucle;
+      const ox = w / 2 - g.tile / 2 + p.defilX * ph * g.tile, oy = h / 2 - g.tile / 2 + p.defilY * ph * g.tile;
+      const tu = mod((q.x - ox) / g.tile, 1), tv = mod((q.y - oy) / g.tile, 1);
+      const R = p.rayon * BR * Math.max(1, p.repetitions) / 2, s = q.shift ? -1 : 1;
+      const r0 = Math.ceil(R * 2);
+      for (let dj = -r0; dj <= r0; dj++) for (let di = -r0; di <= r0; di++) {
+        const d2 = (di * di + dj * dj) / (R * R);
+        if (d2 > 4) continue;
+        const i = mod(Math.floor(tu * BR) + di, BR), j = mod(Math.floor(tv * BR) + dj, BR);
+        const k = j * BR + i;
+        brush[k] = Math.max(-1, Math.min(1, brush[k] + s * p.force * 0.25 * Math.exp(-d2 * 1.5)));
+      }
+    }
+
+    // ——— SVG : rectangles fusionnés par rangées, un groupe par couleur ———
+    function tileSVGBody(L, G, cs, x0, y0) {
+      const out = [], pal = p.palette.length ? p.palette : ['#000000'], f = (v) => Math.round(v * 100) / 100;
+      const at = (i, j) => L[mod(j, G) * G + mod(i, G)];
+      const cell = (x, y) => {
+        const g = p.jour * cs, s = cs - 2 * g;
+        if (p.pixel === 'rond') return `<circle cx="${f(x + cs / 2)}" cy="${f(y + cs / 2)}" r="${f(s / 2)}"/>`;
+        if (p.pixel === 'arrondi') return `<rect x="${f(x + g)}" y="${f(y + g)}" width="${f(s)}" height="${f(s)}" rx="${f(s * 0.32)}"/>`;
+        if (p.pixel === 'croix') { const k = s * 0.32; return `<path d="M${f(x + g + (s - k) / 2)} ${f(y + g)}h${f(k)}v${f(s)}h${f(-k)}zM${f(x + g)} ${f(y + g + (s - k) / 2)}h${f(s)}v${f(k)}h${f(-s)}z"/>`; }
+        return null;
+      };
+      const runs = (pred, col) => {
+        let s = `<g fill="${col}">`;
+        for (let j = 0; j < G; j++) {
+          let i = 0;
+          while (i < G) {
+            if (!pred(i, j)) { i++; continue; }
+            if (p.pixel !== 'carre' || p.jour > 0) {
+              const c = cell(x0 + i * cs, y0 + j * cs);
+              s += c || `<rect x="${f(x0 + i * cs + p.jour * cs)}" y="${f(y0 + j * cs + p.jour * cs)}" width="${f(cs * (1 - 2 * p.jour))}" height="${f(cs * (1 - 2 * p.jour))}"/>`;
+              i++; continue;
+            }
+            let k = i; while (k < G && pred(k, j)) k++;
+            s += `<rect x="${f(x0 + i * cs)}" y="${f(y0 + j * cs)}" width="${f((k - i) * cs)}" height="${f(cs)}"/>`;
+            i = k;
+          }
+        }
+        return s + '</g>';
+      };
+      if (p.contour === 'pixel') out.push(runs((i, j) => { if (at(i, j) !== 0) return false; for (let dj = -1; dj <= 1; dj++) for (let di = -1; di <= 1; di++) if ((di || dj) && at(i + di, j + dj) > 0) return true; return false; }, p.trait));
+      for (let lv = 1; lv <= p.niveaux; lv++) out.push(runs((i, j) => at(i, j) === lv, pal[(lv - 1) % pal.length]));
+      if (p.contour === 'trait') {
+        const lw = Math.max(0.5, p.epaisseur * cs);
+        let d = '';
+        const diff = (x, y) => x !== y && (p.entre || x === 0 || y === 0);
+        for (let j = 0; j < G; j++) for (let i = 0; i < G; i++) {
+          const a = at(i, j);
+          if (diff(a, at(i + 1, j))) d += `M${f(x0 + (i + 1) * cs)} ${f(y0 + j * cs)}v${f(cs)}`;
+          if (diff(a, at(i, j + 1))) d += `M${f(x0 + i * cs)} ${f(y0 + (j + 1) * cs)}h${f(cs)}`;
+          if (i === 0 && diff(a, at(i - 1, j))) d += `M${f(x0)} ${f(y0 + j * cs)}v${f(cs)}`;
+          if (j === 0 && diff(a, at(i, j - 1))) d += `M${f(x0 + i * cs)} ${f(y0)}h${f(cs)}`;
+        }
+        if (d) out.push(`<path d="${d}" stroke="${p.trait}" stroke-width="${f(lw)}" stroke-linecap="square" fill="none"/>`);
+      }
+      return out.join('');
+    }
+    function exportSVG(tileOnly) {
+      const L = levels(app.time), G = p.pixels;
+      if (tileOnly) {
+        const cs = 16, S = G * cs;
+        return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${S} ${S}" width="${S}" height="${S}"><rect width="${S}" height="${S}" fill="${p.fond}"/>${tileSVGBody(L, G, cs, 0, 0)}</svg>`;
+      }
+      const { w, h } = app.size, g = tileGeom(), cs = g.tile / G, ph = app.time / p.boucle;
+      const ox = ((w / 2 - g.tile / 2 + p.defilX * ph * g.tile) % g.tile + g.tile) % g.tile - g.tile;
+      const oy = ((h / 2 - g.tile / 2 + p.defilY * ph * g.tile) % g.tile + g.tile) % g.tile - g.tile;
+      // La tuile est définie une fois, puis réutilisée (<use>) sur tout le cadre.
+      const out = [`<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}">`,
+        `<defs><g id="tuile">${tileSVGBody(L, G, cs, 0, 0)}</g><clipPath id="cadre"><rect width="${w}" height="${h}"/></clipPath></defs>`,
+        `<rect width="${w}" height="${h}" fill="${p.fond}"/><g clip-path="url(#cadre)">`];
+      for (let y = oy; y < h; y += g.tile) for (let x = ox; x < w; x += g.tile) out.push(`<use href="#tuile" xlink:href="#tuile" x="${x.toFixed(2)}" y="${y.toFixed(2)}"/>`);
+      out.push('</g></svg>');
+      return out.join('\n');
+    }
+  </script>
+</body>
+</html>

@@ -1,0 +1,15 @@
+{
+  "slug": "bitmap-raccord",
+  "title": "Bitmap raccord",
+  "type": "pattern",
+  "description": "Taches organiques en gros pixels, raccordables : bruit fractal périodique à plusieurs niveaux, contours, pinceau qui se répète dans chaque tuile, export de tuile PNG et SVG.",
+  "tags": ["bitmap", "pixel", "raccord", "bruit", "motif", "boucle"],
+  "inspiration": [
+    "Moodboard de Noé, fiche 6 — motifs bitmap raccordables",
+    "Ken Perlin — bruit et fbm ; bruit périodique pour textures raccordables",
+    "Palettes bitmap, trame-nuit, kegelbahn, menthe, glyphes, salon, papier-60"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
