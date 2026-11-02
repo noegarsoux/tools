@@ -1,0 +1,318 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Échos</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Une forme qui se déplace laisse derrière elle ses contours passés : l'écho k est la forme au temps
+    // t − k·Δ, poussée d'un décalage fixe (balayage). Les échos sont peints du plus ancien au plus récent,
+    // chacun masque en partie les précédents, si bien qu'il ne reste que des lignes décalées. La forme
+    // présente est sombre et floue, avec un lisere lumineux.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const off = document.createElement('canvas'), octx = off.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const MENTHE = PAL('menthe'), NUIT = PAL('trame-nuit'), ACIDE = PAL('acide'), KB = PAL('kegelbahn'), ORB = PAL('orbite');
+    const LUZ = PAL('luzern'), P60 = PAL('papier-60'), GOOD = PAL('good-room'), BIEN = PAL('biennale');
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: false,
+      finish: { grain: 0.16, vignette: 0.12 },
+      hint: 'Glissez la forme pour la déplacer : ses échos suivent · molette : nombre d’échos',
+      params: {
+        'Forme': {
+          forme: { type: 'select', label: 'Forme', options: { triangle: 'Triangle', carre: 'Carré', cercle: 'Cercle', polygone: 'Polygone', etoile: 'Étoile', goutte: 'Goutte', logo: 'Logo' }, value: 'triangle' },
+          cotes: { type: 'range', label: 'Côtés / branches', min: 3, max: 12, step: 1, value: 5, show: (q) => q.forme === 'polygone' || q.forme === 'etoile' },
+          creux: { type: 'range', label: 'Creux de l’étoile', min: 0.1, max: 0.95, step: 0.01, value: 0.5, show: (q) => q.forme === 'etoile' },
+          image: { type: 'file', label: 'Logo ou image', accept: 'image/*', show: (q) => q.forme === 'logo' },
+          taille: { type: 'range', label: 'Taille', min: 0.05, max: 0.8, step: 0.005, value: 0.42 },
+          arrondi: { type: 'range', label: 'Arrondi des angles', min: 0, max: 0.4, step: 0.005, value: 0.06, show: (q) => q.forme !== 'cercle' && q.forme !== 'logo' && q.forme !== 'goutte' },
+          angle: { type: 'range', label: 'Angle (°)', min: -180, max: 180, step: 1, value: 0 },
+        },
+        'Trajectoire': {
+          trajet: { type: 'segmented', label: 'Trajet', options: { lissajous: 'Lissajous', cercle: 'Cercle', balayage: 'Balayage', fixe: 'Fixe' }, value: 'lissajous' },
+          amplitude: { type: 'range', label: 'Amplitude', min: 0, max: 0.5, step: 0.005, value: 0.16, show: (q) => q.trajet !== 'fixe' },
+          fx: { type: 'range', label: 'Fréquence X', min: 1, max: 5, step: 1, value: 1, show: (q) => q.trajet === 'lissajous' },
+          fy: { type: 'range', label: 'Fréquence Y', min: 1, max: 5, step: 1, value: 2, show: (q) => q.trajet === 'lissajous' },
+          direction: { type: 'range', label: 'Direction du balayage (°)', min: -180, max: 180, step: 1, value: 0, show: (q) => q.trajet === 'balayage' },
+          tourne: { type: 'range', label: 'Tours de la forme', min: -3, max: 3, step: 1, value: 0 },
+          pulsation: { type: 'range', label: 'Pulsation', min: 0, max: 0.5, step: 0.01, value: 0.06 },
+          boucle: { type: 'range', label: 'Boucle (s)', min: 2, max: 30, step: 0.5, value: 10 },
+        },
+        'Échos': {
+          echos: { type: 'range', label: 'Nombre d’échos', min: 0, max: 120, step: 1, value: 30 },
+          retard: { type: 'range', label: 'Retard entre échos (s)', min: 0, max: 0.4, step: 0.002, value: 0.05 },
+          decalage: { type: 'range', label: 'Décalage par écho', min: 0, max: 0.03, step: 0.0005, value: 0.008 },
+          sens: { type: 'range', label: 'Sens du décalage (°)', min: -180, max: 180, step: 1, value: -60 },
+          croissance: { type: 'range', label: 'Croissance par écho', min: -0.03, max: 0.03, step: 0.0005, value: 0.004 },
+          trait: { type: 'range', label: 'Épaisseur des lignes', min: 0.2, max: 6, step: 0.05, value: 1.5 },
+          estompe: { type: 'range', label: 'Estompe', min: 0, max: 1, step: 0.01, value: 0.45 },
+          opaques: { type: 'toggle', label: 'Échos opaques', value: true },
+        },
+        'Lueur': {
+          lisere: { type: 'range', label: 'Liseré', min: 0, max: 8, step: 0.05, value: 2.2 },
+          lueur: { type: 'range', label: 'Rayon de lueur', min: 0, max: 0.12, step: 0.001, value: 0.035 },
+          intensite: { type: 'range', label: 'Intensité', min: 0, max: 2, step: 0.01, value: 1 },
+          flou: { type: 'range', label: 'Flou de la forme', min: 0, max: 0.08, step: 0.001, value: 0.018 },
+        },
+        'Couleur': {
+          fond: { type: 'color', label: 'Fond', value: MENTHE[0] },
+          corps: { type: 'color', label: 'Forme', value: MENTHE[1] },
+          lignes: { type: 'color', label: 'Lignes', value: MENTHE[1] },
+          eclat: { type: 'color', label: 'Lueur', value: MENTHE[2] },
+          degrade: { type: 'toggle', label: 'Lignes en dégradé', value: false },
+          palette: { type: 'palette', label: 'Dégradé des échos', value: [MENTHE[3], MENTHE[1]], show: (q) => q.degrade },
+        },
+      },
+      presets: {
+        'Menthe': {},
+        'Nuit acide': { forme: 'cercle', taille: 0.3, trajet: 'lissajous', fx: 2, fy: 3, amplitude: 0.2, echos: 40, retard: 0.03, decalage: 0.002, croissance: 0, trait: 0.9, estompe: 0.85, opaques: false, lisere: 2, lueur: 0.06, intensite: 1.4, flou: 0.03, fond: NUIT[0], corps: '#000000', lignes: NUIT[1], eclat: ACIDE[2], degrade: false },
+        'Kegelbahn': { forme: 'triangle', taille: 0.42, arrondi: 0, trajet: 'fixe', tourne: 1, pulsation: 0.1, echos: 14, retard: 0.08, decalage: 0.012, sens: 90, croissance: 0.02, trait: 3, estompe: 0, opaques: true, lisere: 0, lueur: 0, flou: 0, fond: KB[0], corps: KB[1], lignes: KB[0], eclat: KB[3], degrade: true, palette: KB.slice(1) },
+        'Étoile orbite': { forme: 'etoile', cotes: 6, creux: 0.45, taille: 0.3, arrondi: 0.03, trajet: 'cercle', amplitude: 0.14, tourne: -1, echos: 30, retard: 0.04, decalage: 0.004, sens: 30, croissance: 0.006, trait: 1.4, estompe: 0.6, opaques: true, lisere: 2.5, lueur: 0.03, intensite: 0.8, flou: 0.01, fond: ORB[0], corps: ORB[1], lignes: ORB[1], eclat: ORB[2] },
+        'Balayage papier': { forme: 'carre', taille: 0.4, arrondi: 0.12, angle: 12, trajet: 'balayage', direction: 0, amplitude: 0.3, echos: 60, retard: 0.02, decalage: 0.0015, sens: 180, croissance: 0, trait: 0.8, estompe: 0.4, opaques: true, lisere: 0, lueur: 0, flou: 0, fond: P60[0], corps: P60[1], lignes: P60[1], eclat: P60[0] },
+        'Chrome Luzern': { forme: 'goutte', taille: 0.36, trajet: 'lissajous', fx: 1, fy: 1, amplitude: 0.12, tourne: 1, echos: 22, retard: 0.06, decalage: 0.01, sens: -120, croissance: -0.012, trait: 2.4, estompe: 0.3, opaques: true, lisere: 3, lueur: 0.05, intensite: 1.2, flou: 0.02, fond: LUZ[3], corps: LUZ[1], lignes: LUZ[2], eclat: LUZ[0], degrade: true, palette: [LUZ[0], LUZ[1], LUZ[2]] },
+        'Good Room': { forme: 'polygone', cotes: 4, taille: 0.26, arrondi: 0.2, angle: 45, trajet: 'lissajous', fx: 3, fy: 2, amplitude: 0.22, echos: 9, retard: 0.12, decalage: 0, croissance: 0, trait: 0, estompe: 0, opaques: true, lisere: 0, lueur: 0, flou: 0, fond: GOOD[0], corps: GOOD[1], lignes: GOOD[0], eclat: GOOD[2], degrade: true, palette: [GOOD[4], GOOD[3], GOOD[2], GOOD[1]] },
+        'Affiche': { forme: 'cercle', taille: 0.42, trajet: 'balayage', direction: 90, amplitude: 0.1, echos: 18, retard: 0.05, decalage: 0.008, sens: -90, croissance: 0.012, trait: 2.2, estompe: 0, opaques: true, lisere: 0, lueur: 0.02, intensite: 0.5, flou: 0, fond: BIEN[0], corps: BIEN[2], lignes: BIEN[1], eclat: BIEN[4] },
+      },
+      brand(colors) {
+        return { fond: colors[0], corps: colors[1] || colors[0], lignes: colors[1] || colors[0], eclat: colors[2] || colors[1] || colors[0], palette: colors.length > 2 ? colors.slice(2) : colors.slice() };
+      },
+      pointer: {
+        down: (q) => { dragging = { x: q.x, y: q.y, ox: offset[0], oy: offset[1] }; },
+        drag: (q) => { if (dragging) { const { w, h } = app.size, u = Math.min(w, h), m0 = p.amplitude * (p.trajet === 'fixe' ? 0 : 1) + p.taille * 0.5, mx = Math.max(0, w / u / 2 - m0), my = Math.max(0, h / u / 2 - m0); offset = [clamp(dragging.ox + (q.x - dragging.x) / u, -mx, mx), clamp(dragging.oy + (q.y - dragging.y) / u, -my, my)]; } },
+        up: () => { dragging = null; },
+        wheel: (q, dy) => app.set('echos', Math.round(Math.max(0, Math.min(120, p.echos * Math.exp(-dy * 0.0015) + (dy < 0 ? 1 : 0))))),
+      },
+      onChange: (key) => { if (key === '*') offset = [0, 0]; },
+      export: { name: 'echos', svg: () => exportSVG() },
+    });
+    const p = app.params;
+    let dragging = null, offset = [0, 0];
+    // Historique du décalage au pointeur : les échos le rejouent avec leur retard.
+    const hist = [];
+    let clock = 0;
+
+    const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
+    const hex = (c) => { const n = parseInt(c.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; };
+    const rgb = (a) => `rgb(${a[0] | 0},${a[1] | 0},${a[2] | 0})`;
+    function ramp(pal, u) {
+      if (pal.length === 1) return hex(pal[0]);
+      const f = clamp(u, 0, 1) * (pal.length - 1), i = Math.min(pal.length - 2, Math.floor(f)), k = f - i;
+      const a = hex(pal[i]), b = hex(pal[i + 1]);
+      return [a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k, a[2] + (b[2] - a[2]) * k];
+    }
+
+    // ——— Forme ———
+    // Contour en coordonnées locales (rayon 1), avec angles arrondis par des arcs tangents.
+    function outline() {
+      const pts = [];
+      const n = p.forme === 'triangle' ? 3 : p.forme === 'carre' ? 4 : p.cotes;
+      if (p.forme === 'cercle') return null;
+      if (p.forme === 'goutte') {
+        for (let i = 0; i < 96; i++) { const a = TAU * i / 96 - Math.PI / 2; const r = 0.75 + 0.25 * Math.cos(a + Math.PI / 2) ; pts.push([Math.cos(a) * r * (1 - 0.35 * Math.sin(a)), Math.sin(a) * r]); }
+        return { pts, smooth: true };
+      }
+      if (p.forme === 'etoile') {
+        for (let i = 0; i < n * 2; i++) { const a = Math.PI * i / n - Math.PI / 2, r = i % 2 ? p.creux : 1; pts.push([Math.cos(a) * r, Math.sin(a) * r]); }
+      } else {
+        for (let i = 0; i < n; i++) { const a = TAU * i / n - Math.PI / 2 + (n === 4 ? Math.PI / 4 : 0); pts.push([Math.cos(a), Math.sin(a)]); }
+      }
+      // Centre optique du triangle : on le recentre sur sa boîte.
+      let y0 = 1e9, y1 = -1e9; for (const q of pts) { y0 = Math.min(y0, q[1]); y1 = Math.max(y1, q[1]); }
+      const dy = -(y0 + y1) / 2; for (const q of pts) q[1] += dy;
+      return { pts, smooth: false };
+    }
+    function tracePath(c, S, x, y, r, rot) {
+      c.beginPath();
+      if (!S) { c.arc(x, y, r, 0, TAU); return; }
+      const cs = Math.cos(rot), sn = Math.sin(rot);
+      const P = S.pts.map((q) => [x + (q[0] * cs - q[1] * sn) * r, y + (q[0] * sn + q[1] * cs) * r]);
+      if (S.smooth || p.arrondi <= 0) { c.moveTo(P[0][0], P[0][1]); for (let i = 1; i < P.length; i++) c.lineTo(P[i][0], P[i][1]); c.closePath(); return; }
+      const rr = p.arrondi * r, n = P.length;
+      const m = (a, b) => [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+      const s0 = m(P[n - 1], P[0]);
+      c.moveTo(s0[0], s0[1]);
+      for (let i = 0; i < n; i++) { const a = P[i], b = P[(i + 1) % n], mb = m(a, b); c.arcTo(a[0], a[1], mb[0], mb[1], rr); }
+      c.closePath();
+    }
+
+    // Logo : silhouette mise en cache, teintée à la demande.
+    let logoSrc = null, logoMask = null;
+    const tintCache = new Map();
+    function logoTinted(col) {
+      const img = p.image || app.logoImg;
+      if (!img) return null;
+      if (img !== logoSrc) {
+        logoSrc = img; tintCache.clear();
+        const iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height, k = 512 / Math.max(iw, ih);
+        logoMask = document.createElement('canvas'); logoMask.width = Math.max(1, Math.round(iw * k)); logoMask.height = Math.max(1, Math.round(ih * k));
+        const x = logoMask.getContext('2d', { willReadFrequently: true }); x.drawImage(img, 0, 0, logoMask.width, logoMask.height);
+        const d = x.getImageData(0, 0, logoMask.width, logoMask.height);
+        for (let i = 0; i < d.data.length; i += 4) { const l = (d.data[i] * 0.2126 + d.data[i + 1] * 0.7152 + d.data[i + 2] * 0.0722) / 255; d.data[i + 3] = Math.round(d.data[i + 3] * (1 - l)); d.data[i] = d.data[i + 1] = d.data[i + 2] = 0; }
+        x.putImageData(d, 0, 0);
+      }
+      if (!tintCache.has(col)) {
+        const cv = document.createElement('canvas'); cv.width = logoMask.width; cv.height = logoMask.height;
+        const x = cv.getContext('2d'); x.drawImage(logoMask, 0, 0); x.globalCompositeOperation = 'source-in'; x.fillStyle = col; x.fillRect(0, 0, cv.width, cv.height);
+        tintCache.set(col, cv);
+      }
+      return tintCache.get(col);
+    }
+    function drawLogo(c, col, x, y, r, rot, ring) {
+      const cv = logoTinted(col);
+      if (!cv) return false;
+      const k = 2 * r / Math.max(cv.width, cv.height);
+      c.save(); c.translate(x, y); c.rotate(rot);
+      if (ring > 0) for (let i = 0; i < 12; i++) { const a = TAU * i / 12; c.drawImage(cv, -cv.width * k / 2 + Math.cos(a) * ring, -cv.height * k / 2 + Math.sin(a) * ring, cv.width * k, cv.height * k); }
+      else c.drawImage(cv, -cv.width * k / 2, -cv.height * k / 2, cv.width * k, cv.height * k);
+      c.restore();
+      return true;
+    }
+
+    // ——— Mouvement ———
+    function pose(t) {
+      const th = TAU * t / p.boucle, A = p.amplitude;
+      let x = 0, y = 0;
+      if (p.trajet === 'lissajous') { x = A * Math.sin(p.fx * th); y = A * Math.sin(p.fy * th + Math.PI / 2 * (p.fx === p.fy ? 1 : 0)); }
+      else if (p.trajet === 'cercle') { x = A * Math.cos(th); y = A * Math.sin(th); }
+      else if (p.trajet === 'balayage') { const d = p.direction * Math.PI / 180, s = A * Math.sin(th); x = Math.cos(d) * s; y = Math.sin(d) * s; }
+      const rot = p.angle * Math.PI / 180 + p.tourne * th;
+      const sc = 1 + p.pulsation * Math.sin(th * 2);
+      return { x, y, rot, sc };
+    }
+    function offsetAt(lag) {
+      if (!hist.length || lag <= 0) return offset;
+      const target = clock - lag;
+      for (let i = hist.length - 1; i >= 0; i--) if (hist[i].t <= target) return hist[i].o;
+      return hist[0].o;
+    }
+
+    // Liste des échos du plus ancien au plus récent (le dernier est la forme présente).
+    function echoes(t) {
+      const { w, h } = app.size, u = Math.min(w, h), K = p.echos, out = [];
+      const sd = p.sens * Math.PI / 180;
+      for (let k = K; k >= 0; k--) {
+        const P = pose(t - k * p.retard), o = offsetAt(k * p.retard);
+        const push = k * p.decalage * u;
+        const x = w / 2 + (P.x + o[0]) * u + Math.cos(sd) * push, y = h / 2 + (P.y + o[1]) * u + Math.sin(sd) * push;
+        const r = Math.max(1, p.taille * u * 0.5 * P.sc * (1 + k * p.croissance));
+        out.push({ k, x, y, r, rot: P.rot, f: K === 0 ? 0 : k / K });
+      }
+      return out;
+    }
+
+    function lineColor(e) { return p.degrade ? rgb(ramp(p.palette.length ? p.palette : [p.lignes], 1 - e.f)) : p.lignes; }
+
+    function render(c, t) {
+      const { w, h } = app.size, u = Math.min(w, h), S = outline(), E = echoes(t), lw = p.trait * u / 1000;
+      c.fillStyle = p.fond; c.fillRect(0, 0, w, h);
+      c.lineJoin = 'round'; c.lineCap = 'round';
+      const isLogo = p.forme === 'logo' && (p.image || app.logoImg);
+      for (const e of E) {
+        if (e.k === 0) break;
+        const a = 1 - p.estompe * e.f, col = lineColor(e);
+        c.globalAlpha = a;
+        if (isLogo) {
+          if (lw > 0) drawLogo(c, col, e.x, e.y, e.r, e.rot, lw);
+          if (p.opaques) { c.globalAlpha = 1; drawLogo(c, p.degrade && lw === 0 ? col : p.fond, e.x, e.y, e.r, e.rot, 0); }
+        } else {
+          tracePath(c, S, e.x, e.y, e.r, e.rot);
+          if (p.opaques) { c.globalAlpha = 1; c.fillStyle = p.degrade && lw === 0 ? col : p.fond; c.fill(); c.globalAlpha = a; }
+          if (lw > 0) { c.strokeStyle = col; c.lineWidth = lw; c.stroke(); }
+        }
+      }
+      c.globalAlpha = 1;
+      // Forme présente : corps flou puis lisere lumineux.
+      const e = E[E.length - 1], blur = p.flou * u, glow = p.lueur * u, rim = p.lisere * u / 1000;
+      if (glow > 0 && p.intensite > 0) {
+        c.save(); c.shadowColor = p.eclat; c.shadowBlur = glow * 2;
+        for (let i = 0; i < Math.ceil(p.intensite); i++) {
+          c.globalAlpha = Math.min(1, p.intensite - i);
+          if (isLogo) drawLogo(c, p.eclat, e.x, e.y, e.r, e.rot, rim); else { tracePath(c, S, e.x, e.y, e.r, e.rot); c.strokeStyle = p.eclat; c.lineWidth = Math.max(rim, u / 600); c.stroke(); }
+        }
+        c.restore();
+      }
+      if (rim > 0) {
+        c.globalAlpha = 1;
+        if (isLogo) drawLogo(c, p.eclat, e.x, e.y, e.r, e.rot, rim);
+        else { tracePath(c, S, e.x, e.y, e.r, e.rot); c.strokeStyle = p.eclat; c.lineWidth = rim * 2; c.stroke(); }
+      }
+      c.save();
+      if (blur > 0) c.filter = `blur(${(blur * app.size.dpr).toFixed(2)}px)`;
+      if (isLogo) drawLogo(c, p.corps, e.x, e.y, e.r, e.rot, 0);
+      else { tracePath(c, S, e.x, e.y, e.r, e.rot); c.fillStyle = p.corps; c.fill(); }
+      c.restore();
+    }
+
+    app.loop((t, dt) => {
+      const { w, h, dpr } = app.size;
+      clock += dt || 0;
+      hist.push({ t: clock, o: offset.slice() });
+      while (hist.length > 2 && hist[1].t < clock - 130 * 0.4) hist.shift();
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.filter = 'none';
+      render(ctx, t);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      app.finish(ctx);
+    });
+
+    // ——— SVG : contours vectoriels (lueur et flou en filtres SVG) ———
+    function exportSVG() {
+      const { w, h } = app.size, u = Math.min(w, h), S = outline(), E = echoes(app.time), lw = p.trait * u / 1000, f = (v) => Math.round(v * 100) / 100;
+      const pathOf = (e) => {
+        if (!S) return null;
+        let d = '';
+        const rec = { beginPath() {}, moveTo(x, y) { d += `M${f(x)} ${f(y)}`; }, lineTo(x, y) { d += `L${f(x)} ${f(y)}`; }, closePath() { d += 'Z'; }, arc() {},
+          arcTo(x1, y1, x2, y2, r) {
+            // Approximation de arcTo par une courbe quadratique passant par le sommet.
+            const last = d.match(/(-?[\d.]+) (-?[\d.]+)[^\d]*$/);
+            const px = last ? +last[1] : x1, py = last ? +last[2] : y1;
+            const v1 = [px - x1, py - y1], v2 = [x2 - x1, y2 - y1], l1 = Math.hypot(...v1) || 1, l2 = Math.hypot(...v2) || 1;
+            const k = Math.min(r, l1, l2);
+            const a = [x1 + v1[0] / l1 * k, y1 + v1[1] / l1 * k], b = [x1 + v2[0] / l2 * k, y1 + v2[1] / l2 * k];
+            d += `L${f(a[0])} ${f(a[1])}Q${f(x1)} ${f(y1)} ${f(b[0])} ${f(b[1])}L${f(x2)} ${f(y2)}`;
+          } };
+        tracePath(rec, S, e.x, e.y, e.r, e.rot);
+        return d;
+      };
+      const isLogo = p.forme === 'logo' && (p.image || app.logoImg);
+      const img = (e, col, extra = '') => {
+        const cv = logoTinted(col), k = 2 * e.r / Math.max(cv.width, cv.height), W = cv.width * k, H = cv.height * k;
+        return `<image href="${cv.toDataURL('image/png')}" x="${f(-W / 2)}" y="${f(-H / 2)}" width="${f(W)}" height="${f(H)}" transform="translate(${f(e.x)} ${f(e.y)}) rotate(${f(e.rot * 180 / Math.PI)})"${extra}/>`;
+      };
+      const shape = (e, attrs) => (S ? `<path d="${pathOf(e)}" ${attrs}/>` : `<circle cx="${f(e.x)}" cy="${f(e.y)}" r="${f(e.r)}" ${attrs}/>`);
+      if (isLogo) {
+        // Logo : silhouettes matricielles teintées (le contour n'est pas vectorisable proprement ici).
+        const outL = [`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}">`, `<rect width="${w}" height="${h}" fill="${p.fond}"/>`];
+        for (const e of E) { if (e.k === 0) break; outL.push(img(e, lineColor(e), ` opacity="${f(1 - p.estompe * e.f)}"`)); }
+        outL.push(img(E[E.length - 1], p.corps), '</svg>');
+        return outL.join('\n');
+      }
+      const out = [`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}">`,
+        `<defs><filter id="flou" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="${f(p.flou * u)}"/></filter><filter id="lueur" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="${f(p.lueur * u)}"/></filter></defs>`,
+        `<rect width="${w}" height="${h}" fill="${p.fond}"/>`];
+      for (const e of E) {
+        if (e.k === 0) break;
+        const a = 1 - p.estompe * e.f, col = lineColor(e);
+        const fill = p.opaques ? `fill="${p.degrade && lw === 0 ? col : p.fond}"` : 'fill="none"';
+        out.push(shape(e, `${fill}${lw > 0 ? ` stroke="${col}" stroke-width="${f(lw)}" stroke-opacity="${f(a)}" stroke-linejoin="round"` : ''}`));
+      }
+      const e = E[E.length - 1], rim = p.lisere * u / 1000;
+      if (p.lueur > 0 && p.intensite > 0) out.push(shape(e, `fill="none" stroke="${p.eclat}" stroke-width="${f(Math.max(rim, u / 600) * 3)}" filter="url(#lueur)" opacity="${f(Math.min(1, p.intensite))}"`));
+      if (rim > 0) out.push(shape(e, `fill="none" stroke="${p.eclat}" stroke-width="${f(rim * 2)}"`));
+      out.push(shape(e, `fill="${p.corps}"${p.flou > 0 ? ' filter="url(#flou)"' : ''}`));
+      out.push('</svg>');
+      return out.join('\n');
+    }
+  </script>
+</body>
+</html>
