@@ -1,0 +1,266 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Méandres</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Méandres : l'axe de la rivière migre selon Howard et Knutson. Chaque point se déplace vers la rive externe
+    // à une vitesse qui dépend de la courbure locale (qui freine) et de la courbure en amont (qui pousse) :
+    // les boucles grandissent, glissent vers l'aval, se touchent et se recoupent en bras morts.
+    // Les anciens lits restent dessinés sur la plaine, par époques de couleur, comme sur les cartes de Fisk.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const PYR = PAL('pyramides'), EVT = PAL('eventail'), MENTHE = PAL('menthe'), BIEN = PAL('biennale'), KB = PAL('kegelbahn'), THERM = PAL('thermique');
+
+    let pending = [], sinceFull = 0, simKey = '', frozen = false, rng = Math.random, U = [], V = [], traces = [], lakes = [], stepN = 0, flood = 0, held = null, layer = null, layerKey = '', layerDirty = true, nTrace = 0;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.06, vignette: 0.12 },
+      hint: 'Glissez pour pousser le lit · touchez pour une crue · molette : vitesse',
+      notes: 'Dans une boucle, l’eau frappe la rive externe et l’érode, pendant que la rive interne se couvre de sable. Le modèle de Howard et Knutson résume cela : chaque point du lit avance vers l’extérieur selon la courbure en amont, freiné par sa courbure propre. Les boucles grossissent et glissent vers l’aval jusqu’à se toucher ; la rivière coupe alors au plus court et abandonne un bras mort, qui se comble peu à peu. Les anciens lits restent gravés dans la plaine, comme sur les cartes du Mississippi dessinées par Harold Fisk en 1944.',
+      params: {
+        'Rivière': {
+          largeur: { type: 'range', label: 'Largeur du lit', min: 0.006, max: 0.035, step: 0.001, value: 0.014 },
+          vitesse: { type: 'range', label: 'Vitesse', min: 0, max: 1, step: 0.01, value: 0.45 },
+          asymetrie: { type: 'range', label: 'Poussée de l’amont', min: 1.6, max: 4, step: 0.05, value: 2.5 },
+          portee: { type: 'range', label: 'Longueur des boucles', min: 0.4, max: 2, step: 0.05, value: 0.8 },
+          alea: { type: 'range', label: 'Aléa', min: 0, max: 1, step: 0.01, value: 0.3 },
+          vallee: { type: 'range', label: 'Largeur de la vallée', min: 0.2, max: 1, step: 0.01, value: 0.72 },
+        },
+        'Mémoire': {
+          intervalle: { type: 'range', label: 'Pas entre deux lits gardés', min: 3, max: 60, step: 1, value: 14 },
+          memoire: { type: 'range', label: 'Lits gardés', min: 10, max: 300, step: 1, value: 140 },
+          epoque: { type: 'range', label: 'Lits par époque de couleur', min: 2, max: 40, step: 1, value: 14 },
+          comblement: { type: 'range', label: 'Durée des bras morts', min: 0.1, max: 1, step: 0.01, value: 0.5 },
+        },
+        'Rendu': {
+          style: { type: 'segmented', label: 'Style', options: { fisk: 'Fisk', lidar: 'Lidar', trait: 'Trait' }, value: 'fisk' },
+          eau: { type: 'color', label: 'Eau', value: '#2f5f9e' },
+          fond: { type: 'color', label: 'Plaine', value: '#efe7d4' },
+          ages: { type: 'palette', label: 'Époques', value: ['#e8b9a6', '#d9cf8f', '#a9cfa2', '#e6a2b8', '#b9b3dc', '#f0c98a', '#9fd0d0'] },
+          berges: { type: 'range', label: 'Berges', min: 0, max: 1, step: 0.01, value: 0.5 },
+        },
+      },
+      presets: {
+        'Fisk 1944': {},
+        'Lidar': { style: 'lidar', fond: '#8c8c8a', eau: '#1d1f22', memoire: 260, intervalle: 6 },
+        'Trait': { style: 'trait', fond: '#f4f1ea', eau: '#151515', ages: ['#151515'], memoire: 120, intervalle: 10 },
+        'Grand fleuve': { largeur: 0.022, vallee: 0.85, epoque: 10, berges: 0.7 },
+        'Ruisseau': { largeur: 0.007, alea: 0.6, intervalle: 8, memoire: 200, vallee: 0.5 },
+        'Divagation': { vitesse: 0.9, asymetrie: 3.4, comblement: 0.9, alea: 0.5 },
+        'Nuit': { style: 'lidar', fond: '#14161c', eau: '#7fd3ff', memoire: 220, intervalle: 6 },
+        'Pyramides': { fond: PYR[0], eau: PYR[5], ages: [PYR[2], PYR[3], PYR[4], '#d8cfc4', PYR[1]] },
+        'Éventail': { fond: '#efe3c8', eau: EVT[1], ages: [EVT[2], EVT[3], EVT[4], '#d9b36a'] },
+        'Menthe': { style: 'trait', fond: MENTHE[0], eau: MENTHE[1], ages: [MENTHE[3], MENTHE[2]] },
+        'Thermique': { fond: THERM[0], eau: THERM[1], ages: [THERM[2], THERM[3], THERM[4], THERM[5]] },
+      },
+      brand(colors) {
+        const lum = (x) => { const c = hex(x); return c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114; };
+        const all = colors.slice().sort((a, b) => lum(b) - lum(a));
+        return { fond: all[0], eau: all[all.length - 1], ages: all.length > 2 ? all.slice(1, -1) : [all[Math.min(1, all.length - 1)]] };
+      },
+      pointer: {
+        down: (q) => { held = { x: q.x, y: q.y, x0: q.x, y0: q.y, moved: false }; },
+        drag: (q) => { if (!held) return; if (Math.hypot(q.x - held.x0, q.y - held.y0) > 5) held.moved = true; push(held.x, held.y, q.x - held.x, q.y - held.y); held.x = q.x; held.y = q.y; },
+        up: () => { if (held && !held.moved) flood = 1; held = null; },
+        wheel: (q, dy) => app.set('vitesse', Math.max(0, Math.min(1, +(p.vitesse + (dy > 0 ? -0.05 : 0.05)).toFixed(2)))),
+      },
+      onChange(k) { if (k === '*' || ['largeur', 'vallee'].includes(k)) simKey = ''; layerDirty = true; frozen = false; },
+      onSeed() { simKey = ''; frozen = false; },
+      export: { name: 'meandres', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    const hex = (x) => { const n = parseInt(x.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; };
+    const mix = (a, b, t) => { const A = hex(a), B = hex(b); return '#' + A.map((v, i) => Math.round(v + (B[i] - v) * t).toString(16).padStart(2, '0')).join(''); };
+    const lumHex = (x) => { const c = hex(x); return c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114; };
+    function mulberry(a) { return () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+    const gauss = () => { let u = 0, v = 0; while (!u) u = rng(); v = rng(); return Math.sqrt(-2 * Math.log(u)) * Math.cos(TAU * v); };
+
+    // ——— Repère : la rivière coule le long du grand côté (u), la vallée s'étend sur le petit (v) ———
+    function frame() { const { w, h } = app.size, long = w >= h; return { w, h, long, L: long ? w : h, S: long ? h : w }; }
+    const toXY = (u, v, F) => F.long ? [u, v] : [F.w - v, u];
+    const toUV = (x, y, F) => F.long ? [x, y] : [y, F.w - x];
+    const Wc = () => p.largeur * Math.min(app.size.w, app.size.h);
+
+    function reset() {
+      const F = frame(), W = Wc(), ds = W * 0.5; rng = mulberry(app.seed * 6007 + 11);
+      U = []; V = []; traces = []; pending = []; lakes = []; stepN = 0; nTrace = 0; flood = 0; layerDirty = true;
+      const u0 = -F.L * 0.45, u1 = F.L * 1.06, n = Math.ceil((u1 - u0) / ds);
+      for (let i = 0; i <= n; i++) { U.push(u0 + (u1 - u0) * i / n); V.push(F.S / 2 + Math.sin(i * 0.05 + rng() * 0.1) * W * 0.3 + (rng() - 0.5) * W * 0.2); }
+    }
+
+    // ——— Un pas de migration ———
+    function step() {
+      const F = frame(), W = Wc(), ds = W * 0.5, n = U.length;
+      const ang = new Float32Array(n), C = new Float32Array(n);
+      for (let i = 0; i < n - 1; i++) ang[i] = Math.atan2(V[i + 1] - V[i], U[i + 1] - U[i]);
+      for (let i = 1; i < n - 1; i++) { let d = ang[i] - ang[i - 1]; d -= Math.round(d / TAU) * TAU; C[i] = d / ds * W; }
+      // noyau amont : la courbure des points en amont pousse le point vers l'extérieur
+      const K = Math.ceil(p.portee * 30), decay = ds / (W * p.portee), wts = new Float32Array(K); let sw = 0;
+      for (let k = 0; k < K; k++) { wts[k] = Math.exp(-decay * (k + 1)); sw += wts[k]; }
+      const E = (1.6 + flood * 3) * (W / 14), noise = p.alea * 0.03 * W * (1 + flood * 2), nu = new Float32Array(n), nv = new Float32Array(n);
+      const band = F.S * 0.5 * p.vallee, mid = F.S / 2;
+      for (let i = 1; i < n - 1; i++) {
+        let s = 0; for (let k = 0; k < K && i - k - 1 >= 0; k++) s += C[i - k - 1] * wts[k];
+        const R = -C[i] + p.asymetrie * s / sw;
+        let tu = U[i + 1] - U[i - 1], tv = V[i + 1] - V[i - 1]; const tl = Math.hypot(tu, tv) || 1; tu /= tl; tv /= tl;
+        const taper = Math.min(1, i / 12, (n - 1 - i) / 12), m = (R * E + gauss() * noise) * taper;
+        nu[i] = U[i] + tv * m; nv[i] = V[i] - tu * m;
+        // la vallée : au-delà de ses bords, le terrain résiste et repousse le lit
+        const off = nv[i] - mid; if (Math.abs(off) > band) nv[i] -= (off - Math.sign(off) * band) * 0.2;
+      }
+      nu[0] = U[0]; nv[0] = V[0]; nu[n - 1] = U[n - 1]; nv[n - 1] = V[n - 1];
+      // léger lissage (stabilité numérique), puis rééchantillonnage à pas constant
+      const su = Float32Array.from(nu), sv = Float32Array.from(nv);
+      for (let i = 1; i < n - 1; i++) { su[i] = nu[i] * 0.8 + (nu[i - 1] + nu[i + 1]) * 0.1; sv[i] = nv[i] * 0.8 + (nv[i - 1] + nv[i + 1]) * 0.1; }
+      resample(su, sv, ds);
+      if (stepN % 3 === 0) cutoffs(W, ds);
+      stepN++;
+      if (stepN % p.intervalle === 0) keepTrace();
+    }
+    function resample(su, sv, ds) {
+      const n = su.length, L = new Float32Array(n);
+      for (let i = 1; i < n; i++) L[i] = L[i - 1] + Math.hypot(su[i] - su[i - 1], sv[i] - sv[i - 1]);
+      const m = Math.max(2, Math.round(L[n - 1] / ds)); U = new Array(m + 1); V = new Array(m + 1); let j = 0;
+      for (let k = 0; k <= m; k++) {
+        const s = L[n - 1] * k / m; while (j < n - 2 && L[j + 1] < s) j++;
+        const t = (s - L[j]) / Math.max(1e-9, L[j + 1] - L[j]); U[k] = su[j] + (su[j + 1] - su[j]) * t; V[k] = sv[j] + (sv[j + 1] - sv[j]) * t;
+      }
+    }
+    function cutoffs(W, ds) {
+      // deux points éloignés le long du lit mais proches sur la plaine : la boucle est recoupée
+      const cell = W * 1.25, grid = new Map(), gap = Math.ceil(W * 5 / ds), n = U.length;
+      const key = (a, b) => a * 73856093 ^ b * 19349663;
+      for (let i = 0; i < n; i++) { const k = key(Math.floor(U[i] / cell), Math.floor(V[i] / cell)); (grid.get(k) || grid.set(k, []).get(k)).push(i); }
+      for (let i = 0; i < n; i++) {
+        const cu = Math.floor(U[i] / cell), cv = Math.floor(V[i] / cell); let best = -1;
+        for (let a = -1; a <= 1; a++) for (let b = -1; b <= 1; b++) {
+          const L = grid.get(key(cu + a, cv + b)); if (!L) continue;
+          for (const j of L) if (j > i + gap && j > best && Math.hypot(U[j] - U[i], V[j] - V[i]) < W * 1.15) best = j;
+        }
+        if (best > 0) {
+          const F = frame(), lu = U.slice(i, best + 1), lv = V.slice(i, best + 1);
+          lakes.push({ U: lu, V: lv, t0: stepN, life: Math.round(80 + p.comblement * 520) });
+          U = U.slice(0, i + 1).concat(U.slice(best)); V = V.slice(0, i + 1).concat(V.slice(best));
+          resample(Float32Array.from(U), Float32Array.from(V), ds);
+          return cutoffs(W, ds);
+        }
+      }
+      lakes = lakes.filter((l) => stepN - l.t0 < l.life); if (lakes.length > 70) lakes.splice(0, lakes.length - 70);
+    }
+    function keepTrace() {
+      const n = U.length, m = Math.ceil(n / 2), tu = new Float32Array(m), tv = new Float32Array(m);
+      for (let k = 0; k < m; k++) { const i = Math.min(n - 1, k * 2); tu[k] = U[i]; tv[k] = V[i]; }
+      const tr = { U: tu, V: tv, idx: nTrace++ }; traces.push(tr); pending.push(tr); while (traces.length > p.memoire) traces.shift();
+      // de temps en temps on repeint tout (les plus anciens lits s'effacent) ; sinon on ajoute juste le nouveau par-dessus
+      if (++sinceFull > 48) layerDirty = true;
+    }
+    // glisser : le lit suit la main, avec une influence qui décroît autour du point saisi
+    function push(x, y, dx, dy) {
+      const F = frame(), W = Wc(), [pu, pv] = toUV(x, y, F), [du, dv] = F.long ? [dx, dy] : [dy, -dx], r = W * 6;
+      for (let i = 1; i < U.length - 1; i++) { const d = Math.hypot(U[i] - pu, V[i] - pv); if (d < r) { const f = Math.pow(1 - d / r, 2); U[i] += du * f; V[i] += dv * f; } }
+      resample(Float32Array.from(U), Float32Array.from(V), W * 0.5);
+    }
+
+    // ——— Rendu ———
+    function strokeLine(c, Us, Vs, F) {
+      c.beginPath(); for (let i = 0; i < Us.length; i++) { const [x, y] = toXY(Us[i], Vs[i], F); if (i) c.lineTo(x, y); else c.moveTo(x, y); }
+    }
+    function paintTrace(c, tr, F, W, last, dark) {
+      const age = (last - tr.idx) / Math.max(1, p.memoire), ep = Math.floor(tr.idx / p.epoque), col = p.ages[((ep % p.ages.length) + p.ages.length) % p.ages.length];
+      if (p.style === 'fisk') {
+        strokeLine(c, tr.U, tr.V, F); c.globalAlpha = 1;
+        c.strokeStyle = mix(col, '#000000', 0.12 * p.berges); c.lineWidth = W * 1.5; c.stroke();
+        c.strokeStyle = col; c.lineWidth = W * 1.5 - Math.max(0.6, W * 0.18 * p.berges); c.stroke();
+      } else if (p.style === 'lidar') {
+        // crête et creux : un trait clair décalé, un trait sombre, comme un relief éclairé de biais
+        const o = Math.max(0.6, W * 0.12);
+        c.globalAlpha = 0.5 * (1 - age * 0.6); c.lineWidth = Math.max(0.7, W * 0.22);
+        c.save(); c.translate(-o, -o); strokeLine(c, tr.U, tr.V, F); c.strokeStyle = mix(p.fond, '#ffffff', dark ? 0.25 : 0.55); c.stroke(); c.restore();
+        c.save(); c.translate(o, o); strokeLine(c, tr.U, tr.V, F); c.strokeStyle = mix(p.fond, '#000000', 0.45); c.stroke(); c.restore();
+      } else {
+        strokeLine(c, tr.U, tr.V, F); c.globalAlpha = 0.18 + 0.6 * (1 - age); c.strokeStyle = p.ages.length > 1 ? col : mix(p.fond, p.ages[0], 0.7); c.lineWidth = Math.max(0.6, W * 0.1); c.stroke();
+      }
+      c.globalAlpha = 1;
+    }
+    function drawLayer(full) {
+      // les anciens lits ne bougent plus : ils sont peints dans un calque, le nouveau par-dessus les autres
+      const { w, h, dpr } = app.size, F = frame(), W = Wc();
+      if (!layer || layer.width !== Math.round(w * dpr) || layer.height !== Math.round(h * dpr)) { layer = document.createElement('canvas'); layer.width = Math.round(w * dpr); layer.height = Math.round(h * dpr); full = true; }
+      const c = layer.getContext('2d'); c.setTransform(dpr, 0, 0, dpr, 0, 0); c.lineCap = 'round'; c.lineJoin = 'round';
+      const last = traces.length ? traces[traces.length - 1].idx : 0, dark = lumHex(p.fond) < 110;
+      if (full) { c.clearRect(0, 0, w, h); for (const tr of traces) paintTrace(c, tr, F, W, last, dark); layerDirty = false; sinceFull = 0; }
+      else for (const tr of pending) paintTrace(c, tr, F, W, last, dark);
+      pending = [];
+    }
+    function draw() {
+      const { w, h, dpr } = app.size, F = frame(), W = Wc();
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over';
+      ctx.fillStyle = p.fond; ctx.fillRect(0, 0, w, h);
+      const lk = [w, h, dpr, p.style, p.fond, p.ages.join(), p.epoque, p.berges, p.memoire].join();
+      if (layerDirty || lk !== layerKey) { drawLayer(true); layerKey = lk; } else if (pending.length) drawLayer(false);
+      ctx.drawImage(layer, 0, 0, w, h);
+      ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+      // bras morts : ils se comblent, s'amincissent et prennent la couleur de la plaine
+      for (const l of lakes) {
+        const a = (stepN - l.t0) / l.life, wd = W * 0.8 * (1 - a * 0.85), col = mix(p.eau, p.fond, 0.4 + a * 0.5);
+        strokeLine(ctx, l.U, l.V, F);
+        if (p.style !== 'trait') { ctx.strokeStyle = mix(col, '#000000', 0.25 * p.berges); ctx.lineWidth = wd + Math.max(0.6, W * 0.2 * p.berges); ctx.stroke(); }
+        ctx.strokeStyle = col; ctx.lineWidth = p.style === 'trait' ? Math.max(0.8, W * 0.22 * (1 - a)) : wd; ctx.stroke();
+      }
+      // le lit actif
+      strokeLine(ctx, U, V, F);
+      if (p.style === 'trait') { ctx.strokeStyle = p.eau; ctx.lineWidth = Math.max(1, W * 0.35); ctx.stroke(); }
+      else {
+        ctx.strokeStyle = mix(p.eau, '#000000', 0.35 * p.berges + 0.05); ctx.lineWidth = W + Math.max(0.8, W * 0.3 * p.berges); ctx.stroke();
+        ctx.strokeStyle = p.eau; ctx.lineWidth = W; ctx.stroke();
+        ctx.strokeStyle = mix(p.eau, '#ffffff', 0.3); ctx.globalAlpha = 0.6; ctx.lineWidth = Math.max(0.6, W * 0.18); ctx.stroke(); ctx.globalAlpha = 1;
+      }
+    }
+
+    app.loop((tt, dt) => {
+      dt = Math.min(0.05, dt || 0);
+      const { w, h } = app.size, key = [p.largeur, p.vallee, w, h, app.seed].join();
+      if (key !== simKey) {
+        reset(); simKey = key;
+        // la plaine a déjà une histoire : on laisse la rivière divaguer avant d'ouvrir les yeux
+        for (let i = 0; i < 1400; i++) step();
+      }
+      if (!app.thumbnail) {
+        const n = Math.round(p.vitesse * p.vitesse * 8 * dt * 60 + (p.vitesse > 0 ? 0.4 : 0));
+        for (let i = 0; i < n; i++) step();
+        flood = Math.max(0, flood - dt * 0.5);
+      }
+      draw();
+      app.finish(ctx);
+    });
+
+    // ——— Export SVG : anciens lits, bras morts et lit actif ———
+    function toSVG() {
+      const { w, h } = app.size, F = frame(), W = Wc(), out = [`<rect width="100%" height="100%" fill="${p.fond}"/>`];
+      const pl = (Us, Vs) => { const s = []; for (let i = 0; i < Us.length; i++) { const [x, y] = toXY(Us[i], Vs[i], F); s.push(x.toFixed(1) + ',' + y.toFixed(1)); } return s.join(' '); };
+      const last = traces.length ? traces[traces.length - 1].idx : 0;
+      for (const tr of traces) {
+        const ep = Math.floor(tr.idx / p.epoque), col = p.style === 'lidar' ? mix(p.fond, '#000000', 0.4) : p.style === 'trait' && p.ages.length < 2 ? mix(p.fond, p.ages[0], 0.7) : p.ages[((ep % p.ages.length) + p.ages.length) % p.ages.length];
+        const wd = p.style === 'fisk' ? W * 1.5 : Math.max(0.6, W * (p.style === 'lidar' ? 0.22 : 0.1));
+        out.push(`<polyline points="${pl(tr.U, tr.V)}" fill="none" stroke="${col}" stroke-width="${wd.toFixed(2)}" stroke-linecap="round" stroke-linejoin="round"${p.style === 'fisk' ? '' : ` opacity="${(0.2 + 0.6 * (1 - (last - tr.idx) / Math.max(1, p.memoire))).toFixed(2)}"`}/>`);
+      }
+      for (const l of lakes) { const a = (stepN - l.t0) / l.life; out.push(`<polyline points="${pl(l.U, l.V)}" fill="none" stroke="${mix(p.eau, p.fond, 0.25 + a * 0.6)}" stroke-width="${(W * (1 - a * 0.85)).toFixed(2)}" stroke-linecap="round" stroke-linejoin="round"/>`); }
+      out.push(`<polyline points="${pl(U, V)}" fill="none" stroke="${p.eau}" stroke-width="${(p.style === 'trait' ? Math.max(1, W * 0.35) : W).toFixed(2)}" stroke-linecap="round" stroke-linejoin="round"/>`);
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">${out.join('')}</svg>`;
+    }
+  </script>
+</body>
+</html>
