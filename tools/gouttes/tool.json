@@ -1,0 +1,15 @@
+{
+  "slug": "gouttes",
+  "title": "Gouttes",
+  "type": "motion",
+  "description": "Une vitre sous la pluie devant une scène de marque : buée, gouttes-lentilles qui montrent la scène renversée, coulures qui fusionnent et vitre à essuyer.",
+  "tags": ["pluie", "gouttes", "vitre", "refraction", "logo", "image"],
+  "inspiration": [
+    "Saul Leiter, photographies à travers les vitres (années 1950)",
+    "Optique des gouttes posées : lentille convergente et image renversée",
+    "references/techniques.md ; palettes biennale, kegelbahn, menthe, luzern"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
