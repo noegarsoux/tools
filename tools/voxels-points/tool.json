@@ -1,0 +1,15 @@
+{
+  "slug": "voxels-points",
+  "title": "Voxels de points",
+  "type": "webgl",
+  "description": "Un logo ou un volume mathématique sculpté dans un cube de points en perspective : la taille de chaque point dit où passe la forme, qui tourne en boucle.",
+  "tags": ["voxels", "points", "3d", "logo", "svg", "boucle"],
+  "inspiration": [
+    "Moodboard de Noé, fiche 3 : lettre en voxels dans un cube de points",
+    "Surfaces implicites : tore, gyroïde de Schoen, sphère percée",
+    "Palettes papier, trame-nuit, acide, orbite, papier-60, kegelbahn, biennale"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
