@@ -249,6 +249,12 @@
         // le pendule choisi se balance par-dessus la carte, sur un voile
         ctx.fillStyle = mix(p.fond, '#000000', 0.2); ctx.globalAlpha = 0.55; const g = geom(); ctx.beginPath(); ctx.arc(g.cx, g.cy, (g.L1 + g.L2) * 1.06, 0, TAU); ctx.fill(); ctx.globalAlpha = 1;
       }
+      if (p.mode === 'gerbe') {
+        // le disque que la masse du bas peut atteindre, comme un cadran
+        const g0 = geom(), R = g0.L1 + g0.L2, lt = lumHex(p.fond) < 128;
+        ctx.fillStyle = mix(p.fond, lt ? '#ffffff' : '#000000', lt ? 0.09 : 0.06); ctx.beginPath(); ctx.arc(g0.cx, g0.cy, R * 1.03, 0, TAU); ctx.fill();
+        ctx.strokeStyle = mix(p.fond, lt ? '#ffffff' : '#000000', 0.22); ctx.lineWidth = 1; ctx.beginPath(); ctx.arc(g0.cx, g0.cy, R * 1.03, 0, TAU); ctx.stroke();
+      }
       if (trail) ctx.drawImage(trail, 0, 0, w, h);
       // bras et masses
       const g = geom(), lw = Math.max(0.6, Math.min(w, h) * 0.002 * p.epaisseur), single = N < 20;
