@@ -1,0 +1,15 @@
+{
+  "slug": "harmonie-differentielle",
+  "title": "Harmonie différentielle",
+  "type": "motion",
+  "description": "Des points qui tournent à des vitesses proportionnelles à leur rang : figures symétriques à chaque fraction du cycle, puis réalignement parfait.",
+  "tags": ["whitney", "rotation", "cycle", "motion", "svg", "symetrie"],
+  "inspiration": [
+    "John Whitney, Permutations (1968) et Arabesque (1975)",
+    "John Whitney, Digital Harmony: On the Complementarity of Music and Visual Art (1980)",
+    "references/artistes.md ; palettes acide, orbite, thermique, kegelbahn, luzern, glyphes"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
