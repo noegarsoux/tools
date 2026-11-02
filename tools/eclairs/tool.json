@@ -1,0 +1,15 @@
+{
+  "slug": "eclairs",
+  "title": "Éclairs",
+  "type": "motion",
+  "description": "Foudre par claquage diélectrique : le traceur cherche le sol, l'arc en retour illumine le ciel ; figures de Lichtenberg et décharges autour du logo.",
+  "tags": ["eclairs", "foudre", "lichtenberg", "fractale", "logo", "svg"],
+  "inspiration": [
+    "Niemeyer, Pietronero et Wiesmann, Fractal dimension of dielectric breakdown (1984)",
+    "Kim et Lin, Fast animation of lightning using an adaptive mesh (2007)",
+    "Figures de Lichtenberg dans l'acrylique et le bois"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
