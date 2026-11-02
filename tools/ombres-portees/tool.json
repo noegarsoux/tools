@@ -1,0 +1,15 @@
+{
+  "slug": "ombres-portees",
+  "title": "Ombres portées",
+  "type": "typography",
+  "description": "Un texte vectorisé qui projette des ombres exactes vers l’opposé d’une ou plusieurs lumières colorées, parallèles ou ponctuelles, en paliers ; le pointeur est la lumière.",
+  "tags": ["typographie", "ombre", "lumiere", "vectorisation", "svg", "motion"],
+  "inspiration": [
+    "Ombres longues (long shadow) des affiches et du design à plat",
+    "Ombres colorées RVB des installations lumineuses",
+    "references/techniques.md ; palettes biennale, kegelbahn, salon, good-room, luzern, pyramides"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
