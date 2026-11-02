@@ -1,0 +1,337 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Typo liquide</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Typo liquide (moodboard 24) : le mot est dessiné flou dans une texture, puis lu à travers un
+    // domain warp (sommes de sinus imbriquées) et seuillé : les bords restent nets pendant que la
+    // matière ondule, coule et se reforme. Le pointeur remue le liquide (impulsions qui s'estompent).
+    // La même fonction est évaluée en JavaScript pour l'export SVG (marching squares) : vectoriel fidèle.
+    const canvas = document.querySelector('canvas');
+    const gl = canvas.getContext('webgl2', { alpha: false, antialias: false, depth: false, stencil: false, preserveDrawingBuffer: false });
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const PAP = PAL('papier'), KB = PAL('kegelbahn'), MENTHE = PAL('menthe'), BIEN = PAL('biennale'), ACIDE = PAL('acide');
+    const LU = PAL('luzern'), TH = PAL('thermique'), ORB = PAL('orbite'), NUIT = PAL('trame-nuit'), PG = PAL('papier-gris');
+    const FONTS = {
+      grotesque: "'Helvetica Neue', Helvetica, Arial, sans-serif",
+      serif: "Georgia, 'Times New Roman', Times, serif",
+      mono: "'Courier New', Courier, monospace",
+    };
+    const NI = 32;
+
+    let maskDirty = true, ptr = null, lastImp = 0, imps = [], clock = 0, mask = null;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.03, vignette: 0 },
+      hint: 'Glissez sur le mot pour remuer le liquide · molette : amplitude',
+      notes: 'Le mot est lu à travers une déformation ondulante puis seuillé : les bords restent nets pendant que la matière coule. Le seuil épaissit ou amincit les lettres, le lissage arrondit leurs angles.',
+      params: {
+        'Texte': {
+          texte: { type: 'textarea', label: 'Texte (une ligne par retour)', value: 'liquide', rows: 2 },
+          police: { type: 'font', label: 'Police', options: { grotesque: 'Grotesque', serif: 'Sérif', mono: 'Machine' }, value: 'grotesque' },
+          graisse: { type: 'segmented', label: 'Graisse', options: { 400: 'Normale', 700: 'Grasse', 900: 'Noire' }, value: '900' },
+          taille: { type: 'range', label: 'Taille', min: 0.2, max: 0.98, step: 0.01, value: 0.84 },
+          lissage: { type: 'range', label: 'Lissage', min: 0, max: 1, step: 0.01, value: 0.35 },
+          seuil: { type: 'range', label: 'Seuil (graisse apparente)', min: 0.15, max: 0.85, step: 0.01, value: 0.5 },
+        },
+        'Liquide': {
+          amplitude: { type: 'range', label: 'Amplitude', min: 0, max: 0.12, step: 0.001, value: 0.03 },
+          echelle: { type: 'range', label: 'Échelle des ondes', min: 0.5, max: 12, step: 0.1, value: 3.2 },
+          detail: { type: 'range', label: 'Détail', min: 0, max: 1, step: 0.01, value: 0.5 },
+          vitesse: { type: 'range', label: 'Vitesse', min: 0, max: 3, step: 0.01, value: 0.6 },
+          fonte: { type: 'range', label: 'Coulures', min: 0, max: 1, step: 0.01, value: 0.25 },
+          remuer: { type: 'range', label: 'Force du pointeur', min: 0, max: 2, step: 0.01, value: 1 },
+        },
+        'Rendu': {
+          rendu: { type: 'segmented', label: 'Rendu', options: { aplat: 'Aplat', reflet: 'Reflet', contour: 'Contour', ombre: 'Ombre' }, value: 'aplat' },
+          trait: { type: 'range', label: 'Épaisseur du contour', min: 0.5, max: 12, step: 0.1, value: 3, show: (q) => q.rendu === 'contour' },
+          decalage: { type: 'range', label: 'Décalage de l’ombre', min: 0, max: 0.08, step: 0.001, value: 0.02, show: (q) => q.rendu === 'ombre' },
+          fond: { type: 'color', label: 'Fond', value: PAP[0] },
+          encre: { type: 'color', label: 'Encre', value: PAP[1] },
+          accent: { type: 'color', label: 'Accent (reflet, ombre)', value: '#e5452a' },
+        },
+      },
+      presets: {
+        'Liquide': {},
+        'Fonte': { texte: 'FONTE', fonte: 0.85, amplitude: 0.02, echelle: 2.4, vitesse: 0.4, lissage: 0.5, fond: KB[0], encre: KB[3], accent: KB[1] },
+        'Reflet': { texte: 'chrome', rendu: 'reflet', fond: '#0b0b0b', encre: '#cfd3d6', accent: '#ffffff', amplitude: 0.025, echelle: 2.6, lissage: 0.6 },
+        'Contour': { texte: 'ONDE', rendu: 'contour', trait: 2.4, fond: MENTHE[0], encre: MENTHE[1], amplitude: 0.045, echelle: 4, detail: 0.8 },
+        'Ombre': { texte: 'Biennale', police: 'serif', graisse: '700', rendu: 'ombre', decalage: 0.018, fond: BIEN[0], encre: BIEN[1], accent: BIEN[3], amplitude: 0.022 },
+        'Acide': { texte: 'RAVE\nTOXIC', fond: ACIDE[2], encre: ACIDE[1], amplitude: 0.05, echelle: 5.5, detail: 0.9, vitesse: 1.4, seuil: 0.42, fonte: 0.1 },
+        'Luzern': { texte: 'Luzern', rendu: 'reflet', fond: LU[1], encre: LU[0], accent: '#ffffff', amplitude: 0.03, echelle: 2, lissage: 0.8, seuil: 0.45 },
+        'Thermique': { texte: 'CHAUD', rendu: 'ombre', decalage: 0.03, fond: TH[0], encre: TH[2], accent: TH[1], fonte: 0.6, amplitude: 0.025 },
+        'Orbite': { texte: 'orbite', police: 'serif', graisse: '400', fond: ORB[0], encre: ORB[2], seuil: 0.42, amplitude: 0.015, echelle: 1.5, vitesse: 0.3, lissage: 0.2 },
+        'Nuit': { texte: 'NUIT', rendu: 'contour', trait: 1.2, fond: NUIT[0], encre: NUIT[1], amplitude: 0.032, echelle: 5, detail: 1, vitesse: 0.8 },
+        'Papier gris': { texte: 'encre\nde chine', police: 'serif', graisse: '700', fond: PG[0], encre: PG[1], fonte: 0.5, amplitude: 0.018, lissage: 0.45 },
+      },
+      brand(colors) {
+        return { fond: colors[0], encre: colors[1] || '#111111', accent: colors[2] || colors[1] || '#e5452a' };
+      },
+      pointer: {
+        move: (q) => {
+          const now = clock;
+          if (ptr && now - lastImp > 0.03) {
+            const vx = q.x - ptr.x, vy = q.y - ptr.y;
+            if (Math.hypot(vx, vy) > 0.5) { imps.push({ x: q.x, y: q.y, vx, vy, t: now }); if (imps.length > NI) imps.shift(); lastImp = now; }
+          }
+          ptr = { x: q.x, y: q.y };
+        },
+        wheel: (q, dy) => app.set('amplitude', Math.max(0, Math.min(0.12, Math.round((p.amplitude - dy * 0.00005) * 1000) / 1000))),
+      },
+      onChange(k) { if (k === '*' || ['texte', 'police', 'graisse', 'taille', 'lissage'].includes(k)) maskDirty = true; if (k === '*') imps = []; },
+      export: { name: 'typo-liquide', svg: () => toSVG() },
+    });
+    const p = app.params;
+    canvas.addEventListener('pointerleave', () => { ptr = null; });
+    if (document.fonts) document.fonts.addEventListener('loadingdone', () => { maskDirty = true; });
+
+    // ——— Le mot, flou, à mi-résolution ———
+    function family() { return p.police === 'AtelierBrand' ? "'AtelierBrand', sans-serif" : (FONTS[p.police] || FONTS.grotesque); }
+    function buildMask(w, h) {
+      const k = 0.5, W = Math.max(8, Math.round(w * k)), H = Math.max(8, Math.round(h * k));
+      const cv = document.createElement('canvas'); cv.width = W; cv.height = H;
+      const c = cv.getContext('2d', { willReadFrequently: true });
+      c.fillStyle = '#000'; c.fillRect(0, 0, W, H);
+      const lines = String(p.texte || '').split('\n').map((x) => x.trim()).filter(Boolean);
+      if (lines.length) {
+        const fam = family();
+        c.font = `${p.graisse} 100px ${fam}`;
+        let mw = 1;
+        for (const l of lines) mw = Math.max(mw, c.measureText(l).width);
+        const lh = 0.95, size = Math.min(W * p.taille / mw * 100, H * Math.min(0.9, p.taille * 1.02) / (lines.length * lh));
+        // Le flou fait office de champ de distance : le seuil lit un bord net, le lissage arrondit.
+        c.filter = `blur(${(0.6 + p.lissage * size * 0.05).toFixed(2)}px)`;
+        c.font = `${p.graisse} ${size}px ${fam}`;
+        c.textAlign = 'center'; c.textBaseline = 'middle'; c.fillStyle = '#fff';
+        lines.forEach((l, i) => c.fillText(l, W / 2, H / 2 + (i - (lines.length - 1) / 2) * size * lh + size * 0.04));
+      }
+      const d = c.getImageData(0, 0, W, H).data, m = new Uint8Array(W * H);
+      for (let i = 0; i < m.length; i++) m[i] = d[i * 4];
+      mask = { W, H, m, k, w, h };
+      gl.bindTexture(gl.TEXTURE_2D, maskTex);
+      gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, W, H, 0, gl.RED, gl.UNSIGNED_BYTE, m);
+      maskDirty = false;
+    }
+
+    // ——— Déformation (identique en GLSL et en JS) ———
+    const GLSL_WARP = `
+    vec2 wave(vec2 u, float F, float t) {
+      return vec2(sin(u.y * F + t * 0.9 + 1.3) + 0.5 * sin(u.y * F * 2.3 - t * 1.3 + u.x * F * 0.7),
+                  sin(u.x * F * 1.1 - t * 0.8 + 0.2) + 0.5 * sin(u.x * F * 2.1 + t * 1.1 - u.y * F * 0.9));
+    }
+    vec2 warp(vec2 p) {
+      vec2 u = (p - uRes * 0.5) / uU;
+      vec2 w1 = wave(u, uF, uT);
+      vec2 w2 = wave(u * 1.9 + w1 * 0.35, uF, uT * 1.3 + 4.0);
+      vec2 d = uA * (w1 + uDet * 0.6 * w2) * uU;
+      // Coulures : certaines colonnes tirent la matière vers le bas.
+      float dr = pow(max(0.0, sin(u.x * 9.0 + 0.8 * sin(u.x * 17.0) + uSeed)), 4.0);
+      d.y += uFonte * uU * 0.09 * dr * (0.65 + 0.35 * sin(uT * 0.5 + u.x * 3.0));
+      for (int i = 0; i < ${NI}; i++) {
+        if (i >= uNI) break;
+        vec4 I = uImp[i];
+        vec2 e = p - I.xy;
+        float g = exp(-dot(e, e) / (uIR * uIR)) * uImpA[i];
+        d += I.zw * g;
+      }
+      return p - d;
+    }`;
+    function waveJS(ux, uy, F, t) {
+      return [Math.sin(uy * F + t * 0.9 + 1.3) + 0.5 * Math.sin(uy * F * 2.3 - t * 1.3 + ux * F * 0.7),
+        Math.sin(ux * F * 1.1 - t * 0.8 + 0.2) + 0.5 * Math.sin(ux * F * 2.1 + t * 1.1 - uy * F * 0.9)];
+    }
+    function warpJS(px, py, U) {
+      const S = state, ux = (px - S.w / 2) / U, uy = (py - S.h / 2) / U;
+      const w1 = waveJS(ux, uy, S.F, S.T), w2 = waveJS(ux * 1.9 + w1[0] * 0.35, uy * 1.9 + w1[1] * 0.35, S.F, S.T * 1.3 + 4);
+      let dx = S.A * (w1[0] + S.det * 0.6 * w2[0]) * U, dy = S.A * (w1[1] + S.det * 0.6 * w2[1]) * U;
+      const dr = Math.pow(Math.max(0, Math.sin(ux * 9 + 0.8 * Math.sin(ux * 17) + S.seed)), 4);
+      dy += S.fonte * U * 0.09 * dr * (0.65 + 0.35 * Math.sin(S.T * 0.5 + ux * 3));
+      for (const I of S.imps) { const ex = px - I.x, ey = py - I.y, g = Math.exp(-(ex * ex + ey * ey) / (S.IR * S.IR)) * I.a; dx += I.vx * g; dy += I.vy * g; }
+      return [px - dx, py - dy];
+    }
+    function maskAt(x, y) {
+      const M = mask, fx = x * M.k - 0.5, fy = y * M.k - 0.5, i = Math.floor(fx), j = Math.floor(fy), ax = fx - i, ay = fy - j;
+      const g = (a, b) => (a < 0 || b < 0 || a >= M.W || b >= M.H ? 0 : M.m[b * M.W + a] / 255);
+      return (g(i, j) * (1 - ax) + g(i + 1, j) * ax) * (1 - ay) + (g(i, j + 1) * (1 - ax) + g(i + 1, j + 1) * ax) * ay;
+    }
+
+    const VS = `#version 300 es
+    layout(location = 0) in vec2 aP;
+    void main() { gl_Position = vec4(aP, 0., 1.); }`;
+    const FS = `#version 300 es
+    precision highp float;
+    uniform sampler2D uM;
+    uniform vec2 uRes, uCss;
+    uniform float uU, uF, uT, uA, uDet, uFonte, uSeed, uIR, uSeuil, uTrait, uOff, uGrain, uVig, uFrame, uPx;
+    uniform vec4 uImp[${NI}];
+    uniform float uImpA[${NI}];
+    uniform int uNI, uMode;
+    uniform vec3 uBg, uInk, uAcc;
+    out vec4 o;
+    ${GLSL_WARP}
+    float hash(vec2 p) { uvec2 q = uvec2(ivec2(p)) * uvec2(1597334673u, 3812015801u); uint n = (q.x ^ q.y) * 1597334673u; n ^= n >> 16; n *= 2246822519u; n ^= n >> 13; return float(n) / 4294967295.; }
+    float field(vec2 p) { vec2 q = warp(p); return texture(uM, q / uCss).r; }
+    void main() {
+      // Coordonnées en pixels CSS, origine en haut à gauche (comme le canevas 2D et le SVG).
+      vec2 p = vec2(gl_FragCoord.x, uRes.y - gl_FragCoord.y) / uPx;
+      float f = field(p);
+      float aa = max(fwidth(f), 1e-4) * 0.8;
+      float a = smoothstep(uSeuil - aa, uSeuil + aa, f);
+      vec3 col = uBg;
+      if (uMode == 0) col = mix(uBg, uInk, a);
+      else if (uMode == 1) {
+        // Reflet : la pente du champ éclaire le bord, comme une goutte.
+        vec2 g = vec2(dFdx(f), dFdy(f)) * uPx;
+        float sl = length(g) * uU * 0.02;
+        vec3 n = normalize(vec3(-g * uU * 0.04, 1.));
+        float spec = pow(max(dot(n, normalize(vec3(-0.45, 0.55, 0.7))), 0.), 18.);
+        float inner = smoothstep(uSeuil, min(1., uSeuil + 0.35), f);
+        vec3 ink = mix(uInk * 0.55, uInk, inner) + uAcc * spec * 0.9;
+        col = mix(uBg, ink, a);
+      } else if (uMode == 2) {
+        float d = abs(f - uSeuil) / max(fwidth(f), 1e-4);
+        col = mix(uBg, uInk, 1. - smoothstep(uTrait * 0.5 * uPx - 0.7, uTrait * 0.5 * uPx + 0.7, d));
+      } else {
+        float fs = field(p - vec2(uOff, uOff) * uU);
+        float as = smoothstep(uSeuil - aa, uSeuil + aa, fs);
+        col = mix(uBg, uAcc, as);
+        col = mix(col, uInk, a);
+      }
+      vec2 c2 = gl_FragCoord.xy / uRes * 2. - 1.;
+      col *= 1. - uVig * 0.85 * smoothstep(0.35, 1.25, length(c2));
+      col += (hash(gl_FragCoord.xy + uFrame * 17.31) - 0.5) * uGrain * 0.22;
+      o = vec4(col, 1.);
+    }`;
+    function sh(type, src) { const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s); if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s)); return s; }
+    const prog = gl.createProgram();
+    gl.attachShader(prog, sh(gl.VERTEX_SHADER, VS)); gl.attachShader(prog, sh(gl.FRAGMENT_SHADER, FS));
+    gl.linkProgram(prog);
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
+    const Lc = {}; const u = (n) => (n in Lc ? Lc[n] : (Lc[n] = gl.getUniformLocation(prog, n)));
+    const vao = gl.createVertexArray(); gl.bindVertexArray(vao);
+    const buf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+    const maskTex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, maskTex);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+    const rgbf = (hx) => { const n = parseInt(String(hx).slice(1, 7), 16) || 0; return [(n >> 16 & 255) / 255, (n >> 8 & 255) / 255, (n & 255) / 255]; };
+    let state = null, frame = 0;
+    // État partagé par le rendu GPU et l'export SVG.
+    function makeState(t) {
+      const { w, h } = app.size, U = Math.min(w, h), decay = 1.6;
+      const list = [];
+      for (const I of imps) {
+        const age = t - I.t;
+        if (age < 0 || age > decay * 3) continue;
+        // Une impulsion entraîne la matière dans le sens du geste, puis s'estompe.
+        list.push({ x: I.x, y: I.y, vx: I.vx * 1.6 * p.remuer, vy: I.vy * 1.6 * p.remuer, a: Math.exp(-age / decay) });
+      }
+      return { w, h, U, F: p.echelle, T: t * p.vitesse, A: p.amplitude, det: p.detail, fonte: p.fonte, seed: (app.seed % 1000) * 0.0137, IR: U * 0.08, imps: list.slice(-NI) };
+    }
+    function render(t) {
+      const { w, h } = app.size;
+      if (maskDirty || !mask || mask.w !== w || mask.h !== h) buildMask(w, h);
+      state = makeState(t);
+      const S = state;
+      gl.viewport(0, 0, canvas.width, canvas.height);
+      gl.useProgram(prog); gl.bindVertexArray(vao);
+      gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, maskTex); gl.uniform1i(u('uM'), 0);
+      gl.uniform2f(u('uRes'), canvas.width, canvas.height); gl.uniform2f(u('uCss'), w, h);
+      gl.uniform1f(u('uPx'), canvas.width / w);
+      gl.uniform1f(u('uU'), S.U); gl.uniform1f(u('uF'), S.F); gl.uniform1f(u('uT'), S.T); gl.uniform1f(u('uA'), S.A);
+      gl.uniform1f(u('uDet'), S.det); gl.uniform1f(u('uFonte'), S.fonte); gl.uniform1f(u('uSeed'), S.seed); gl.uniform1f(u('uIR'), S.IR);
+      const im = new Float32Array(NI * 4), ia = new Float32Array(NI);
+      S.imps.forEach((I, i) => { im.set([I.x, I.y, I.vx, I.vy], i * 4); ia[i] = I.a; });
+      gl.uniform4fv(u('uImp[0]'), im); gl.uniform1fv(u('uImpA[0]'), ia); gl.uniform1i(u('uNI'), S.imps.length);
+      gl.uniform1f(u('uSeuil'), p.seuil); gl.uniform1f(u('uTrait'), p.trait); gl.uniform1f(u('uOff'), p.decalage);
+      gl.uniform1i(u('uMode'), ['aplat', 'reflet', 'contour', 'ombre'].indexOf(p.rendu));
+      gl.uniform3fv(u('uBg'), rgbf(p.fond)); gl.uniform3fv(u('uInk'), rgbf(p.encre)); gl.uniform3fv(u('uAcc'), rgbf(p.accent));
+      gl.uniform1f(u('uGrain'), p.grain ?? 0); gl.uniform1f(u('uVig'), p.vignette ?? 0); gl.uniform1f(u('uFrame'), frame % 997);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+    }
+    app.loop((t, dt) => {
+      clock = t;
+      if (imps.length && t - imps[imps.length - 1].t > 6) imps = [];
+      render(t);
+      if (dt > 0) frame++;
+    });
+
+    // ——— Export SVG : la même fonction échantillonnée, contours par marching squares ———
+    function contours(f, W, H, th) {
+      const GW = W + 2, GH = H + 2, g = (i, j) => (i < 1 || j < 1 || i > W || j > H ? 0 : f[(j - 1) * W + (i - 1)]);
+      const NH = GW * GH, adj = new Int32Array(NH * 4).fill(-1), qx = new Float32Array(NH * 2), qy = new Float32Array(NH * 2);
+      const link = (a, b) => { if (adj[a * 2] < 0) adj[a * 2] = b; else adj[a * 2 + 1] = b; if (adj[b * 2] < 0) adj[b * 2] = a; else adj[b * 2 + 1] = a; };
+      const hE = (i, j, a, b) => { const id = j * GW + i; qx[id] = i + (th - a) / (b - a); qy[id] = j; return id; };
+      const vE = (i, j, a, b) => { const id = NH + j * GW + i; qx[id] = i; qy[id] = j + (th - a) / (b - a); return id; };
+      for (let j = 0; j < GH - 1; j++) for (let i = 0; i < GW - 1; i++) {
+        const a = g(i, j), b = g(i + 1, j), c = g(i + 1, j + 1), d = g(i, j + 1);
+        const k = (a >= th) | ((b >= th) << 1) | ((c >= th) << 2) | ((d >= th) << 3);
+        if (k === 0 || k === 15) continue;
+        const e0 = () => hE(i, j, a, b), e2 = () => hE(i, j + 1, d, c), e3 = () => vE(i, j, a, d), e1 = () => vE(i + 1, j, b, c);
+        const mid = (a + b + c + d) / 4 >= th;
+        switch (k) {
+          case 1: case 14: link(e3(), e0()); break;
+          case 2: case 13: link(e0(), e1()); break;
+          case 3: case 12: link(e3(), e1()); break;
+          case 4: case 11: link(e1(), e2()); break;
+          case 6: case 9: link(e0(), e2()); break;
+          case 7: case 8: link(e3(), e2()); break;
+          case 5: if (mid) { link(e0(), e1()); link(e2(), e3()); } else { link(e3(), e0()); link(e1(), e2()); } break;
+          case 10: if (mid) { link(e3(), e0()); link(e1(), e2()); } else { link(e0(), e1()); link(e2(), e3()); } break;
+        }
+      }
+      const seen = new Uint8Array(NH * 2), out = [];
+      for (let s = 0; s < NH * 2; s++) {
+        if (seen[s] || adj[s * 2] < 0) continue;
+        const pts = [];
+        let prev = -1, cur = s;
+        while (cur >= 0 && !seen[cur]) {
+          seen[cur] = 1; pts.push(qx[cur] - 1, qy[cur] - 1);
+          const n0 = adj[cur * 2], n1 = adj[cur * 2 + 1], nx = n0 !== prev && !seen[n0] ? n0 : n1;
+          prev = cur; cur = nx;
+        }
+        if (pts.length >= 6) out.push(pts);
+      }
+      return out;
+    }
+    function fieldPath(step, ox, oy) {
+      const S = state, W = Math.ceil(S.w / step), H = Math.ceil(S.h / step), f = new Float32Array(W * H);
+      for (let j = 0; j < H; j++) for (let i = 0; i < W; i++) {
+        const [qx, qy] = warpJS((i + 0.5) * step - ox, (j + 0.5) * step - oy, S.U);
+        f[j * W + i] = maskAt(qx, qy);
+      }
+      let d = '';
+      for (const L of contours(f, W, H, p.seuil)) {
+        for (let k = 0; k < L.length; k += 2) d += (k ? 'L' : 'M') + ((L[k] + 0.5) * step).toFixed(1) + ' ' + ((L[k + 1] + 0.5) * step).toFixed(1);
+        d += 'Z';
+      }
+      return d;
+    }
+    function toSVG() {
+      render(clock);
+      const { w, h } = app.size, step = 1.5;
+      let body = '';
+      if (p.rendu === 'contour') body = `<path d="${fieldPath(step, 0, 0)}" fill="none" stroke="${p.encre}" stroke-width="${p.trait}" stroke-linejoin="round"/>`;
+      else {
+        if (p.rendu === 'ombre') { const o = p.decalage * state.U; body += `<path d="${fieldPath(step, o, o)}" fill="${p.accent}" fill-rule="evenodd"/>\n`; }
+        body += `<path d="${fieldPath(step, 0, 0)}" fill="${p.encre}" fill-rule="evenodd"/>`;
+      }
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">\n<rect width="100%" height="100%" fill="${p.fond}"/>\n${body}\n</svg>`;
+    }
+  </script>
+</body>
+</html>
