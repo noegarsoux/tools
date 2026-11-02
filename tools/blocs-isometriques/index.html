@@ -1,0 +1,248 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Blocs isométriques</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Blocs isométriques : un champ de blocs extrudés en projection axonométrique,
+    // trois faces en trois tons. Les hauteurs suivent une onde, un bruit qui coule, des gradins,
+    // une pyramide ou le logo. Glisser fait tourner la vue (l'ordre de peinture suit la profondeur).
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2, DEG = Math.PI / 180;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const BIEN = PAL('biennale'), KB = PAL('kegelbahn'), SALON = PAL('salon'), GR = PAL('good-room'), LUZ = PAL('luzern');
+    const P60 = PAL('papier-60'), MENTHE = PAL('menthe'), ORB = PAL('orbite'), PYR = PAL('pyramides'), CODE = PAL('code'), BIT = PAL('bitmap');
+
+    let theta = 45 * DEG, thetaV = 0, spinAcc = 0, drag = null, hover = null, pulses = [], noiseT = [], clock = 0;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.03, vignette: 0 },
+      hint: 'Glissez pour tourner la vue · touchez pour lancer une onde · survolez pour soulever · molette : hauteur',
+      notes: 'Choisissez « Logo » pour extruder votre logo (charte ou image) : chaque case prend la hauteur de la marque à cet endroit. Les trois faces prennent trois tons ; en mode « Par hauteur », le dessus suit la palette.',
+      params: {
+        'Champ': {
+          relief: { type: 'select', label: 'Relief', options: { onde: 'Onde', bruit: 'Bruit qui coule', gradins: 'Gradins', pyramide: 'Pyramide', damier: 'Damier vivant', logo: 'Logo' }, value: 'onde' },
+          image: { type: 'file', label: 'Logo ou image', accept: 'image/*', show: (q) => q.relief === 'logo' },
+          cases: { type: 'range', label: 'Cases par côté', min: 4, max: 40, step: 1, value: 14 },
+          hauteur: { type: 'range', label: 'Hauteur', min: 0, max: 3, step: 0.01, value: 1.2 },
+          socle: { type: 'range', label: 'Socle', min: 0, max: 1, step: 0.01, value: 0.15 },
+          joint: { type: 'range', label: 'Joint', min: 0, max: 0.6, step: 0.01, value: 0.12 },
+          vitesse: { type: 'range', label: 'Vitesse', min: 0, max: 3, step: 0.01, value: 1 },
+          frequence: { type: 'range', label: 'Fréquence', min: 0.2, max: 3, step: 0.01, value: 1 },
+        },
+        'Vue': {
+          rotation: { type: 'range', label: 'Rotation (°)', min: 0, max: 360, step: 1, value: 45 },
+          inclinaison: { type: 'range', label: 'Inclinaison', min: 0.3, max: 0.9, step: 0.01, value: 0.58 },
+          tourne: { type: 'range', label: 'Rotation lente', min: -1, max: 1, step: 0.01, value: 0.08 },
+          zoom: { type: 'range', label: 'Zoom', min: 0.4, max: 1.4, step: 0.01, value: 0.85 },
+        },
+        'Couleur': {
+          fond: { type: 'color', label: 'Fond', value: BIEN[0] },
+          dessus: { type: 'color', label: 'Dessus', value: BIEN[4] },
+          gauche: { type: 'color', label: 'Face gauche', value: BIEN[2] },
+          droite: { type: 'color', label: 'Face droite', value: BIEN[1] },
+          modeCouleur: { type: 'segmented', label: 'Dessus', options: { uni: 'Uni', hauteur: 'Par hauteur' }, value: 'uni' },
+          palette: { type: 'palette', label: 'Palette des hauteurs', value: [BIEN[3], BIEN[4], BIEN[2]], show: (q) => q.modeCouleur === 'hauteur' },
+          contour: { type: 'range', label: 'Contour', min: 0, max: 3, step: 0.1, value: 0 },
+        },
+      },
+      presets: {
+        'Biennale': {},
+        'Kegelbahn': { relief: 'bruit', fond: KB[0], dessus: KB[3], gauche: KB[1], droite: KB[2], cases: 18, hauteur: 1.6, joint: 0.08 },
+        'Gradins': { relief: 'gradins', fond: P60[0], dessus: '#ffffff', gauche: '#c9c8c4', droite: P60[1], cases: 12, hauteur: 1.4, joint: 0, contour: 1.2 },
+        'Pyramide': { relief: 'pyramide', fond: PYR[0], dessus: PYR[4], gauche: PYR[2], droite: PYR[1], cases: 16, hauteur: 2, joint: 0.05, tourne: 0.15 },
+        'Salon': { relief: 'damier', fond: SALON[0], dessus: SALON[4], gauche: SALON[2], droite: SALON[1], modeCouleur: 'hauteur', palette: [SALON[4], SALON[3], SALON[2]], cases: 10, joint: 0.2 },
+        'Good Room': { relief: 'onde', fond: GR[0], dessus: GR[1], gauche: GR[3], droite: GR[2], modeCouleur: 'hauteur', palette: [GR[4], GR[1], GR[2], GR[3]], cases: 24, hauteur: 1.8, joint: 0.15, frequence: 1.6 },
+        'Luzern': { relief: 'bruit', fond: LUZ[2], dessus: LUZ[4], gauche: LUZ[0], droite: LUZ[3], cases: 30, hauteur: 2.2, joint: 0.3, inclinaison: 0.5 },
+        'Menthe': { relief: 'gradins', fond: MENTHE[0], dessus: MENTHE[2], gauche: MENTHE[3], droite: MENTHE[1], cases: 20, joint: 0.1, frequence: 0.6 },
+        'Orbite': { relief: 'onde', fond: ORB[2], dessus: ORB[0], gauche: '#3c3c3c', droite: ORB[1], cases: 9, hauteur: 2.4, joint: 0.35, frequence: 0.5, contour: 1 },
+        'Code': { relief: 'damier', fond: CODE[0], dessus: CODE[4], gauche: CODE[5], droite: CODE[6], modeCouleur: 'hauteur', palette: [CODE[1], CODE[2], CODE[3], CODE[4], CODE[5]], cases: 16, joint: 0.06, vitesse: 1.6 },
+        'Bitmap': { relief: 'bruit', fond: BIT[0], dessus: BIT[4], gauche: BIT[2], droite: BIT[1], cases: 36, hauteur: 0.9, joint: 0, frequence: 1.4, inclinaison: 0.7 },
+      },
+      brand(colors) {
+        const c = colors.slice(1).length ? colors.slice(1) : ['#111111'];
+        return { fond: colors[0], dessus: c[2] || c[0], gauche: c[1] || c[0], droite: c[0], palette: c.slice(0, 6) };
+      },
+      pointer: {
+        move: (q) => { hover = { x: q.x, y: q.y }; },
+        down: (q) => { drag = { x: q.x, y: q.y, r: spinAcc, moved: false, lx: q.x, lt: performance.now() }; thetaV = 0; },
+        drag: (q) => {
+          if (!drag) return;
+          hover = { x: q.x, y: q.y };
+          if (Math.abs(q.x - drag.x) > 5) drag.moved = true;
+          if (drag.moved) {
+            const now = performance.now();
+            thetaV = ((q.x - drag.lx) * 0.5) / Math.max(8, now - drag.lt) * 16;
+            drag.lx = q.x; drag.lt = now;
+            spinAcc = drag.r + (q.x - drag.x) * 0.4;
+          }
+        },
+        up: (q) => {
+          if (drag && !drag.moved) { const c = unproject(drag.x, drag.y); if (c) pulses.push({ x: c.x, y: c.y, t0: clock }); }
+          drag = null;
+        },
+        wheel: (q, dy) => app.set('hauteur', Math.max(0, Math.min(3, +(p.hauteur - dy * 0.002).toFixed(2)))),
+      },
+      onChange(k) { if (k === '*') { spinAcc = 0; thetaV = 0; } },
+      onSeed() { reseed(); },
+      export: { name: 'blocs-isometriques', svg: () => toSVG() },
+    });
+    const p = app.params;
+    canvas.addEventListener('pointerleave', () => { if (!drag) hover = null; });
+    function reseed() { const r = app.rng(11); noiseT = Array.from({ length: 512 }, () => r()); }
+    reseed();
+
+    // Bruit de valeur lissé (2D) sur une table pseudo-aléatoire.
+    const hsh = (i, j) => noiseT[((i * 73856093) ^ (j * 19349663)) & 511];
+    function vnoise(x, y) {
+      const i = Math.floor(x), j = Math.floor(y), fx = x - i, fy = y - j, sx = fx * fx * (3 - 2 * fx), sy = fy * fy * (3 - 2 * fy);
+      const a = hsh(i, j), b = hsh(i + 1, j), c = hsh(i, j + 1), d = hsh(i + 1, j + 1);
+      return a + (b - a) * sx + (c - a) * sy + (a - b - c + d) * sx * sy;
+    }
+
+    // ——— Logo échantillonné ———
+    let logoSrc = null, logoData = null;
+    function logoSample() {
+      const img = p.image || app.logoImg;
+      if (!img) return null;
+      if (img !== logoSrc) {
+        logoSrc = img;
+        const S = 128, c = document.createElement('canvas'); c.width = c.height = S;
+        const x = c.getContext('2d', { willReadFrequently: true });
+        const iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height, k = (S * 0.9) / Math.max(iw, ih);
+        x.fillStyle = '#fff'; x.fillRect(0, 0, S, S);
+        x.drawImage(img, (S - iw * k) / 2, (S - ih * k) / 2, iw * k, ih * k);
+        const d = x.getImageData(0, 0, S, S).data;
+        logoData = { S, v: new Float32Array(S * S) };
+        for (let i = 0; i < S * S; i++) logoData.v[i] = 1 - (d[i * 4] * 0.2126 + d[i * 4 + 1] * 0.7152 + d[i * 4 + 2] * 0.0722) / 255;
+      }
+      return logoData;
+    }
+
+    // ——— Hauteurs ———
+    function heightAt(i, j, N, t) {
+      const u = (i + 0.5) / N - 0.5, v = (j + 0.5) / N - 0.5, f = p.frequence, sp = p.vitesse;
+      let z = 0;
+      switch (p.relief) {
+        case 'bruit': z = vnoise(u * 5 * f + t * sp * 0.35, v * 5 * f - t * sp * 0.2) * 1.2 - 0.1; break;
+        case 'gradins': { const r = Math.max(Math.abs(u), Math.abs(v)); z = Math.floor(((Math.sin(r * 14 * f - t * sp * 1.6) + 1) / 2) * 4) / 4; break; }
+        case 'pyramide': { const r = Math.max(Math.abs(u), Math.abs(v)) * 2; z = Math.max(0, 1 - r) * 1.6 * (0.75 + 0.25 * Math.sin(t * sp * 1.2)) + 0.08 * Math.sin(r * 18 * f - t * sp * 2); break; }
+        case 'damier': { const k = (i + j) % 2, ph = t * sp * 1.4 + (i * 0.37 + j * 0.61) * f; z = k ? 0.5 + 0.5 * Math.sin(ph) : 0.5 - 0.5 * Math.sin(ph); break; }
+        case 'logo': {
+          const L = logoSample();
+          if (L) { const x = Math.floor((u + 0.5) * L.S), y = Math.floor((v + 0.5) * L.S); z = L.v[Math.min(L.S - 1, y) * L.S + Math.min(L.S - 1, x)] * (0.85 + 0.15 * Math.sin(t * sp * 2 - (i + j) * 0.3 * f)); }
+          else z = 0.5 + 0.5 * Math.sin(Math.hypot(u, v) * 18 * f - t * sp * 2);
+          break;
+        }
+        default: z = 0.5 + 0.5 * Math.sin(Math.hypot(u, v) * 18 * f - t * sp * 2);
+      }
+      // Ondes de touche et soulèvement au survol.
+      for (const pu of pulses) { const d = Math.hypot(i + 0.5 - pu.x, j + 0.5 - pu.y), age = t - pu.t0, r = age * N * 0.6; z += 0.8 * Math.exp(-((d - r) ** 2) / 2) * Math.max(0, 1 - age / 2.2); }
+      if (hc) { const d = Math.hypot(i + 0.5 - hc.x, j + 0.5 - hc.y); z += 0.6 * Math.exp(-(d * d) / (N * 0.012 + 1.5)); }
+      return Math.max(0, z);
+    }
+    let hc = null;
+
+    // ——— Projection axonométrique ———
+    function view(w, h) {
+      const N = Math.round(p.cases), c = Math.cos(theta), s = Math.sin(theta), tilt = p.inclinaison;
+      const cell = (Math.min(w, h * 1.25) * p.zoom) / (N * 1.42), H = cell * p.hauteur * N * 0.12;
+      return { N, c, s, tilt, cell, H, ox: w / 2, oy: h / 2 + H * 0.35 };
+    }
+    // Coordonnées monde (x, y dans la grille, z en unités de hauteur) → écran.
+    const proj = (V, x, y, z) => { const X = x - V.N / 2, Y = y - V.N / 2; return [V.ox + (X * V.c - Y * V.s) * V.cell, V.oy + (X * V.s + Y * V.c) * V.cell * V.tilt - z * V.H]; };
+    function unproject(sx, sy) {
+      const { w, h } = app.size, V = view(w, h);
+      const a = (sx - V.ox) / V.cell, b = (sy - V.oy) / (V.cell * V.tilt);
+      const X = a * V.c + b * V.s, Y = -a * V.s + b * V.c;
+      return { x: X + V.N / 2, y: Y + V.N / 2 };
+    }
+
+    function shade(hex, k) {
+      const n = parseInt(hex.slice(1), 16), r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255;
+      const m = (x) => Math.round(k < 0 ? x * (1 + k) : x + (255 - x) * k).toString(16).padStart(2, '0');
+      return '#' + m(r) + m(g) + m(b);
+    }
+
+    function scene(pen, w, h, t) {
+      const V = view(w, h), N = V.N, gap = p.joint * 0.5, base = p.socle;
+      hc = hover && !drag ? unproject(hover.x, hover.y) : null;
+      if (hc && (hc.x < -1 || hc.y < -1 || hc.x > N + 1 || hc.y > N + 1)) hc = null;
+      const cells = [];
+      for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) {
+        const X = i + 0.5 - N / 2, Y = j + 0.5 - N / 2;
+        cells.push({ i, j, d: X * V.s + Y * V.c, z: base + heightAt(i, j, N, t) });
+      }
+      cells.sort((a, b) => a.d - b.d);
+      const P = p.palette && p.palette.length ? p.palette : [p.dessus];
+      // Faces latérales visibles : normales (±1, 0) et (0, ±1) tournées vers l'observateur.
+      const showXp = V.s > 0, showYp = V.c > 0;
+      const sideCol = (nx) => {
+        // La face gauche ou droite à l'écran dépend de l'orientation de sa normale.
+        const sxn = nx ? V.c * (showXp ? 1 : -1) : -V.s * (showYp ? 1 : -1);
+        return sxn < 0 ? p.gauche : p.droite;
+      };
+      const lw = p.contour, ink = p.contour > 0 ? p.droite : null;
+      for (const c of cells) {
+        const x0 = c.i + gap, x1 = c.i + 1 - gap, y0 = c.j + gap, y1 = c.j + 1 - gap, z = c.z;
+        const top = [...proj(V, x0, y0, z), ...proj(V, x1, y0, z), ...proj(V, x1, y1, z), ...proj(V, x0, y1, z)];
+        const fx = showXp ? x1 : x0, fy = showYp ? y1 : y0;
+        const fX = [...proj(V, fx, y0, z), ...proj(V, fx, y1, z), ...proj(V, fx, y1, 0), ...proj(V, fx, y0, 0)];
+        const fY = [...proj(V, x0, fy, z), ...proj(V, x1, fy, z), ...proj(V, x1, fy, 0), ...proj(V, x0, fy, 0)];
+        pen.poly(fX, sideCol(true), ink, lw);
+        pen.poly(fY, sideCol(false), ink, lw);
+        let tc = p.dessus;
+        if (p.modeCouleur === 'hauteur') { const k = Math.min(P.length - 1, Math.floor(Math.min(0.999, (z - base) / 1.2) * P.length)); tc = P[Math.max(0, k)]; }
+        pen.poly(top, tc, ink, lw);
+      }
+    }
+
+    function canvasPen(c) {
+      return {
+        poly(q, col, ink, lw) {
+          c.beginPath(); c.moveTo(q[0], q[1]); for (let i = 2; i < q.length; i += 2) c.lineTo(q[i], q[i + 1]); c.closePath();
+          c.fillStyle = col; c.fill();
+          if (ink && lw > 0) { c.strokeStyle = ink; c.lineWidth = lw; c.lineJoin = 'round'; c.stroke(); }
+          else if (p.joint < 0.02) { c.strokeStyle = col; c.lineWidth = 0.6; c.stroke(); } // ferme les micro-joints d'anticrénelage
+        },
+      };
+    }
+
+    app.loop((t, dt) => {
+      const { w, h, dpr } = app.size;
+      dt = Math.min(0.05, dt || 0);
+      clock = t;
+      // Élan après le glisser, puis rotation lente ; le réglage « Rotation » reste l'angle de départ.
+      if (!drag) { thetaV *= Math.pow(0.05, dt); spinAcc += thetaV + p.tourne * dt * 20; }
+      theta = (p.rotation + spinAcc) * DEG;
+      pulses = pulses.filter((q) => t - q.t0 < 2.4);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = p.fond; ctx.fillRect(0, 0, w, h);
+      scene(canvasPen(ctx), w, h, t);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      app.finish(ctx);
+    });
+
+    function toSVG() {
+      const { w, h } = app.size, out = [], f = (v) => Math.round(v * 100) / 100;
+      scene({
+        poly(q, col, ink, lw) {
+          let s = ''; for (let i = 0; i < q.length; i += 2) s += (i ? ' ' : '') + f(q[i]) + ',' + f(q[i + 1]);
+          out.push(`<polygon points="${s}" fill="${col}" stroke="${ink && lw > 0 ? ink : col}" stroke-width="${ink && lw > 0 ? f(lw) : 0.6}" stroke-linejoin="round"/>`);
+        },
+      }, w, h, clock);
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">\n<rect width="100%" height="100%" fill="${p.fond}"/>\n${out.join('\n')}\n</svg>`;
+    }
+  </script>
+</body>
+</html>

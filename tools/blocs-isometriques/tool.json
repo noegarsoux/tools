@@ -1,0 +1,15 @@
+{
+  "slug": "blocs-isometriques",
+  "title": "Blocs isométriques",
+  "type": "shapes",
+  "description": "Un champ de blocs extrudés en axonométrie, trois faces en trois tons ; hauteurs en onde, bruit, gradins, pyramide, damier ou logo. La vue tourne au glisser.",
+  "tags": ["isometrie", "blocs", "3d", "logo", "svg", "motion"],
+  "inspiration": [
+    "Illustrations isométriques et axonométries des identités architecturales",
+    "Champs de hauteur extrudés (heightmaps) en trois tons",
+    "references/identites.md ; palettes biennale, kegelbahn, salon, good-room, luzern, pyramides"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
