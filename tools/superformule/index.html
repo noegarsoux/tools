@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Superformule</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Superformule : la courbe de Johan Gielis, r(φ) = (|cos(mφ/4)/a|^n2 + |sin(mφ/4)/b|^n3)^(−1/n1),
+    // qui passe du cercle à l'étoile, à la fleur ou au carré arrondi avec six nombres. La forme réglée
+    // se métamorphose en boucle vers une suite de formes cibles ; le morphing interpole les rayons
+    // (et non les paramètres) pour que la courbe reste toujours fermée. Trois mises en page : une forme,
+    // un empilement de couches qui glissent de la forme vers la cible, une planche de variantes.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2, S = 720;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const P60 = PAL('papier-60'), NUIT = PAL('trame-nuit'), BIEN = PAL('biennale'), KB = PAL('kegelbahn');
+    const LU = PAL('luzern'), MENTHE = PAL('menthe'), ORB = PAL('orbite'), SALON = PAL('salon'), ACIDE = PAL('acide');
+
+    // Bibliothèque de cibles du morphing : [m, n1, n2, n3, a, b].
+    const LIB = [
+      [5, 0.6, 0.6, 0.6, 1, 1], [6, 1, 7, 8, 1, 1], [4, 12, 15, 15, 1, 1], [3, 4.5, 10, 10, 1, 1],
+      [8, 0.5, 0.5, 8, 1, 1], [7, 2, 8, 4, 1, 1], [2, 1, 4, 8, 1, 1], [12, 15, 20, 3, 1, 1],
+      [16, 2, 6, 6, 1, 1], [4, 1, 1, 1, 1, 1], [9, 1.2, 4, 1.4, 1, 1], [3, 0.6, 1, 1.6, 1, 1],
+    ];
+
+    let ready = false, order = [], drag = null, hoverCell = -1, lastT = 0;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.04, vignette: 0 },
+      hint: 'Glissez : horizontal pour la symétrie, vertical pour la rondeur · molette : nombre de couches',
+      notes: 'La forme réglée se métamorphose en boucle vers une suite de formes cibles. Le morphing passe par les rayons, pas par les paramètres : la courbe reste toujours fermée.',
+      params: {
+        'Forme': {
+          m: { type: 'range', label: 'Symétrie (m)', min: 0, max: 24, step: 1, value: 6 },
+          n1: { type: 'range', label: 'Rondeur (n1)', min: 0.1, max: 40, step: 0.05, value: 1.6 },
+          n2: { type: 'range', label: 'Pointes (n2)', min: 0.1, max: 40, step: 0.05, value: 7 },
+          n3: { type: 'range', label: 'Pointes (n3)', min: 0.1, max: 40, step: 0.05, value: 8 },
+          ab: { type: 'range', label: 'Asymétrie (a / b)', min: 0.5, max: 2, step: 0.01, value: 1 },
+        },
+        'Mise en page': {
+          mode: { type: 'segmented', label: 'Mode', options: { forme: 'Forme', empilement: 'Empilement', planche: 'Planche' }, value: 'empilement' },
+          couches: { type: 'range', label: 'Couches', min: 2, max: 60, step: 1, value: 18 },
+          reduction: { type: 'range', label: 'Taille de la plus petite couche', min: 0, max: 0.95, step: 0.01, value: 0.08 },
+          torsion: { type: 'range', label: 'Torsion entre couches (°)', min: -30, max: 30, step: 0.5, value: 4 },
+          colonnes: { type: 'range', label: 'Colonnes de la planche', min: 2, max: 8, step: 1, value: 4 },
+          variation: { type: 'range', label: 'Variation de la planche', min: 0, max: 1, step: 0.01, value: 0.6 },
+        },
+        'Mouvement': {
+          morphing: { type: 'range', label: 'Morphing', min: 0, max: 1, step: 0.01, value: 0.8 },
+          duree: { type: 'range', label: 'Durée d’une métamorphose (s)', min: 1, max: 20, step: 0.5, value: 5 },
+          rotation: { type: 'range', label: 'Rotation (tours par métamorphose)', min: -1, max: 1, step: 0.05, value: 0.1 },
+          vague: { type: 'range', label: 'Décalage entre couches', min: 0, max: 1, step: 0.01, value: 0.35 },
+        },
+        'Dessin': {
+          rendu: { type: 'segmented', label: 'Rendu', options: { trait: 'Trait', plein: 'Plein', alterne: 'Alterné' }, value: 'alterne' },
+          epaisseur: { type: 'range', label: 'Épaisseur du trait', min: 0.3, max: 8, step: 0.1, value: 1.4 },
+          taille: { type: 'range', label: 'Taille', min: 0.2, max: 1, step: 0.01, value: 0.82 },
+        },
+        'Couleur': {
+          fond: { type: 'color', label: 'Fond', value: P60[0] },
+          couleurs: { type: 'palette', label: 'Couleurs (alternées)', value: [P60[1], '#e5452a', P60[0]] },
+        },
+      },
+      presets: {
+        'Empilement': {},
+        'Fleur': { mode: 'forme', m: 6, n1: 1, n2: 7, n3: 8, rendu: 'plein', morphing: 0.35, fond: BIEN[0], couleurs: [BIEN[2], BIEN[3]] },
+        'Tunnel': { mode: 'empilement', couches: 50, reduction: 0, torsion: 2.5, rendu: 'trait', epaisseur: 1, m: 4, n1: 12, n2: 15, n3: 15, fond: NUIT[0], couleurs: [NUIT[1], NUIT[2]], vague: 0.8 },
+        'Planche': { mode: 'planche', colonnes: 4, variation: 0.8, rendu: 'plein', fond: KB[0], couleurs: [KB[1], KB[2], KB[3], KB[4], KB[5]], morphing: 0.5 },
+        'Étoiles': { m: 5, n1: 0.3, n2: 0.3, n3: 0.3, couches: 12, reduction: 0.15, torsion: 15, fond: ACIDE[2], couleurs: [ACIDE[1], ACIDE[2]], rendu: 'alterne' },
+        'Luzern': { couches: 24, m: 8, n1: 0.5, n2: 0.5, n3: 8, fond: LU[3], couleurs: [LU[0], LU[1], LU[2], LU[4]], rendu: 'alterne', torsion: -6 },
+        'Engrenage': { mode: 'forme', m: 16, n1: 3, n2: 4, n3: 4, rendu: 'plein', fond: SALON[0], couleurs: [SALON[1]], morphing: 0.3, rotation: 0.25 },
+        'Menthe': { mode: 'planche', colonnes: 6, variation: 0.4, rendu: 'trait', epaisseur: 2, fond: MENTHE[0], couleurs: [MENTHE[1], MENTHE[3]] },
+        'Orbite': { couches: 9, reduction: 0.3, m: 3, n1: 4.5, n2: 10, n3: 10, rendu: 'alterne', fond: ORB[0], couleurs: [ORB[1], ORB[2]], torsion: 20, vague: 0.6 },
+      },
+      brand(colors) {
+        const rest = colors.slice(1);
+        return { fond: colors[0], couleurs: (rest.length ? rest : ['#000000']).concat(rest.length < 2 ? [colors[0]] : []).slice(0, 6) };
+      },
+      pointer: {
+        move: (q) => { hoverCell = p.mode === 'planche' ? cellAt(q.x, q.y) : -1; },
+        down: (q) => { drag = { x: q.x, y: q.y, m: p.m, n1: p.n1, moved: false }; },
+        drag: (q) => {
+          if (!drag) return;
+          const dx = q.x - drag.x, dy = q.y - drag.y;
+          if (Math.hypot(dx, dy) > 4) drag.moved = true;
+          app.set('m', Math.max(0, Math.min(24, Math.round(drag.m + dx / 30))));
+          app.set('n1', Math.max(0.1, Math.min(40, +(drag.n1 * Math.exp(-dy / 120)).toFixed(2))));
+        },
+        up: (q) => {
+          // Un clic sur une variante de la planche en fait la forme réglée.
+          if (drag && !drag.moved && p.mode === 'planche') {
+            const i = cellAt(q.x, q.y);
+            if (i >= 0) { const v = variant(i); app.set('m', v[0]); app.set('n1', +v[1].toFixed(2)); app.set('n2', +v[2].toFixed(2)); app.set('n3', +v[3].toFixed(2)); }
+          }
+          drag = null;
+        },
+        wheel: (q, dy) => app.set('couches', Math.max(2, Math.min(60, Math.round(p.couches - dy * 0.02)))),
+      },
+      onChange(k) { if (k === '*') shuffle(); },
+      onSeed() { shuffle(); },
+      export: { name: 'superformule', svg: () => toSVG() },
+    });
+    const p = app.params;
+    canvas.addEventListener('pointerleave', () => { hoverCell = -1; });
+
+    function shuffle() {
+      const r = app.rng(9);
+      order = LIB.map((_, i) => i);
+      for (let i = order.length - 1; i > 0; i--) { const j = Math.floor(r() * (i + 1)); [order[i], order[j]] = [order[j], order[i]]; }
+    }
+
+    // Rayons normalisés d'une superformule, échantillonnés sur S angles (le plus grand rayon vaut 1).
+    const cache = new Map();
+    function radii(v) {
+      const key = v.map((x) => x.toFixed(3)).join(',');
+      let R = cache.get(key);
+      if (R) return R;
+      const [m, n1, n2, n3, a, b] = v;
+      R = new Float32Array(S);
+      let mx = 0;
+      for (let i = 0; i < S; i++) {
+        const f = i / S * TAU;
+        const t = Math.pow(Math.abs(Math.cos(m * f / 4) / a), n2) + Math.pow(Math.abs(Math.sin(m * f / 4) / b), n3);
+        let r = t > 0 ? Math.pow(t, -1 / n1) : 0;
+        if (!isFinite(r)) r = 0;
+        R[i] = r; if (r > mx) mx = r;
+      }
+      if (mx > 0) for (let i = 0; i < S; i++) R[i] /= mx;
+      if (cache.size > 400) cache.clear();
+      cache.set(key, R);
+      return R;
+    }
+    const userShape = () => [p.m, p.n1, p.n2, p.n3, p.ab >= 1 ? 1 : p.ab, p.ab >= 1 ? 1 / p.ab : 1];
+
+    // Morphing : la forme réglée va vers la cible k puis revient, et la cible change à chaque aller-retour.
+    const ease = (x) => x * x * (3 - 2 * x);
+    function morphAt(t, base) {
+      const cyc = t / p.duree, k = Math.floor(cyc), f = cyc - k;
+      const s = ease(Math.sin(f * Math.PI) ** 2) * p.morphing;
+      const tgt = radii(LIB[order[k % order.length] ?? 0]);
+      const out = new Float32Array(S);
+      for (let i = 0; i < S; i++) out[i] = base[i] + (tgt[i] - base[i]) * s;
+      return out;
+    }
+
+    function variant(i) {
+      // Variante de planche : la symétrie et les exposants dérivent de la forme réglée.
+      const r = app.rng(100 + i), v = p.variation, u = userShape();
+      if (i === 0) return u;
+      return [
+        // (bornes : pas de variante réduite à des aiguilles ou à un point)
+        Math.max(2, Math.round(u[0] + (r() - 0.5) * 12 * v)),
+        Math.min(20, Math.max(0.7, u[1] * Math.exp((r() - 0.5) * 4 * v))),
+        Math.min(20, Math.max(0.5, u[2] * Math.exp((r() - 0.5) * 4 * v))),
+        Math.min(20, Math.max(0.5, u[3] * Math.exp((r() - 0.5) * 4 * v))), u[4], u[5],
+      ];
+    }
+    function grid() {
+      const { w, h } = app.size, cols = p.colonnes, rows = Math.max(1, Math.round(cols * h / w));
+      const c = Math.min(w / cols, h / rows);
+      return { cols, rows, c, x0: (w - cols * c) / 2, y0: (h - rows * c) / 2 };
+    }
+    function cellAt(x, y) {
+      const g = grid(), i = Math.floor((x - g.x0) / g.c), j = Math.floor((y - g.y0) / g.c);
+      return i >= 0 && j >= 0 && i < g.cols && j < g.rows ? j * g.cols + i : -1;
+    }
+
+    // Une liste de formes à dessiner : { cx, cy, R, rot, rad (rayons), col, fill }.
+    function scene(t) {
+      const { w, h } = app.size, U = Math.min(w, h), cols = p.couleurs.length ? p.couleurs : ['#000000'];
+      const base = radii(userShape()), out = [];
+      const cyc = t / p.duree, rot0 = cyc * p.rotation * TAU;
+      if (p.mode === 'forme') {
+        out.push({ cx: w / 2, cy: h / 2, R: U * 0.5 * p.taille, rot: rot0, rad: morphAt(t, base), col: cols[0], k: 0 });
+      } else if (p.mode === 'empilement') {
+        const L = p.couches;
+        for (let i = 0; i < L; i++) {
+          const u = L > 1 ? i / (L - 1) : 0;
+          // Chaque couche est en retard sur la précédente : une vague traverse l'empilement.
+          const rad = morphAt(Math.max(0, t - u * p.vague * p.duree), base);
+          out.push({ cx: w / 2, cy: h / 2, R: U * 0.5 * p.taille * (1 - u * (1 - p.reduction)), rot: rot0 + i * p.torsion * Math.PI / 180, rad, col: p.rendu === 'plein' ? cols[0] : cols[i % cols.length], k: i });
+        }
+      } else {
+        const g = grid();
+        for (let j = 0; j < g.rows; j++) for (let i = 0; i < g.cols; i++) {
+          const n = j * g.cols + i, b = radii(variant(n));
+          const rad = morphAt(t + n * 0.37 * p.duree, b);
+          out.push({ cx: g.x0 + (i + 0.5) * g.c, cy: g.y0 + (j + 0.5) * g.c, R: g.c * 0.42 * p.taille * (n === hoverCell ? 1.08 : 1), rot: rot0, rad, col: cols[n % cols.length], k: n });
+        }
+      }
+      return out;
+    }
+    function pts(s) {
+      const a = new Float32Array(S * 2);
+      for (let i = 0; i < S; i++) {
+        const f = i / S * TAU + s.rot, r = s.rad[i] * s.R;
+        a[i * 2] = s.cx + Math.cos(f) * r; a[i * 2 + 1] = s.cy + Math.sin(f) * r;
+      }
+      return a;
+    }
+    // Plein : aplats d'une couleur cernés d'un filet du fond ; alterné : aplats aux couleurs successives.
+    const filled = () => p.rendu !== 'trait';
+    const cerne = () => p.rendu === 'plein';
+    function draw(t) {
+      const { w, h, dpr } = app.size;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = p.fond; ctx.fillRect(0, 0, w, h);
+      ctx.lineJoin = 'round';
+      for (const s of scene(t)) {
+        const a = pts(s);
+        ctx.beginPath();
+        for (let i = 0; i < S; i++) i ? ctx.lineTo(a[i * 2], a[i * 2 + 1]) : ctx.moveTo(a[0], a[1]);
+        ctx.closePath();
+        if (filled(s)) { ctx.fillStyle = s.col; ctx.fill(); if (cerne()) { ctx.strokeStyle = p.fond; ctx.lineWidth = p.epaisseur; ctx.stroke(); } }
+        else { ctx.strokeStyle = s.col; ctx.lineWidth = p.epaisseur; ctx.stroke(); }
+      }
+    }
+    function toSVG() {
+      const { w, h } = app.size, f = (v) => v.toFixed(1), body = [];
+      for (const s of scene(lastT)) {
+        const a = pts(s);
+        let d = '';
+        for (let i = 0; i < S; i += 2) d += (i ? 'L' : 'M') + f(a[i * 2]) + ' ' + f(a[i * 2 + 1]);
+        d += 'Z';
+        body.push(filled(s) ? `<path d="${d}" fill="${s.col}"${cerne() ? ` stroke="${p.fond}" stroke-width="${p.epaisseur}" stroke-linejoin="round"` : ''}/>` : `<path d="${d}" fill="none" stroke="${s.col}" stroke-width="${p.epaisseur}" stroke-linejoin="round"/>`);
+      }
+      return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}"><rect width="100%" height="100%" fill="${p.fond}"/>${body.join('')}</svg>`;
+    }
+
+    shuffle();
+    ready = true;
+    app.loop((t) => { lastT = t; draw(t); app.finish(ctx); });
+  </script>
+</body>
+</html>
