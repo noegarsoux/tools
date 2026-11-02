@@ -1,0 +1,324 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Kaléidoscope</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Kaléidoscope : un plan source (formes qui dérivent, ou une image / le logo) est vu à travers
+    // une région fondamentale, puis répété par miroirs : rosace à n miroirs, rotation seule,
+    // pavage de triangles (trois miroirs, le vrai kaléidoscope) ou pavage de carrés.
+    // La région est rendue une fois hors champ, puis posée à chaque tuile (même structure en SVG).
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2, DEG = Math.PI / 180, R3 = Math.sqrt(3);
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const KB = PAL('kegelbahn'), BIEN = PAL('biennale'), GLY = PAL('glyphes'), LUZ = PAL('luzern'), MENTHE = PAL('menthe'), PIX = PAL('pixels');
+    const ACIDE = PAL('acide'), SALON = PAL('salon'), CODE = PAL('code'), THER = PAL('thermique'), NUIT = PAL('trame-nuit'), P60 = PAL('papier-60');
+
+    let pan = { x: 0, y: 0 }, vel = { x: 0, y: 0 }, drag = null, spin = 0, shuffle = 0, shapes = [];
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.03, vignette: 0 },
+      hint: 'Glissez pour faire défiler la source · touchez pour rebattre les formes · molette : miroirs ou taille du motif',
+      notes: 'La région fondamentale (secteur, triangle ou carré) est rendue une fois, puis répétée par réflexions. En SVG, la source est un groupe découpé, réutilisé par <use> à chaque tuile.',
+      params: {
+        'Symétrie': {
+          symetrie: { type: 'select', label: 'Symétrie', options: { miroirs: 'Rosace à miroirs', rotation: 'Rosace tournante', triangles: 'Pavage de triangles', carres: 'Pavage de carrés' }, value: 'miroirs' },
+          segments: { type: 'range', label: 'Miroirs', min: 2, max: 18, step: 1, value: 8, show: (q) => q.symetrie === 'miroirs' || q.symetrie === 'rotation' },
+          motif: { type: 'range', label: 'Taille du motif', min: 0.08, max: 0.6, step: 0.005, value: 0.22, show: (q) => q.symetrie === 'triangles' || q.symetrie === 'carres' },
+          tourne: { type: 'range', label: 'Rotation', min: -1, max: 1, step: 0.01, value: 0.1 },
+        },
+        'Source': {
+          source: { type: 'segmented', label: 'Source', options: { formes: 'Formes', image: 'Image / logo' }, value: 'formes' },
+          image: { type: 'file', label: 'Image', accept: 'image/*', show: (q) => q.source === 'image' },
+          formes: { type: 'select', label: 'Formes', options: { mixte: 'Mélange', disques: 'Disques', anneaux: 'Anneaux', barres: 'Barres', triangles: 'Triangles', demi: 'Demi-lunes' }, value: 'mixte', show: (q) => q.source === 'formes' },
+          nombre: { type: 'range', label: 'Nombre', min: 3, max: 80, step: 1, value: 40, show: (q) => q.source === 'formes' },
+          taille: { type: 'range', label: 'Taille', min: 0.2, max: 2.5, step: 0.01, value: 1 },
+          derive: { type: 'range', label: 'Dérive', min: 0, max: 2, step: 0.01, value: 0.4 },
+          contour: { type: 'range', label: 'Contour seul', min: 0, max: 12, step: 0.5, value: 0, show: (q) => q.source === 'formes' },
+        },
+        'Couleur': {
+          fond: { type: 'color', label: 'Fond', value: KB[0] },
+          couleurs: { type: 'palette', label: 'Couleurs', value: [KB[1], KB[2], KB[3], KB[4], KB[5]] },
+          melange: { type: 'segmented', label: 'Mélange', options: { normal: 'Normal', multiply: 'Produit', screen: 'Superposition' }, value: 'normal' },
+          joint: { type: 'range', label: 'Arêtes des miroirs', min: 0, max: 4, step: 0.1, value: 0 },
+          couleurJoint: { type: 'color', label: 'Couleur des arêtes', value: '#ffffff', show: (q) => q.joint > 0 },
+        },
+      },
+      presets: {
+        'Kegelbahn': {},
+        'Biennale': { symetrie: 'miroirs', segments: 6, fond: BIEN[0], couleurs: [BIEN[1], BIEN[2], BIEN[3], BIEN[4]], formes: 'mixte', nombre: 18, taille: 1.3, melange: 'multiply' },
+        'Vitrail': { symetrie: 'triangles', motif: 0.2, fond: NUIT[0], couleurs: [GLY[2], GLY[3], GLY[4], GLY[5], GLY[6]], formes: 'disques', nombre: 20, taille: 1.1, joint: 2, couleurJoint: '#0a0a0a' },
+        'Carrelage': { symetrie: 'carres', motif: 0.18, fond: SALON[0], couleurs: [SALON[1], SALON[2], SALON[3], SALON[4]], formes: 'barres', nombre: 18, taille: 1.6, tourne: 0 },
+        'Rosace': { symetrie: 'rotation', segments: 12, fond: LUZ[3], couleurs: [LUZ[0], LUZ[1], LUZ[2], LUZ[4]], formes: 'demi', nombre: 22, taille: 0.9, tourne: 0.2 },
+        'Menthe': { symetrie: 'miroirs', segments: 5, fond: MENTHE[0], couleurs: [MENTHE[2], MENTHE[3], MENTHE[1]], formes: 'anneaux', nombre: 16, taille: 1.4, contour: 0, melange: 'multiply', derive: 0.25 },
+        'Néon': { symetrie: 'miroirs', segments: 12, fond: '#08080a', couleurs: [PIX[1], PIX[2], PIX[3], PIX[4], PIX[5]], formes: 'mixte', nombre: 30, contour: 2.5, melange: 'screen', taille: 1.2 },
+        'Acide': { symetrie: 'triangles', motif: 0.32, fond: ACIDE[1], couleurs: [ACIDE[2], ACIDE[3], ACIDE[0]], formes: 'triangles', nombre: 40, taille: 1.7 },
+        'Code': { symetrie: 'carres', motif: 0.26, fond: CODE[0], couleurs: [CODE[1], CODE[2], CODE[3], CODE[4], CODE[5], CODE[6]], formes: 'mixte', nombre: 34, taille: 0.8, joint: 1, couleurJoint: CODE[0] },
+        'Thermique': { symetrie: 'miroirs', segments: 16, fond: THER[0], couleurs: [THER[1], THER[2], THER[3], THER[4], THER[5]], formes: 'disques', nombre: 40, taille: 0.8, melange: 'multiply', derive: 0.6 },
+        'Logo': { symetrie: 'miroirs', segments: 6, source: 'image', fond: P60[0], couleurs: [P60[1]], taille: 1, derive: 0.3, joint: 0 },
+      },
+      brand(colors) {
+        const c = colors.slice(1).length ? colors.slice(1) : ['#111111'];
+        return { fond: colors[0], couleurs: c.slice(0, 7) };
+      },
+      pointer: {
+        down: (q) => { drag = { x: q.x, y: q.y, lx: q.x, ly: q.y, lt: performance.now(), moved: false }; vel.x = vel.y = 0; },
+        drag: (q) => {
+          if (!drag) return;
+          if (Math.hypot(q.x - drag.x, q.y - drag.y) > 5) drag.moved = true;
+          if (!drag.moved) return;
+          const B = regionSize(), now = performance.now(), dt = Math.max(0.008, (now - drag.lt) / 1000);
+          const dx = (q.x - drag.lx) / B * 0.6, dy = (q.y - drag.ly) / B * 0.6;
+          pan.x -= dx; pan.y -= dy; vel.x = -dx / dt; vel.y = -dy / dt;
+          drag.lx = q.x; drag.ly = q.y; drag.lt = now;
+        },
+        up: () => {
+          if (drag && !drag.moved) { shuffle++; build(); vel.x = vel.y = 0; }
+          drag = null;
+        },
+        wheel: (q, dy) => {
+          if (p.symetrie === 'miroirs' || p.symetrie === 'rotation') app.set('segments', Math.max(2, Math.min(18, p.segments + (dy > 0 ? -1 : 1))));
+          else app.set('motif', Math.max(0.08, Math.min(0.6, +(p.motif - dy * 0.0001).toFixed(3))));
+        },
+      },
+      onChange(k) { if (k === 'nombre' || k === 'formes' || k === '*') build(); if (k === '*') { pan.x = pan.y = 0; vel.x = vel.y = 0; spin = 0; } },
+      onSeed() { shuffle = 0; build(); },
+      export: { name: 'kaleidoscope', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    // ——— Formes de la source (plan unité torique : positions dans [0,1)²) ———
+    const KINDS = ['disques', 'anneaux', 'barres', 'triangles', 'demi'];
+    function build() {
+      const r = app.rng(11 + shuffle * 101), n = Math.round(p.nombre);
+      shapes = [];
+      for (let i = 0; i < n; i++) {
+        const kind = p.formes === 'mixte' ? KINDS[Math.floor(r() * KINDS.length)] : p.formes;
+        shapes.push({ kind, u: r(), v: r(), s: 0.04 + Math.pow(r(), 1.8) * 0.2, a: r() * TAU, va: (r() - 0.5) * 1.2, vu: (r() - 0.5) * 0.06, vv: (r() - 0.5) * 0.06, c: Math.floor(r() * 7), e: 0.3 + r() * 0.5 });
+      }
+    }
+    build();
+
+    // ——— Région fondamentale (en pixels, origine au sommet du miroir) ———
+    function regionSize() {
+      const { w, h } = app.size;
+      if (p.symetrie === 'triangles' || p.symetrie === 'carres') return Math.min(w, h) * p.motif;
+      return Math.hypot(w, h) / 2 + 2;
+    }
+    function region() {
+      const B = regionSize(), n = Math.round(p.segments);
+      switch (p.symetrie) {
+        case 'triangles': return { B, poly: [0, 0, B, 0, B / 2, B * R3 / 2], box: [0, 0, B, B * R3 / 2] };
+        case 'carres': return { B, poly: [0, 0, B, 0, B, B, 0, B], box: [0, 0, B, B] };
+        default: {
+          const a = p.symetrie === 'rotation' ? TAU / n : Math.PI / n, poly = [0, 0], steps = Math.max(2, Math.ceil(a / (8 * DEG)));
+          for (let i = 0; i <= steps; i++) { const t = (i / steps) * a; poly.push(Math.cos(t) * B / Math.cos(a / steps / 2), Math.sin(t) * B / Math.cos(a / steps / 2)); }
+          let x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+          for (let i = 0; i < poly.length; i += 2) { x0 = Math.min(x0, poly[i]); x1 = Math.max(x1, poly[i]); y0 = Math.min(y0, poly[i + 1]); y1 = Math.max(y1, poly[i + 1]); }
+          return { B, poly, box: [x0, y0, x1, y1], a };
+        }
+      }
+    }
+    // Agrandit légèrement le polygone (évite les liserés entre tuiles).
+    function grow(poly, d) {
+      let cx = 0, cy = 0; const n = poly.length / 2;
+      for (let i = 0; i < poly.length; i += 2) { cx += poly[i]; cy += poly[i + 1]; }
+      cx /= n; cy /= n;
+      return poly.map((v, i) => { const c = i % 2 ? cy : cx, o = i % 2 ? poly[i - 1] - cx : poly[i + 1] - cy, L = Math.hypot(i % 2 ? o : v - c, i % 2 ? v - c : o) || 1; return v + ((v - c) / L) * d; });
+    }
+
+    // ——— Dessin de la source dans la région (via un « stylo » commun canvas / SVG) ———
+    function eachShape(R, t, fn) {
+      const P = p.couleurs && p.couleurs.length ? p.couleurs : ['#111111'];
+      if (R.a) {
+        // Rosaces : coordonnées polaires dans le secteur ; glisser fait tourner (x) ou affluer (y) la source.
+        const B = R.B, a = R.a;
+        for (const s of shapes) {
+          const u = (((s.u + pan.x * 0.5 + s.vu * t * p.derive) % 1) + 1) % 1, v = (((s.v + pan.y + s.vv * t * p.derive) % 1) + 1) % 1;
+          const th = -a * 0.25 + u * a * 1.5, r = Math.pow(v, 0.7) * B * 0.9;
+          const size = s.s * p.taille * (B * 0.06 + r * 0.55) * Math.min(1.6, a * 1.6 + 0.35), ang = s.a + s.va * t * p.derive;
+          fn(s, Math.cos(th) * r, Math.sin(th) * r, size, ang, P[s.c % P.length]);
+        }
+        return;
+      }
+      const B = R.B * 1.4, [x0, y0, x1, y1] = R.box, span = Math.max(x1 - x0, y1 - y0) + B * 0.6;
+      for (const s of shapes) {
+        // Plan torique de côté « span » : les formes défilent sans jamais disparaître.
+        const u = (((s.u + pan.x + s.vu * t * p.derive) % 1) + 1) % 1, v = (((s.v + pan.y + s.vv * t * p.derive) % 1) + 1) % 1;
+        const x = x0 - B * 0.3 + u * span, y = y0 - B * 0.3 + v * span, size = s.s * B * p.taille, ang = s.a + s.va * t * p.derive;
+        fn(s, x, y, size, ang, P[s.c % P.length]);
+      }
+    }
+    function drawShapes(pen, R, t) {
+      eachShape(R, t, (s, x, y, r, ang, col) => {
+        const st = p.contour > 0;
+        switch (s.kind) {
+          case 'anneaux': pen.ring(x, y, r, r * (1 - s.e * 0.6), col, st); break;
+          case 'barres': pen.poly(rectPts(x, y, r * 2.4, r * 0.5 * s.e + r * 0.12, ang), col, st); break;
+          case 'triangles': pen.poly(ngon(x, y, r, 3, ang), col, st); break;
+          case 'demi': pen.half(x, y, r, ang, col, st); break;
+          default: pen.disc(x, y, r * 0.8, col, st);
+        }
+      });
+    }
+    function rectPts(x, y, w, h, a) { const c = Math.cos(a), s = Math.sin(a), out = []; for (const [i, j] of [[-1, -1], [1, -1], [1, 1], [-1, 1]]) { const px = i * w / 2, py = j * h / 2; out.push(x + px * c - py * s, y + px * s + py * c); } return out; }
+    function ngon(x, y, r, n, a) { const out = []; for (let i = 0; i < n; i++) { const t = a + (i / n) * TAU; out.push(x + Math.cos(t) * r, y + Math.sin(t) * r); } return out; }
+
+    let srcImg = null, srcKey = null;
+    function sourceImage() {
+      const img = p.image || app.logoImg;
+      if (img) return img;
+      // Repli : une marque géométrique dessinée (pas de texte).
+      if (!srcImg) {
+        const c = document.createElement('canvas'); c.width = c.height = 512; const x = c.getContext('2d');
+        x.fillStyle = '#000'; x.beginPath(); x.arc(256, 256, 190, 0, TAU); x.arc(256, 256, 100, 0, TAU, true); x.fill('evenodd');
+        x.fillRect(226, 30, 60, 452);
+        srcImg = c;
+      }
+      return srcImg;
+    }
+    function imagePlacement(R, t) {
+      const img = sourceImage(), iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height;
+      const [x0, y0, x1, y1] = R.box, bw = x1 - x0, bh = y1 - y0;
+      // Rosaces : l'image est posée près du centre, à cheval sur les miroirs ; pavages : au centre de la tuile.
+      const S = (R.a ? R.B * 0.42 : Math.max(bw, bh) * 0.9) * p.taille, k = S / Math.max(iw, ih), U = R.a ? R.B * 0.3 : Math.max(bw, bh);
+      const cx = R.a ? Math.cos(R.a / 2) * R.B * 0.22 : x0 + bw / 2, cy = R.a ? Math.sin(R.a / 2) * R.B * 0.22 : y0 + bh / 2;
+      const ox = Math.sin(t * 0.3 * p.derive) * U * 0.25 - pan.x * U, oy = Math.cos(t * 0.23 * p.derive) * U * 0.25 - pan.y * U;
+      return { img, x: cx - iw * k / 2 + ox, y: cy - ih * k / 2 + oy, w: iw * k, h: ih * k };
+    }
+
+    // ——— Tuiles : liste de transformations [a, b, c, d, e, f] couvrant le cadre ———
+    function tiles(R, w, h) {
+      const out = [], B = R.B;
+      if (p.symetrie === 'miroirs' || p.symetrie === 'rotation') {
+        const n = Math.round(p.segments), rot = spin;
+        for (let i = 0; i < n; i++) {
+          const a = rot + (i / n) * TAU, c = Math.cos(a), s = Math.sin(a);
+          out.push([c, s, -s, c, w / 2, h / 2]);
+          if (p.symetrie === 'miroirs') out.push([c, s, s, -c, w / 2, h / 2]); // réflexion puis rotation
+        }
+        return out;
+      }
+      // Pavages : rotation globale autour du centre.
+      const rc = Math.cos(spin), rs = Math.sin(spin), mul = (m, x, y) => [m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]];
+      const comp = (A, Bm) => [A[0] * Bm[0] + A[2] * Bm[1], A[1] * Bm[0] + A[3] * Bm[1], A[0] * Bm[2] + A[2] * Bm[3], A[1] * Bm[2] + A[3] * Bm[3], A[0] * Bm[4] + A[2] * Bm[5] + A[4], A[1] * Bm[4] + A[3] * Bm[5] + A[5]];
+      const G = [rc, rs, -rs, rc, w / 2, h / 2], reach = Math.hypot(w, h) / 2 + B * 2;
+      if (p.symetrie === 'carres') {
+        const per = 2 * B, N = Math.ceil(reach / per) + 1;
+        const cell = [[1, 0, 0, 1, 0, 0], [-1, 0, 0, 1, 0, 0], [1, 0, 0, -1, 0, 0], [-1, 0, 0, -1, 0, 0]];
+        for (let j = -N; j <= N; j++) for (let i = -N; i <= N; i++) for (const m of cell) out.push(comp(G, comp([1, 0, 0, 1, i * per, j * per], m)));
+        return out;
+      }
+      // Triangles (3 miroirs) : hexagone de 6 triangles autour d'un sommet, réseau de pas √3·B.
+      const hex = [];
+      for (let k = 0; k < 3; k++) {
+        const a = k * TAU / 3, c = Math.cos(a), s = Math.sin(a);
+        hex.push([c, s, -s, c, 0, 0]);
+        const a2 = 2 * (60 * DEG) + a, c2 = Math.cos(a2), s2 = Math.sin(a2); // réflexion sur la droite à 60°, puis rotation
+        hex.push([c2, s2, s2, -c2, 0, 0]);
+      }
+      const v1 = [R3 * B * Math.cos(30 * DEG), R3 * B * Math.sin(30 * DEG)], v2 = [0, R3 * B], N = Math.ceil(reach / (R3 * B * 0.85)) + 1;
+      for (let j = -N; j <= N; j++) for (let i = -N; i <= N; i++) {
+        const tx = i * v1[0] + j * v2[0], ty = i * v1[1] + j * v2[1];
+        const c = mul(G, tx, ty); if (Math.abs(c[0] - w / 2) > w / 2 + B * 1.2 || Math.abs(c[1] - h / 2) > h / 2 + B * 1.2) continue;
+        for (const m of hex) out.push(comp(G, comp([1, 0, 0, 1, tx, ty], m)));
+      }
+      return out;
+    }
+
+    // ——— Rendu canvas : région hors champ, puis posée à chaque tuile ———
+    const off = document.createElement('canvas'), octx = off.getContext('2d');
+    function canvasPen(c) {
+      const paint = (col, st) => { if (st) { c.strokeStyle = col; c.lineWidth = p.contour; c.lineJoin = 'round'; c.stroke(); } else { c.fillStyle = col; c.fill('evenodd'); } };
+      return {
+        disc(x, y, r, col, st) { c.beginPath(); c.arc(x, y, r, 0, TAU); paint(col, st); },
+        ring(x, y, r, r2, col, st) { c.beginPath(); c.arc(x, y, r, 0, TAU); if (st) { paint(col, st); c.beginPath(); c.arc(x, y, r2, 0, TAU); paint(col, st); } else { c.moveTo(x + r2, y); c.arc(x, y, r2, 0, TAU, true); paint(col, st); } },
+        poly(q, col, st) { c.beginPath(); c.moveTo(q[0], q[1]); for (let i = 2; i < q.length; i += 2) c.lineTo(q[i], q[i + 1]); c.closePath(); paint(col, st); },
+        half(x, y, r, a, col, st) { c.beginPath(); c.arc(x, y, r, a, a + Math.PI); c.closePath(); paint(col, st); },
+      };
+    }
+    function renderRegion(R, t, dpr) {
+      const [x0, y0, x1, y1] = R.box, W = Math.ceil((x1 - x0 + 4) * dpr), H = Math.ceil((y1 - y0 + 4) * dpr);
+      if (off.width !== W || off.height !== H) { off.width = W; off.height = H; }
+      octx.setTransform(1, 0, 0, 1, 0, 0); octx.clearRect(0, 0, W, H);
+      octx.setTransform(dpr, 0, 0, dpr, (-x0 + 2) * dpr, (-y0 + 2) * dpr);
+      octx.fillStyle = p.fond; octx.fillRect(x0 - 2, y0 - 2, x1 - x0 + 4, y1 - y0 + 4);
+      octx.globalCompositeOperation = p.melange === 'normal' ? 'source-over' : p.melange;
+      if (p.source === 'image') {
+        const im = imagePlacement(R, t);
+        octx.drawImage(im.img, im.x, im.y, im.w, im.h);
+      } else drawShapes(canvasPen(octx), R, t);
+      octx.globalCompositeOperation = 'source-over';
+    }
+
+    app.loop((t, dt) => {
+      const { w, h, dpr } = app.size;
+      dt = Math.min(0.05, dt || 0);
+      spin += dt * p.tourne * 0.25;
+      if (!drag) { pan.x += vel.x * dt; pan.y += vel.y * dt; const k = Math.pow(0.15, dt); vel.x *= k; vel.y *= k; }
+      const R = region();
+      renderRegion(R, t, dpr);
+      const [x0, y0] = R.box, clip = new Path2D(), gp = grow(R.poly, 0.6);
+      clip.moveTo(gp[0], gp[1]); for (let i = 2; i < gp.length; i += 2) clip.lineTo(gp[i], gp[i + 1]); clip.closePath();
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = p.fond; ctx.fillRect(0, 0, w, h);
+      const T = tiles(R, w, h);
+      for (const m of T) {
+        ctx.setTransform(m[0] * dpr, m[1] * dpr, m[2] * dpr, m[3] * dpr, m[4] * dpr, m[5] * dpr);
+        ctx.save(); ctx.clip(clip);
+        ctx.drawImage(off, x0 - 2, y0 - 2, off.width / dpr, off.height / dpr);
+        ctx.restore();
+      }
+      if (p.joint > 0) {
+        const edge = new Path2D(); edge.moveTo(R.poly[0], R.poly[1]); for (let i = 2; i < R.poly.length; i += 2) edge.lineTo(R.poly[i], R.poly[i + 1]); edge.closePath();
+        // Toutes les arêtes dans un seul tracé (un seul trait par image).
+        const all = new Path2D();
+        for (const m of T) all.addPath(edge, new DOMMatrix(m));
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.strokeStyle = p.couleurJoint; ctx.lineJoin = 'round'; ctx.lineWidth = p.joint; ctx.stroke(all);
+      }
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      app.finish(ctx);
+    });
+
+    // ——— Export SVG : la région est un groupe découpé, réutilisé à chaque tuile ———
+    function toSVG() {
+      const { w, h } = app.size, f = (v) => Math.round(v * 100) / 100, t = app.time || 0, R = region(), out = [];
+      const fill = (col, st) => (st ? `fill="none" stroke="${col}" stroke-width="${p.contour}" stroke-linejoin="round"` : `fill="${col}"`);
+      const pen = {
+        disc(x, y, r, col, st) { out.push(`<circle cx="${f(x)}" cy="${f(y)}" r="${f(r)}" ${fill(col, st)}/>`); },
+        ring(x, y, r, r2, col, st) {
+          if (st) { out.push(`<circle cx="${f(x)}" cy="${f(y)}" r="${f(r)}" ${fill(col, st)}/>`, `<circle cx="${f(x)}" cy="${f(y)}" r="${f(r2)}" ${fill(col, st)}/>`); return; }
+          out.push(`<path d="M${f(x + r)} ${f(y)}A${f(r)} ${f(r)} 0 1 0 ${f(x - r)} ${f(y)}A${f(r)} ${f(r)} 0 1 0 ${f(x + r)} ${f(y)}ZM${f(x + r2)} ${f(y)}A${f(r2)} ${f(r2)} 0 1 0 ${f(x - r2)} ${f(y)}A${f(r2)} ${f(r2)} 0 1 0 ${f(x + r2)} ${f(y)}Z" fill-rule="evenodd" ${fill(col, st)}/>`);
+        },
+        poly(q, col, st) { out.push(`<polygon points="${q.map(f).join(' ')}" ${fill(col, st)}/>`); },
+        half(x, y, r, a, col, st) { const ax = x + Math.cos(a) * r, ay = y + Math.sin(a) * r, bx = x - Math.cos(a) * r, by = y - Math.sin(a) * r; out.push(`<path d="M${f(ax)} ${f(ay)}A${f(r)} ${f(r)} 0 0 1 ${f(bx)} ${f(by)}Z" ${fill(col, st)}/>`); },
+      };
+      const [x0, y0, x1, y1] = R.box;
+      let src = `<rect x="${f(x0 - 2)}" y="${f(y0 - 2)}" width="${f(x1 - x0 + 4)}" height="${f(y1 - y0 + 4)}" fill="${p.fond}"/>`;
+      if (p.source === 'image') {
+        const im = imagePlacement(R, t), c = document.createElement('canvas'), iw = im.img.naturalWidth || im.img.width, ih = im.img.naturalHeight || im.img.height, k = Math.min(1, 1024 / Math.max(iw, ih));
+        c.width = Math.max(1, Math.round(iw * k)); c.height = Math.max(1, Math.round(ih * k)); c.getContext('2d').drawImage(im.img, 0, 0, c.width, c.height);
+        src += `<image href="${c.toDataURL('image/png')}" x="${f(im.x)}" y="${f(im.y)}" width="${f(im.w)}" height="${f(im.h)}"/>`;
+      } else {
+        drawShapes(pen, R, t);
+        const blend = p.melange === 'normal' ? '' : ` style="mix-blend-mode:${p.melange}"`;
+        src += `<g${blend}>${out.join('')}</g>`;
+      }
+      const gp = grow(R.poly, 0.6).map(f).join(' ');
+      const T = tiles(R, w, h).map((m) => `<use href="#r" transform="matrix(${m.map(f).join(' ')})"/>`);
+      const edges = p.joint > 0 ? tiles(R, w, h).map((m) => `<polygon points="${R.poly.map(f).join(' ')}" transform="matrix(${m.map(f).join(' ')})" fill="none" stroke="${p.couleurJoint}" stroke-width="${p.joint}" stroke-linejoin="round"/>`).join('\n') : '';
+      return `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">\n<defs><clipPath id="c"><polygon points="${gp}"/></clipPath><g id="r" clip-path="url(#c)" style="isolation:isolate">${src}</g></defs>\n<rect width="100%" height="100%" fill="${p.fond}"/>\n${T.join('\n')}\n${edges}\n</svg>`;
+    }
+  </script>
+</body>
+</html>
