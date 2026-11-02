@@ -1,0 +1,15 @@
+{
+  "slug": "superformule",
+  "title": "Superformule",
+  "type": "shapes",
+  "description": "La superformule de Gielis en métamorphose continue : une forme, un empilement de couches qui ondulent ou une planche de variantes, en SVG.",
+  "tags": ["superformule", "gielis", "morphing", "formes", "svg", "planche"],
+  "inspiration": [
+    "Johan Gielis (2003), A generic geometric transformation that unifies a wide range of natural and abstract shapes",
+    "references/techniques.md : superformule, SDF 2D",
+    "Palettes papier-60, biennale, kegelbahn, luzern, menthe, orbite, salon"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
