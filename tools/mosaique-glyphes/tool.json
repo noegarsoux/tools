@@ -1,0 +1,15 @@
+{
+  "slug": "mosaique-glyphes",
+  "title": "Mosaïque de glyphes",
+  "type": "pattern",
+  "description": "Une grille dense de petits glyphes organisée en grandes régions de couleur venues d'un bruit, de cellules, d'une image ou du logo, avec export SVG.",
+  "tags": ["motif", "grille", "glyphes", "regions", "svg", "logo"],
+  "inspiration": [
+    "Moodboard de Noé, fiche 14 : motif de glyphes en régions",
+    "Tapisseries et mosaïques textiles, trames de Truchet",
+    "Palettes glyphes, good-room, papier-60, kegelbahn, trame-nuit, acide, menthe, bitmap"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
