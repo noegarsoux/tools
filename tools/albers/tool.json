@@ -1,0 +1,15 @@
+{
+  "slug": "albers",
+  "title": "Interaction des couleurs",
+  "type": "color",
+  "description": "Les exercices de Josef Albers rejoués avec la charte : une couleur sur deux fonds, fausse transparence, vibration et Hommage au carré, avec leurs preuves.",
+  "tags": ["albers", "couleur", "contraste", "oklab", "planche", "svg"],
+  "inspiration": [
+    "Josef Albers, Interaction of Color (1963)",
+    "Josef Albers, Homage to the Square (1950-1976)",
+    "Björn Ottosson, OKLab ; references/livres.md ; palettes kegelbahn, biennale, salon, thermique, luzern"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
