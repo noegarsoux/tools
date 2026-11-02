@@ -1,0 +1,489 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pavage hyperbolique</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Pavage hyperbolique {p, q} : des polygones à p côtés, q autour de chaque sommet, posés dans
+    // le disque de Poincaré (ou le demi-plan, ou la bande). Chaque pixel est ramené par réflexions
+    // successives dans le triangle fondamental (angles π/p, π/q, π/2) ; on garde la trace de la
+    // transformation pour retrouver le centre de sa tuile, donc sa couleur et son logo.
+    // L'export SVG reconstruit les tuiles une à une, en arcs de cercle exacts.
+    const canvas = document.querySelector('canvas');
+    const gl = canvas.getContext('webgl2', { alpha: false, antialias: false, depth: false, stencil: false, preserveDrawingBuffer: false });
+    const TAU = Math.PI * 2, MAXC = 8;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const P60 = PAL('papier-60'), KB = PAL('kegelbahn'), BIEN = PAL('biennale'), GR = PAL('good-room'), LU = PAL('luzern');
+    const MENTHE = PAL('menthe'), NUIT = PAL('trame-nuit'), SAL = PAL('salon'), EV = PAL('eventail'), BIT = PAL('bitmap');
+
+    // ——— Nombres complexes (tableaux [re, im]) et matrices de Möbius [a, b, c, d] ———
+    const C = {
+      mul: (a, b) => [a[0] * b[0] - a[1] * b[1], a[0] * b[1] + a[1] * b[0]],
+      div: (a, b) => { const d = b[0] * b[0] + b[1] * b[1]; return [(a[0] * b[0] + a[1] * b[1]) / d, (a[1] * b[0] - a[0] * b[1]) / d]; },
+      add: (a, b) => [a[0] + b[0], a[1] + b[1]],
+      sub: (a, b) => [a[0] - b[0], a[1] - b[1]],
+      cj: (a) => [a[0], -a[1]],
+      sc: (a, s) => [a[0] * s, a[1] * s],
+      exp: (a) => { const e = Math.exp(a[0]); return [e * Math.cos(a[1]), e * Math.sin(a[1])]; },
+      log: (a) => [Math.log(Math.hypot(a[0], a[1])), Math.atan2(a[1], a[0])],
+      abs: (a) => Math.hypot(a[0], a[1]),
+    };
+    const ONE = [1, 0], ZERO = [0, 0], I = [0, 1];
+    const mm = (M, N) => [C.add(C.mul(M[0], N[0]), C.mul(M[1], N[2])), C.add(C.mul(M[0], N[1]), C.mul(M[1], N[3])), C.add(C.mul(M[2], N[0]), C.mul(M[3], N[2])), C.add(C.mul(M[2], N[1]), C.mul(M[3], N[3]))];
+    const mob = (M, z) => C.div(C.add(C.mul(M[0], z), M[1]), C.add(C.mul(M[2], z), M[3]));
+    const mcj = (M) => M.map(C.cj);
+    const minv = (M) => [M[3], C.sc(M[1], -1), C.sc(M[2], -1), M[0]];
+    // Isométries du disque : (M, k) agit par z ↦ M · conj^k(z).
+    const act = (g, z) => mob(g.M, g.k % 2 ? C.cj(z) : z);
+    const transl = (a) => [ONE, a, C.cj(a), ONE];             // envoie 0 sur a
+    const rotm = (th) => [[Math.cos(th / 2), Math.sin(th / 2)], ZERO, ZERO, [Math.cos(th / 2), -Math.sin(th / 2)]];
+    const norm = (M) => { const s = Math.sqrt(Math.max(1e-300, C.abs(C.sub(C.mul(M[0], M[3]), C.mul(M[1], M[2]))))); return M.map((x) => C.sc(x, 1 / s)); };
+
+    let view = rotm(0), dragS = null, hoverS = null, hoverZ0 = null, lastT = 0, frame = 0, wanderPh = [0, 0, 0];
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.03, vignette: 0 },
+      hint: 'Glissez pour voyager dans le plan hyperbolique · survol : la tuile s’allume · molette : échelle',
+      notes: 'Toutes les tuiles sont identiques : elles ne rapetissent qu’à nos yeux, parce que le bord du disque est à distance infinie. Il faut 1/p + 1/q < 1/2 ; si q est trop petit, il est relevé automatiquement. Le demi-plan et la bande montrent le même pavage, vu autrement.',
+      params: {
+        'Pavage': {
+          p: { type: 'range', label: 'Côtés des tuiles (p)', min: 3, max: 12, step: 1, value: 7 },
+          q: { type: 'range', label: 'Tuiles par sommet (q)', min: 3, max: 10, step: 1, value: 3 },
+          modele: { type: 'segmented', label: 'Modèle', options: { disque: 'Disque', demi: 'Demi-plan', bande: 'Bande' }, value: 'disque' },
+          echelle: { type: 'range', label: 'Échelle', min: 0.4, max: 4, step: 0.01, value: 0.94 },
+        },
+        'Mouvement': {
+          vitesse: { type: 'range', label: 'Vitesse', min: 0, max: 2, step: 0.01, value: 0.5 },
+          errance: { type: 'range', label: 'Errance', min: 0, max: 0.85, step: 0.01, value: 0.42 },
+          rotation: { type: 'range', label: 'Rotation (°/s)', min: -30, max: 30, step: 0.5, value: 3 },
+          survol: { type: 'range', label: 'Éclat au survol', min: 0, max: 1, step: 0.01, value: 0.85 },
+        },
+        'Dessin': {
+          style: { type: 'segmented', label: 'Style', options: { aplats: 'Aplats', triangles: 'Triangles', reseau: 'Réseau', logo: 'Logo' }, value: 'aplats' },
+          coloration: { type: 'segmented', label: 'Coloration', options: { hasard: 'Au hasard', anneaux: 'Par anneau', secteurs: 'Par secteur' }, value: 'hasard' },
+          trait: { type: 'range', label: 'Épaisseur des arêtes', min: 0, max: 0.3, step: 0.005, value: 0.05 },
+          tailleLogo: { type: 'range', label: 'Taille du logo', min: 0.2, max: 1.4, step: 0.01, value: 0.72 },
+        },
+        'Couleur': {
+          fond: { type: 'color', label: 'Fond', value: P60[0] },
+          couleurs: { type: 'palette', label: 'Couleurs des tuiles', value: ['#e5452a', '#f2b0c8', '#f2e640', '#486cfc', '#f4f3f0'] },
+          ligne: { type: 'color', label: 'Arêtes et logo', value: P60[1] },
+        },
+      },
+      presets: {
+        'Heptagones': {},
+        'Escher': { p: 6, q: 4, style: 'triangles', coloration: 'anneaux', couleurs: ['#111111', '#f4f3f0'], fond: '#f4f3f0', ligne: '#111111', trait: 0, errance: 0.5 },
+        'Demi-plan': { p: 7, q: 3, modele: 'demi', echelle: 0.8, coloration: 'anneaux', couleurs: [KB[1], KB[2], KB[3], KB[5]], fond: KB[0], ligne: KB[0], trait: 0.045, seed: 7 },
+        'Bande': { p: 8, q: 3, modele: 'bande', echelle: 0.7, coloration: 'secteurs', couleurs: [EV[1], EV[2], EV[3], EV[4]], fond: EV[0], ligne: EV[0], trait: 0.06 },
+        'Logo': { p: 6, q: 4, style: 'logo', couleurs: [BIEN[0], '#f2b0c8'], fond: BIEN[0], ligne: BIEN[2], trait: 0.03, tailleLogo: 0.8 },
+        'Réseau': { p: 3, q: 8, style: 'reseau', fond: NUIT[0], ligne: NUIT[1], couleurs: [NUIT[2]], trait: 0.035, rotation: -4 },
+        'Good Room': { p: 4, q: 5, couleurs: [GR[1], GR[2], GR[3], GR[4]], fond: GR[0], ligne: GR[0], trait: 0.09, seed: 3 },
+        'Menthe': { p: 5, q: 5, style: 'triangles', coloration: 'secteurs', couleurs: [MENTHE[2], MENTHE[3], MENTHE[0]], fond: MENTHE[0], ligne: MENTHE[1], trait: 0.02 },
+        'Luzern': { p: 10, q: 3, couleurs: [LU[0], LU[1], LU[2], LU[4]], fond: LU[3], ligne: LU[3], trait: 0.04, coloration: 'anneaux', echelle: 1.25 },
+        'Salon': { p: 3, q: 7, couleurs: [SAL[2], SAL[3], SAL[4], SAL[0]], fond: SAL[0], ligne: SAL[1], trait: 0.03, coloration: 'hasard', seed: 12 },
+      },
+      brand(colors) {
+        const rest = colors.slice(1);
+        return { fond: colors[0], couleurs: (rest.length ? rest : ['#ffffff']).slice(0, MAXC), ligne: colors[0] };
+      },
+      pointer: {
+        move: (q) => { hoverS = [q.x, q.y]; },
+        down: (q) => { dragS = [q.x, q.y]; },
+        drag: (q) => {
+          hoverS = [q.x, q.y];
+          if (!dragS) return;
+          const z0 = toModel(dragS), z1 = toModel([q.x, q.y]);
+          dragS = [q.x, q.y];
+          if (!z0 || !z1 || C.abs(z0) > 0.97 || C.abs(z1) > 0.97) return;
+          // Le point saisi reste sous le pointeur : translation hyperbolique qui envoie z1 sur z0.
+          const W = wanderM(lastT), w0 = mob(W, z0), w1 = mob(W, z1);
+          const next = norm(mm(view, mm(transl(w0), transl(C.sc(w1, -1)))));
+          if (C.abs(mob(next, ZERO)) < 0.985) view = next;
+        },
+        up: () => { dragS = null; },
+        wheel: (q, dy) => app.set('echelle', Math.max(0.4, Math.min(4, +(p.echelle * Math.exp(-dy * 0.001)).toFixed(3)))),
+      },
+      onChange(k) { if (k === '*') view = rotm(0); if (k === '*' || k === '_logo') logoDirty = true; },
+      onSeed() { reseed(); },
+      export: { name: 'pavage-hyperbolique', svg: () => toSVG() },
+    });
+    const p = app.params;
+    canvas.addEventListener('pointerleave', () => { hoverS = null; });
+
+    function reseed() { const r = app.rng(23); wanderPh = [r() * TAU, r() * TAU, r() * TAU]; }
+    reseed();
+
+    // ——— Géométrie du triangle fondamental ———
+    function geom() {
+      const P = Math.round(p.p);
+      let Q = Math.round(p.q);
+      while ((P - 2) * (Q - 2) <= 4) Q++;
+      const a = Math.PI / P, b = Math.PI / Q;
+      const r = Math.sqrt(Math.sin(a) ** 2 / (Math.cos(b) ** 2 - Math.sin(a) ** 2)), c = Math.sqrt(1 + r * r);
+      const tv = c * Math.cos(a) - Math.sqrt(c * c * Math.cos(a) ** 2 - 1);
+      const rho = 2 * Math.atanh(c - r); // demi-distance entre centres voisins
+      return { P, Q, a, b, r, c, tv, rho };
+    }
+
+    // ——— Modèles : écran (px CSS) ↔ disque ———
+    function scaleOf() { const { w, h } = app.size; return p.modele === 'disque' ? Math.min(w, h) * 0.5 * p.echelle : h * 0.5 * p.echelle; }
+    function toModel(s) {
+      const { w, h } = app.size, R = scaleOf();
+      if (p.modele === 'disque') { const z = [(s[0] - w / 2) / R, (s[1] - h / 2) / R]; return C.abs(z) < 1 ? z : null; }
+      if (p.modele === 'demi') { const W = [(s[0] - w / 2) / R, (h * 0.96 - s[1]) / R]; return W[1] > 0 ? C.div(C.sub(W, I), C.add(W, I)) : null; }
+      const W = [(s[0] - w / 2) / R * Math.PI / 2, (s[1] - h / 2) / R * Math.PI / 2];
+      if (Math.abs(W[1]) >= Math.PI / 2) return null;
+      const e = C.exp(W); return C.div(C.sub(e, ONE), C.add(e, ONE));
+    }
+    function toScreen(z) {
+      const { w, h } = app.size, R = scaleOf();
+      if (p.modele === 'disque') return [w / 2 + z[0] * R, h / 2 + z[1] * R];
+      if (p.modele === 'demi') { const W = C.mul(I, C.div(C.add(ONE, z), C.sub(ONE, z))); return [w / 2 + W[0] * R, h * 0.96 - W[1] * R]; }
+      const W = C.log(C.div(C.add(ONE, z), C.sub(ONE, z)));
+      return [w / 2 + W[0] * R * 2 / Math.PI, h / 2 + W[1] * R * 2 / Math.PI];
+    }
+
+    // Vue : errance lente (translation qui dessine une Lissajous) et rotation, puis le voyage de l'utilisateur.
+    function wanderM(t) {
+      const s = t * p.vitesse, e = p.errance;
+      const a = [e * (0.62 * Math.sin(s * 0.23 + wanderPh[0]) + 0.38 * Math.sin(s * 0.11 + wanderPh[2])), e * (0.62 * Math.sin(s * 0.17 + wanderPh[1]) + 0.38 * Math.cos(s * 0.07 + wanderPh[0]))];
+      const k = C.abs(a); if (k > 0.9) { a[0] *= 0.9 / k; a[1] *= 0.9 / k; }
+      return mm(transl(a), rotm(t * p.rotation * Math.PI / 180));
+    }
+    const viewM = (t) => norm(mm(view, wanderM(t)));
+
+    // Pliage dans le triangle fondamental (le même qu'en GLSL) : renvoie le point plié et l'isométrie g telle que g(z) le donne.
+    function fold(z, G) {
+      let M = [ONE, ZERO, ZERO, ONE], k = 0, inv = 0;
+      const e = [Math.cos(G.a), Math.sin(G.a)], ei = C.cj(e), n = [-Math.sin(G.a), Math.cos(G.a)];
+      for (let it = 0; it < 200; it++) {
+        let ch = false;
+        if (z[1] < 0) { z = [z[0], -z[1]]; M = mcj(M); k++; ch = true; }
+        const s = z[0] * n[0] + z[1] * n[1];
+        if (s > 0) { z = [z[0] - 2 * s * n[0], z[1] - 2 * s * n[1]]; const N = mcj(M); M = [C.mul(e, N[0]), C.mul(e, N[1]), C.mul(ei, N[2]), C.mul(ei, N[3])]; k++; ch = true; }
+        const dz = [z[0] - G.c, z[1]], r2 = dz[0] * dz[0] + dz[1] * dz[1];
+        if (r2 < G.r * G.r) {
+          z = [G.c + dz[0] * G.r * G.r / r2, dz[1] * G.r * G.r / r2];
+          const N = mcj(M); M = [C.sub(C.sc(N[0], G.c), N[2]), C.sub(C.sc(N[1], G.c), N[3]), C.sub(N[0], C.sc(N[2], G.c)), C.sub(N[1], C.sc(N[3], G.c))]; k++; inv++; ch = true;
+        }
+        if (!ch) break;
+      }
+      return { z, M, k, inv };
+    }
+    // Centre de la tuile qui contient z (coordonnées du pavage) : l'antécédent de 0.
+    function centerOf(f) { const c0 = C.sc(C.div(f.M[1], f.M[0]), -1); return f.k % 2 ? C.cj(c0) : c0; }
+
+    // Couleur d'une tuile : même hachage entier qu'en GLSL.
+    // Couleur d'une tuile : son centre en coordonnées de l'hyperboloïde (X, Y), sans fonction transcendante.
+    // Dans ce plan, deux centres voisins sont toujours à plus de 2ρ ; une grille de pas 0,7ρ, décalée,
+    // ne coupe donc jamais une tuile, et les arrondis du GPU restent très loin des bords de cellule.
+    function tileCell(z0, G) {
+      const k = 2 / (1 - (z0[0] * z0[0] + z0[1] * z0[1])), st = G.rho * 0.7;
+      return [Math.floor(z0[0] * k / st + 0.5917), Math.floor(z0[1] * k / st + 0.5631)];
+    }
+    function hashTile(z0, G) {
+      const [x, y] = tileCell(z0, G);
+      let hh = (Math.imul(x, 0x27d4eb2d) ^ Math.imul(y, 0x165667b1) ^ Math.imul(app.seed | 0, 0x9e3779b1)) >>> 0;
+      hh = Math.imul(hh ^ (hh >>> 15), 0x2c1b3c6d) >>> 0; hh = Math.imul(hh ^ (hh >>> 12), 0x297a2d39) >>> 0; hh = (hh ^ (hh >>> 15)) >>> 0;
+      return hh;
+    }
+    function tileIndex(z0, G, n) {
+      if (p.coloration === 'anneaux') { const d = 2 * Math.atanh(Math.min(0.999999, C.abs(z0))); return Math.floor(d / (2 * G.rho) + 0.27) % n; }
+      if (p.coloration === 'secteurs') { if (C.abs(z0) < 1e-6) return 0; const s = Math.floor(((Math.atan2(z0[1], z0[0]) / TAU * G.P) % G.P + G.P + 0.63)) % G.P; return (s % n + 1) % n; }
+      return hashTile(z0, G) % n;
+    }
+
+    // ——— GPU ———
+    const VS = `#version 300 es
+    in vec2 a; void main() { gl_Position = vec4(a, 0., 1.); }`;
+    const FS = `#version 300 es
+    precision highp float; precision highp int;
+    uniform vec2 uSize; uniform float uDpr, uScale; uniform int uModel;
+    uniform vec4 uVa, uVb, uVc, uVd;
+    uniform float uA, uC, uR, uRho, uP;
+    uniform int uStyle, uCol, uNC; uniform uint uSeed;
+    uniform vec3 uBg, uLine, uPal[${MAXC}];
+    uniform float uLW, uHov; uniform vec2 uHover; uniform float uHasHover;
+    uniform sampler2D uLogo; uniform float uHasLogo, uLogoS; uniform vec2 uLogoAsp;
+    uniform float uGrain, uVig, uFrame;
+    out vec4 o;
+    const float PI = 3.14159265358979;
+
+    vec2 cmul(vec2 a, vec2 b) { return vec2(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x); }
+    vec2 cdiv(vec2 a, vec2 b) { return vec2(a.x * b.x + a.y * b.y, a.y * b.x - a.x * b.y) / dot(b, b); }
+    vec2 cj(vec2 a) { return vec2(a.x, -a.y); }
+    float hash(vec2 q) { return fract(sin(dot(q, vec2(12.9898, 78.233))) * 43758.5453); }
+    uint hashTile(vec2 z0) {
+      float k = 2. / (1. - dot(z0, z0)), st = uRho * 0.7;
+      int x = int(floor(z0.x * k / st + 0.5917)), y = int(floor(z0.y * k / st + 0.5631));
+      uint h = (uint(x) * 0x27d4eb2du) ^ (uint(y) * 0x165667b1u) ^ (uSeed * 0x9e3779b1u);
+      h = (h ^ (h >> 15)) * 0x2c1b3c6du; h = (h ^ (h >> 12)) * 0x297a2d39u; h ^= h >> 15;
+      return h;
+    }
+    vec3 pal(int i) { i = i % uNC; vec3 c = uPal[0]; for (int k = 1; k < ${MAXC}; k++) if (k == i) c = uPal[k]; return c; }
+
+    void main() {
+      vec2 s = vec2(gl_FragCoord.x, uSize.y * uDpr - gl_FragCoord.y) / uDpr;
+      vec2 z; bool inside;
+      if (uModel == 0) { z = (s - uSize * 0.5) / uScale; inside = dot(z, z) < 1.; }
+      else if (uModel == 1) { vec2 W = vec2(s.x - uSize.x * 0.5, uSize.y * 0.96 - s.y) / uScale; inside = W.y > 0.; z = cdiv(W - vec2(0, 1), W + vec2(0, 1)); }
+      else { vec2 W = (s - uSize * 0.5) / uScale * PI * 0.5; inside = abs(W.y) < PI * 0.5; W.x = clamp(W.x, -30., 30.); vec2 e = exp(W.x) * vec2(cos(W.y), sin(W.y)); z = cdiv(e - vec2(1, 0), e + vec2(1, 0)); }
+      // Taille d'un pixel en unités hyperboliques (pour l'anticrénelage et le fondu au bord).
+      vec2 zv = cdiv(cmul(uVa.xy, z) + uVb.xy, cmul(uVc.xy, z) + uVd.xy);
+      float lam = 2. / max(1e-6, 1. - dot(zv, zv));
+      float pxh = length(vec2(length(dFdx(zv)), length(dFdy(zv)))) * lam;
+
+      // Pliage : on note la suite des réflexions (2 bits chacune), puis on la rejoue à l'envers depuis 0
+      // pour retrouver le centre de la tuile. Dans ce sens, les erreurs d'arrondi se contractent.
+      vec2 q = zv; uint ops[8]; for (int i = 0; i < 8; i++) ops[i] = 0u;
+      int k = 0;
+      vec2 n = vec2(-sin(uA), cos(uA));
+      for (int it = 0; it < 220; it++) {
+        uint op = 0u;
+        if (q.y < 0.) { q.y = -q.y; op = 1u; }
+        else if (dot(q, n) > 0.) { q -= 2. * dot(q, n) * n; op = 2u; }
+        else { vec2 dz = q - vec2(uC, 0.); float r2 = dot(dz, dz); if (r2 < uR * uR) { q = vec2(uC, 0.) + dz * (uR * uR / r2); op = 3u; } }
+        if (op == 0u) break;
+        if (k < 128) ops[k >> 4] |= op << uint((k & 15) * 2);
+        k++;
+      }
+      vec2 z0 = zv;
+      if (k <= 128) {
+        z0 = vec2(0);
+        for (int j = 0; j < 128; j++) {
+          int i = k - 1 - j;
+          if (i < 0) break;
+          uint op = (ops[i >> 4] >> uint((i & 15) * 2)) & 3u;
+          if (op == 1u) z0.y = -z0.y;
+          else if (op == 2u) z0 -= 2. * dot(z0, n) * n;
+          else { vec2 dz = z0 - vec2(uC, 0.); z0 = vec2(uC, 0.) + dz * (uR * uR / dot(dz, dz)); }
+        }
+      }
+      float lq = 2. / max(1e-6, 1. - dot(q, q));
+      float dEdge = (length(q - vec2(uC, 0.)) - uR) * lq;     // jusqu'à l'arête de la tuile
+      float dMid = q.y * lq, dRay = -dot(q, n) * lq;           // jusqu'aux miroirs internes
+      float aa = max(pxh, 1e-5) * 0.75;
+
+      int idx;
+      if (uCol == 1) { float d = 2. * atanh(min(0.999999, length(z0))); idx = int(floor(d / (2. * uRho) + 0.27)); }
+      else if (uCol == 2) { if (length(z0) < 1e-5) idx = 0; else { float ang = atan(z0.y, z0.x) / (2. * PI) * uP; idx = int(mod(floor(ang + 0.63), uP)) + 1; } }
+      else idx = int(hashTile(z0) % uint(uNC));
+      vec3 base = pal(idx), col;
+
+      if (uStyle == 1) {
+        col = (k & 1) == 0 ? base : pal(idx + 1);
+        float dm = min(dEdge, min(dMid, dRay));
+        col = mix(uLine, col, smoothstep(uLW * 0.5 - aa, uLW * 0.5 + aa, dm));
+      } else if (uStyle == 2) {
+        col = uBg;
+        col = mix(uPal[0], col, smoothstep(uLW * 0.3 - aa, uLW * 0.3 + aa, dMid));
+        col = mix(uLine, col, smoothstep(uLW - aa, uLW + aa, dEdge));
+      } else {
+        col = base;
+        if (uStyle == 3) {
+          // Coordonnées locales : la translation hyperbolique qui ramène le centre de la tuile en 0.
+          vec2 u = cdiv(zv - z0, vec2(1, 0) - cmul(cj(z0), zv));
+          vec2 v = u / ((uC - uR) * uLogoS);
+          float m = 0.;
+          if (uHasLogo > 0.5) { vec2 t = v / uLogoAsp * 0.5 + 0.5; if (all(greaterThan(t, vec2(0))) && all(lessThan(t, vec2(1)))) m = texture(uLogo, t).a; }
+          else { float L = length(v), w = max(aa / (lq * (uC - uR) * uLogoS) * 2., 0.01); m = smoothstep(0.96 + w, 0.96 - w, L) * smoothstep(0.62 - w, 0.62 + w, L) + smoothstep(0.34 + w, 0.34 - w, L); }
+          col = mix(col, uLine, clamp(m, 0., 1.));
+        }
+        col = mix(uLine, col, smoothstep(uLW - aa, uLW + aa, dEdge));
+      }
+      if (uHasHover > 0.5 && length(cdiv(z0 - uHover, vec2(1, 0) - cmul(cj(uHover), z0))) < tanh(uRho * 0.25)) col = mix(col, uStyle == 2 ? uPal[0] : uLine, uHov);
+
+      // Près du bord, les tuiles passent sous le pixel : on fond vers la couleur moyenne.
+      vec3 avg = vec3(0); for (int i = 0; i < ${MAXC}; i++) if (i < uNC) avg += uPal[i]; avg /= float(uNC);
+      vec3 far = uStyle == 2 ? mix(uBg, uLine, 0.5) : mix(avg, uLine, clamp(uLW * 4., 0., 0.6));
+      col = mix(col, far, smoothstep(0.12, 0.45, pxh / (2. * uRho)));
+      if (!inside) col = uBg;
+      // Liseré du disque.
+      vec2 uv = (s - uSize * 0.5) / min(uSize.x, uSize.y);
+      col *= 1. - uVig * 0.85 * smoothstep(0.35, 1.25, length(uv) * 1.4);
+      col += (hash(gl_FragCoord.xy + uFrame * 17.31) - 0.5) * uGrain * 0.22;
+      o = vec4(col, 1.);
+    }`;
+    function sh(type, src) { const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s); if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s)); return s; }
+    const prog = gl.createProgram();
+    gl.attachShader(prog, sh(gl.VERTEX_SHADER, VS)); gl.attachShader(prog, sh(gl.FRAGMENT_SHADER, FS));
+    gl.bindAttribLocation(prog, 0, 'a'); gl.linkProgram(prog);
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
+    const uc = {}; const u = (n) => uc[n] ?? (uc[n] = gl.getUniformLocation(prog, n));
+    const buf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+    const tLogo = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, tLogo);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(4));
+    for (const k of [gl.TEXTURE_MIN_FILTER, gl.TEXTURE_MAG_FILTER]) gl.texParameteri(gl.TEXTURE_2D, k, gl.LINEAR);
+    for (const k of [gl.TEXTURE_WRAP_S, gl.TEXTURE_WRAP_T]) gl.texParameteri(gl.TEXTURE_2D, k, gl.CLAMP_TO_EDGE);
+    let logoDirty = true, logoAsp = [1, 1];
+    const rgbf = (hx) => { const n = parseInt(String(hx).slice(1, 7), 16); return [(n >> 16 & 255) / 255, (n >> 8 & 255) / 255, (n & 255) / 255]; };
+    const STY = { aplats: 0, triangles: 1, reseau: 2, logo: 3 }, COL = { hasard: 0, anneaux: 1, secteurs: 2 }, MOD = { disque: 0, demi: 1, bande: 2 };
+
+    function render(t) {
+      const { w, h } = app.size, G = geom(), V = viewM(t);
+      gl.viewport(0, 0, canvas.width, canvas.height);
+      gl.useProgram(prog);
+      gl.uniform2f(u('uSize'), w, h); gl.uniform1f(u('uDpr'), canvas.width / w); gl.uniform1f(u('uScale'), scaleOf()); gl.uniform1i(u('uModel'), MOD[p.modele]);
+      gl.uniform4f(u('uVa'), ...V[0], 0, 0); gl.uniform4f(u('uVb'), ...V[1], 0, 0); gl.uniform4f(u('uVc'), ...V[2], 0, 0); gl.uniform4f(u('uVd'), ...V[3], 0, 0);
+      gl.uniform1f(u('uA'), G.a); gl.uniform1f(u('uC'), G.c); gl.uniform1f(u('uR'), G.r); gl.uniform1f(u('uRho'), G.rho); gl.uniform1f(u('uP'), G.P);
+      gl.uniform1i(u('uStyle'), STY[p.style]); gl.uniform1i(u('uCol'), COL[p.coloration]); gl.uniform1ui(u('uSeed'), app.seed >>> 0);
+      gl.uniform3fv(u('uBg'), rgbf(p.fond)); gl.uniform3fv(u('uLine'), rgbf(p.ligne));
+      const pal = (p.couleurs.length ? p.couleurs : ['#ffffff']).slice(0, MAXC), flat = [];
+      for (let i = 0; i < MAXC; i++) flat.push(...rgbf(pal[i % pal.length]));
+      gl.uniform3fv(u('uPal[0]'), flat); gl.uniform1i(u('uNC'), pal.length);
+      gl.uniform1f(u('uLW'), p.trait);
+      // Tuile sous le pointeur.
+      let hz = null;
+      if (hoverS && p.survol > 0) { const zm = toModel(hoverS); if (zm) hz = centerOf(fold(mob(V, zm), G)); }
+      hoverZ0 = hz;
+      gl.uniform1f(u('uHasHover'), hz ? 1 : 0); gl.uniform2f(u('uHover'), ...(hz || [0, 0])); gl.uniform1f(u('uHov'), p.survol);
+      const img = app.logoImg;
+      gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, tLogo); gl.uniform1i(u('uLogo'), 0);
+      if (img && logoDirty) {
+        const iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height, M = 512, kk = M / Math.max(iw, ih);
+        const cv = document.createElement('canvas'); cv.width = Math.max(1, Math.round(iw * kk)); cv.height = Math.max(1, Math.round(ih * kk));
+        cv.getContext('2d').drawImage(img, 0, 0, cv.width, cv.height);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, cv);
+        logoAsp = iw > ih ? [1, ih / iw] : [iw / ih, 1];
+      }
+      logoDirty = false;
+      gl.uniform1f(u('uHasLogo'), img ? 1 : 0); gl.uniform1f(u('uLogoS'), p.tailleLogo); gl.uniform2f(u('uLogoAsp'), ...logoAsp);
+      gl.uniform1f(u('uGrain'), p.grain ?? 0); gl.uniform1f(u('uVig'), p.vignette ?? 0); gl.uniform1f(u('uFrame'), (frame++) % 997);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+    }
+
+    // ——— Export SVG : tuiles reconstruites par réflexions successives, arêtes en arcs ———
+    function toSVG() {
+      const { w, h } = app.size, G = geom(), V = viewM(lastT), Vi = minv(V), f = (v) => +v.toFixed(2);
+      const cols = p.couleurs.length ? p.couleurs : ['#ffffff'];
+      const scr = (z) => { const zm = mob(Vi, z); return C.abs(zm) >= 1 ? null : toScreen(zm); };
+      // Sommets et milieux d'arêtes de la tuile centrale, dans l'ordre.
+      const verts = [], mids = [];
+      for (let i = 0; i < G.P; i++) { const ang = G.a * (2 * i - 1); verts.push([G.tv * Math.cos(ang), G.tv * Math.sin(ang)]); mids.push([(G.c - G.r) * Math.cos(2 * G.a * i), (G.c - G.r) * Math.sin(2 * G.a * i)]); }
+      // Réflexion dans l'arête i : rotation · cercle · rotation.
+      const S0 = [[G.c, 0], [-1, 0], ONE, [-G.c, 0]];
+      const refl = [];
+      for (let i = 0; i < G.P; i++) { const R = rotm(2 * G.a * i); refl.push(mm(R, mm(S0, R))); }
+      const zc = toModel([w / 2, h / 2]) || [0, 0], f0 = fold(mob(V, zc), G);
+      const g0 = { M: f0.k % 2 ? mcj(minv(f0.M)) : minv(f0.M), k: f0.k };
+      const seen = new Set(), queue = [g0], tilesOut = [];
+      const key = (z) => `${Math.round(z[0] * 1e7)},${Math.round(z[1] * 1e7)}`;
+      seen.add(key(act(g0, ZERO)));
+      const minPx = p.style === 'triangles' ? 2.5 : 1.2, MAXT = 26000;
+      while (queue.length && tilesOut.length < MAXT) {
+        const g = queue.shift();
+        const P = verts.map((v) => scr(act(g, v)));
+        if (P.some((q) => !q)) continue;
+        let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+        for (const q of P) { x0 = Math.min(x0, q[0]); y0 = Math.min(y0, q[1]); x1 = Math.max(x1, q[0]); y1 = Math.max(y1, q[1]); }
+        const size = Math.max(x1 - x0, y1 - y0);
+        if (size < minPx || x1 < -size || y1 < -size || x0 > w + size || y0 > h + size) continue;
+        tilesOut.push({ g, P, size });
+        for (let i = 0; i < G.P; i++) {
+          const ng = { M: mm(g.M, g.k % 2 ? mcj(refl[i]) : refl[i]), k: g.k + 1 };
+          const kk = key(act(ng, ZERO));
+          if (!seen.has(kk)) { seen.add(kk); queue.push(ng); }
+        }
+      }
+      // Géodésique entre deux points du disque, tracée à l'écran : arc par trois points (ou segments dans la bande).
+      const geo = (g, A, B, first) => {
+        const za = act(g, A), zb = act(g, B), sa = scr(za), sb = scr(zb);
+        let out = first ? `M${f(sa[0])} ${f(sa[1])}` : '';
+        if (p.modele === 'bande') {
+          for (let s = 1; s <= 8; s++) { const t = s / 8, zt = geodesicPt(za, zb, t), q = scr(zt); out += `L${f(q[0])} ${f(q[1])}`; }
+          return out;
+        }
+        const sm = scr(geodesicPt(za, zb, 0.5));
+        const ax = sa[0], ay = sa[1], bx = sm[0], by = sm[1], cx = sb[0], cy = sb[1];
+        const d = 2 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by));
+        if (Math.abs(d) < 1e-6) return out + `L${f(cx)} ${f(cy)}`;
+        const ux = ((ax * ax + ay * ay) * (by - cy) + (bx * bx + by * by) * (cy - ay) + (cx * cx + cy * cy) * (ay - by)) / d;
+        const uy = ((ax * ax + ay * ay) * (cx - bx) + (bx * bx + by * by) * (ax - cx) + (cx * cx + cy * cy) * (bx - ax)) / d;
+        const R = Math.hypot(ax - ux, ay - uy);
+        if (R > 1e5) return out + `L${f(cx)} ${f(cy)}`;
+        const sweep = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax) > 0 ? 1 : 0;
+        return out + `A${f(R)} ${f(R)} 0 0 ${sweep} ${f(cx)} ${f(cy)}`;
+      };
+      const pxPerH = (z) => { const zm = mob(Vi, z), e = 1e-5, a = toScreen(zm), b = toScreen([zm[0] + e, zm[1]]); return Math.hypot(b[0] - a[0], b[1] - a[1]) / e * (1 - (zm[0] ** 2 + zm[1] ** 2)) / 2; };
+
+      let body = '';
+      const bg = p.fond, line = p.ligne, n = cols.length;
+      // Région du modèle.
+      let region;
+      if (p.modele === 'disque') { const R = scaleOf(); region = `<circle cx="${f(w / 2)}" cy="${f(h / 2)}" r="${f(R)}"/>`; }
+      else if (p.modele === 'demi') region = `<rect x="0" y="0" width="${w}" height="${f(h * 0.96)}"/>`;
+      else { const R = scaleOf(); region = `<rect x="0" y="${f(h / 2 - R)}" width="${w}" height="${f(2 * R)}"/>`; }
+      const avg = (() => { let r = 0, g = 0, b = 0; for (const c of cols) { const v = rgbf(c); r += v[0]; g += v[1]; b += v[2]; } const k = p.style === 'reseau' ? 0 : Math.min(0.6, p.trait * 4); const L = rgbf(line), B = rgbf(bg); const m = p.style === 'reseau' ? [(B[0] + L[0]) / 2, (B[1] + L[1]) / 2, (B[2] + L[2]) / 2] : [r / n * (1 - k) + L[0] * k, g / n * (1 - k) + L[1] * k, b / n * (1 - k) + L[2] * k]; return `rgb(${m.map((x) => Math.round(x * 255)).join(',')})`; })();
+      body += region.replace('/>', ` fill="${avg}"/>`) + '\n';
+      let logoDefs = '';
+      if (p.style === 'logo') {
+        const img = app.logoImg;
+        logoDefs = img
+          ? `<filter id="t" x="0" y="0" width="1" height="1"><feFlood flood-color="${line}"/><feComposite in2="SourceGraphic" operator="in"/></filter><symbol id="L" overflow="visible"><image href="${img.src}" x="${-logoAsp[0]}" y="${-logoAsp[1]}" width="${2 * logoAsp[0]}" height="${2 * logoAsp[1]}" preserveAspectRatio="xMidYMid meet" filter="url(#t)"/></symbol>`
+          : `<symbol id="L" overflow="visible"><path fill-rule="evenodd" d="M-0.96 0a0.96 0.96 0 1 0 1.92 0a0.96 0.96 0 1 0 -1.92 0zM-0.62 0a0.62 0.62 0 1 0 1.24 0a0.62 0.62 0 1 0 -1.24 0z"/><circle r="0.34"/></symbol>`;
+      }
+      const strokes = [];
+      for (const T of tilesOut) {
+        const g = T.g, z0 = act(g, ZERO), idx = tileIndex(z0, G, n), wpx = 2 * p.trait * pxPerH(z0);
+        let d = '';
+        for (let i = 0; i < G.P; i++) d += geo(g, verts[i], verts[(i + 1) % G.P], i === 0);
+        d += 'Z';
+        if (p.style === 'triangles') {
+          // 2p triangles fondamentaux, colorés selon la parité des réflexions.
+          for (let i = 0; i < G.P; i++) for (const half of [0, 1]) {
+            const A = half ? mids[i] : verts[i], B = half ? verts[(i + 1) % G.P] : mids[i];
+            const par = (2 * i + 1 - half + g.k) % 2, col = par === 0 ? cols[idx % n] : cols[(idx + 1) % n];
+            const c0 = scr(z0);
+            body += `<path d="M${f(c0[0])} ${f(c0[1])}${geo(g, ZERO, A, false).replace(/^M[^LA]*/, '')}${geo(g, A, B, false)}${geo(g, B, ZERO, false)}Z" fill="${col}"/>\n`;
+          }
+          if (p.trait > 0) strokes.push({ d, wpx, inner: true, g });
+        } else if (p.style === 'reseau') {
+          if (p.trait > 0) strokes.push({ d, wpx, g });
+        } else {
+          body += `<path d="${d}" fill="${cols[idx % n]}"/>\n`;
+          if (p.style === 'logo') {
+            const S = (G.c - G.r) * p.tailleLogo, e = 1e-4;
+            const at = (uu) => scr(C.div(C.add(uu, z0), C.add(ONE, C.mul(C.cj(z0), uu))));
+            const o = at(ZERO), ax = at([e, 0]), ay = at([0, e]);
+            if (o && ax && ay) {
+              const m = [(ax[0] - o[0]) / e * S, (ax[1] - o[1]) / e * S, (ay[0] - o[0]) / e * S, (ay[1] - o[1]) / e * S];
+              body += `<use href="#L" fill="${line}" transform="matrix(${m.map((x) => +x.toFixed(4)).join(' ')} ${f(o[0])} ${f(o[1])})"/>\n`;
+            }
+          }
+          if (p.trait > 0) strokes.push({ d, wpx, g });
+        }
+      }
+      if (p.style === 'reseau') {
+        // Le graphe dual : du centre de chaque tuile aux milieux de ses arêtes.
+        let dd = '';
+        for (const T of tilesOut) { const z0 = act(T.g, ZERO), c0 = scr(z0); for (let i = 0; i < G.P; i++) dd += `M${f(c0[0])} ${f(c0[1])}` + geo(T.g, ZERO, mids[i], false); }
+        const wd = 0.6 * p.trait * pxPerH(act(g0, ZERO));
+        body = region.replace('/>', ` fill="${bg}"/>`) + '\n' + `<path d="${dd}" fill="none" stroke="${cols[0]}" stroke-width="${f(Math.max(0.3, wd))}" stroke-linecap="round"/>\n`;
+      }
+      for (const s of strokes) body += `<path d="${s.d}" fill="none" stroke="${line}" stroke-width="${f(Math.max(0.15, s.wpx))}" stroke-linejoin="round"/>\n`;
+      return `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">\n<defs><clipPath id="m">${region}</clipPath>${logoDefs}</defs>\n<rect width="100%" height="100%" fill="${bg}"/>\n<g clip-path="url(#m)">\n${body}</g>\n</svg>`;
+    }
+    // Point à la fraction t de la géodésique [a, b] : on ramène a en 0, la géodésique devient un rayon.
+    function geodesicPt(a, b, t) {
+      const Ta = transl(a), Tai = transl(C.sc(a, -1)), bb = mob(Tai, b), r = C.abs(bb);
+      if (r < 1e-12) return a;
+      const d = 2 * Math.atanh(Math.min(r, 0.9999999999)) * t, rr = Math.tanh(d / 2);
+      return mob(Ta, C.sc(bb, rr / r));
+    }
+
+    app.loop((t) => { lastT = t; render(t); });
+  </script>
+</body>
+</html>

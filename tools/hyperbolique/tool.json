@@ -1,0 +1,15 @@
+{
+  "slug": "hyperbolique",
+  "title": "Pavage hyperbolique",
+  "type": "pattern",
+  "description": "Un pavage {p, q} du plan hyperbolique dans le disque de Poincaré, le demi-plan ou la bande ; on y voyage en glissant, chaque tuile peut porter le logo.",
+  "tags": ["hyperbolique", "poincare", "pavage", "escher", "svg", "logo"],
+  "inspiration": [
+    "M. C. Escher, Limite circulaire I à IV (1958-1960), d'après H. S. M. Coxeter",
+    "Henri Poincaré, modèles du disque et du demi-plan (1882)",
+    "references/physique-maths.md (pavages) ; palettes papier-60, kegelbahn, good-room, luzern, menthe, salon"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
