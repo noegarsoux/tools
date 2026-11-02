@@ -1,0 +1,288 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Bougies</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Bougies : des bougies aux couleurs de la marque, en rangée, en cercle, en grille ou dessinant le logo.
+    // Chaque flamme vacille (bruit lent + frémissements), se couche au vent, éclaire la cire et le fond ;
+    // soufflée, elle laisse monter un filet de fumée, puis se rallume.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const BIEN = PAL('biennale'), KB = PAL('kegelbahn'), SALON = PAL('salon'), MENTHE = PAL('menthe'), LUZ = PAL('luzern'), THER = PAL('thermique'), GLY = PAL('glyphes'), PYR = PAL('pyramides');
+
+    let candles = [], cKey = '', time = 0, drag = null, gusts = [], smoke = [], mask = null, maskKey = null, glowSpr = null, glowKey = '', gCv = null;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.06, vignette: 0.35 },
+      hint: 'Touchez une bougie pour la souffler ou la rallumer · glissez pour faire un courant d’air · molette : vacillement',
+      notes: 'La flamme est une goutte dont la pointe suit un bruit lent (le vacillement) et un frémissement rapide ; le vent la couche dans sa direction. Chaque flamme éclaire le fond et la cire autour d’elle. Un souffle trop fort l’éteint : un filet de fumée monte en s’enroulant.',
+      params: {
+        'Bougies': {
+          disposition: { type: 'select', label: 'Disposition', options: { rangee: 'Rangée', cercle: 'Cercle', grille: 'Grille', logo: 'Logo' }, value: 'rangee' },
+          image: { type: 'file', label: 'Logo', accept: 'image/*', show: (q) => q.disposition === 'logo' },
+          nombre: { type: 'range', label: 'Nombre', min: 1, max: 40, step: 1, value: 9, show: (q) => q.disposition !== 'logo' },
+          taille: { type: 'range', label: 'Taille', min: 0.02, max: 0.14, step: 0.002, value: 0.07 },
+          hauteurs: { type: 'range', label: 'Hauteurs inégales', min: 0, max: 1, step: 0.01, value: 0.6 },
+          couleurs: { type: 'palette', label: 'Cire', value: ['#f4efe6', '#e5452a', '#f2b0c8'] },
+        },
+        'Flamme': {
+          vacillement: { type: 'range', label: 'Vacillement', min: 0, max: 1, step: 0.01, value: 0.35 },
+          vent: { type: 'range', label: 'Courant d’air', min: -1, max: 1, step: 0.01, value: 0 },
+          lueur: { type: 'range', label: 'Lueur', min: 0, max: 2, step: 0.05, value: 1 },
+          flamme: { type: 'select', label: 'Couleur de flamme', options: { naturelle: 'Naturelle', marque: 'Teintée', froide: 'Froide' }, value: 'naturelle' },
+        },
+        'Fond': {
+          fond: { type: 'color', label: 'Fond', value: '#120d0b' },
+          sol: { type: 'color', label: 'Table', value: '#24170f' },
+        },
+      },
+      presets: {
+        'Rangée': {},
+        'Cercle': { disposition: 'cercle', nombre: 14, taille: 0.055, couleurs: ['#f4efe6'] },
+        'Logo': { disposition: 'logo', taille: 0.034, hauteurs: 0.3, couleurs: ['#f4efe6', '#f2d27a'] },
+        'Veillée': { disposition: 'grille', nombre: 30, taille: 0.045, hauteurs: 0.9, couleurs: ['#f4efe6', '#efe6d2', '#e9dcc0'] },
+        'Biennale': { couleurs: [BIEN[2], BIEN[3], BIEN[4], BIEN[0]], fond: '#140b0a', sol: '#2a1410' },
+        'Kegelbahn': { couleurs: [KB[1], KB[2], KB[3], KB[5]], fond: KB[0], sol: '#1a0f14', flamme: 'marque' },
+        'Salon': { couleurs: [SALON[2], SALON[3], SALON[4]], fond: '#0f0d0a', sol: '#2a2418', nombre: 6, taille: 0.07 },
+        'Menthe': { couleurs: [MENTHE[2], MENTHE[0]], fond: '#0a1210', sol: '#16241e', flamme: 'froide' },
+        'Luzern': { couleurs: [LUZ[0], LUZ[1], LUZ[2], LUZ[4]], fond: LUZ[3], sol: '#2a1a10', disposition: 'cercle', nombre: 10 },
+        'Courant d’air': { vent: 0.7, vacillement: 0.8, nombre: 12 },
+        'Grande': { nombre: 1, taille: 0.14, hauteurs: 0, couleurs: ['#f4efe6'] },
+        'Pyramides': { couleurs: [PYR[2], PYR[3], PYR[4], PYR[5]], fond: '#100c08', sol: PYR[1], disposition: 'grille', nombre: 20 },
+        'Jour': { fond: '#e9e3d8', sol: '#cfc4b0', lueur: 0.4, couleurs: ['#e5452a', '#2f4fa8', '#f2c230'] },
+      },
+      brand(colors) {
+        const lum = (h) => { const n = parseInt(h.slice(1), 16); return ((n >> 16) & 255) * 0.299 + ((n >> 8) & 255) * 0.587 + (n & 255) * 0.114; };
+        const all = colors.slice().sort((a, b) => lum(a) - lum(b));
+        return { fond: all[0], sol: all[1] && lum(all[1]) < 100 ? all[1] : all[0], couleurs: all.slice(1).length ? all.slice(1) : ['#f4efe6'] };
+      },
+      pointer: {
+        down: (q) => { drag = { x: q.x, y: q.y, x0: q.x, y0: q.y, moved: false }; },
+        drag: (q) => {
+          if (!drag) return;
+          if (Math.hypot(q.x - drag.x0, q.y - drag.y0) > 8) drag.moved = true;
+          gusts.push({ x: q.x, y: q.y, vx: (q.x - drag.x) * 10, t: 0 }); if (gusts.length > 50) gusts.shift();
+          drag.x = q.x; drag.y = q.y;
+        },
+        up: (q) => { if (drag && !drag.moved) toggleAt(q.x, q.y); drag = null; },
+        wheel: (q, dy) => app.set('vacillement', Math.max(0, Math.min(1, +(p.vacillement + (dy > 0 ? -0.05 : 0.05)).toFixed(2)))),
+      },
+      onChange(k) { if (k === 'image') maskKey = null; if (['disposition', 'image', 'nombre', 'taille', 'hauteurs', 'couleurs'].includes(k)) cKey = ''; },
+      onSeed() { cKey = ''; },
+      export: { name: 'bougies', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    const hex = (h) => { const n = parseInt(h.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; };
+    const rgba = (c, a) => `rgba(${c[0]},${c[1]},${c[2]},${a})`;
+    const mixc = (a, b, t) => [Math.round(a[0] + (b[0] - a[0]) * t), Math.round(a[1] + (b[1] - a[1]) * t), Math.round(a[2] + (b[2] - a[2]) * t)];
+    function hash(n) { const s = Math.sin(n * 127.1 + app.seed * 0.0131) * 43758.5453; return s - Math.floor(s); }
+    function vnoise(x, o) { const i = Math.floor(x), f = x - i, u = f * f * (3 - 2 * f); return hash(i + o) * (1 - u) + hash(i + 1 + o) * u; }
+    const lightBg = () => { const [r, g, b] = hex(p.fond); return r * 0.3 + g * 0.6 + b * 0.1 > 130; };
+
+    // ——— Disposition ———
+    function logoMask() {
+      const img = p.image || app.logoImg, key = img ? (img.src || 'c') : 'demo';
+      if (key === maskKey && mask) return mask;
+      maskKey = key;
+      const M = 120, c = document.createElement('canvas'); c.width = c.height = M; const x = c.getContext('2d', { willReadFrequently: true });
+      if (img) { const iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height, k = M * 0.96 / Math.max(iw, ih); x.drawImage(img, (M - iw * k) / 2, (M - ih * k) / 2, iw * k, ih * k); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(60, 60, 56, 0, TAU); x.arc(60, 60, 30, 0, TAU, true); x.fill('evenodd'); x.fillRect(52, 2, 16, 116); }
+      const d = x.getImageData(0, 0, M, M).data, inside = new Uint8Array(M * M);
+      let transp = 0; for (let i = 3; i < d.length; i += 16) if (d[i] < 128) transp++;
+      const useA = transp > d.length / 16 * 0.05;
+      for (let i = 0; i < M * M; i++) { const l = (d[i * 4] * 0.2126 + d[i * 4 + 1] * 0.7152 + d[i * 4 + 2] * 0.0722) / 255; inside[i] = (useA ? d[i * 4 + 3] > 128 : d[i * 4 + 3] > 128 && l < 0.5) ? 1 : 0; }
+      mask = { M, inside }; return mask;
+    }
+    // la table est vue en biais : y du sol écrasé, profondeur = y
+    function build() {
+      const { w, h } = app.size, key = [w, h, p.disposition, p.nombre, p.taille, p.hauteurs, p.couleurs.join(), app.seed, maskKey].join();
+      if (key === cKey) return; cKey = key;
+      const S = Math.min(w, h), R = S * p.taille * 0.5, cols = p.couleurs.length ? p.couleurs : ['#f4efe6'], pos = [];
+      const tableY = h * 0.62, tilt = 0.45;
+      if (p.disposition === 'rangee') { const n = p.nombre, span = Math.min(w * 0.8, n * R * 3.2); for (let i = 0; i < n; i++) pos.push([w / 2 + (n > 1 ? (i / (n - 1) - 0.5) * span : 0), tableY + h * 0.12]); }
+      else if (p.disposition === 'cercle') { const n = p.nombre, rx = Math.min(w * 0.36, n * R * 0.7 + R * 2), ry = rx * tilt * 0.7; for (let i = 0; i < n; i++) { const a = i / n * TAU; pos.push([w / 2 + Math.cos(a) * rx, tableY + h * 0.08 + Math.sin(a) * ry]); } }
+      else if (p.disposition === 'grille') { const n = p.nombre, cols2 = Math.ceil(Math.sqrt(n * 2.2)), rows = Math.ceil(n / cols2), gx = Math.min(w * 0.8 / cols2, R * 4), gy = gx * tilt * 1.2; let k = 0; for (let j = 0; j < rows; j++) for (let i = 0; i < cols2 && k < n; i++, k++) pos.push([w / 2 + (i - (cols2 - 1) / 2 + (j % 2) * 0.5) * gx, tableY - gy * (rows - 1) * 0.3 + j * gy]); }
+      else {
+        const m = logoMask(), gx = R * 3.1, gy = gx * tilt, L = Math.min(w * 0.8, (h * 0.36) / tilt);
+        for (let y = -L / 2; y <= L / 2; y += gx) for (let x = -L / 2; x <= L / 2; x += gx) {
+          const u = Math.floor((x / L + 0.5) * m.M), v = Math.floor((y / L + 0.5) * m.M);
+          if (u >= 0 && v >= 0 && u < m.M && v < m.M && m.inside[v * m.M + u]) pos.push([w / 2 + x + ((Math.round(y / gx) % 2) * gx * 0.0), tableY + h * 0.06 + y * tilt]);
+        }
+      }
+      candles = pos.map(([x, y], i) => ({ x, y, R: R * (0.85 + hash(i + 3) * 0.3), H: R * (2.2 + 4 * p.hauteurs * hash(i + 7)) * (p.disposition === 'logo' ? 0.8 : 1), col: cols[i % cols.length], lit: true, out: 0, ph: hash(i + 13) * 100, lean: 0, lv: 0 }));
+      candles.sort((a, b) => a.y - b.y);
+    }
+
+    // ——— Souffle ———
+    function toggleAt(x, y) {
+      let best = null, bd = Infinity;
+      for (const c of candles) { const fx = c.x, fy = c.y - c.H - c.R * 1.2, d = Math.hypot(x - fx, (y - fy) * 0.7); if (d < bd && d < Math.max(40, c.R * 4)) { bd = d; best = c; } }
+      if (!best) return;
+      if (best.lit) blowOut(best); else { best.lit = true; best.out = 0; }
+    }
+    function blowOut(c) { c.lit = false; c.out = 0; for (let k = 0; k < 18; k++) smoke.push({ x: c.x, y: c.y - c.H - c.R * 0.2, vx: (Math.random() - 0.5) * 6, vy: -20 - Math.random() * 15, t: -k * 0.05, life: 3 + Math.random(), ph: Math.random() * TAU, r: c.R }); }
+    function gustAt(x, y) {
+      let v = 0; const Rr = Math.min(app.size.w, app.size.h) * 0.12;
+      for (const g of gusts) { const d2 = (x - g.x) ** 2 + (y - g.y) ** 2; v += g.vx * Math.exp(-d2 / (Rr * Rr)) * Math.exp(-g.t * 2.5); }
+      return v;
+    }
+
+    // ——— Flamme ———
+    function flameCols() {
+      if (p.flamme === 'froide') return { base: [70, 120, 255], mid: [170, 220, 255], core: [245, 252, 255], glow: [120, 180, 255] };
+      if (p.flamme === 'marque') { const c = hex(p.couleurs[1] || p.couleurs[0] || '#ff8a3d'); return { base: mixc(c, [0, 0, 0], 0.3), mid: mixc(c, [255, 200, 120], 0.4), core: [255, 248, 230], glow: c }; }
+      return { base: [60, 90, 255], mid: [255, 150, 40], core: [255, 246, 214], glow: [255, 150, 60] };
+    }
+    function flameShape(c) {
+      // longueur, inclinaison et frémissement
+      const t = time, v = p.vacillement;
+      const n1 = vnoise(t * 1.3 + c.ph, 5) - 0.5, n2 = vnoise(t * 7 + c.ph * 3, 9) - 0.5;
+      const L = c.R * (2.4 + 0.5 * n1 * v * 2 + 0.25 * n2 * v) * (c.out > 0 ? 1 - c.out : 1);
+      const lean = c.lean + (n1 * 0.5 + n2 * 0.25) * v * 0.6;
+      return { L, lean, Wd: c.R * 0.55 * (1 + 0.1 * n2 * v) };
+    }
+    function flamePath(x, c, f, k) {
+      // goutte : base arrondie au pied de la mèche, pointe déviée par le vent
+      const bx = c.x, by = c.y - c.H - c.R * 0.35, L = f.L * k, W = f.Wd * k;
+      const tx = bx + Math.sin(f.lean) * L, ty = by - Math.cos(f.lean) * L;
+      x.beginPath();
+      x.moveTo(tx, ty);
+      x.bezierCurveTo(bx + W * 1.1 + Math.sin(f.lean) * L * 0.4, by - L * 0.45, bx + W, by + W * 0.2, bx, by + W * 0.55);
+      x.bezierCurveTo(bx - W, by + W * 0.2, bx - W * 1.1 + Math.sin(f.lean) * L * 0.4, by - L * 0.45, tx, ty);
+      x.closePath();
+      return [bx, by, tx, ty];
+    }
+    function glowSprite() {
+      const key = flameCols().glow.join();
+      if (glowSpr && glowKey === key) return glowSpr; glowKey = key;
+      const c = document.createElement('canvas'); c.width = c.height = 128; const x = c.getContext('2d'), g = x.createRadialGradient(64, 64, 0, 64, 64, 64), col = flameCols().glow;
+      g.addColorStop(0, rgba(col, 0.55)); g.addColorStop(0.2, rgba(col, 0.25)); g.addColorStop(0.55, rgba(col, 0.07)); g.addColorStop(1, rgba(col, 0));
+      x.fillStyle = g; x.fillRect(0, 0, 128, 128); glowSpr = c; return c;
+    }
+
+    // ——— Dessin d'une bougie ———
+    function drawCandle(x, c, lightK) {
+      const col = hex(c.col), top = c.y - c.H, rx = c.R, ry = c.R * 0.35;
+      // corps : dégradé horizontal (cylindre), plus clair côté flamme
+      const g = x.createLinearGradient(c.x - rx, 0, c.x + rx, 0);
+      const lit = c.lit ? 0.25 * p.lueur * lightK : 0;
+      g.addColorStop(0, rgba(mixc(col, [0, 0, 0], 0.55), 1)); g.addColorStop(0.45, rgba(mixc(col, [255, 220, 170], lit), 1)); g.addColorStop(1, rgba(mixc(col, [0, 0, 0], 0.35), 1));
+      x.fillStyle = g;
+      x.beginPath(); x.moveTo(c.x - rx, top); x.lineTo(c.x - rx, c.y); x.ellipse(c.x, c.y, rx, ry, 0, Math.PI, 0, true); x.lineTo(c.x + rx, top); x.closePath(); x.fill();
+      // dessus : cuvette de cire fondue qui rougeoie
+      const gt = x.createRadialGradient(c.x, top, 0, c.x, top, rx);
+      gt.addColorStop(0, rgba(mixc(col, [255, 200, 120], c.lit ? 0.6 * Math.min(1, p.lueur) : 0), 1)); gt.addColorStop(1, rgba(mixc(col, [0, 0, 0], 0.15), 1));
+      x.fillStyle = gt; x.beginPath(); x.ellipse(c.x, top, rx, ry, 0, 0, TAU); x.fill();
+      // coulure
+      if (hash(c.ph) > 0.5) { x.fillStyle = rgba(mixc(col, [255, 255, 255], 0.15), 0.9); x.beginPath(); const dx = c.x + rx * (hash(c.ph + 1) - 0.5) * 1.4; x.ellipse(dx, top + c.H * 0.15, rx * 0.12, c.H * 0.15, 0, 0, TAU); x.fill(); }
+      // mèche
+      x.strokeStyle = '#1a1210'; x.lineWidth = Math.max(1, rx * 0.08); x.lineCap = 'round';
+      const f = flameShape(c);
+      x.beginPath(); x.moveTo(c.x, top); x.lineTo(c.x + Math.sin(f.lean) * rx * 0.2, top - rx * 0.4); x.stroke();
+      if (!c.lit) { x.fillStyle = 'rgba(255,90,30,' + Math.max(0, 0.8 - c.out) + ')'; x.beginPath(); x.arc(c.x, top - rx * 0.4, Math.max(1, rx * 0.06), 0, TAU); x.fill(); }
+    }
+    function drawFlame(x, c) {
+      if (!c.lit) return;
+      const f = flameShape(c), fc = flameCols();
+      const [bx, by, tx, ty] = flamePath(x, c, f, 1);
+      const g = x.createLinearGradient(bx, by + f.Wd * 0.5, tx, ty);
+      g.addColorStop(0, rgba(fc.base, 0.75)); g.addColorStop(0.18, rgba(fc.mid, 0.9)); g.addColorStop(0.6, rgba(fc.mid, 0.75)); g.addColorStop(1, rgba(fc.mid, 0));
+      x.fillStyle = g; x.fill();
+      flamePath(x, c, f, 0.55);
+      const g2 = x.createLinearGradient(bx, by, tx, ty);
+      g2.addColorStop(0, rgba(fc.core, 0.2)); g2.addColorStop(0.25, rgba(fc.core, 0.95)); g2.addColorStop(1, rgba(fc.core, 0));
+      x.fillStyle = g2; x.fill();
+    }
+
+    app.loop((tt, dt) => {
+      const { w, h, dpr } = app.size, S = Math.min(w, h);
+      dt = Math.min(0.05, dt || 0); time += dt;
+      if (app.thumbnail) time = 7.3;
+      build();
+      // vent et souffle : la flamme se couche ; trop fort, elle s'éteint ; éteinte, elle se rallume après un moment
+      for (const c of candles) {
+        const gw = gusts.length ? gustAt(c.x, c.y - c.H) : 0, wind = p.vent * 0.8 + gw / (S * 0.5);
+        c.lv += ((Math.atan(wind * 1.5) - c.lean) * 30 - c.lv * 6) * dt; c.lean += c.lv * dt;
+        if (c.lit && Math.abs(gw) > S * 0.9) blowOut(c);
+        if (!c.lit) { c.out += dt * 0.5; if (c.out > 3 && !app.thumbnail) { c.lit = true; c.out = 0; } }
+      }
+      for (const g of gusts) g.t += dt; gusts = gusts.filter((g) => g.t < 2);
+      for (const s of smoke) { s.t += dt; if (s.t < 0) continue; s.vx += (Math.sin(s.t * 2.2 + s.ph) * 30 + p.vent * 40) * dt; s.vy -= 6 * dt; s.x += s.vx * dt; s.y += s.vy * dt; }
+      smoke = smoke.filter((s) => s.t < s.life);
+
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      const L = lightBg();
+      ctx.fillStyle = p.fond; ctx.fillRect(0, 0, w, h);
+      const ty = Math.min(...candles.map((c) => c.y)) - S * 0.03;
+      const gtab = ctx.createLinearGradient(0, ty, 0, h); gtab.addColorStop(0, p.sol); gtab.addColorStop(1, p.fond);
+      ctx.fillStyle = gtab; ctx.fillRect(0, ty, w, h - ty);
+      // lumière des flammes sur le fond et la table
+      const spr = glowSprite(), lit = candles.filter((c) => c.lit);
+      const litSig = cKey + '|' + candles.map((c) => c.lit ? 1 : 0).join('');
+      const flick = (c) => 0.85 + 0.15 * vnoise(time * 9 + c.ph, 3);
+      ctx.globalCompositeOperation = L ? 'multiply' : 'lighter';
+      if (!L && lit.length) {
+        // halo ample : peint au quart de la résolution puis agrandi (sinon des centaines de grands sprites saturent le remplissage)
+        const q = 0.25, gw = Math.ceil(w * q), gh = Math.ceil(h * q);
+        if (!gCv) gCv = document.createElement('canvas');
+        if (gCv.width !== gw || gCv.height !== gh) { gCv.width = gw; gCv.height = gh; }
+        const gx = gCv.getContext('2d'); gx.setTransform(1, 0, 0, 1, 0, 0); gx.clearRect(0, 0, gw, gh); gx.setTransform(q, 0, 0, q, 0, 0); gx.globalCompositeOperation = 'lighter';
+        for (const c of lit) { const r = S * 0.35 * Math.min(2, p.lueur) * Math.sqrt(c.R / (S * 0.025)), k = flick(c); gx.globalAlpha = Math.min(1, 0.5 * p.lueur * k / Math.max(1, Math.sqrt(lit.length / 4))); gx.drawImage(spr, c.x - r, c.y - c.H - r, r * 2, r * 2); }
+        ctx.drawImage(gCv, 0, 0, w, h);
+      }
+      ctx.globalCompositeOperation = 'source-over'; ctx.globalAlpha = 1;
+      // reflets sur la table
+      for (const c of candles) {
+        if (litSig !== c.lk0) { c.lk0 = litSig; c.lk = lit.reduce((a, o) => a + (o === c ? 0 : Math.exp(-((o.x - c.x) ** 2 + (o.y - c.y) ** 2) / (S * S * 0.02))), 0) * 0.3 + (c.lit ? 1 : 0.3); }
+        const lightK = c.lk;
+        // ombre douce au pied
+        ctx.fillStyle = 'rgba(0,0,0,0.3)'; ctx.beginPath(); ctx.ellipse(c.x + c.R * 0.2, c.y + c.R * 0.1, c.R * 1.4, c.R * 0.5, 0, 0, TAU); ctx.fill();
+        drawCandle(ctx, c, Math.min(1.5, lightK));
+        drawFlame(ctx, c);
+      }
+      // halo serré autour de chaque flamme
+      if (!L) { ctx.globalCompositeOperation = 'lighter'; for (const c of lit) { const f = flameShape(c), r = c.R * 2.4; ctx.globalAlpha = Math.min(1, 0.6 * p.lueur / Math.max(1, Math.pow(lit.length / 12, 0.35))); ctx.drawImage(spr, c.x + Math.sin(f.lean) * f.L * 0.4 - r, c.y - c.H - c.R * 0.35 - Math.cos(f.lean) * f.L * 0.45 - r, r * 2, r * 2); } ctx.globalCompositeOperation = 'source-over'; ctx.globalAlpha = 1; }
+      // fumée
+      ctx.lineCap = 'round';
+      for (const s of smoke) { if (s.t < 0) continue; const u = s.t / s.life; ctx.strokeStyle = L ? `rgba(60,60,60,${0.25 * (1 - u)})` : `rgba(200,200,200,${0.22 * (1 - u)})`; ctx.lineWidth = s.r * (0.15 + u * 0.8); ctx.beginPath(); ctx.moveTo(s.x, s.y); ctx.lineTo(s.x - s.vx * 0.05, s.y - s.vy * 0.05); ctx.stroke(); }
+      app.finish(ctx);
+    });
+
+    function toSVG() {
+      const { w, h } = app.size, f = (v) => v.toFixed(1), out = [], defs = [], S = Math.min(w, h), fc = flameCols(), L = lightBg();
+      const ty = Math.min(...candles.map((c) => c.y)) - S * 0.03;
+      defs.push(`<linearGradient id="tab" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="${p.sol}"/><stop offset="1" stop-color="${p.fond}"/></linearGradient><radialGradient id="halo"><stop offset="0" stop-color="rgb(${fc.glow})" stop-opacity="0.55"/><stop offset="0.2" stop-color="rgb(${fc.glow})" stop-opacity="0.25"/><stop offset="0.55" stop-color="rgb(${fc.glow})" stop-opacity="0.07"/><stop offset="1" stop-color="rgb(${fc.glow})" stop-opacity="0"/></radialGradient>`);
+      out.push(`<rect width="100%" height="100%" fill="${p.fond}"/><rect x="0" y="${f(ty)}" width="${w}" height="${f(h - ty)}" fill="url(#tab)"/>`);
+      const lit = candles.filter((c) => c.lit);
+      if (!L) out.push(`<g style="mix-blend-mode:screen" opacity="${Math.min(1, 0.5 * p.lueur / Math.max(1, Math.sqrt(lit.length / 4))).toFixed(2)}">${lit.map((c) => { const r = S * 0.35 * Math.min(2, p.lueur) * Math.sqrt(c.R / (S * 0.025)); return `<circle cx="${f(c.x)}" cy="${f(c.y - c.H)}" r="${f(r)}" fill="url(#halo)"/>`; }).join('')}</g>`);
+      candles.forEach((c, i) => {
+        const col = hex(c.col), top = c.y - c.H, rx = c.R, ry = c.R * 0.35, lt = c.lit ? 0.25 * p.lueur : 0;
+        defs.push(`<linearGradient id="cy${i}" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="rgb(${mixc(col, [0, 0, 0], 0.55)})"/><stop offset="0.45" stop-color="rgb(${mixc(col, [255, 220, 170], lt)})"/><stop offset="1" stop-color="rgb(${mixc(col, [0, 0, 0], 0.35)})"/></linearGradient>`);
+        out.push(`<ellipse cx="${f(c.x + c.R * 0.2)}" cy="${f(c.y + c.R * 0.1)}" rx="${f(c.R * 1.4)}" ry="${f(c.R * 0.5)}" fill="#000" fill-opacity="0.3"/>`);
+        out.push(`<path d="M${f(c.x - rx)} ${f(top)}L${f(c.x - rx)} ${f(c.y)}A${f(rx)} ${f(ry)} 0 0 0 ${f(c.x + rx)} ${f(c.y)}L${f(c.x + rx)} ${f(top)}Z" fill="url(#cy${i})"/><ellipse cx="${f(c.x)}" cy="${f(top)}" rx="${f(rx)}" ry="${f(ry)}" fill="rgb(${mixc(col, [255, 200, 120], c.lit ? 0.5 : 0)})"/>`);
+        out.push(`<path d="M${f(c.x)} ${f(top)}L${f(c.x)} ${f(top - rx * 0.4)}" stroke="#1a1210" stroke-width="${f(Math.max(1, rx * 0.08))}" stroke-linecap="round"/>`);
+        if (c.lit) {
+          const fl = flameShape(c), bx = c.x, by = top - c.R * 0.35;
+          const d = (k) => { const Lf = fl.L * k, W = fl.Wd * k, tx = bx + Math.sin(fl.lean) * Lf, tyy = by - Math.cos(fl.lean) * Lf; return `M${f(tx)} ${f(tyy)}C${f(bx + W * 1.1 + Math.sin(fl.lean) * Lf * 0.4)} ${f(by - Lf * 0.45)} ${f(bx + W)} ${f(by + W * 0.2)} ${f(bx)} ${f(by + W * 0.55)}C${f(bx - W)} ${f(by + W * 0.2)} ${f(bx - W * 1.1 + Math.sin(fl.lean) * Lf * 0.4)} ${f(by - Lf * 0.45)} ${f(tx)} ${f(tyy)}Z`; };
+          defs.push(`<linearGradient id="fl${i}" x1="0" y1="1" x2="0" y2="0"><stop offset="0" stop-color="rgb(${fc.base})" stop-opacity="0.75"/><stop offset="0.18" stop-color="rgb(${fc.mid})" stop-opacity="0.9"/><stop offset="0.6" stop-color="rgb(${fc.mid})" stop-opacity="0.75"/><stop offset="1" stop-color="rgb(${fc.mid})" stop-opacity="0"/></linearGradient><linearGradient id="fk${i}" x1="0" y1="1" x2="0" y2="0"><stop offset="0" stop-color="rgb(${fc.core})" stop-opacity="0.2"/><stop offset="0.25" stop-color="rgb(${fc.core})" stop-opacity="0.95"/><stop offset="1" stop-color="rgb(${fc.core})" stop-opacity="0"/></linearGradient>`);
+          out.push(`<path d="${d(1)}" fill="url(#fl${i})"/><path d="${d(0.55)}" fill="url(#fk${i})"/>`);
+        }
+      });
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">\n<defs>${defs.join('')}</defs>\n${out.join('\n')}\n</svg>`;
+    }
+  </script>
+</body>
+</html>
