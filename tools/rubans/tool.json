@@ -1,0 +1,15 @@
+{
+  "slug": "rubans",
+  "title": "Rubans",
+  "type": "motion",
+  "description": "Rubans plats qui se vrillent le long de courbes 3D (nœuds, Lissajous, orbites, hélices) ; recto et verso colorés, rotation libre et export SVG.",
+  "tags": ["rubans", "3d", "motion", "vrille", "svg", "identite"],
+  "inspiration": [
+    "Rubans de Möbius et sculptures en bande pliée (Max Bill, Ruth Asawa)",
+    "Identités en ruban continu des années 2010 (signalétique de biennales)",
+    "references/techniques.md ; palettes biennale, kegelbahn, good-room, menthe"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
