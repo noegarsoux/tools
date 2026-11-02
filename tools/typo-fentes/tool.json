@@ -1,0 +1,15 @@
+{
+  "slug": "typo-fentes",
+  "title": "Typo à fentes",
+  "type": "typography",
+  "description": "Un mot en mouvement découpé en fentes (bandes, colonnes, anneaux, rayons) ; chaque fente le montre un peu plus tôt : le temps étale et déchire la lettre.",
+  "tags": ["typographie", "slit-scan", "temps", "echo", "motion", "svg"],
+  "inspiration": [
+    "Photographie à fente (slit-scan) et la séquence de la porte des étoiles de Douglas Trumbull (1968)",
+    "Génériques cinétiques et affiches typographiques en bandes décalées",
+    "references/techniques.md ; palettes biennale, kegelbahn, luzern, trame-nuit, menthe"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}

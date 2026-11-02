@@ -1,0 +1,261 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Typo à fentes</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Typo à fentes (slit-scan) : un mot bouge, et l'image est découpée en fentes — bandes,
+    // colonnes, anneaux ou rayons. Chaque fente montre le mot tel qu'il était un peu plus tôt :
+    // le mouvement s'étale dans le temps et le mot se déchire en échos décalés.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const BIEN = PAL('biennale'), KB = PAL('kegelbahn'), LUZ = PAL('luzern'), ACIDE = PAL('acide'), MENTHE = PAL('menthe'), GR = PAL('good-room');
+    const P60 = PAL('papier-60'), NUIT = PAL('trame-nuit'), SALON = PAL('salon'), ORB = PAL('orbite'), THER = PAL('thermique');
+    const FONTS = {
+      grotesque: "'Helvetica Neue', Helvetica, Arial, sans-serif",
+      serif: "Georgia, 'Times New Roman', Times, serif",
+      mono: "'Courier New', Courier, monospace",
+    };
+    const REF = 220, HMAX = 360;
+
+    let hist = [], head = 0, pos = null, vel = { x: 0, y: 0 }, follow = null, grab = null, kick = 0, kickV = 0, block = null, tinted = new Map();
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.03, vignette: 0 },
+      hint: 'Survolez : le mot suit le pointeur · glissez pour le lancer · touchez pour une secousse · molette : nombre de fentes',
+      notes: 'Chaque fente affiche le mot tel qu’il était il y a un certain retard (jusqu’à 6 s). Le profil répartit les retards entre les fentes ; la couleur suit la fente ou le retard.',
+      params: {
+        'Texte': {
+          texte: { type: 'textarea', label: 'Texte', value: 'FENTES', rows: 2 },
+          police: { type: 'font', label: 'Police', options: { grotesque: 'Grotesque', serif: 'Sérif', mono: 'Machine' }, value: 'grotesque' },
+          graisse: { type: 'segmented', label: 'Graisse', options: { 400: 'Normale', 700: 'Grasse', 900: 'Noire' }, value: '900' },
+          taille: { type: 'range', label: 'Taille', min: 0.2, max: 1.4, step: 0.01, value: 0.8 },
+          interligne: { type: 'range', label: 'Interligne', min: 0.7, max: 1.5, step: 0.01, value: 0.9 },
+        },
+        'Fentes': {
+          decoupe: { type: 'select', label: 'Découpe', options: { bandes: 'Bandes horizontales', colonnes: 'Colonnes', anneaux: 'Anneaux', rayons: 'Rayons' }, value: 'bandes' },
+          nombre: { type: 'range', label: 'Nombre de fentes', min: 4, max: 160, step: 1, value: 48 },
+          retard: { type: 'range', label: 'Retard maximal (s)', min: 0.05, max: 6, step: 0.05, value: 1.2 },
+          cycles: { type: 'range', label: 'Répétitions du profil', min: 1, max: 8, step: 1, value: 3 },
+          profil: { type: 'select', label: 'Profil des retards', options: { lineaire: 'Linéaire', miroir: 'En miroir', onde: 'Onde', marches: 'Marches', hasard: 'Hasard' }, value: 'lineaire' },
+          fente: { type: 'range', label: 'Jour entre les fentes', min: 0, max: 0.85, step: 0.01, value: 0 },
+        },
+        'Mouvement': {
+          mouvement: { type: 'select', label: 'Mouvement', options: { balancier: 'Balancier', orbite: 'Orbite', pulsation: 'Pulsation', vrille: 'Vrille', calme: 'Calme' }, value: 'balancier' },
+          vitesse: { type: 'range', label: 'Vitesse', min: 0, max: 3, step: 0.01, value: 1 },
+          amplitude: { type: 'range', label: 'Amplitude', min: 0, max: 1, step: 0.01, value: 0.5 },
+        },
+        'Couleur': {
+          fond: { type: 'color', label: 'Fond', value: BIEN[0] },
+          couleurs: { type: 'palette', label: 'Encres', value: [BIEN[1], BIEN[2], BIEN[3]] },
+          teinte: { type: 'segmented', label: 'Couleur selon', options: { fente: 'La fente', retard: 'Le retard', une: 'Une encre' }, value: 'retard' },
+        },
+      },
+      presets: {
+        'Biennale': {},
+        'Colonnes': { texte: 'ÉCHO', decoupe: 'colonnes', cycles: 4, nombre: 64, retard: 1.6, profil: 'miroir', mouvement: 'pulsation', fond: KB[0], couleurs: [KB[1], KB[2], KB[3], KB[5]], teinte: 'fente', amplitude: 0.6 },
+        'Anneaux': { texte: 'ONDE', decoupe: 'anneaux', cycles: 1, nombre: 40, retard: 2, profil: 'lineaire', mouvement: 'vrille', fond: LUZ[0], couleurs: [LUZ[3], LUZ[4], LUZ[1]], teinte: 'retard', taille: 0.7 },
+        'Rayons': { texte: 'ROTATION', decoupe: 'rayons', cycles: 2, nombre: 36, retard: 1.5, profil: 'onde', mouvement: 'orbite', fond: NUIT[0], couleurs: [NUIT[1], ORB[0], NUIT[2]], teinte: 'fente', taille: 0.6 },
+        'Serif': { texte: 'Lenteur', police: 'serif', graisse: '400', decoupe: 'bandes', nombre: 90, retard: 3, profil: 'onde', mouvement: 'balancier', vitesse: 0.5, fond: P60[0], couleurs: [P60[1]], teinte: 'une', taille: 0.9 },
+        'Machine': { texte: 'SCAN\n0101', police: 'mono', graisse: '700', decoupe: 'colonnes', nombre: 120, retard: 0.8, profil: 'hasard', mouvement: 'pulsation', fond: ACIDE[1], couleurs: [ACIDE[2], ACIDE[3]], teinte: 'fente', taille: 0.8 },
+        'Menthe': { texte: 'souffle', police: 'serif', graisse: '700', decoupe: 'bandes', nombre: 24, retard: 0.9, profil: 'miroir', fente: 0.35, mouvement: 'orbite', fond: MENTHE[0], couleurs: [MENTHE[3], MENTHE[1], MENTHE[2]], teinte: 'retard' },
+        'Good Room': { texte: 'GOOD\nROOM', decoupe: 'anneaux', cycles: 1, nombre: 36, retard: 4, profil: 'marches', mouvement: 'balancier', fond: GR[0], couleurs: [GR[1], GR[2], GR[3], GR[4]], teinte: 'retard', taille: 0.75 },
+        'Salon': { texte: 'SALON', decoupe: 'bandes', nombre: 12, retard: 0.6, profil: 'lineaire', fente: 0.15, mouvement: 'vrille', fond: SALON[0], couleurs: [SALON[2], SALON[3], SALON[4], SALON[1]], teinte: 'fente' },
+        'Thermique': { texte: 'CHALEUR', decoupe: 'colonnes', cycles: 6, nombre: 160, retard: 2.5, profil: 'onde', mouvement: 'pulsation', fond: THER[0], couleurs: [THER[1], THER[4], THER[2], THER[3]], teinte: 'retard', taille: 0.85 },
+        'Fixe': { texte: 'ARRÊT\nSUR\nIMAGE', decoupe: 'bandes', nombre: 60, retard: 1, profil: 'miroir', mouvement: 'calme', fond: BIEN[4], couleurs: [BIEN[1], BIEN[2]], teinte: 'fente', taille: 0.65, interligne: 0.85 },
+      },
+      brand(colors) {
+        const c = colors.slice(1).length ? colors.slice(1) : ['#111111'];
+        return { fond: colors[0], couleurs: c.slice(0, 7) };
+      },
+      pointer: {
+        move: (q) => { if (!grab) follow = { x: q.x, y: q.y }; },
+        down: (q) => { grab = { x: q.x, y: q.y, moved: false, lx: q.x, ly: q.y, lt: performance.now() }; },
+        drag: (q) => {
+          if (!grab) return;
+          if (Math.hypot(q.x - grab.x, q.y - grab.y) > 6) grab.moved = true;
+          if (!grab.moved) return;
+          const now = performance.now(), dt = Math.max(0.008, (now - grab.lt) / 1000);
+          vel.x = (q.x - grab.lx) / dt; vel.y = (q.y - grab.ly) / dt;
+          grab.lx = q.x; grab.ly = q.y; grab.lt = now;
+          follow = { x: q.x, y: q.y };
+        },
+        up: () => {
+          if (grab && !grab.moved) kickV += 9;
+          else if (grab) follow = null; // lâché : le mot file avec son élan
+          grab = null;
+        },
+        wheel: (q, dy) => app.set('nombre', Math.max(4, Math.min(160, p.nombre + (dy > 0 ? -2 : 2)))),
+      },
+      onChange(k) {
+        if (['texte', 'police', 'graisse', 'interligne', 'couleurs', '*'].includes(k)) { block = null; tinted.clear(); }
+        if (k === '*') { hist = []; pos = null; }
+      },
+      export: { name: 'typo-fentes', svg: () => toSVG() },
+    });
+    const p = app.params;
+    canvas.addEventListener('pointerleave', () => { if (!grab) follow = null; });
+
+    function family() { return p.police === 'AtelierBrand' ? "'AtelierBrand', sans-serif" : (FONTS[p.police] || FONTS.grotesque); }
+    const fontStr = () => `${p.graisse} ${REF}px ${family()}`;
+
+    // ——— Bloc de texte de référence (encre blanche), mesuré au plus juste ———
+    function buildBlock() {
+      const lines = String(p.texte || ' ').split('\n').map((l) => l.trim() || ' ');
+      const m = document.createElement('canvas').getContext('2d'); m.font = fontStr();
+      const lh = REF * p.interligne;
+      let wmax = 1, asc = 0, desc = 0;
+      const ms = lines.map((l) => { const t = m.measureText(l); wmax = Math.max(wmax, t.actualBoundingBoxLeft + t.actualBoundingBoxRight); return t; });
+      asc = ms[0].actualBoundingBoxAscent; desc = ms[ms.length - 1].actualBoundingBoxDescent;
+      const pad = 8, W = Math.ceil(wmax + pad * 2), H = Math.ceil(asc + lh * (lines.length - 1) + desc + pad * 2);
+      const c = document.createElement('canvas'); c.width = W; c.height = H;
+      const x = c.getContext('2d'); x.font = fontStr(); x.fillStyle = '#fff'; x.textAlign = 'center'; x.textBaseline = 'alphabetic';
+      const base = lines.map((l, i) => pad + asc + i * lh);
+      lines.forEach((l, i) => x.fillText(l, W / 2, base[i]));
+      block = { c, W, H, lines, base };
+      tinted.clear();
+    }
+    function tint(col) {
+      if (!tinted.has(col)) {
+        const c = document.createElement('canvas'); c.width = block.W; c.height = block.H;
+        const x = c.getContext('2d'); x.drawImage(block.c, 0, 0); x.globalCompositeOperation = 'source-in'; x.fillStyle = col; x.fillRect(0, 0, block.W, block.H);
+        tinted.set(col, c);
+      }
+      return tinted.get(col);
+    }
+
+    // ——— Mouvement : état courant {x, y, s, r} enregistré à chaque image ———
+    function baseMotion(t, w, h) {
+      const a = p.amplitude, v = p.vitesse, S = Math.min(w, h);
+      switch (p.mouvement) {
+        case 'orbite': return { x: w / 2 + Math.cos(t * v) * S * 0.28 * a, y: h / 2 + Math.sin(t * v * 1.3) * S * 0.2 * a, s: 1, r: Math.sin(t * v * 0.7) * 0.25 * a };
+        case 'pulsation': return { x: w / 2, y: h / 2 + Math.sin(t * v * 0.5) * S * 0.05 * a, s: 1 + Math.sin(t * v * 1.6) * 0.35 * a, r: 0 };
+        case 'vrille': return { x: w / 2 + Math.sin(t * v * 0.6) * S * 0.08 * a, y: h / 2, s: 1 + Math.sin(t * v * 0.9) * 0.12 * a, r: Math.sin(t * v * 0.8) * 1.2 * a };
+        case 'calme': return { x: w / 2, y: h / 2, s: 1, r: 0 };
+        default: return { x: w / 2 + Math.sin(t * v) * S * 0.32 * a, y: h / 2 + Math.sin(t * v * 2) * S * 0.04 * a, s: 1, r: Math.sin(t * v + 0.6) * 0.18 * a };
+      }
+    }
+    function step(t, dt, w, h) {
+      const b = baseMotion(t, w, h);
+      if (!pos) pos = { x: b.x, y: b.y };
+      // Le mot rejoint son mouvement de base, ou le pointeur s'il est là (ressort amorti).
+      const tx = follow ? follow.x : b.x, ty = follow ? follow.y : b.y, kS = follow ? 60 : 14, dmp = follow ? 12 : 5;
+      vel.x += ((tx - pos.x) * kS - vel.x * dmp) * dt; vel.y += ((ty - pos.y) * kS - vel.y * dmp) * dt;
+      pos.x += vel.x * dt; pos.y += vel.y * dt;
+      kickV += (-kick * 40 - kickV * 6) * dt; kick += kickV * dt;
+      const st = { x: pos.x, y: pos.y, s: b.s * (1 + kick * 0.04), r: b.r + kick * 0.12 + Math.max(-0.4, Math.min(0.4, vel.x * 0.0004)) };
+      if (hist.length < HMAX) hist.push(st); else hist[head] = st;
+      head = (head + 1) % HMAX;
+    }
+    function past(frames) {
+      const n = hist.length; if (!n) return null;
+      const f = Math.min(n - 1, Math.max(0, Math.round(frames)));
+      const last = (head - 1 + HMAX) % HMAX;
+      return n < HMAX ? hist[Math.max(0, n - 1 - f)] : hist[(last - f + HMAX) % HMAX];
+    }
+
+    // ——— Fentes : géométrie et retard ———
+    const hash = (i) => { let n = (i * 374761393 + 668265263) | 0; n = Math.imul(n ^ (n >>> 13), 1274126177); return ((n ^ (n >>> 16)) >>> 0) / 4294967296; };
+    function profile(u0, i) {
+      const c = Math.round(p.cycles), u = c > 1 ? (u0 * c) % 1.0000001 : u0;
+      switch (p.profil) {
+        case 'miroir': return 1 - Math.abs(u * 2 - 1);
+        case 'onde': return 0.5 + 0.5 * Math.sin(u * TAU * 1.5);
+        case 'marches': return Math.floor(u * 5) / 4;
+        case 'hasard': return hash(i + 17);
+        default: return u;
+      }
+    }
+    function slices(w, h) {
+      const n = Math.round(p.nombre), out = [], g = 1 - p.fente, cx = w / 2, cy = h / 2, R = Math.hypot(w, h) / 2 + 2;
+      for (let i = 0; i < n; i++) {
+        const u = n > 1 ? i / (n - 1) : 0;
+        let poly;
+        if (p.decoupe === 'colonnes') { const sw = w / n, x0 = i * sw, ww = sw * g + 0.6; poly = [x0, 0, x0 + ww, 0, x0 + ww, h, x0, h]; }
+        else if (p.decoupe === 'anneaux') {
+          const r0 = (i / n) * R, r1 = r0 + (R / n) * g + 0.6;
+          out.push({ ring: [cx, cy, r0, r1], u, d: profile(u, i), i });
+          continue;
+        } else if (p.decoupe === 'rayons') {
+          const a0 = (i / n) * TAU - Math.PI / 2, a1 = a0 + (TAU / n) * g + 0.004, Rr = R * 1.05;
+          poly = [cx, cy, cx + Math.cos(a0) * Rr, cy + Math.sin(a0) * Rr, cx + Math.cos((a0 + a1) / 2) * Rr / Math.cos((a1 - a0) / 2), cy + Math.sin((a0 + a1) / 2) * Rr / Math.cos((a1 - a0) / 2), cx + Math.cos(a1) * Rr, cy + Math.sin(a1) * Rr];
+        } else { const sh = h / n, y0 = i * sh, hh = sh * g + 0.6; poly = [0, y0, w, y0, w, y0 + hh, 0, y0 + hh]; }
+        out.push({ poly, u, d: profile(u, i), i });
+      }
+      return out;
+    }
+    function colorFor(sl) {
+      const P = p.couleurs && p.couleurs.length ? p.couleurs : ['#111111'];
+      if (p.teinte === 'une') return P[0];
+      if (p.teinte === 'fente') return P[sl.i % P.length];
+      return P[Math.min(P.length - 1, Math.floor(sl.d * P.length * 0.999))];
+    }
+    function scaleK(w, h) { return p.taille * Math.min((w * 0.86) / block.W, (h * 0.6) / block.H); }
+    function matrixOf(st, k) { const c = Math.cos(st.r) * st.s * k, s = Math.sin(st.r) * st.s * k; return [c, s, -s, c, st.x, st.y]; }
+
+    // La fente croise-t-elle le mot à cet instant ? (disque englobant du bloc)
+    function touches(sl, st, k) {
+      const rw = Math.hypot(block.W, block.H) * 0.5 * k * Math.abs(st.s);
+      if (sl.ring) { const d = Math.hypot(st.x - sl.ring[0], st.y - sl.ring[1]); return sl.ring[3] >= d - rw && sl.ring[2] <= d + rw; }
+      if (p.decoupe === 'rayons') return true;
+      let x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
+      for (let i = 0; i < sl.poly.length; i += 2) { x0 = Math.min(x0, sl.poly[i]); x1 = Math.max(x1, sl.poly[i]); y0 = Math.min(y0, sl.poly[i + 1]); y1 = Math.max(y1, sl.poly[i + 1]); }
+      return x1 >= st.x - rw && x0 <= st.x + rw && y1 >= st.y - rw && y0 <= st.y + rw;
+    }
+    let lastT = null;
+    app.loop((t, dt) => {
+      const { w, h, dpr } = app.size;
+      if (!block) buildBlock();
+      dt = Math.min(0.05, dt || 0);
+      if (dt > 0 || !hist.length) step(t, dt || 1 / 60, w, h);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = p.fond; ctx.fillRect(0, 0, w, h);
+      const k = scaleK(w, h), maxF = Math.min(HMAX - 1, p.retard * 60);
+      for (const sl of slices(w, h)) {
+        const st = past(sl.d * maxF); if (!st) continue;
+        if (!touches(sl, st, k)) continue;
+        ctx.save();
+        ctx.beginPath();
+        if (sl.ring) { const [cx, cy, r0, r1] = sl.ring; ctx.arc(cx, cy, r1, 0, TAU); if (r0 > 0) { ctx.moveTo(cx + r0, cy); ctx.arc(cx, cy, r0, 0, TAU, true); } }
+        else { ctx.moveTo(sl.poly[0], sl.poly[1]); for (let i = 2; i < sl.poly.length; i += 2) ctx.lineTo(sl.poly[i], sl.poly[i + 1]); ctx.closePath(); }
+        ctx.clip();
+        const m = matrixOf(st, k);
+        ctx.setTransform(m[0] * dpr, m[1] * dpr, m[2] * dpr, m[3] * dpr, m[4] * dpr, m[5] * dpr);
+        ctx.drawImage(tint(colorFor(sl)), -block.W / 2, -block.H / 2);
+        ctx.restore();
+      }
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      app.finish(ctx);
+    });
+
+    // ——— SVG : une fente = un clipPath, le texte vectoriel avec la transformation de son instant ———
+    function toSVG() {
+      const { w, h } = app.size; if (!block) buildBlock();
+      const f = (v) => Math.round(v * 100) / 100, k = scaleK(w, h), maxF = Math.min(HMAX - 1, p.retard * 60);
+      const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      const fam = family().replace(/"/g, "'"), defs = [], body = [];
+      const tspans = block.lines.map((l, i) => `<tspan x="0" y="${f(block.base[i] - block.H / 2)}">${esc(l)}</tspan>`).join('');
+      slices(w, h).forEach((sl, j) => {
+        const st = past(sl.d * maxF); if (!st) return;
+        if (sl.ring) {
+          const [cx, cy, r0, r1] = sl.ring.map(f), arc = (r) => `M${f(cx + r)} ${cy}A${r} ${r} 0 1 0 ${f(cx - r)} ${cy}A${r} ${r} 0 1 0 ${f(cx + r)} ${cy}Z`;
+          defs.push(`<clipPath id="f${j}"><path d="${arc(r1)}${r0 > 0 ? arc(r0) : ''}" clip-rule="evenodd"/></clipPath>`);
+        } else defs.push(`<clipPath id="f${j}"><polygon points="${sl.poly.map(f).join(' ')}"/></clipPath>`);
+        body.push(`<g clip-path="url(#f${j})"><text transform="matrix(${matrixOf(st, k).map(f).join(' ')})" fill="${colorFor(sl)}">${tspans}</text></g>`);
+      });
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">\n<defs>\n${defs.join('\n')}\n</defs>\n<rect width="100%" height="100%" fill="${p.fond}"/>\n<g font-family="${fam}" font-weight="${p.graisse}" font-size="${REF}" text-anchor="middle">\n${body.join('\n')}\n</g>\n</svg>`;
+    }
+  </script>
+</body>
+</html>
