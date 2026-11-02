@@ -1,0 +1,452 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Trame liquide</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Trame liquide : une trame de points dont le rayon suit un champ de densité (bruit, ondes, image, logo).
+    // Chaque point est un disque signé (SDF) ; les voisins se soudent par union lissée (smin), comme des métaballes.
+    // La densité est calculée sur le CPU, une valeur par cellule, puis envoyée au GPU ; l'export SVG reprend
+    // exactement les mêmes cellules et trace les contours par marching squares.
+    const canvas = document.querySelector('canvas');
+    const gl = canvas.getContext('webgl2', { alpha: false, antialias: false, depth: false, stencil: false, preserveDrawingBuffer: false });
+
+    const PAL = Atelier.PALETTES;
+    const TAU = Math.PI * 2;
+    const MAXC = 6;
+
+    const blobs = [];
+    let imgCv = null, imgSrc = null, imgData = null;
+    let grid = null;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.1, vignette: 0.12 },
+      hint: 'Glissez pour gonfler la trame · Maj pour la creuser · molette pour le pas',
+      notes: 'Chaque point est un disque dont le rayon suit la densité locale. La fusion soude les voisins par union lissée, comme des métaballes. La source boucle exactement sur la durée choisie.',
+      pointer: {
+        down: (q) => addBlob(q),
+        drag: (q) => {
+          const last = blobs.at(-1);
+          if (!last || Math.hypot(q.x - last.x, q.y - last.y) > p.pinceau * Math.min(app.size.w, app.size.h) * 0.25) addBlob(q);
+        },
+        wheel: (q, dy) => app.set('pas', Math.max(0.008, Math.min(0.12, +(p.pas * (dy > 0 ? 1.08 : 0.926)).toFixed(4)))),
+      },
+      params: {
+        'Source': {
+          source: { type: 'segmented', label: 'Source', options: { bruit: 'Bruit', ondes: 'Ondes', radial: 'Radial', image: 'Image' }, value: 'bruit' },
+          image: { type: 'file', label: 'Image ou logo', accept: 'image/*', button: 'Importer une image', show: (q) => q.source === 'image' },
+          echelle: { type: 'range', label: 'Échelle', min: 0.3, max: 6, step: 0.05, value: 1.6, show: (q) => q.source !== 'image' },
+          deformation: { type: 'range', label: 'Déformation', min: 0, max: 2.5, step: 0.05, value: 0.8, show: (q) => q.source === 'bruit' },
+          sources: { type: 'range', label: 'Foyers', min: 1, max: 5, step: 1, value: 2, show: (q) => q.source === 'ondes' },
+          contraste: { type: 'range', label: 'Contraste', min: 0.3, max: 4, step: 0.05, value: 1.15 },
+          niveau: { type: 'range', label: 'Niveau', min: -0.6, max: 0.6, step: 0.01, value: 0 },
+          inverser: { type: 'toggle', label: 'Inverser' },
+        },
+        'Trame': {
+          grille: { type: 'segmented', label: 'Grille', options: { carree: 'Carrée', hex: 'Hexagonale' }, value: 'carree' },
+          pas: { type: 'range', label: 'Pas', min: 0.008, max: 0.12, step: 0.001, value: 0.05 },
+          angle: { type: 'range', label: 'Angle (°)', min: -90, max: 90, step: 1, value: 0 },
+          forme: { type: 'segmented', label: 'Point', options: { cercle: 'Cercle', carre: 'Carré', losange: 'Losange', trait: 'Trait' }, value: 'cercle' },
+          rmin: { type: 'range', label: 'Rayon min', min: 0, max: 0.8, step: 0.01, value: 0.05 },
+          rmax: { type: 'range', label: 'Rayon max', min: 0.2, max: 1.6, step: 0.01, value: 0.9 },
+          seuil: { type: 'range', label: 'Seuil', min: 0, max: 0.8, step: 0.01, value: 0.2 },
+          fusion: { type: 'range', label: 'Fusion', min: 0, max: 1, step: 0.01, value: 0.42 },
+          contour: { type: 'range', label: 'Contour seul', min: 0, max: 0.3, step: 0.005, value: 0 },
+        },
+        'Mouvement': {
+          boucle: { type: 'range', label: 'Boucle (s)', min: 2, max: 30, step: 0.5, value: 10 },
+          derive: { type: 'range', label: 'Dérive', min: 0, max: 1.5, step: 0.01, value: 0.35 },
+          respiration: { type: 'range', label: 'Respiration', min: 0, max: 0.6, step: 0.01, value: 0.12 },
+        },
+        'Pinceau': {
+          pinceau: { type: 'range', label: 'Taille', min: 0.03, max: 0.5, step: 0.01, value: 0.16 },
+          force: { type: 'range', label: 'Force', min: 0.1, max: 1.5, step: 0.05, value: 0.7 },
+          persistance: { type: 'range', label: 'Persistance (s)', min: 0.5, max: 30, step: 0.5, value: 6 },
+          effacer: { type: 'button', label: 'Effacer les touches', action: () => { blobs.length = 0; } },
+        },
+        'Couleur': {
+          fond: { type: 'color', label: 'Fond', value: PAL['gris-0006'].colors[0] },
+          encre: { type: 'color', label: 'Encre', value: PAL['gris-0006'].colors[1] },
+          coloration: { type: 'segmented', label: 'Coloration', options: { une: 'Une encre', densite: 'Par densité', hasard: 'Au hasard' }, value: 'une' },
+          palette: { type: 'palette', label: 'Palette', value: PAL.bitmap.colors.slice(1), show: (q) => q.coloration !== 'une' },
+        },
+      },
+      presets: {
+        'Série 0006': {},
+        'Trame ouverte': {
+          source: 'bruit', echelle: 1.1, deformation: 1.4, contraste: 1.6, niveau: -0.12, inverser: false,
+          grille: 'carree', pas: 0.026, angle: 0, forme: 'cercle', rmin: 0.5, rmax: 1.3, seuil: 0, fusion: 0.28, contour: 0,
+          derive: 0.3, respiration: 0.1, fond: PAL['trame-nuit'].colors[0], encre: PAL['trame-nuit'].colors[1], coloration: 'une', grain: 0.14, vignette: 0.2,
+        },
+        'Marques 60': {
+          source: 'ondes', sources: 1, echelle: 0.8, contraste: 1.3, niveau: 0, inverser: false,
+          grille: 'hex', pas: 0.055, angle: 0, forme: 'cercle', rmin: 0, rmax: 1.25, seuil: 0.15, fusion: 0.31, contour: 0,
+          derive: 0.2, respiration: 0.2, fond: PAL['papier-60'].colors[0], encre: PAL['papier-60'].colors[1], coloration: 'une', grain: 0.12, vignette: 0.08,
+        },
+        'Acide': {
+          source: 'ondes', sources: 3, echelle: 2.2, contraste: 1.8, niveau: 0, inverser: false,
+          grille: 'hex', pas: 0.03, angle: 0, forme: 'cercle', rmin: 0, rmax: 1.1, seuil: 0.1, fusion: 0.2, contour: 0,
+          derive: 0.25, respiration: 0.1, fond: PAL.acide.colors[0], encre: PAL.acide.colors[1], coloration: 'densite', palette: [PAL.acide.colors[1], PAL.acide.colors[1], PAL.acide.colors[2]], grain: 0.1, vignette: 0.1,
+        },
+        'Bitmap': {
+          source: 'bruit', echelle: 2.4, deformation: 1.8, contraste: 2.6, niveau: 0.02, inverser: false,
+          grille: 'carree', pas: 0.026, angle: 0, forme: 'carre', rmin: 0, rmax: 1.02, seuil: 0.22, fusion: 0.0, contour: 0,
+          derive: 0.4, respiration: 0.05, fond: PAL.bitmap.colors[0], encre: PAL.bitmap.colors[1], coloration: 'densite', palette: PAL.bitmap.colors.slice(1), grain: 0.08, vignette: 0,
+        },
+        'Gravure': {
+          source: 'ondes', sources: 2, echelle: 1.4, contraste: 1.3, niveau: 0, inverser: false,
+          grille: 'carree', pas: 0.016, angle: 45, forme: 'trait', rmin: 0.04, rmax: 0.8, seuil: 0, fusion: 0.11, contour: 0,
+          derive: 0.3, respiration: 0.15, fond: PAL.papier.colors[0], encre: PAL.papier.colors[1], coloration: 'une', grain: 0.12, vignette: 0.06,
+        },
+        'Kegelbahn': {
+          source: 'radial', echelle: 0.9, contraste: 1.2, niveau: 0, inverser: false,
+          grille: 'carree', pas: 0.05, angle: 45, forme: 'losange', rmin: 0.1, rmax: 1.15, seuil: 0, fusion: 0.14, contour: 0,
+          derive: 0.15, respiration: 0.25, fond: PAL.kegelbahn.colors[0], encre: PAL.kegelbahn.colors[1], coloration: 'densite', palette: PAL.kegelbahn.colors.slice(1), grain: 0.08, vignette: 0.1,
+        },
+        'Bulles au trait': {
+          source: 'bruit', echelle: 1.2, deformation: 0.6, contraste: 1.4, niveau: 0.05, inverser: true,
+          grille: 'hex', pas: 0.05, angle: 0, forme: 'cercle', rmin: 0.1, rmax: 1.2, seuil: 0, fusion: 0.39, contour: 0.06,
+          derive: 0.35, respiration: 0.12, fond: PAL.menthe.colors[0], encre: PAL.menthe.colors[1], coloration: 'une', grain: 0.12, vignette: 0.08,
+        },
+      },
+      export: { name: 'trame-liquide', svg: () => buildSVG() },
+      brand(colors) {
+        const out = { fond: colors[0], encre: colors[1] || colors[0] };
+        if (colors.length > 2) out.palette = colors.slice(1, 1 + MAXC);
+        return out;
+      },
+      onChange(key) {
+        if (key === 'image' || key === '*') imgSrc = null;
+      },
+    });
+    const p = app.params;
+
+    // ——— Bruit de valeur lissé, reproductible avec la graine ———
+    let perm = new Uint8Array(512);
+    function reseed() {
+      const r = app.rng(7), a = Array.from({ length: 256 }, (_, i) => i);
+      for (let i = 255; i > 0; i--) { const j = Math.floor(r() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; }
+      for (let i = 0; i < 512; i++) perm[i] = a[i & 255];
+    }
+    const fade = (t) => t * t * t * (t * (t * 6 - 15) + 10);
+    function vnoise(x, y) {
+      const xi = Math.floor(x), yi = Math.floor(y), xf = x - xi, yf = y - yi;
+      const X = xi & 255, Y = yi & 255;
+      const h = (i, j) => perm[perm[(X + i) & 255] + ((Y + j) & 255)] / 255;
+      const u = fade(xf), v = fade(yf);
+      const a = h(0, 0), b = h(1, 0), c = h(0, 1), d = h(1, 1);
+      return a + (b - a) * u + (c - a) * v + (a - b - c + d) * u * v;
+    }
+    function fbm(x, y) {
+      let s = 0, a = 0.5, f = 1;
+      for (let o = 0; o < 4; o++) { s += a * vnoise(x * f, y * f); f *= 2.03; a *= 0.5; }
+      return s / 0.9375;
+    }
+
+    function addBlob(q) {
+      blobs.push({ x: q.x, y: q.y, born: app.time, sign: q.shift ? -1 : 1, r: p.pinceau, f: p.force });
+      if (blobs.length > 64) blobs.shift();
+    }
+
+    // Image ou logo → petite carte de densité (sombre = dense), cadrée « contain ».
+    function imageSource() {
+      const img = p.image || app.logoImg;
+      if (!img) return null;
+      if (img !== imgSrc) {
+        imgSrc = img;
+        imgCv = imgCv || document.createElement('canvas');
+        const N = 360, iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height;
+        const k = N / Math.max(iw, ih);
+        imgCv.width = Math.max(1, Math.round(iw * k)); imgCv.height = Math.max(1, Math.round(ih * k));
+        const x = imgCv.getContext('2d', { willReadFrequently: true });
+        x.fillStyle = '#fff'; x.fillRect(0, 0, imgCv.width, imgCv.height);
+        x.drawImage(img, 0, 0, imgCv.width, imgCv.height);
+        const d = x.getImageData(0, 0, imgCv.width, imgCv.height).data;
+        imgData = new Float32Array(imgCv.width * imgCv.height);
+        for (let i = 0; i < imgData.length; i++) imgData[i] = 1 - (d[i * 4] * 0.2126 + d[i * 4 + 1] * 0.7152 + d[i * 4 + 2] * 0.0722) / 255;
+      }
+      return imgData;
+    }
+
+    // Densité en un point (coordonnées normalisées : centre 0, petit côté = 1).
+    function makeField(t) {
+      const th = TAU * t / p.boucle, ox = Math.cos(th) * p.derive, oy = Math.sin(th) * p.derive;
+      const { w, h } = app.size, sh = Math.min(w, h);
+      const img = p.source === 'image' ? imageSource() : null;
+      const foyers = [];
+      if (p.source === 'ondes') {
+        const r = app.rng(11);
+        for (let i = 0; i < p.sources; i++) foyers.push([(r() - 0.5) * w / sh * 0.8, (r() - 0.5) * h / sh * 0.8, r() * TAU]);
+      }
+      const live = blobs.map((b) => {
+        const age = t - b.born, life = age < 0 ? 0 : Math.exp(-age / p.persistance) * Math.min(1, age * 6 + 0.25);
+        return { x: (b.x - w / 2) / sh, y: (b.y - h / 2) / sh, r2: b.r * b.r * 0.25, a: b.sign * b.f * life };
+      }).filter((b) => Math.abs(b.a) > 0.01);
+      return (u, v) => {
+        let s;
+        if (p.source === 'bruit') {
+          const k = p.echelle, x = u * k + ox, y = v * k + oy;
+          const qx = fbm(x + 3.1, y - 1.7) - 0.5, qy = fbm(x - 5.2, y + 2.8) - 0.5;
+          s = fbm(x + qx * p.deformation * 2, y + qy * p.deformation * 2);
+          s = (s - 0.5) * 1.6 + 0.5;
+        } else if (p.source === 'ondes') {
+          s = 0;
+          for (const [fx, fy, ph] of foyers) s += Math.cos(Math.hypot(u - fx, v - fy) * p.echelle * 12 - th + ph);
+          s = 0.5 + 0.5 * s / Math.sqrt(foyers.length);
+        } else if (p.source === 'radial') {
+          const r = Math.hypot(u, v), a = Math.atan2(v, u);
+          s = 1 - r * p.echelle * 0.9 + 0.12 * Math.sin(a * 5 + th) * r * p.echelle + 0.08 * Math.cos(r * p.echelle * 9 - th);
+        } else {
+          s = 0;
+          if (img) {
+            const W = imgCv.width, H = imgCv.height, k = Math.min((w * 0.9) / W, (h * 0.9) / H) / sh;
+            const ix = Math.floor(u / k + W / 2), iy = Math.floor(v / k + H / 2);
+            if (ix >= 0 && iy >= 0 && ix < W && iy < H) s = img[iy * W + ix];
+          } else {
+            const x = u * 1.6 + ox, y = v * 1.6 + oy;
+            s = (fbm(x, y) - 0.5) * 1.6 + 0.5;
+          }
+        }
+        s += p.respiration * Math.sin(th + Math.hypot(u, v) * 7) * 0.5;
+        for (const b of live) { const dx = u - b.x, dy = v - b.y; s += b.a * Math.exp(-(dx * dx + dy * dy) / b.r2); }
+        s = (s - 0.5 + p.niveau) * p.contraste + 0.5;
+        if (p.inverser) s = 1 - s;
+        return s < 0 ? 0 : s > 1 ? 1 : s;
+      };
+    }
+
+    // ——— Grille : une densité par cellule, dans le repère tourné de la trame ———
+    function buildGrid(t) {
+      const { w, h } = app.size, sh = Math.min(w, h);
+      const c = p.pas * sh, a = p.angle * Math.PI / 180, ca = Math.cos(a), sa = Math.sin(a);
+      const hex = p.grille === 'hex', rowH = hex ? Math.sqrt(3) / 2 : 1;
+      const R = Math.hypot(w, h) / 2 / c + 3;
+      const nj = Math.ceil(R / rowH), ni = Math.ceil(R) + 1;
+      const W = ni * 2 + 1, H = nj * 2 + 1;
+      const field = makeField(t);
+      const dens = new Float32Array(W * H), rnd = app.rng(23);
+      const hue = new Float32Array(W * H);
+      for (let j = -nj; j <= nj; j++) {
+        const off = hex && (j & 1) ? 0.5 : 0;
+        for (let i = -ni; i <= ni; i++) {
+          const gx = (i + off) * c, gy = j * rowH * c;
+          const x = gx * ca - gy * sa, y = gx * sa + gy * ca;
+          const k = (j + nj) * W + (i + ni);
+          if (Math.abs(x) > w / 2 + 2 * c || Math.abs(y) > h / 2 + 2 * c) { dens[k] = 0; hue[k] = rnd(); continue; }
+          dens[k] = field(x / sh, y / sh);
+          hue[k] = rnd();
+        }
+      }
+      return { W, H, ni, nj, c, ca, sa, hex, rowH, dens, hue };
+    }
+
+    // ——— GPU ———
+    const VS = `#version 300 es
+    in vec2 a; void main() { gl_Position = vec4(a, 0., 1.); }`;
+    const FS = `#version 300 es
+    precision highp float;
+    uniform sampler2D uDens, uHue;
+    uniform vec2 uSize, uHalf; uniform float uDpr, uCell, uCa, uSa, uRowH, uHex;
+    uniform ivec2 uN, uOff; uniform int uReach, uShape, uColor, uNC;
+    uniform float uRmin, uRmax, uSeuil, uK, uLine, uGrain, uVig, uFrame;
+    uniform vec3 uBg, uInk, uPal[${MAXC}];
+    out vec4 o;
+    float hash(vec2 p) { p = fract(p * vec2(443.897, 441.423)); p += dot(p, p.yx + 19.19); return fract((p.x + p.y) * p.x); }
+    float shape(vec2 d, float r) {
+      if (uShape == 1) { vec2 q = abs(d) - vec2(r * 0.886); return length(max(q, 0.)) + min(max(q.x, q.y), 0.); }
+      if (uShape == 2) { vec2 q = abs(d); return (q.x + q.y - r * 1.25) * 0.7071; }
+      if (uShape == 3) { vec2 q = abs(d); q.y = max(q.y - r * 0.15, 0.); return length(vec2(max(q.x - uCell * 0.5, 0.), q.y)) - r * 0.85 + 0.0; }
+      return length(d) - r;
+    }
+    void main() {
+      vec2 px = vec2(gl_FragCoord.x, uSize.y * uDpr - gl_FragCoord.y) / uDpr - uHalf;
+      vec2 g = vec2(uCa * px.x + uSa * px.y, -uSa * px.x + uCa * px.y) / uCell;
+      int j0 = int(floor(g.y / uRowH + 0.5));
+      float d = 1e9, best = 1e9, dens = 0.; int bi = 0;
+      for (int dj = -3; dj <= 3; dj++) {
+        if (abs(dj) > uReach) continue;
+        int j = j0 + dj;
+        float off = (uHex > 0.5 && (j & 1) != 0) ? 0.5 : 0.;
+        int i0 = int(floor(g.x - off + 0.5));
+        for (int di = -3; di <= 3; di++) {
+          if (abs(di) > uReach) continue;
+          int i = i0 + di;
+          ivec2 t = ivec2(i, j) + uOff;
+          if (t.x < 0 || t.y < 0 || t.x >= uN.x || t.y >= uN.y) continue;
+          float s = texelFetch(uDens, t, 0).r;
+          if (s <= uSeuil) continue;
+          float r = mix(uRmin, uRmax, (s - uSeuil) / max(1e-3, 1. - uSeuil)) * 0.5;
+          vec2 dv = (g - vec2(float(i) + off, float(j) * uRowH)) * uCell;
+          float e = shape(dv, r * uCell);
+          if (e < best) { best = e; dens = s; bi = t.y * uN.x + t.x; }
+          if (uK > 0.) { float h = max(uK - abs(d - e), 0.) / uK; d = min(d, e) - h * h * uK * 0.25; }
+          else d = min(d, e);
+        }
+      }
+      if (uLine > 0.) d = abs(d + uLine * 0.5) - uLine * 0.5;
+      float aa = clamp(fwidth(d), 0.5 / uDpr, 1.5 / uDpr);
+      float m = 1. - smoothstep(-aa, aa, d);
+      vec3 ink = uInk;
+      if (uColor == 1) { int k = clamp(int(dens * float(uNC) * 0.999), 0, uNC - 1); for (int q = 0; q < ${MAXC}; q++) if (q == k) ink = uPal[q]; }
+      if (uColor == 2) { ivec2 t = ivec2(bi % uN.x, bi / uN.x); int k = clamp(int(texelFetch(uHue, t, 0).r * float(uNC)), 0, uNC - 1); for (int q = 0; q < ${MAXC}; q++) if (q == k) ink = uPal[q]; }
+      vec3 col = mix(uBg, ink, m);
+      vec2 uv = px / max(uHalf.x, uHalf.y);
+      col *= 1. - uVig * 0.85 * smoothstep(0.35, 1.25, length(uv));
+      col += (hash(gl_FragCoord.xy + uFrame * 17.31) - 0.5) * uGrain * 0.22;
+      o = vec4(col, 1.);
+    }`;
+    function sh(type, src) { const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s); if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s)); return s; }
+    const prog = gl.createProgram();
+    gl.attachShader(prog, sh(gl.VERTEX_SHADER, VS)); gl.attachShader(prog, sh(gl.FRAGMENT_SHADER, FS));
+    gl.linkProgram(prog);
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
+    const U = {};
+    const u = (n) => (U[n] ??= gl.getUniformLocation(prog, n));
+    const vao = gl.createVertexArray(); gl.bindVertexArray(vao);
+    const buf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+    gl.bindAttribLocation(prog, 0, 'a');
+    function tex() { const t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t); for (const k of [gl.TEXTURE_MIN_FILTER, gl.TEXTURE_MAG_FILTER]) gl.texParameteri(gl.TEXTURE_2D, k, gl.NEAREST); for (const k of [gl.TEXTURE_WRAP_S, gl.TEXTURE_WRAP_T]) gl.texParameteri(gl.TEXTURE_2D, k, gl.CLAMP_TO_EDGE); return t; }
+    const tDens = tex(), tHue = tex();
+    const rgb = (hx) => { const n = parseInt(hx.slice(1), 16); return [(n >> 16 & 255) / 255, (n >> 8 & 255) / 255, (n & 255) / 255]; };
+    const SHAPES = { cercle: 0, carre: 1, losange: 2, trait: 3 };
+    const COLORS = { une: 0, densite: 1, hasard: 2 };
+    let frame = 0;
+
+    function render() {
+      const g = grid, { w, h, dpr } = app.size;
+      gl.viewport(0, 0, canvas.width, canvas.height);
+      gl.useProgram(prog);
+      gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+      gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, tDens);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.R32F, g.W, g.H, 0, gl.RED, gl.FLOAT, g.dens);
+      gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, tHue);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.R32F, g.W, g.H, 0, gl.RED, gl.FLOAT, g.hue);
+      gl.uniform1i(u('uDens'), 0); gl.uniform1i(u('uHue'), 1);
+      gl.uniform2f(u('uSize'), w, h); gl.uniform2f(u('uHalf'), w / 2, h / 2);
+      gl.uniform1f(u('uDpr'), canvas.width / w);
+      gl.uniform1f(u('uCell'), g.c); gl.uniform1f(u('uCa'), g.ca); gl.uniform1f(u('uSa'), g.sa);
+      gl.uniform1f(u('uRowH'), g.rowH); gl.uniform1f(u('uHex'), g.hex ? 1 : 0);
+      gl.uniform2i(u('uN'), g.W, g.H); gl.uniform2i(u('uOff'), g.ni, g.nj);
+      const reach = Math.min(3, Math.ceil(p.rmax * 0.5 + p.fusion * 1.0 + (p.forme === 'trait' ? 0.5 : 0) + 0.3));
+      gl.uniform1i(u('uReach'), reach);
+      gl.uniform1i(u('uShape'), SHAPES[p.forme] ?? 0);
+      const pal = (p.palette && p.palette.length ? p.palette : [p.encre]).slice(0, MAXC);
+      gl.uniform1i(u('uColor'), COLORS[p.coloration] ?? 0); gl.uniform1i(u('uNC'), pal.length);
+      const flat = new Float32Array(MAXC * 3); pal.forEach((c, i) => flat.set(rgb(c), i * 3));
+      gl.uniform3fv(u('uPal[0]'), flat);
+      gl.uniform1f(u('uRmin'), p.rmin); gl.uniform1f(u('uRmax'), Math.max(p.rmin, p.rmax));
+      gl.uniform1f(u('uSeuil'), p.seuil); gl.uniform1f(u('uK'), p.fusion * g.c * 1.6);
+      gl.uniform1f(u('uLine'), p.contour * g.c);
+      gl.uniform3fv(u('uBg'), rgb(p.fond)); gl.uniform3fv(u('uInk'), rgb(p.encre));
+      gl.uniform1f(u('uGrain'), p.grain ?? 0); gl.uniform1f(u('uVig'), p.vignette ?? 0); gl.uniform1f(u('uFrame'), frame % 997);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+    }
+
+    // ——— SVG : contours par marching squares sur le même champ signé, un tracé par couleur ———
+    function sdfJS(g, x, y, group, pal) {
+      const gx = (g.ca * x + g.sa * y) / g.c, gy = (-g.sa * x + g.ca * y) / g.c;
+      const j0 = Math.floor(gy / g.rowH + 0.5), K = p.fusion * g.c * 1.6;
+      const reach = Math.min(3, Math.ceil(p.rmax * 0.5 + p.fusion * 1.0 + (p.forme === 'trait' ? 0.5 : 0) + 0.3));
+      const rmax = Math.max(p.rmin, p.rmax);
+      let d = 1e9;
+      for (let dj = -reach; dj <= reach; dj++) {
+        const j = j0 + dj, off = g.hex && (j & 1) ? 0.5 : 0, i0 = Math.floor(gx - off + 0.5);
+        for (let di = -reach; di <= reach; di++) {
+          const i = i0 + di, ti = i + g.ni, tj = j + g.nj;
+          if (ti < 0 || tj < 0 || ti >= g.W || tj >= g.H) continue;
+          const k = tj * g.W + ti, s = g.dens[k];
+          if (s <= p.seuil) continue;
+          if (group >= 0) {
+            const n = pal.length, idx = p.coloration === 'densite' ? Math.min(n - 1, Math.floor(s * n * 0.999)) : Math.min(n - 1, Math.floor(g.hue[k] * n));
+            if (idx !== group) continue;
+          }
+          const r = (p.rmin + (rmax - p.rmin) * (s - p.seuil) / Math.max(1e-3, 1 - p.seuil)) * 0.5 * g.c;
+          const dx = (gx - (i + off)) * g.c, dy = (gy - j * g.rowH) * g.c;
+          let e;
+          const ax = Math.abs(dx), ay = Math.abs(dy);
+          if (p.forme === 'carre') { const qx = ax - r * 0.886, qy = ay - r * 0.886; e = Math.hypot(Math.max(qx, 0), Math.max(qy, 0)) + Math.min(Math.max(qx, qy), 0); }
+          else if (p.forme === 'losange') e = (ax + ay - r * 1.25) * 0.7071;
+          else if (p.forme === 'trait') e = Math.hypot(Math.max(ax - g.c * 0.5, 0), Math.max(ay - r * 0.15, 0)) - r * 0.85;
+          else e = Math.hypot(dx, dy) - r;
+          if (K > 0) { const hh = Math.max(K - Math.abs(d - e), 0) / K; d = Math.min(d, e) - hh * hh * K * 0.25; } else d = Math.min(d, e);
+        }
+      }
+      if (p.contour > 0) { const L = p.contour * g.c; d = Math.abs(d + L * 0.5) - L * 0.5; }
+      return d;
+    }
+    function contourPath(fn, w, h, step) {
+      const nx = Math.ceil(w / step) + 1, ny = Math.ceil(h / step) + 1;
+      const v = new Float32Array(nx * ny);
+      for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) v[j * nx + i] = fn(Math.min(i * step, w) - w / 2, Math.min(j * step, h) - h / 2);
+      const segs = [];
+      const lerp = (a, b) => a / (a - b);
+      for (let j = 0; j < ny - 1; j++) for (let i = 0; i < nx - 1; i++) {
+        const a = v[j * nx + i], b = v[j * nx + i + 1], c = v[(j + 1) * nx + i + 1], d = v[(j + 1) * nx + i];
+        const x = i * step, y = j * step;
+        const P = [];
+        if ((a < 0) !== (b < 0)) P.push([x + lerp(a, b) * step, y]);
+        if ((b < 0) !== (c < 0)) P.push([x + step, y + lerp(b, c) * step]);
+        if ((c < 0) !== (d < 0)) P.push([x + (1 - lerp(c, d)) * step, y + step]);
+        if ((d < 0) !== (a < 0)) P.push([x, y + (1 - lerp(d, a)) * step]);
+        if (P.length === 2) segs.push(P);
+        else if (P.length === 4) { segs.push([P[0], P[1]]); segs.push([P[2], P[3]]); }
+      }
+      // Chaînage des segments en polygones fermés (le cadre est fermé par la grille débordante).
+      const key = (q) => `${Math.round(q[0] * 8)},${Math.round(q[1] * 8)}`;
+      const ends = new Map();
+      segs.forEach((s, k) => { for (const e of [0, 1]) { const kk = key(s[e]); (ends.get(kk) || ends.set(kk, []).get(kk)).push(k); } });
+      const used = new Uint8Array(segs.length);
+      let out = '';
+      for (let s0 = 0; s0 < segs.length; s0++) {
+        if (used[s0]) continue;
+        used[s0] = 1;
+        const pts = [segs[s0][0], segs[s0][1]];
+        for (;;) {
+          const list = ends.get(key(pts.at(-1))) || [];
+          const nk = list.find((k) => !used[k]);
+          if (nk === undefined) break;
+          used[nk] = 1;
+          const s = segs[nk];
+          pts.push(key(s[0]) === key(pts.at(-1)) ? s[1] : s[0]);
+        }
+        out += 'M' + pts.map((q) => `${q[0].toFixed(1)} ${q[1].toFixed(1)}`).join('L') + 'Z';
+      }
+      return out;
+    }
+    function buildSVG() {
+      const { w, h } = app.size, g = grid || buildGrid(app.time);
+      const step = Math.max(1, Math.min(g.c / 6, Math.min(w, h) / 500));
+      const pal = (p.palette && p.palette.length ? p.palette : [p.encre]).slice(0, MAXC);
+      const groups = p.coloration === 'une' ? [[-1, p.encre]] : pal.map((c, i) => [i, c]);
+      // Grille débordante d'une cellule : les formes coupées par le bord restent fermées.
+      const pad = (fn) => (x, y) => (Math.abs(x) >= w / 2 - 0.01 || Math.abs(y) >= h / 2 - 0.01 ? Math.max(fn(x, y), 0.5) : fn(x, y));
+      let body = '';
+      for (const [k, col] of groups) {
+        const d = contourPath(pad((x, y) => sdfJS(g, x, y, k, pal)), w, h, step);
+        if (d) body += `<path d="${d}" fill="${col}" fill-rule="evenodd"/>`;
+      }
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><rect width="${w}" height="${h}" fill="${p.fond}"/>${body}</svg>`;
+    }
+
+    let seedSeen = null;
+    app.loop((t) => {
+      if (app.size.w < 2 || app.size.h < 2) return;
+      if (app.seed !== seedSeen) { seedSeen = app.seed; reseed(); }
+      grid = buildGrid(t);
+      render();
+      frame++;
+    });
+  </script>
+</body>
+</html>
