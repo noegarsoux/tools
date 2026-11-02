@@ -1,0 +1,15 @@
+{
+  "slug": "page-pliee",
+  "title": "Page pliée",
+  "type": "typography",
+  "description": "Un bloc de texte justifié sur une page 3D qui ondule, se froisse, se tord et se plie ; on la soulève et on la tire au pointeur.",
+  "tags": ["papier", "pli", "3d", "typographie", "webgl", "svg"],
+  "inspiration": [
+    "Texte plié sur une surface froissée (moodboard 11)",
+    "Typographie plaquée sur maillage déformé, en perspective",
+    "references/moodboard.md ; palettes papier, papier-gris, photocopie, biennale, kegelbahn, menthe"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
