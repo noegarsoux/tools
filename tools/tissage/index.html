@@ -1,0 +1,577 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tissage</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Tissage : une étoffe calculée comme sur un métier à cadres. Chaque fil de chaîne est passé
+    // dans un cadre (rentrage), chaque passée lève une combinaison de cadres (marchure, attache) :
+    // la case (fil, passée) dit si la chaîne passe dessus ou dessous. Les flottés sont dessinés
+    // en relief, la navette tisse passée après passée et le motif se modifie au toucher.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const P60 = PAL('papier-60'), BIEN = PAL('biennale'), MENTHE = PAL('menthe'), KB = PAL('kegelbahn'), GR = PAL('good-room'), NUIT = PAL('trame-nuit');
+    const LUZ = PAL('luzern'), SALON = PAL('salon'), PYR = PAL('pyramides'), ACIDE = PAL('acide'), BIT = PAL('bitmap'), EV = PAL('eventail'), GL = PAL('glyphes');
+
+    let boost = 0, hist = [], push = { x: 0, y: 0, k: 0, target: 0 }, drag = null, rowsCache = [], loom = { n: 0, ph: 0 }, scroll = 0, evoT = 0;
+    let rand = null, maskCache = null, maskKey = null, colorSeq = null, colorKey = '', layoutKey = '';
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.04, vignette: 0 },
+      hint: 'Touchez l’étoffe pour changer l’armure · glissez pour écarter les fils · molette : grosseur du fil',
+      notes: 'Chaque fil de chaîne passe dans un cadre, chaque passée de trame lève certains cadres : la rencontre des deux dit qui passe dessus. Toucher une case inverse ce croisement pour tous les fils et toutes les passées qui partagent les mêmes cadres.',
+      params: {
+        'Armure': {
+          armure: { type: 'select', label: 'Armure', options: { toile: 'Toile', serge: 'Sergé', chevron: 'Chevron', losanges: 'Losanges', satin: 'Satin', libre: 'Libre (au hasard)', logo: 'Damassé du logo' }, value: 'losanges' },
+          image: { type: 'file', label: 'Logo', accept: 'image/*', show: (q) => q.armure === 'logo' },
+          cadres: { type: 'range', label: 'Cadres', min: 3, max: 8, step: 1, value: 6, show: (q) => q.armure !== 'toile' },
+          flotte: { type: 'range', label: 'Flotté', min: 1, max: 7, step: 1, value: 2, show: (q) => q.armure !== 'toile' && q.armure !== 'logo' && q.armure !== 'libre' },
+        },
+        'Fil': {
+          echelle: { type: 'range', label: 'Grosseur du fil', min: 5, max: 28, step: 1, value: 11 },
+          serrage: { type: 'range', label: 'Serrage', min: 0.4, max: 1, step: 0.01, value: 0.84 },
+          relief: { type: 'range', label: 'Relief', min: 0, max: 1, step: 0.01, value: 0.6 },
+          ondulation: { type: 'range', label: 'Ondulation', min: 0, max: 1, step: 0.01, value: 0.15 },
+        },
+        'Couleur': {
+          fond: { type: 'color', label: 'Fond', value: P60[0] },
+          chaine: { type: 'palette', label: 'Chaîne', value: [BIEN[1], BIEN[2]] },
+          trame: { type: 'palette', label: 'Trame', value: [BIEN[0], BIEN[4]] },
+          motif: { type: 'select', label: 'Ordre des couleurs', options: { uni: 'Une couleur', rayures: 'Rayures', ecossais: 'Écossais' }, value: 'rayures' },
+          rayures: { type: 'range', label: 'Largeur des rayures', min: 1, max: 16, step: 1, value: 6, show: (q) => q.motif !== 'uni' },
+          metier: { type: 'color', label: 'Navette et battant', value: P60[1] },
+        },
+        'Mouvement': {
+          mode: { type: 'select', label: 'Vue', options: { metier: 'Sur le métier', etoffe: 'Étoffe entière' }, value: 'metier' },
+          vitesse: { type: 'range', label: 'Vitesse', min: 0, max: 4, step: 0.05, value: 1.2 },
+          evolution: { type: 'range', label: 'Changements par minute', min: 0, max: 20, step: 1, value: 4 },
+        },
+      },
+      presets: {
+        'Métier': {},
+        'Pied-de-poule': { armure: 'serge', cadres: 4, flotte: 2, chaine: [P60[1], P60[0]], trame: [P60[1], P60[0]], motif: 'rayures', rayures: 4, fond: P60[1], echelle: 10, serrage: 0.9, evolution: 0, mode: 'etoffe', vitesse: 0.6 },
+        'Écossais': { armure: 'serge', cadres: 4, flotte: 2, chaine: [KB[0], KB[5], KB[3], KB[2], KB[4]], trame: [KB[0], KB[5], KB[3], KB[2], KB[4]], motif: 'ecossais', rayures: 6, fond: KB[0], echelle: 9, serrage: 0.92, mode: 'etoffe', evolution: 0, vitesse: 0.5 },
+        'Damassé': { armure: 'logo', cadres: 5, chaine: [P60[1]], trame: [P60[0]], motif: 'uni', fond: P60[1], echelle: 7, serrage: 0.92, relief: 0.7, metier: '#8a8680', evolution: 0, vitesse: 1.6 },
+        'Chevron': { armure: 'chevron', cadres: 6, flotte: 3, chaine: [MENTHE[1]], trame: [MENTHE[2], MENTHE[3]], motif: 'rayures', rayures: 10, fond: MENTHE[0], metier: MENTHE[1], echelle: 10 },
+        'Satin': { armure: 'satin', cadres: 8, flotte: 7, chaine: [GR[4], GR[3]], trame: [GR[0]], motif: 'rayures', rayures: 14, fond: GR[0], metier: GR[2], echelle: 9, relief: 0.8, mode: 'etoffe', vitesse: 0.4 },
+        'Toile': { armure: 'toile', chaine: [SALON[2], SALON[1]], trame: [SALON[0], SALON[4]], motif: 'rayures', rayures: 3, fond: SALON[1], metier: SALON[1], echelle: 16, serrage: 0.72, ondulation: 0.4 },
+        'Libre': { armure: 'libre', cadres: 6, chaine: [NUIT[1]], trame: [GR[2], GR[3], GR[4]], motif: 'rayures', rayures: 12, fond: NUIT[0], metier: NUIT[2], echelle: 8, evolution: 8 },
+        'Kegelbahn': { armure: 'losanges', cadres: 8, flotte: 4, chaine: [KB[1], KB[2]], trame: [KB[3], KB[0]], motif: 'rayures', rayures: 8, fond: KB[0], metier: KB[4], echelle: 8 },
+        'Luzern': { armure: 'chevron', cadres: 8, flotte: 4, chaine: [LUZ[1], LUZ[3]], trame: [LUZ[0], LUZ[2], LUZ[4]], motif: 'ecossais', rayures: 7, fond: LUZ[3], metier: LUZ[3], echelle: 9, mode: 'etoffe', vitesse: 0.5 },
+        'Pyramides': { armure: 'losanges', cadres: 5, flotte: 2, chaine: [PYR[1], PYR[5]], trame: [PYR[0], PYR[2], PYR[3], PYR[4]], motif: 'ecossais', rayures: 5, fond: PYR[6], metier: PYR[6], echelle: 10 },
+        'Acide': { armure: 'logo', cadres: 5, chaine: [ACIDE[1]], trame: [ACIDE[2]], motif: 'uni', fond: ACIDE[1], metier: ACIDE[0], echelle: 6, relief: 0.5, mode: 'etoffe', vitesse: 0.3 },
+        'Bitmap': { armure: 'libre', cadres: 4, chaine: [BIT[1], BIT[0]], trame: [BIT[2], BIT[3], BIT[4]], motif: 'rayures', rayures: 5, fond: BIT[0], metier: BIT[1], echelle: 18, serrage: 0.8, relief: 0.4, evolution: 10 },
+        'Éventail': { armure: 'serge', cadres: 6, flotte: 3, chaine: [EV[0]], trame: [EV[1], EV[2], EV[3], EV[4]], motif: 'rayures', rayures: 2, fond: EV[0], metier: '#e8dcc4', echelle: 12, mode: 'etoffe', ondulation: 0.5, vitesse: 0.4 },
+      },
+      brand(colors) {
+        const c = colors.slice(1).length ? colors.slice(1) : ['#111111'];
+        const lum = (h) => { const n = parseInt(h.slice(1), 16); return ((n >> 16) & 255) * 0.299 + ((n >> 8) & 255) * 0.587 + (n & 255) * 0.114; };
+        const sorted = c.slice().sort((a, b) => lum(a) - lum(b));
+        const half = Math.max(1, Math.ceil(c.length / 2));
+        return { fond: colors[0], metier: sorted[0], chaine: c.slice(0, half), trame: c.length > 1 ? c.slice(half).concat([colors[0]]) : [colors[0]] };
+      },
+      pointer: {
+        move: (q) => { push.x = q.x; push.y = q.y; if (!drag) push.target = 0.12; },
+        down: (q) => { drag = { x: q.x, y: q.y, moved: false }; push.x = q.x; push.y = q.y; },
+        drag: (q) => { push.x = q.x; push.y = q.y; if (drag && Math.hypot(q.x - drag.x, q.y - drag.y) > 6) drag.moved = true; if (drag && drag.moved) push.target = 0.7; },
+        up: (q) => { if (drag && !drag.moved) toggleAt(q.x, q.y); drag = null; push.target = 0.12; },
+        wheel: (q, dy) => app.set('echelle', Math.max(5, Math.min(28, p.echelle + (dy > 0 ? -1 : 1)))),
+      },
+      onChange(k) {
+        if (['armure', 'cadres', 'flotte', 'image', '*'].includes(k)) resetDraft();
+        if (['mode', 'echelle', '*'].includes(k)) layoutKey = '';
+      },
+      onSeed() { resetDraft(); layoutKey = ''; },
+      export: { name: 'tissage', svg: () => toSVG() },
+    });
+    const p = app.params;
+    canvas.addEventListener('pointerleave', () => { push.target = 0; });
+
+    // ——— Mise en carte : rentrage, marchure et attache ———
+    const N = () => (p.armure === 'toile' ? 2 : p.armure === 'satin' ? (Math.round(p.cadres) === 6 ? 5 : Math.max(5, Math.round(p.cadres))) : p.armure === 'logo' ? 5 : Math.round(p.cadres));
+    const pointed = (i, n) => { const per = 2 * n - 2, k = ((i % per) + per) % per; return k < n ? k : per - k; };
+    const satinStep = (n) => ({ 5: 2, 7: 3, 8: 3 }[n] || 2);
+    let libre = null;
+    function resetDraft() {
+      rand = app.rng(29);
+      const n = N();
+      // Libre : attache au hasard, rentrage en marche aléatoire, symétrique (comme pour un « overshot »).
+      const walk = [0]; for (let k = 1; k < 18 + n * 3; k++) { const last = walk[k - 1]; let nx = last + (rand() < 0.5 ? -1 : 1) * (rand() < 0.75 ? 1 : 2); nx = ((nx % n) + n) % n; walk.push(nx); }
+      const seq = walk.concat(walk.slice(1, -1).reverse());
+      const tie = []; for (let s = 0; s < n; s++) { tie.push([]); for (let t = 0; t < n; t++) tie[s].push(rand() < 0.5); }
+      for (let t = 0; t < n; t++) { tie[t % n][t] = true; tie[(t + 1) % n][t] = false; }
+      libre = { seq, tie };
+      hist = [{ j: -Infinity, sw: 1, flips: new Set(), inv: false }];
+      colorKey = '';
+    }
+    function baseTie(s, t, n) {
+      switch (p.armure) {
+        case 'toile': return s === t;
+        case 'satin': return ((s - t * satinStep(n)) % n + n) % n < Math.round(Math.min(p.flotte, n - 1));
+        case 'libre': return libre.tie[s][t];
+        default: return ((s - t) % n + n) % n < Math.round(Math.min(p.flotte, n - 1));
+      }
+    }
+    function shaft(i, n) {
+      if (p.armure === 'chevron' || p.armure === 'losanges') return pointed(i, n);
+      if (p.armure === 'libre') return libre.seq[((i % libre.seq.length) + libre.seq.length) % libre.seq.length];
+      return ((i % n) + n) % n;
+    }
+    function treadle(j, n) {
+      if (p.armure === 'losanges') return pointed(j, n);
+      if (p.armure === 'libre') return libre.seq[((j % libre.seq.length) + libre.seq.length) % libre.seq.length];
+      return ((j % n) + n) % n;
+    }
+    // État de la mise en carte valable pour une passée : sur le métier, un changement vaut à partir
+    // de la passée en cours ; en étoffe entière, il descend comme un rideau.
+    function stateFor(j, yb) {
+      for (let k = hist.length - 1; k > 0; k--) {
+        const e = hist[k];
+        if (p.mode === 'metier' ? j >= e.j : (e.sw >= 1 || yb < e.sw * (app.size.h + 40) - 20)) return e;
+      }
+      return hist[0];
+    }
+    function up(i, j, yb, xb) {
+      const n = N(), e = stateFor(j, yb), s = shaft(i, n), t = treadle(j, n);
+      if (p.armure === 'logo') {
+        const inside = logoAt(xb, j) !== e.inv;
+        const sat = ((s - t * 2) % 5 + 5) % 5 === 0;
+        return inside ? !sat : sat;
+      }
+      let v = baseTie(s, t, n);
+      if (e.flips.has(s * 16 + t)) v = !v;
+      return v;
+    }
+    function change(flipKey) {
+      const last = hist[hist.length - 1], flips = new Set(last.flips);
+      let inv = last.inv;
+      if (flipKey == null) inv = !inv; else if (flips.has(flipKey)) flips.delete(flipKey); else flips.add(flipKey);
+      hist.push({ j: loom.n, sw: 0, flips, inv });
+      if (hist.length > 6) hist.splice(1, 1);
+    }
+    function toggleAt(x, y) {
+      let best = null, bd = Infinity;
+      for (const r of rowsCache) { const d = Math.abs(r.y + r.hgt / 2 - y); if (d < bd) { bd = d; best = r; } }
+      if (!best || bd > p.echelle * 2) return;
+      const L = layout(), i = Math.floor((x - L.offX) / p.echelle), n = N();
+      if (p.armure === 'logo') { change(null); boost = 1; return; }
+      change(shaft(i, n) * 16 + treadle(best.j, n));
+      boost = 1; // sur le métier, la navette accélère pour montrer vite la nouvelle armure
+    }
+    function evolve() {
+      if (p.armure === 'logo') { change(null); return; }
+      const n = N(), last = hist[hist.length - 1];
+      // Au-delà d'un tiers des croisements modifiés, on revient plutôt vers l'armure d'origine.
+      if (last.flips.size > (n * n) / 3 && rand() < 0.7) { const arr = [...last.flips]; change(arr[Math.floor(rand() * arr.length)]); return; }
+      change(Math.floor(rand() * n) * 16 + Math.floor(rand() * n));
+    }
+
+    // ——— Logo pour le damassé ———
+    function logoMask() {
+      const img = p.image || app.logoImg, key = img ? (img.src || 'c') : 'demo';
+      if (key === maskKey) return maskCache;
+      maskKey = key;
+      const M = 200, c = document.createElement('canvas'); c.width = c.height = M; const x = c.getContext('2d', { willReadFrequently: true });
+      if (img) { const iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height, k = M * 0.92 / Math.max(iw, ih); x.drawImage(img, (M - iw * k) / 2, (M - ih * k) / 2, iw * k, ih * k); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(100, 100, 92, 0, Math.PI * 2); x.arc(100, 100, 52, 0, Math.PI * 2, true); x.fill('evenodd'); x.fillRect(88, 4, 24, 192); }
+      const d = x.getImageData(0, 0, M, M).data, a = new Uint8Array(M * M);
+      let transp = 0; for (let i = 3; i < d.length; i += 16) if (d[i] < 128) transp++;
+      const useA = transp > d.length / 16 * 0.05;
+      for (let i = 0; i < M * M; i++) { const l = (d[i * 4] * 0.2126 + d[i * 4 + 1] * 0.7152 + d[i * 4 + 2] * 0.0722) / 255; a[i] = (useA ? d[i * 4 + 3] > 128 : d[i * 4 + 3] > 128 && l < 0.5) ? 1 : 0; }
+      maskCache = { M, a };
+      return maskCache;
+    }
+    function logoAt(x, j) {
+      const L = layout(), m = logoMask(), Z = L.S * 0.62, pr = L.period;
+      const v = ((((j % pr) + pr) % pr) + 0.5) * p.echelle - (pr * p.echelle - Z) / 2, u = x - (app.size.w - Z) / 2;
+      if (u < 0 || v < 0 || u >= Z || v >= Z) return false;
+      return m.a[Math.floor(v / Z * m.M) * m.M + Math.floor(u / Z * m.M)] === 1;
+    }
+
+    // ——— Couleurs des fils ———
+    function colorsOf(list, k) {
+      if (!colorSeq) return list[0];
+      return list[colorSeq[((k % colorSeq.length) + colorSeq.length) % colorSeq.length] % list.length];
+    }
+    function colorIdx(len, k) {
+      if (!colorSeq) return 0;
+      return colorSeq[((k % colorSeq.length) + colorSeq.length) % colorSeq.length] % len;
+    }
+    function buildColorSeq() {
+      const key = [p.motif, p.rayures, p.chaine.length, p.trame.length, app.seed].join('|');
+      if (key === colorKey) return; colorKey = key;
+      const n = Math.max(p.chaine.length, p.trame.length, 1), k = Math.round(p.rayures);
+      if (p.motif === 'uni') colorSeq = [0];
+      else if (p.motif === 'rayures') { colorSeq = []; for (let c = 0; c < n; c++) for (let r = 0; r < k; r++) colorSeq.push(c); }
+      else {
+        // Écossais : bandes de largeurs variées, motif en miroir.
+        const r = app.rng(41), half = [];
+        for (let c = 0; c < n; c++) { const cnt = Math.max(1, Math.round(k * (0.25 + r() * 1.75))); for (let q = 0; q < cnt; q++) half.push(c); }
+        for (let c = 0; c < n; c++) { const cnt = Math.max(1, Math.round(k * (0.15 + r() * 0.6))); for (let q = 0; q < cnt; q++) half.push((c + 1) % n); }
+        colorSeq = half.concat(half.slice(1, -1).reverse());
+      }
+    }
+    const hex = (h) => { const n = parseInt(h.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; };
+    const shadeCache = new Map();
+    function shade(h, k) {
+      const key = h + k; let v = shadeCache.get(key); if (v) return v;
+      const [r, g, b] = hex(h); v = `rgb(${Math.round(r * k)},${Math.round(g * k)},${Math.round(b * k)})`;
+      if (shadeCache.size > 400) shadeCache.clear(); shadeCache.set(key, v); return v;
+    }
+
+    // ——— Mise en page ———
+    let L0 = null;
+    function layout() {
+      const { w, h } = app.size, c = p.echelle;
+      if (layoutKey && L0 && L0.w === w && L0.h === h && L0.c === c && L0.mode === p.mode) return L0;
+      layoutKey = 'ok';
+      const S = Math.min(w, h), cols = Math.ceil(w / c) + 4, offX = (w - cols * c) / 2;
+      const period = Math.ceil(Math.max(h * 0.95, S * 0.62 / 0.8) / c);
+      const fell = p.mode === 'metier' ? h * 0.7 : h;
+      L0 = { S, cols, offX, period, fell, w, h, c, mode: p.mode };
+      // Positions de départ : le motif du logo centré dans l'étoffe visible.
+      if (p.mode === 'metier') { loom.n = period * 40 + Math.round(period / 2 + fell / c / 2); loom.ph = 0.35; }
+      else scroll = period * 40 + period / 2 - h / c / 2;
+      return L0;
+    }
+
+    // Déplacements : le pointeur écarte les fils, une ondulation lente fait respirer l'étoffe.
+    let T = 0;
+    function dX(x, y) {
+      const c = p.echelle; let o = Math.sin(y * 0.021 + T * 1.3 + x * 0.004) * p.ondulation * c * 0.35;
+      if (push.k > 0.001) { const ax = x - push.x, ay = y - push.y, R = Math.max(60, c * 9); o += ax * push.k * Math.exp(-(ax * ax + ay * ay) / (R * R)); }
+      return o;
+    }
+    function dY(x, y) {
+      const c = p.echelle; let o = Math.sin(x * 0.017 - T * 1.1 + y * 0.003) * p.ondulation * c * 0.35;
+      if (push.k > 0.001) { const ax = x - push.x, ay = y - push.y, R = Math.max(60, c * 9); o += ay * push.k * Math.exp(-(ax * ax + ay * ay) / (R * R)); }
+      return o;
+    }
+
+    // ——— Scène : listes de polygones groupées par couleur ———
+    function scene(opt = {}) {
+      const { w, h } = app.size, c = p.echelle, tw = c * p.serrage, L = layout();
+      const order = []; // couches, dans l'ordre
+      const layer = () => { const m = new Map(); order.push(m); return (fill, alpha, poly) => { const k = fill + '|' + alpha; let g = m.get(k); if (!g) { g = { fill, alpha, polys: [] }; m.set(k, g); } g.polys.push(poly); }; };
+      const ch = p.chaine.length ? p.chaine : ['#222222'], tr = p.trame.length ? p.trame : ['#eeeeee'];
+      buildColorSeq();
+      const rl = p.relief;
+      // Rangées visibles
+      const rows = [];
+      let beat = 0, s = 0, curY = 0, newRow = null;
+      if (p.mode === 'metier') {
+        const ph = loom.ph; s = Math.min(1, ph / 0.8); beat = ph > 0.8 ? (ph - 0.8) / 0.2 : 0;
+        const e = beat * beat * (3 - 2 * beat), gap = c * 1.6;
+        for (let k = loom.n - 1, y = L.fell - c - c * e; y > -c * 3; k--, y -= c) rows.push({ j: k, y, hgt: c });
+        curY = L.fell + gap * (1 - e) - c * e;
+        newRow = { j: loom.n, y: curY, hgt: c, s, dir: loom.n % 2 === 0 ? 1 : -1 };
+        const sw0 = Math.max(90, c * 10);
+        newRow.xa = newRow.dir > 0 ? -c * 2 : w + c * 2;
+        newRow.xs = newRow.dir > 0 ? -sw0 + (w + sw0 * 2) * s : w + sw0 - (w + sw0 * 2) * s;
+      } else {
+        const j0 = Math.floor(scroll) - 2;
+        for (let j = j0; (j - scroll) * c < h + c * 2; j++) rows.push({ j, y: (j - scroll) * c, hgt: c });
+      }
+      rowsCache = newRow ? rows.concat([newRow]) : rows;
+      rows.sort((a, b) => a.y - b.y);
+      const top = rows.length ? rows[0].y : 0, bot = rows.length ? rows[rows.length - 1].y + c : 0;
+      const step = Math.max(6, c);
+      const warpPoly = (xb, y0, y1, half, sh) => {
+        const n = Math.max(1, Math.ceil((y1 - y0) / step)), a = [], b = [];
+        for (let k = 0; k <= n; k++) { const y = y0 + (y1 - y0) * k / n, x = xb + dX(xb, y) + sh; a.push(x - half, y); b.push(x + half, y); }
+        for (let k = b.length - 2; k >= 0; k -= 2) a.push(b[k], b[k + 1]);
+        return a;
+      };
+      const weftPoly = (yb, x0, x1, half, sh) => {
+        const n = Math.max(1, Math.ceil((x1 - x0) / step)), a = [], b = [];
+        for (let k = 0; k <= n; k++) { const x = x0 + (x1 - x0) * k / n, y = yb + dY(x, yb) + sh; a.push(x, y - half); b.push(x, y + half); }
+        for (let k = b.length - 2; k >= 0; k -= 2) a.push(b[k], b[k + 1]);
+        return a;
+      };
+      const xs = []; for (let i = 0; i < L.cols; i++) xs.push(L.offX + (i + 0.5) * c);
+      const i0 = 0;
+
+      // 1. Métier : chaîne tendue sous le front de tissage, en foule (fils levés plus clairs).
+      if (p.mode === 'metier' && !opt.noCloth) {
+        const lw = layer(), lw2 = layer(), lw3 = layer();
+        const nr = newRow, upNow = xs.map((xb, k) => up(i0 + k, nr.j, nr.y, xb));
+        xs.forEach((xb, k) => { if (!upNow[k]) lw(shade(colorsOf(ch, k), 1 - 0.45 * Math.max(0.3, rl)), 1, warpPoly(xb, bot - c * 0.3, h + c, tw * 0.42, 0)); });
+        // passée en cours, de l'entrée de la navette jusqu'à elle
+        const xa = nr.xa, xn = nr.xs;
+        if (Math.abs(xn - xa) > 1) lw2(colorsOf(tr, nr.j), 1, weftPoly(nr.y + c / 2, Math.min(xa, xn), Math.max(xa, xn), tw / 2, 0));
+        xs.forEach((xb, k) => { if (upNow[k]) lw3(colorsOf(ch, k), 1, warpPoly(xb, bot - c * 0.3, h + c, tw * 0.5, 0)); });
+      }
+
+      // 2. Étoffe : fils dessous assombris, puis flottés en couleur, ombres et reflets.
+      const under = layer(), floats = layer(), shadeL = layer(), light = layer();
+      const dark = 1 - 0.5 * Math.max(0.25, rl);
+      if (rows.length && !opt.noCloth) {
+        xs.forEach((xb, k) => under(shade(colorsOf(ch, k), dark), 1, warpPoly(xb, top, bot, tw * 0.4, 0)));
+        for (const r of rows) under(shade(colorsOf(tr, r.j), dark), 1, weftPoly(r.y + c / 2, -c, w + c, tw * 0.4, 0));
+        // carte des croisements
+        const U = rows.map((r) => xs.map((xb, k) => up(i0 + k, r.j, r.y, xb)));
+        const sl = c * 0.38, hl = 0.18 * rl, sd = 0.32 * rl;
+        // chaîne
+        for (let k = 0; k < xs.length; k++) {
+          const col = colorsOf(ch, k);
+          let a = -1;
+          for (let q = 0; q <= rows.length; q++) {
+            const on = q < rows.length && U[q][k];
+            if (on && a < 0) a = q;
+            if (!on && a >= 0) {
+              const y0 = rows[a].y + c * 0.04, y1 = rows[q - 1].y + c * 0.96;
+              floats(col, 1, warpPoly(xs[k], y0, y1, tw / 2, 0));
+              if (rl > 0) {
+                if (y1 - y0 > c * 1.2) light('#ffffff', hl, warpPoly(xs[k], y0 + c * 0.3, y1 - c * 0.3, tw * 0.13, -tw * 0.14));
+                shadeL('#000000', sd, warpPoly(xs[k], y0, y0 + sl, tw / 2, 0));
+                shadeL('#000000', sd, warpPoly(xs[k], y1 - sl, y1, tw / 2, 0));
+              }
+              a = -1;
+            }
+          }
+        }
+        // trame
+        for (let q = 0; q < rows.length; q++) {
+          const r = rows[q], col = colorsOf(tr, r.j), yb = r.y + c / 2;
+          let a = -1;
+          for (let k = 0; k <= xs.length; k++) {
+            const on = k < xs.length && !U[q][k];
+            if (on && a < 0) a = k;
+            if (!on && a >= 0) {
+              const x0 = xs[a] - c * 0.46, x1 = xs[k - 1] + c * 0.46;
+              floats(col, 1, weftPoly(yb, x0, x1, tw / 2, 0));
+              if (rl > 0) {
+                if (x1 - x0 > c * 1.2) light('#ffffff', hl, weftPoly(yb, x0 + c * 0.3, x1 - c * 0.3, tw * 0.13, -tw * 0.14));
+                shadeL('#000000', sd, weftPoly(yb, x0, x0 + sl, tw / 2, 0));
+                shadeL('#000000', sd, weftPoly(yb, x1 - sl, x1, tw / 2, 0));
+              }
+              a = -1;
+            }
+          }
+        }
+      }
+
+      // 3. Battant et navette
+      const tools = layer();
+      let shuttle = null;
+      if (p.mode === 'metier') {
+        const nr = newRow, by = nr.y + c * 1.7, bh = Math.max(8, c * 1.1);
+        tools(p.metier, 1, [0, by, w, by, w, by + bh, 0, by + bh]);
+        tools('#ffffff', 0.18, [0, by, w, by, w, by + bh * 0.3, 0, by + bh * 0.3]);
+        const sw = Math.max(90, c * 10), sh = Math.max(18, c * 2.2), cx = nr.xs, cy = nr.y + c / 2;
+        shuttle = { cx, cy, sw, sh, col: colorsOf(tr, nr.j) };
+      }
+      return { order, shuttle, rows, bot, xs, newRow };
+    }
+
+
+    // ——— Rendu WebGL de l'étoffe : chaque pixel retrouve son fil de chaîne, sa passée et qui passe dessus ———
+    const FS = `#version 300 es
+    precision highp float;
+    uniform sampler2D uTex;
+    uniform vec2 uRes;
+    uniform float uDpr, uC, uTw, uOffX, uY0, uCols, uRows, uBot, uRel, uOnd, uT, uLoom, uNewY, uXa, uXb;
+    uniform vec3 uPush, uFond;
+    uniform int uNewT;
+    uniform vec3 uCh[8], uTr[8];
+    out vec4 o;
+    float dX(vec2 q) { vec2 a = q - uPush.xy; float R = max(60., uC * 9.); return sin(q.y * 0.021 + uT * 1.3 + q.x * 0.004) * uOnd * uC * 0.35 + a.x * uPush.z * exp(-dot(a, a) / (R * R)); }
+    float dY(vec2 q) { vec2 a = q - uPush.xy; float R = max(60., uC * 9.); return sin(q.x * 0.017 - uT * 1.1 + q.y * 0.003) * uOnd * uC * 0.35 + a.y * uPush.z * exp(-dot(a, a) / (R * R)); }
+    vec4 cell(float i, float r) { if (i < 0. || r < 0. || i >= uCols || r >= uRows) return vec4(-1.); return texelFetch(uTex, ivec2(int(i), int(r)), 0); }
+    bool upAt(float i, float r) { return cell(i, r).r > 0.5; }
+    // Fil vu en relief : profil cylindrique, reflet, torsion, ombre aux bouts des flottés.
+    vec3 thread(vec3 base, float u, float along, float endA, float endB) {
+      float cyl = sqrt(max(0., 1. - u * u));
+      float lit = mix(1., 0.62 + 0.38 * cyl - 0.08 * u, uRel);
+      float spec = pow(max(0., 1. - abs(u + 0.32) / 0.3), 2.) * 0.22 * uRel;
+      float tw = 1. - uRel * 0.07 * (0.5 + 0.5 * sin((along + u * uTw * 0.5) * 1.7));
+      float e = max(1. - smoothstep(0., 0.42, endA), 1. - smoothstep(0., 0.42, endB));
+      vec3 c = base * lit * tw * (1. - uRel * 0.5 * e) + spec * (1. - e);
+      return c;
+    }
+    void main() {
+      vec2 q = vec2(gl_FragCoord.x, uRes.y * uDpr - gl_FragCoord.y) / uDpr;
+      float hw = uTw * 0.5;
+      if (q.y > uBot) {
+        // Sous le front de tissage : la chaîne tendue, en foule, et la passée que la navette dépose.
+        if (uLoom < 0.5) { o = vec4(0.); return; }
+        float li = -1., ld = 1e9, lb = floor((q.x - dX(q) - uOffX) / uC);
+        for (int k = -2; k <= 2; k++) { float i = lb + float(k), xb = uOffX + (i + 0.5) * uC, d = q.x - (xb + dX(vec2(xb, q.y))); if (abs(d) < abs(ld)) { ld = d; li = i; } }
+        vec4 lc = (li >= 0. && li < uCols) ? texelFetch(uTex, ivec2(int(li), int(uRows) - 1), 0) : vec4(0.);
+        bool lup = lc.a > 0.5;
+        vec3 wcol = uCh[int(lc.g * 255. + 0.5)];
+        float uu = clamp(ld / hw, -1., 1.);
+        vec3 W = thread(wcol, uu, q.y, 9., 9.) * (lup ? 1. : 1. - 0.42 * max(0.3, uRel));
+        float aW = clamp((lup ? hw : hw * 0.84) - abs(ld) + 0.5, 0., 1.);
+        float yb = uNewY + uC * 0.5, td = q.y - (yb + dY(vec2(q.x, yb)));
+        float aT = clamp(hw - abs(td) + 0.5, 0., 1.) * clamp(q.x - uXa + 0.5, 0., 1.) * clamp(uXb - q.x + 0.5, 0., 1.);
+        vec3 tcol = uTr[uNewT];
+        vec3 Tc = thread(tcol, clamp(td / hw, -1., 1.), q.x, 9., 9.);
+        vec3 col = uFond;
+        if (lup) { col = mix(col, Tc, aT); col = mix(col, W, aW); } else { col = mix(col, W, aW); col = mix(col, Tc, aT); }
+        o = vec4(col, 1.);
+        return;
+      }
+      // chaîne la plus proche
+      float wi = -1., wd = 1e9, ib = floor((q.x - dX(q) - uOffX) / uC);
+      for (int k = -2; k <= 2; k++) { float i = ib + float(k), xb = uOffX + (i + 0.5) * uC, d = q.x - (xb + dX(vec2(xb, q.y))); if (abs(d) < abs(wd)) { wd = d; wi = i; } }
+      // passée la plus proche
+      float tr = -1., td = 1e9, rb = floor((q.y - dY(q) - uY0) / uC);
+      for (int k = -2; k <= 2; k++) { float r = rb + float(k), yb = uY0 + (r + 0.5) * uC, d = q.y - (yb + dY(vec2(q.x, yb))); if (abs(d) < abs(td)) { td = d; tr = r; } }
+      float aW = clamp(hw - abs(wd) + 0.5, 0., 1.), aT = (tr >= 0. && tr < uRows) ? clamp(hw - abs(td) + 0.5, 0., 1.) : 0.;
+      vec4 cc = cell(wi, tr);
+      if (cc.x < 0.) { o = vec4(uFond, 1.); return; }
+      bool warpUp = cc.r > 0.5;
+      vec3 wc = uCh[int(cc.g * 255. + 0.5)], tc = uTr[int(cc.b * 255. + 0.5)];
+      float uW = clamp(wd / hw, -1., 1.), uT2 = clamp(td / hw, -1., 1.);
+      float dive = 1. - 0.5 * max(0.25, uRel);
+      // couleur de la chaîne à cet endroit
+      vec3 W;
+      float v = (q.y - (uY0 + tr * uC)) / uC; // position dans la case, 0 en haut
+      if (abs(td) < hw) {
+        W = warpUp ? thread(wc, uW, q.y, upAt(wi, tr - 1.) ? 9. : v, upAt(wi, tr + 1.) ? 9. : 1. - v) : wc * dive;
+      } else {
+        float other = tr + (td > 0. ? 1. : -1.);
+        bool b = upAt(wi, other);
+        W = (warpUp && b) ? thread(wc, uW, q.y, 9., 9.) : (warpUp || b) ? wc * mix(dive, 1., 0.5) * mix(1., 0.62 + 0.38 * sqrt(max(0., 1. - uW * uW)), uRel) : wc * dive;
+      }
+      // couleur de la trame
+      vec3 Tc;
+      float hpos = (q.x - (uOffX + wi * uC)) / uC;
+      if (abs(wd) < hw) {
+        Tc = !warpUp ? thread(tc, uT2, q.x, !upAt(wi - 1., tr) ? 9. : hpos, !upAt(wi + 1., tr) ? 9. : 1. - hpos) : tc * dive;
+      } else {
+        float other = wi + (wd > 0. ? 1. : -1.);
+        bool b = !upAt(other, tr);
+        Tc = (!warpUp && b) ? thread(tc, uT2, q.x, 9., 9.) : (!warpUp || b) ? tc * mix(dive, 1., 0.5) * mix(1., 0.62 + 0.38 * sqrt(max(0., 1. - uT2 * uT2)), uRel) : tc * dive;
+      }
+      vec3 col = uFond;
+      if (warpUp) { col = mix(col, Tc, aT); col = mix(col, W, aW); }
+      else { col = mix(col, W, aW); col = mix(col, Tc, aT); }
+      float A = clamp(uBot - q.y, 0., 1.);
+      o = vec4(col * A, A);
+    }`;
+    const VS = `#version 300 es
+    void main() { vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2)); gl_Position = vec4(p * 2. - 1., 0., 1.); }`;
+    const glCv = document.createElement('canvas');
+    let gl = null, prog = null, tex = null, U = {}, texBuf = null;
+    function initGL() {
+      try {
+        gl = glCv.getContext('webgl2', { alpha: true, premultipliedAlpha: true, antialias: false, depth: false, stencil: false, preserveDrawingBuffer: true });
+        if (!gl) return false;
+        const sh = (type, src) => { const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s); if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s)); return s; };
+        prog = gl.createProgram(); gl.attachShader(prog, sh(gl.VERTEX_SHADER, VS)); gl.attachShader(prog, sh(gl.FRAGMENT_SHADER, FS)); gl.linkProgram(prog);
+        if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
+        for (const n of ['uNewT', 'uLoom', 'uNewY', 'uXa', 'uXb', 'uTex', 'uRes', 'uDpr', 'uC', 'uTw', 'uOffX', 'uY0', 'uCols', 'uRows', 'uBot', 'uRel', 'uOnd', 'uT', 'uPush', 'uFond', 'uCh', 'uTr']) U[n] = gl.getUniformLocation(prog, n);
+        tex = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, tex);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        gl.bindVertexArray(gl.createVertexArray());
+        return true;
+      } catch (e) { console.warn(e); gl = null; return false; }
+    }
+    const rgb = (h) => hex(h).map((v) => v / 255);
+    function glCloth(w, h, dpr, F) {
+      const c = p.echelle, L = layout(), rows = F.rows, cols = F.xs.length, R = rows.length;
+      if (!R) return false;
+      if (glCv.width !== Math.round(w * dpr) || glCv.height !== Math.round(h * dpr)) { glCv.width = Math.round(w * dpr); glCv.height = Math.round(h * dpr); }
+      gl.useProgram(prog);
+      const n = cols * R * 4; if (!texBuf || texBuf.length < n) texBuf = new Uint8Array(n);
+      const ch = p.chaine.length ? p.chaine.slice(0, 8) : ['#222222'], tr = p.trame.length ? p.trame.slice(0, 8) : ['#eeeeee'];
+      const ci = F.xs.map((_, k) => colorIdx(ch.length, k));
+      for (let r = 0; r < R; r++) {
+        const row = rows[r], ti = colorIdx(tr.length, row.j);
+        for (let k = 0; k < cols; k++) { const o = (r * cols + k) * 4; texBuf[o] = up(k, row.j, row.y, F.xs[k]) ? 255 : 0; texBuf[o + 1] = ci[k]; texBuf[o + 2] = ti; texBuf[o + 3] = 255; }
+      }
+      // Dernière rangée : le canal alpha porte la foule de la passée en cours.
+      const nr = F.newRow;
+      if (nr) for (let k = 0; k < cols; k++) texBuf[((R - 1) * cols + k) * 4 + 3] = up(k, nr.j, nr.y, F.xs[k]) ? 255 : 0;
+      gl.uniform1f(U.uLoom, nr ? 1 : 0);
+      if (nr) { gl.uniform1i(U.uNewT, colorIdx(tr.length, nr.j)); gl.uniform1f(U.uNewY, nr.y); gl.uniform1f(U.uXa, Math.min(nr.xa, nr.xs)); gl.uniform1f(U.uXb, Math.max(nr.xa, nr.xs)); }
+      gl.viewport(0, 0, glCv.width, glCv.height);
+      gl.useProgram(prog);
+      gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, tex);
+      gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, cols, R, 0, gl.RGBA, gl.UNSIGNED_BYTE, texBuf.subarray(0, n));
+      gl.uniform1i(U.uTex, 0); gl.uniform2f(U.uRes, w, h); gl.uniform1f(U.uDpr, glCv.width / w);
+      gl.uniform1f(U.uC, c); gl.uniform1f(U.uTw, c * p.serrage); gl.uniform1f(U.uOffX, L.offX); gl.uniform1f(U.uY0, rows[0].y);
+      gl.uniform1f(U.uCols, cols); gl.uniform1f(U.uRows, R); gl.uniform1f(U.uBot, p.mode === 'metier' ? F.bot : 1e6);
+      gl.uniform1f(U.uRel, p.relief); gl.uniform1f(U.uOnd, p.ondulation); gl.uniform1f(U.uT, T);
+      gl.uniform3f(U.uPush, push.x, push.y, push.k); gl.uniform3fv(U.uFond, rgb(p.fond));
+      const pad = (list) => { const a = []; for (let k = 0; k < 8; k++) a.push(...rgb(list[k % list.length])); return a; };
+      gl.uniform3fv(U.uCh, pad(ch)); gl.uniform3fv(U.uTr, pad(tr));
+      gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+      return true;
+    }
+
+    function boatPath(s) {
+      // Navette : fuseau pointu aux deux bouts, canette de la couleur de la trame.
+      const { cx, cy, sw, sh } = s, a = sw / 2, b = sh / 2;
+      return `M${(cx - a).toFixed(1)} ${cy.toFixed(1)}Q${(cx - a * 0.55).toFixed(1)} ${(cy - b * 1.05).toFixed(1)} ${cx.toFixed(1)} ${(cy - b).toFixed(1)}Q${(cx + a * 0.55).toFixed(1)} ${(cy - b * 1.05).toFixed(1)} ${(cx + a).toFixed(1)} ${cy.toFixed(1)}Q${(cx + a * 0.55).toFixed(1)} ${(cy + b * 1.05).toFixed(1)} ${cx.toFixed(1)} ${(cy + b).toFixed(1)}Q${(cx - a * 0.55).toFixed(1)} ${(cy + b * 1.05).toFixed(1)} ${(cx - a).toFixed(1)} ${cy.toFixed(1)}Z`;
+    }
+    const bobbin = (s) => ({ x: s.cx - s.sw * 0.22, y: s.cy - s.sh * 0.22, w: s.sw * 0.44, h: s.sh * 0.44 });
+
+    const glOK = initGL();
+    app.loop((t, dt) => {
+      const { w, h, dpr } = app.size;
+      dt = Math.min(0.05, dt || 0);
+      if (!hist.length) resetDraft();
+      T = t;
+      layout();
+      // Avancement
+      const v = p.vitesse;
+      if (p.mode === 'metier') {
+        loom.ph += dt * Math.max(v, 0.3) * 0.9 * (1 + boost * 5) * (v > 0 || boost > 0.01 ? 1 : 0);
+        boost = Math.max(0, boost - dt * 0.45);
+        while (loom.ph >= 1) { loom.ph -= 1; loom.n++; }
+      } else scroll += dt * v * 0.8;
+      for (const e of hist) if (e.sw < 1) e.sw = Math.min(1, e.sw + dt * 1.3);
+      if (p.evolution > 0 && !app.thumbnail) { evoT += dt * p.evolution / 60; if (evoT >= 1) { evoT = 0; evolve(); } }
+      push.k += (push.target - push.k) * Math.min(1, dt * 5);
+
+      const useGL = glOK;
+      const S = scene({ noCloth: useGL });
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = p.fond; ctx.fillRect(0, 0, w, h);
+      // En WebGL, l'étoffe et la chaîne sont dans l'image ; il ne reste en 2D que le battant et la navette.
+      if (useGL && glCloth(w, h, dpr, S)) { ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.drawImage(glCv, 0, 0, canvas.width, canvas.height); ctx.setTransform(dpr, 0, 0, dpr, 0, 0); }
+      for (const m of S.order) for (const g of m.values()) {
+        ctx.globalAlpha = g.alpha; ctx.fillStyle = g.fill; ctx.beginPath();
+        for (const a of g.polys) { ctx.moveTo(a[0], a[1]); for (let k = 2; k < a.length; k += 2) ctx.lineTo(a[k], a[k + 1]); ctx.closePath(); }
+        ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+      if (S.shuttle) {
+        const s = S.shuttle, b = bobbin(s);
+        ctx.fillStyle = p.metier; ctx.fill(new Path2D(boatPath(s)));
+        ctx.fillStyle = s.col; ctx.beginPath(); ctx.roundRect(b.x, b.y, b.w, b.h, b.h / 2); ctx.fill();
+      }
+      app.finish(ctx);
+    });
+
+    function toSVG() {
+      const { w, h } = app.size, S = scene(), out = [];
+      for (const m of S.order) for (const g of m.values()) {
+        const d = g.polys.map((a) => { let s = `M${a[0].toFixed(1)} ${a[1].toFixed(1)}`; for (let k = 2; k < a.length; k += 2) s += `L${a[k].toFixed(1)} ${a[k + 1].toFixed(1)}`; return s + 'Z'; }).join('');
+        out.push(`<path d="${d}" fill="${g.fill}"${g.alpha < 1 ? ` fill-opacity="${g.alpha.toFixed(3)}"` : ''}/>`);
+      }
+      if (S.shuttle) {
+        const s = S.shuttle, b = bobbin(s);
+        out.push(`<path d="${boatPath(s)}" fill="${p.metier}"/>`, `<rect x="${b.x.toFixed(1)}" y="${b.y.toFixed(1)}" width="${b.w.toFixed(1)}" height="${b.h.toFixed(1)}" rx="${(b.h / 2).toFixed(1)}" fill="${s.col}"/>`);
+      }
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">\n<rect width="100%" height="100%" fill="${p.fond}"/>\n${out.join('\n')}\n</svg>`;
+    }
+  </script>
+</body>
+</html>
