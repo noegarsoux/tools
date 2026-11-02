@@ -1,0 +1,402 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Éclairs</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Éclairs : modèle de claquage diélectrique (Niemeyer, Pietronero, Wiesmann 1984) dans sa version rapide
+    // (Kim et Lin 2007) : chaque case conquise ajoute un potentiel 1 − R/r à toutes les candidates, la décharge
+    // choisit sa prochaine case avec une probabilité Φ^η. Le traceur avance par bonds, touche le sol, et le
+    // canal principal s'illumine (arc en retour). Même modèle pour les figures de Lichtenberg et le logo.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const KB = PAL('kegelbahn'), LUZ = PAL('luzern'), ACIDE = PAL('acide'), ORB = PAL('orbite'), THERM = PAL('thermique');
+
+    let bolts = [], time = 0, nextStrike = 0.4, flash = 0, frozen = false, rng = Math.random, last = null, hold = null, holdT = 0;
+    let bg = null, bgKey = '', mask = null, maskKey = null, sceneKey = '', artC = null, artKey = '';
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.06, vignette: 0.3 },
+      hint: 'Touchez pour attirer la foudre · maintenez pour une électrode · molette : ramification',
+      notes: 'La décharge avance case par case. Chaque case conquise modifie le potentiel électrique de toutes ses voisines possibles ; la suivante est tirée au sort avec une probabilité qui croît avec ce potentiel, élevé à la puissance η. Avec η faible la décharge buissonne comme une figure de Lichtenberg, avec η fort elle file presque droit. Quand le traceur touche le sol, le chemin qui le relie au nuage devient le canal principal : c’est l’arc en retour, le seul vraiment lumineux.',
+      params: {
+        'Décharge': {
+          scene: { type: 'select', label: 'Scène', options: { orage: 'Orage', lichtenberg: 'Lichtenberg', logo: 'Logo électrode' }, value: 'orage' },
+          image: { type: 'file', label: 'Logo', accept: 'image/*', show: (q) => q.scene === 'logo' },
+          ramification: { type: 'range', label: 'Ramification (η)', min: 0, max: 1, step: 0.01, value: 0.42 },
+          attraction: { type: 'range', label: 'Attraction du sol', min: 0, max: 1, step: 0.01, value: 0.55, show: (q) => q.scene === 'orage' },
+          finesse: { type: 'range', label: 'Finesse', min: 60, max: 220, step: 1, value: 140 },
+          vitesse: { type: 'range', label: 'Vitesse du traceur', min: 0.05, max: 1, step: 0.01, value: 0.45 },
+          frequence: { type: 'range', label: 'Fréquence', min: 0, max: 1, step: 0.01, value: 0.45 },
+        },
+        'Lumière': {
+          epaisseur: { type: 'range', label: 'Épaisseur', min: 0.3, max: 3, step: 0.05, value: 1.2 },
+          lueur: { type: 'range', label: 'Halo', min: 0, max: 1, step: 0.01, value: 0.6 },
+          branches: { type: 'range', label: 'Branches visibles', min: 0, max: 1, step: 0.01, value: 0.65 },
+          flash: { type: 'range', label: 'Flash', min: 0, max: 1, step: 0.01, value: 0.55 },
+          nuages: { type: 'range', label: 'Nuages', min: 0, max: 1, step: 0.01, value: 0.6 },
+          persistance: { type: 'range', label: 'Persistance', min: 0, max: 1, step: 0.01, value: 0.25 },
+        },
+        'Couleurs': {
+          arc: { type: 'color', label: 'Arc', value: '#f1f0ff' },
+          halo: { type: 'color', label: 'Halo', value: '#8a7dff' },
+          fond: { type: 'color', label: 'Fond', value: '#08070f' },
+          ciel: { type: 'color', label: 'Nuages', value: '#2b2742' },
+        },
+      },
+      presets: {
+        'Orage': {},
+        'Foudre droite': { ramification: 0.15, attraction: 0.6, branches: 0.5, frequence: 0.6 },
+        'Arborescence': { ramification: 0.8, attraction: 0.75, branches: 1, vitesse: 0.3, finesse: 120 },
+        'Lichtenberg': { scene: 'lichtenberg', ramification: 0.75, vitesse: 0.35, nuages: 0, persistance: 0.6, frequence: 0.3 },
+        'Bois brûlé': { scene: 'lichtenberg', ramification: 0.7, arc: '#ffd27a', halo: '#ff5a1f', fond: '#2a1a10', nuages: 0, persistance: 0.85, flash: 0.15, lueur: 0.75, vitesse: 0.25 },
+        'Logo électrode': { scene: 'logo', ramification: 0.6, nuages: 0.2, frequence: 0.5 },
+        'Tempête': { frequence: 1, vitesse: 0.75, flash: 0.8, ramification: 0.35 },
+        'Kegelbahn': { arc: '#ffffff', halo: KB[1], fond: KB[0], ciel: '#2a1424' },
+        'Luzern': { arc: '#ffffff', halo: LUZ[0], fond: LUZ[1], ciel: LUZ[2], nuages: 0.4, flash: 0.35 },
+        'Acide': { arc: ACIDE[2], halo: ACIDE[2], fond: ACIDE[1], ciel: '#3a3d1c', ramification: 0.4 },
+        'Orbite': { scene: 'lichtenberg', arc: ORB[2], halo: ORB[0], fond: ORB[1], nuages: 0, ramification: 0.6, persistance: 0.5 },
+        'Papier': { arc: '#141414', halo: '#5b7fd6', fond: '#efece6', ciel: '#c9c4bb', nuages: 0.35, flash: 0.2, lueur: 0.35 },
+      },
+      brand(colors) {
+        const lum = (h) => { const n = parseInt(h.slice(1), 16); return ((n >> 16) & 255) * 0.299 + ((n >> 8) & 255) * 0.587 + (n & 255) * 0.114; };
+        const sat = (h) => { const c = hex(h), mx = Math.max(...c), mn = Math.min(...c); return mx ? (mx - mn) / mx : 0; };
+        const all = colors.slice().sort((a, b) => lum(b) - lum(a)), dark = all[all.length - 1], light = all[0];
+        const halo = colors.slice().sort((a, b) => sat(b) - sat(a))[0];
+        return { arc: light, fond: dark, halo, ciel: mixHex(dark, halo, 0.22) };
+      },
+      pointer: {
+        down: (q) => { hold = { x: q.x, y: q.y, moved: false, t: 0 }; },
+        drag: (q) => { if (!hold) return; if (Math.hypot(q.x - hold.x, q.y - hold.y) > 6) hold.moved = true; hold.x = q.x; hold.y = q.y; },
+        up: (q) => { if (hold && hold.t < 0.3) strike(q.x, q.y); hold = null; },
+        wheel: (q, dy) => app.set('ramification', Math.max(0, Math.min(1, +(p.ramification + (dy > 0 ? -0.04 : 0.04)).toFixed(2)))),
+      },
+      onChange(k) { if (k === 'image') { maskKey = null; artKey = ''; } if (k === '*' || ['scene', 'finesse', 'image'].includes(k)) { sceneKey = ''; } if (k === '*' || ['fond', 'ciel', 'nuages'].includes(k)) bgKey = ''; frozen = false; },
+      onSeed() { sceneKey = ''; bgKey = ''; frozen = false; },
+      export: { name: 'eclairs', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    const hex = (h) => { const n = parseInt(h.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; };
+    const mixHex = (a, b, t) => { const A = hex(a), B = hex(b); return '#' + A.map((v, i) => Math.round(v + (B[i] - v) * t).toString(16).padStart(2, '0')).join(''); };
+    function mulberry(a) { return () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+    const eta = () => 0.6 + Math.pow(1 - p.ramification, 1.3) * 7;
+
+    // ——— Grille ———
+    function grid() {
+      const { w, h } = app.size, cs = Math.min(w, h) / p.finesse;
+      return { cs, W: Math.ceil(w / cs) + 1, H: Math.ceil(h / cs) + 1 };
+    }
+
+    // ——— Une décharge (DBM rapide) ———
+    // src : liste de cases sources ; target : {x,y} en cases ou null ; kind : 'orage' | 'radial' | 'logo'
+    function makeBolt(src, target, kind) {
+      const g = grid(), N = g.W * g.H;
+      const b = { g, kind, target, occ: new Uint8Array(N), cand: new Uint8Array(N), phi: new Float32Array(N), parent: new Int32Array(N).fill(-1),
+        list: [], cl: [], order: [], jx: null, jy: null, phase: 'lead', t: 0, life: 0, acc: 0, prog: 0, cpf: 4, hit: -1, done: false, alpha: 1, seed: rng() * 1e9 | 0 };
+      b.jr = mulberry(b.seed);
+      for (const c of src) { b.occ[c] = 1; b.cl.push(c); b.order.push(c); }
+      for (const c of src) addNeighbours(b, c);
+      b.maxR = kind === 'radial' ? Math.min(g.W, g.H) * 0.47 : Infinity;
+      b.cx = src.length ? (src[0] % g.W) : 0; b.cy = src.length ? Math.floor(src[0] / g.W) : 0;
+      return b;
+    }
+    const R1 = 0.5;
+    function addNeighbours(b, c) {
+      const { W, H } = b.g, x = c % W, y = (c / W) | 0;
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+        if (!dx && !dy) continue; const nx = x + dx, ny = y + dy; if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
+        const n = ny * W + nx; if (b.occ[n] || b.cand[n]) continue;
+        b.cand[n] = 1; b.parent[n] = c; b.list.push(n);
+        // potentiel initial : somme sur l'amas (sous-échantillonné quand il est très grand)
+        let s = 0; const cl = b.cl, L = cl.length, st = L > 700 ? Math.ceil(L / 700) : 1;
+        for (let i = 0; i < L; i += st) { const o = cl[i], ox = o % W - nx, oy = ((o / W) | 0) - ny; s += 1 - R1 / Math.sqrt(ox * ox + oy * oy); }
+        b.phi[n] = s * st;
+      }
+    }
+    // k cases conquises par passe de normalisation (k petit : quasi identique au DBM strict, bien plus rapide)
+    function grow(b, k = 1) {
+      const { W, H } = b.g, list = b.list, phi = b.phi, e = eta();
+      if (!list.length) { hitAt(b, -1); return; }
+      let mn = Infinity, mx = -Infinity;
+      for (let i = 0; i < list.length; i++) { const v = phi[list[i]]; if (v < mn) mn = v; if (v > mx) mx = v; }
+      const span = mx - mn || 1, cum = growW.length >= list.length ? growW : (growW = new Float64Array(list.length * 2));
+      const att = b.kind === 'orage' ? p.attraction : (b.target ? 0.6 : 0);
+      let tot = 0;
+      for (let i = 0; i < list.length; i++) {
+        const c = list[i]; let v = (phi[c] - mn) / span;
+        if (att > 0) {
+          let a;
+          if (b.target) { const dx = c % W - b.target.x, dy = ((c / W) | 0) - b.target.y; a = 1 - Math.min(1, Math.sqrt(dx * dx + dy * dy) / (b.tDist || 1)); }
+          else a = ((c / W) | 0) / H;
+          v = v * (1 - att) + a * att;
+        }
+        if (b.kind === 'radial') { const dx = c % W - b.cx, dy = ((c / W) | 0) - b.cy; if (dx * dx + dy * dy > b.maxR * b.maxR) v = 0; }
+        tot += v > 0 ? Math.exp(e * Math.log(v)) : 0; cum[i] = tot;
+      }
+      if (tot <= 0) { hitAt(b, -1); return; }
+      const picks = [];
+      for (let j = 0; j < k * 2 && picks.length < k; j++) {
+        const r = rng() * tot; let lo = 0, hi = list.length - 1; while (lo < hi) { const m = (lo + hi) >> 1; if (cum[m] < r) lo = m + 1; else hi = m; }
+        const c = list[lo]; if (b.cand[c] === 1) { b.cand[c] = 3; picks.push(c); }
+      }
+      let n = 0; for (let i = 0; i < list.length; i++) if (b.cand[list[i]] !== 3) list[n++] = list[i]; list.length = n;
+      for (const c of picks) {
+        b.cand[c] = 0; b.occ[c] = 1; b.cl.push(c); b.order.push(c);
+        // mise à jour incrémentale des candidates
+        const x = c % W, y = (c / W) | 0;
+        for (let i = 0; i < list.length; i++) { const o = list[i], dx = o % W - x, dy = ((o / W) | 0) - y; phi[o] += 1 - R1 / Math.sqrt(dx * dx + dy * dy); }
+        addNeighbours(b, c);
+        let pr; if (b.target) { const dx = x - b.target.x, dy = y - b.target.y; pr = 1 - Math.sqrt(dx * dx + dy * dy) / (b.tDist || 1); } else if (b.kind === 'orage') pr = y / (H - 2); else { const dx = x - b.cx, dy = y - b.cy; pr = Math.sqrt(dx * dx + dy * dy) / b.maxR; }
+        if (pr > b.prog) b.prog = pr;
+        if (b.target) { if (Math.abs(x - b.target.x) <= 1 && Math.abs(y - b.target.y) <= 1) return hitAt(b, c); }
+        else if (b.kind === 'orage') { if (y >= H - 2) return hitAt(b, c); }
+        else if (b.order.length - b.n0 > b.cap) return hitAt(b, -1);
+      }
+    }
+    let growW = new Float64Array(1024);
+    function hitAt(b, c) {
+      b.hit = c; b.phase = 'strike'; b.t = 0;
+      // poids des sous-arbres (courant) et canal principal
+      const N = b.g.W * b.g.H, wgt = b.wgt = new Float32Array(N), main = b.main = new Uint8Array(N), ord = b.order;
+      for (let i = ord.length - 1; i >= 0; i--) { const n = ord[i]; wgt[n] += 1; const pa = b.parent[n]; if (pa >= 0 && b.occ[pa]) wgt[pa] += wgt[n]; }
+      if (c >= 0) { let n = c, guard = 0; while (n >= 0 && guard++ < 1e5) { main[n] = 1; n = b.occ[b.parent[n]] ? b.parent[n] : -1; } }
+      else { // figure radiale : les branches les plus longues sont les canaux principaux
+        let mx = 0; for (const n of ord) if (wgt[n] > mx) mx = wgt[n]; b.wmax = mx;
+      }
+      if (b.kind === 'orage' || b.target) flash = Math.max(flash, 1);
+      else flash = Math.max(flash, 0.5);
+    }
+
+    // ——— Scènes ———
+    function logoCells(g) {
+      const img0 = p.image || app.logoImg, key = (img0 ? (img0.src || 'c') : 'demo') + g.W + 'x' + g.H;
+      if (key === maskKey && mask) return mask; maskKey = key;
+      const { w, h } = app.size, c = document.createElement('canvas'); c.width = g.W; c.height = g.H; const x = c.getContext('2d', { willReadFrequently: true });
+      const L = Math.min(w, h) * 0.42 / g.cs, cx = w / 2 / g.cs, cy = h / 2 / g.cs;
+      if (img0) { const iw = img0.naturalWidth || img0.width, ih = img0.naturalHeight || img0.height, k = L / Math.max(iw, ih); x.drawImage(img0, cx - iw * k / 2, cy - ih * k / 2, iw * k, ih * k); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(cx, cy, L * 0.48, 0, TAU); x.arc(cx, cy, L * 0.26, 0, TAU, true); x.fill('evenodd'); x.fillRect(cx - L * 0.06, cy - L * 0.5, L * 0.12, L); }
+      const d = x.getImageData(0, 0, g.W, g.H).data; let transp = 0; for (let i = 3; i < d.length; i += 4) if (d[i] < 128) transp++;
+      const useA = transp > g.W * g.H * 0.05, inn = new Uint8Array(g.W * g.H);
+      for (let i = 0; i < g.W * g.H; i++) { const l = (d[i * 4] * 0.2126 + d[i * 4 + 1] * 0.7152 + d[i * 4 + 2] * 0.0722) / 255; inn[i] = useA ? (d[i * 4 + 3] > 110 ? 1 : 0) : (d[i * 4 + 3] > 128 && l < 0.5 ? 1 : 0); }
+      const edge = [];
+      for (let y = 1; y < g.H - 1; y++) for (let xx = 1; xx < g.W - 1; xx++) { const i = y * g.W + xx; if (inn[i] && (!inn[i - 1] || !inn[i + 1] || !inn[i - g.W] || !inn[i + g.W])) edge.push(i); }
+      mask = { inn, edge }; return mask;
+    }
+
+    function logoArt(col) {
+      const { w, h, dpr } = app.size, g = grid(), img0 = p.image || app.logoImg, key = [w, h, dpr, col, img0 ? (img0.src || 'c') : 'demo', p.finesse].join();
+      if (key === artKey && artC) return artC; artKey = key;
+      const c = artC || document.createElement('canvas'); c.width = Math.round(w * dpr); c.height = Math.round(h * dpr); const x = c.getContext('2d');
+      x.setTransform(dpr, 0, 0, dpr, 0, 0); x.clearRect(0, 0, w, h);
+      const L = Math.min(w, h) * 0.42, cx = w / 2, cy = h / 2;
+      if (img0) { const iw = img0.naturalWidth || img0.width, ih = img0.naturalHeight || img0.height, k = L / Math.max(iw, ih); x.drawImage(img0, cx - iw * k / 2, cy - ih * k / 2, iw * k, ih * k); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(cx, cy, L * 0.48, 0, TAU); x.arc(cx, cy, L * 0.26, 0, TAU, true); x.fill('evenodd'); x.fillRect(cx - L * 0.06, cy - L * 0.5, L * 0.12, L); }
+      x.globalCompositeOperation = 'source-in'; x.fillStyle = col; x.fillRect(0, 0, w, h); x.globalCompositeOperation = 'source-over';
+      artC = c; return c;
+    }
+    function spawn(tx, ty) {
+      const g = grid(); let b;
+      if (p.scene === 'orage') {
+        const x0 = tx != null ? Math.max(2, Math.min(g.W - 3, Math.round(tx / g.cs + (rng() - 0.5) * g.W * 0.35))) : Math.round(g.W * (0.15 + rng() * 0.7));
+        b = makeBolt([x0], tx != null ? { x: Math.round(tx / g.cs), y: Math.round(ty / g.cs) } : null, 'orage');
+      } else if (p.scene === 'lichtenberg') {
+        const cx = tx != null ? Math.round(tx / g.cs) : Math.round(g.W / 2), cy = tx != null ? Math.round(ty / g.cs) : Math.round(g.H / 2);
+        b = makeBolt([cy * g.W + cx], null, 'radial'); b.cx = cx; b.cy = cy; b.maxR = Math.min(g.W, g.H) * (tx != null ? 0.3 : 0.47); b.cap = Math.round(Math.PI * b.maxR * b.maxR * (0.08 + p.ramification * 0.22));
+      } else {
+        const m = logoCells(g);
+        if (tx != null) { b = makeBolt(m.edge.length ? m.edge : [0], { x: Math.round(tx / g.cs), y: Math.round(ty / g.cs) }, 'logo'); }
+        else {
+          // couronne : la décharge part de tout le bord du logo vers l'extérieur
+          const src = m.edge.filter(() => rng() < 0.1); b = makeBolt(src.length ? src : [0], null, 'radial');
+          for (let i = 0; i < m.inn.length; i++) if (m.inn[i] && !b.occ[i]) b.occ[i] = 2; // l'intérieur du logo est isolant
+          b.list = b.list.filter((c) => !b.occ[c]); b.cx = g.W / 2; b.cy = g.H / 2; b.maxR = Math.min(g.W, g.H) * 0.47;
+          b.cap = Math.round(Math.PI * b.maxR * b.maxR * (0.06 + p.ramification * 0.1));
+        }
+      }
+      if (b.target) { const s = b.cl[0], dx = s % g.W - b.target.x, dy = ((s / g.W) | 0) - b.target.y; b.tDist = Math.sqrt(dx * dx + dy * dy) * 1.1 + 2; }
+      b.n0 = b.order.length; if (!b.cap) b.cap = 1e9;
+      b.jx = new Float32Array(g.W * g.H); b.jy = new Float32Array(g.W * g.H);
+      for (let i = 0; i < b.jx.length; i++) { b.jx[i] = (b.jr() - 0.5) * 0.7; b.jy[i] = (b.jr() - 0.5) * 0.7; }
+      bolts.push(b); return b;
+    }
+    function strike(x, y) { spawn(x, y); }
+
+    // ——— Fond : ciel nuageux (bruit fbm basse résolution) ———
+    function background() {
+      const { w, h } = app.size, key = [w, h, p.fond, p.ciel, p.nuages, app.seed].join();
+      if (key === bgKey && bg) return bg; bgKey = key;
+      const W = Math.ceil(w / 4), H = Math.ceil(h / 4), c = bg || document.createElement('canvas'); c.width = W; c.height = H;
+      const x = c.getContext('2d'), img = x.createImageData(W, H), D = img.data, F = hex(p.fond), C = hex(p.ciel);
+      const r = mulberry(app.seed * 31 + 5), G = 64, val = new Float32Array(G * G); for (let i = 0; i < val.length; i++) val[i] = r();
+      const vn = (u, v) => { const i = Math.floor(u), j = Math.floor(v), fu = u - i, fv = v - j, a = (ii, jj) => val[((jj & 63) * G) + (ii & 63)], su = fu * fu * (3 - 2 * fu), sv = fv * fv * (3 - 2 * fv);
+        return (a(i, j) * (1 - su) + a(i + 1, j) * su) * (1 - sv) + (a(i, j + 1) * (1 - su) + a(i + 1, j + 1) * su) * sv; };
+      const sc = 6 / Math.max(W, H);
+      for (let j = 0; j < H; j++) for (let i = 0; i < W; i++) {
+        let n = 0, amp = 0.5, f = 1; for (let o = 0; o < 5; o++) { n += vn(i * sc * f * 1.0 + o * 7.1, j * sc * f * 1.6 + o * 3.3) * amp; amp *= 0.5; f *= 2.1; }
+        const yy = j / H, top = p.scene === 'orage' ? Math.max(0, 1 - yy * 1.25) : 0.55;
+        const m = Math.max(0, Math.min(1, (n - 0.42) * 2.4)) * top * p.nuages, o = (j * W + i) * 4;
+        D[o] = F[0] + (C[0] - F[0]) * m; D[o + 1] = F[1] + (C[1] - F[1]) * m; D[o + 2] = F[2] + (C[2] - F[2]) * m; D[o + 3] = 255;
+      }
+      x.putImageData(img, 0, 0); bg = c; return c;
+    }
+
+    // ——— Rendu des décharges ———
+    function boltPaths(b) {
+      // segments regroupés par classes d'épaisseur (poids du sous-arbre = courant), plus le canal principal et les pointes
+      const { W, cs } = b.g, ord = b.order, classes = [], lead = b.phase === 'lead';
+      let wg = b.wgt, wmax = b.wmax || 1;
+      if (lead) { // poids provisoires pendant la croissance
+        wg = b.tmpW || (b.tmpW = new Float32Array(b.g.W * b.g.H)); wmax = 1;
+        for (let i = 0; i < ord.length; i++) wg[ord[i]] = 0;
+        for (let i = ord.length - 1; i >= 0; i--) { const n = ord[i]; wg[n] += 1; if (wg[n] > wmax) wmax = wg[n]; const pa = b.parent[n]; if (pa >= 0 && b.occ[pa] === 1) wg[pa] += wg[n]; }
+      } else if (!b.wmax) { wmax = 1; for (let i = 0; i < ord.length; i++) if (wg[ord[i]] > wmax) wmax = wg[ord[i]]; b.wmax = wmax; }
+      for (let k = 0; k < 7; k++) classes.push({ path: new Path2D(), pts: [], k, main: false });
+      const mainC = { path: new Path2D(), pts: [], k: 7, main: true }, tips = { path: new Path2D(), pts: [], k: 8 };
+      const px = (n) => ((n % W) + 0.5 + b.jx[n]) * cs, py = (n) => (((n / W) | 0) + 0.5 + b.jy[n]) * cs;
+      const lw = Math.log(1 + Math.max(2, wmax)), tip0 = ord.length - 120;
+      for (let i = 0; i < ord.length; i++) {
+        const n = ord[i], pa = b.parent[n]; if (pa < 0 || b.occ[pa] !== 1) continue;
+        const cls = b.main && b.main[n] ? mainC : classes[Math.min(6, Math.floor(Math.log(1 + wg[n]) / lw * 7))];
+        const x0 = px(pa), y0 = py(pa), x1 = px(n), y1 = py(n);
+        cls.path.moveTo(x0, y0); cls.path.lineTo(x1, y1); cls.pts.push(x0, y0, x1, y1);
+        if (lead && i > tip0) { tips.path.moveTo(x0, y0); tips.path.lineTo(x1, y1); }
+      }
+      return { classes, mainC, tips };
+    }
+    function drawBolt(b, P) {
+      const lw = Math.max(0.6, b.g.cs * 0.22) * p.epaisseur, A = b.alpha, lead = b.phase === 'lead';
+      const br = p.branches, glow = p.lueur;
+      // le halo est tracé dans deux petits canevas (¼ et 1/10 de résolution) puis agrandi : flou gratuit
+      const passes = (path, width, a, lvl) => {
+        if (a <= 0.003) return;
+        // seules les branches fortes reçoivent le halo (le halo large : canal principal et grosses branches)
+        if (glow > 0) for (const G of glowC) { if (lvl < G.min) continue; G.x.strokeStyle = p.halo; G.x.globalAlpha = Math.min(1, a * glow * G.a); G.x.lineWidth = width * G.wk; G.x.stroke(path); }
+        ctx.strokeStyle = p.arc; ctx.globalAlpha = Math.min(1, a); ctx.lineWidth = width; ctx.stroke(path);
+      };
+      const leadK = b.kind === 'radial' ? 0.7 : 0.4;
+      for (const c of P.classes) {
+        const rel = (c.k + 1) / 7, a = A * (0.12 + 0.88 * Math.pow(rel, 1.6)) * (0.15 + 0.85 * br) * (lead ? leadK : (b.hit >= 0 ? 0.75 : 1));
+        passes(c.path, lw * (0.35 + rel * 1.1) * (lead ? 0.7 : (b.kind === 'radial' ? 1.3 : 1)), a, c.k);
+      }
+      if (!lead) passes(P.mainC.path, lw * 2.6, A * 1.1, 9);
+    }
+
+    // ——— Animation ———
+    function stepBolts(dt) {
+      for (const b of bolts) {
+        b.life += dt;
+        if (b.phase === 'lead') {
+          // nombre de cases par seconde
+          // le traceur progresse à vitesse visible constante : on ajuste le nombre de cases par image
+          const Tl = (b.kind === 'radial' ? 2.5 + (1 - p.vitesse) * 9 : 0.35 + (1 - p.vitesse) * 3.2) * (b.durK || 1);
+          const target = Math.min(1, b.life / Tl);
+          b.cpf = b.prog < target ? Math.min(450, b.cpf * 1.25 + 1) : Math.max(0.5, b.cpf * 0.8);
+          b.acc += b.cpf; let n = 0; while (b.acc >= 1 && b.phase === 'lead' && n < 450) { const k = Math.max(1, Math.min(20, Math.floor(b.acc / 10))); grow(b, k); b.acc -= k; n += k; }
+          if (b.life > 12 && b.phase === 'lead') hitAt(b, -1);
+          b.alpha = 1; b.P = null;
+        } else {
+          b.t += dt;
+          const keep = 0.25 + p.persistance * 5;
+          // arc en retour : éclat, puis scintillements qui s'éteignent
+          const fl = b.restrikes || (b.restrikes = [0, 0.09 + rng() * 0.05, 0.22 + rng() * 0.12].slice(0, 1 + Math.floor(rng() * 3)));
+          let a = 0; for (const t0 of fl) { const u = b.t - t0; if (u >= 0) a = Math.max(a, Math.exp(-u * 9)); }
+          a = Math.max(a, (b.kind === 'radial' || b.first ? 0.85 : 0.22) * Math.exp(-b.t / (b.first ? keep + 2 : keep)));
+          b.alpha = a; if (a < 0.01 && b.t > 0.5) b.done = true;
+        }
+      }
+      bolts = bolts.filter((b) => { if (b.done) last = b; return !b.done; });
+      if (bolts.length > 8) bolts.splice(0, bolts.length - 8);
+      flash = Math.max(0, flash - dt * 4.5);
+      // déclenchement automatique
+      time += dt;
+      const leading = bolts.filter((b) => b.phase === 'lead').length;
+      if (p.frequence > 0 && time >= nextStrike && (!leading || (p.frequence > 0.7 && leading < 2))) {
+        spawn(); const f = p.frequence; nextStrike = time + (p.scene === 'orage' ? 0.4 + (1 - f) * 4 : 1 + (1 - f) * 6) * (0.5 + rng());
+      }
+      if (hold) { hold.t += dt; if (hold.t > 0.3) { holdT -= dt; if (holdT <= 0) { strike(hold.x, hold.y); holdT = 0.6; } } }
+    }
+    function draw() {
+      const { w, h, dpr } = app.size;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over';
+      ctx.imageSmoothingEnabled = true; ctx.drawImage(background(), 0, 0, w, h);
+      // flash : le ciel s'illumine
+      if (flash > 0 && p.flash > 0) {
+        const fl = flash * p.flash; ctx.globalCompositeOperation = 'lighter';
+        ctx.globalAlpha = fl * 0.55; ctx.drawImage(background(), 0, 0, w, h); ctx.drawImage(background(), 0, 0, w, h);
+        ctx.globalAlpha = fl * 0.12; ctx.fillStyle = p.halo; ctx.fillRect(0, 0, w, h);
+        ctx.globalCompositeOperation = 'source-over';
+      }
+      // logo isolant visible en scène logo
+      if (p.scene === 'logo') { ctx.globalAlpha = 1; ctx.drawImage(logoArt(mixHex(p.fond, p.halo, 0.3)), 0, 0, w, h); if (flash > 0) { ctx.globalAlpha = flash * p.flash * 0.6; ctx.drawImage(logoArt(mixHex(p.fond, p.halo, 0.3)), 0, 0, w, h); ctx.globalAlpha = 1; } }
+      const light = lumOf(p.fond) > 140;
+      for (const G of glowC) {
+        const W = Math.max(8, Math.ceil(w / G.d)), H = Math.max(8, Math.ceil(h / G.d));
+        if (G.c.width !== W || G.c.height !== H) { G.c.width = W; G.c.height = H; } else { G.x.setTransform(1, 0, 0, 1, 0, 0); G.x.globalCompositeOperation = 'source-over'; G.x.clearRect(0, 0, W, H); }
+        G.x.setTransform(1 / G.d, 0, 0, 1 / G.d, 0, 0); G.x.globalCompositeOperation = 'lighter'; G.x.lineCap = 'round'; G.x.lineJoin = 'round';
+      }
+      ctx.globalCompositeOperation = light ? 'source-over' : 'lighter'; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+      for (const b of bolts) {
+        if (b.phase === 'lead' || !b.P || b.P.lead) b.P = boltPaths(b);
+        drawBolt(b, b.P);
+      }
+      if (p.lueur > 0 && bolts.length) {
+        ctx.globalCompositeOperation = light ? 'multiply' : 'lighter'; ctx.globalAlpha = 1; ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'low';
+        for (const G of glowC) ctx.drawImage(G.c, 0, 0, w, h);
+      }
+      ctx.globalCompositeOperation = 'source-over'; ctx.globalAlpha = 1;
+    }
+    const glowC = [{ d: 4, wk: 3, a: 0.5, min: 3 }, { d: 12, wk: 9, a: 0.35, min: 5 }].map((G) => { const c = document.createElement('canvas'); return Object.assign(G, { c, x: c.getContext('2d') }); });
+    const lumOf = (hx) => { const c = hex(hx); return c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114; };
+
+    app.loop((tt, dt) => {
+      dt = Math.min(0.05, dt || 0);
+      const key = [p.scene, p.finesse, app.size.w, app.size.h, app.seed].join();
+      if (key !== sceneKey) { sceneKey = key; bolts = []; rng = mulberry(app.seed * 7919 + 3); nextStrike = time + 1.5; if (!app.thumbnail) { const b = spawn(); let g = 0; while (b.phase === 'lead' && g++ < 5000) grow(b, 8); b.t = 0.05; b.first = true; } }
+      if (app.thumbnail) {
+        if (!frozen) {
+          bolts = []; rng = mulberry(app.seed * 7919 + 3);
+          const b = spawn(); let guard = 0; while (b.phase === 'lead' && guard++ < 40000) grow(b);
+          if (p.scene === 'orage') { const b2 = spawn(app.size.w * 0.78, app.size.h * 0.98); guard = 0; while (b2.phase === 'lead' && guard++ < 40000) grow(b2); b2.alpha = 0.5; b2.t = 0.3; }
+          b.alpha = 1; b.t = 0.02; flash = 0.6; frozen = true;
+        }
+      } else stepBolts(dt);
+      draw();
+      app.finish(ctx);
+    });
+
+    // ——— Export SVG ———
+    function toSVG() {
+      const { w, h } = app.size, out = [];
+      out.push(`<rect width="100%" height="100%" fill="${p.fond}"/>`);
+      if (p.scene === 'logo') { // le logo isolant, en plages horizontales de la grille
+        const g = grid(), m = logoCells(g); let d = '';
+        for (let y = 0; y < g.H; y++) { let x0 = -1; for (let x = 0; x <= g.W; x++) { const on = x < g.W && m.inn[y * g.W + x]; if (on && x0 < 0) x0 = x; if (!on && x0 >= 0) { d += `M${(x0 * g.cs).toFixed(1)} ${(y * g.cs).toFixed(1)}h${((x - x0) * g.cs).toFixed(1)}v${(g.cs + 0.4).toFixed(1)}h${(-(x - x0) * g.cs).toFixed(1)}Z`; x0 = -1; } } }
+        out.push(`<path d="${d}" fill="${mixHex(p.fond, p.halo, 0.3)}"/>`);
+      }
+      let list = bolts.filter((b) => b.phase !== 'lead' || b.order.length > 4); if (!list.length && last) list = [last];
+      const fmt = (v) => v.toFixed(1);
+      for (const b of list) {
+        const P = boltPaths(b), lw = Math.max(0.6, b.g.cs * 0.22) * p.epaisseur, a = Math.max(0.35, Math.min(1, b.alpha));
+        const seg = (c) => { let d = ''; for (let i = 0; i < c.pts.length; i += 4) d += `M${fmt(c.pts[i])} ${fmt(c.pts[i + 1])}L${fmt(c.pts[i + 2])} ${fmt(c.pts[i + 3])}`; return d; };
+        out.push(`<g fill="none" stroke-linecap="round" stroke-linejoin="round" opacity="${a.toFixed(2)}">`);
+        for (const c of P.classes) { if (!c.pts.length) continue; const rel = (c.k + 1) / 7; out.push(`<path d="${seg(c)}" stroke="${p.arc}" stroke-width="${(lw * (0.35 + rel * 1.1)).toFixed(2)}" stroke-opacity="${((0.3 + 0.7 * Math.pow(rel, 1.4)) * (0.3 + 0.7 * p.branches)).toFixed(2)}"/>`); }
+        if (P.mainC.pts.length) { out.push(`<path d="${seg(P.mainC)}" stroke="${p.halo}" stroke-width="${(lw * 7).toFixed(2)}" stroke-opacity="0.25"/>`); out.push(`<path d="${seg(P.mainC)}" stroke="${p.arc}" stroke-width="${(lw * 2.6).toFixed(2)}"/>`); }
+        out.push('</g>');
+      }
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">\n${out.join('\n')}\n</svg>`;
+    }
+  </script>
+</body>
+</html>
