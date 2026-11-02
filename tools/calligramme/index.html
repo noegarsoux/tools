@@ -1,0 +1,446 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Calligramme</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Calligramme : un champ de hauteur (veines de bois, relief, vagues, tourbillon) est découpé en
+    // bandes de niveau. Dans une bande sur deux, le texte coule le long des lignes de niveau ; dans
+    // les autres, des motifs (traits, pointillés, hachures) suivent les mêmes lignes. Les lignes sont
+    // extraites par marching squares, puis le texte est posé lettre à lettre à l'abscisse curviligne.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const PG = PAL('papier-gris'), P60 = PAL('papier-60'), BIEN = PAL('biennale'), MENTHE = PAL('menthe'), ORB = PAL('orbite');
+    const THERM = PAL('thermique'), PHOTO = PAL('photocopie'), KB = PAL('kegelbahn'), CODE = PAL('code'), EV = PAL('eventail');
+    const FONTS = {
+      serif: "Georgia, 'Times New Roman', Times, serif",
+      grotesque: "'Helvetica Neue', Helvetica, Arial, sans-serif",
+      mono: "'Courier New', Courier, monospace",
+      italique: "Georgia, 'Times New Roman', Times, serif",
+    };
+    const TEXTE = 'le bois garde la trace des saisons, chaque cerne est une année, chaque veine une hésitation de la sève — on lit l’arbre comme on lit une page, en suivant la ligne jusqu’au bout du souffle — ';
+
+    let nodes = [], hover = null, bump = 0, pressed = null, widths = null, clock = 0, fieldPh = 0, scroll = 0, seedV = [];
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.06, vignette: 0.1 },
+      hint: 'Survolez pour creuser le champ · touchez pour poser un nœud · molette : largeur des bandes',
+      notes: 'Le texte suit les lignes de niveau d’un champ ; les bandes alternent texte et motifs. Chaque toucher pose un nœud (une bosse) qui recourbe toutes les lignes autour de lui.',
+      params: {
+        'Texte': {
+          texte: { type: 'textarea', label: 'Texte', value: TEXTE, rows: 5 },
+          police: { type: 'font', label: 'Police', options: { serif: 'Sérif', italique: 'Italique', grotesque: 'Grotesque', mono: 'Machine' }, value: 'italique' },
+          graisse: { type: 'segmented', label: 'Graisse', options: { 400: 'Normale', 700: 'Grasse' }, value: '400' },
+          majuscules: { type: 'toggle', label: 'Majuscules', value: false },
+          corps: { type: 'range', label: 'Corps', min: 6, max: 40, step: 0.5, value: 12 },
+          approche: { type: 'range', label: 'Approche', min: -0.1, max: 0.6, step: 0.01, value: 0.02 },
+        },
+        'Champ': {
+          champ: { type: 'segmented', label: 'Champ', options: { bois: 'Bois', relief: 'Relief', vagues: 'Vagues', tourbillon: 'Tourbillon' }, value: 'bois' },
+          echelle: { type: 'range', label: 'Échelle', min: 0.3, max: 3, step: 0.01, value: 1 },
+          bandes: { type: 'range', label: 'Largeur des bandes', min: 0.03, max: 0.4, step: 0.005, value: 0.13 },
+          lignes: { type: 'range', label: 'Lignes de texte par bande', min: 1, max: 12, step: 1, value: 4 },
+          evolution: { type: 'range', label: 'Évolution du champ', min: 0, max: 1, step: 0.01, value: 0.2 },
+          defilement: { type: 'range', label: 'Défilement du texte', min: -3, max: 3, step: 0.05, value: 0.6 },
+        },
+        'Motifs': {
+          alternance: { type: 'segmented', label: 'Bandes', options: { alterne: 'Texte / motif', texte: 'Tout texte', deux: 'Texte, 2 motifs' }, value: 'alterne' },
+          motif: { type: 'segmented', label: 'Motif', options: { traits: 'Traits', pointilles: 'Points', hachures: 'Hachures', mixte: 'Mixte' }, value: 'mixte' },
+          densite: { type: 'range', label: 'Lignes de motif par bande', min: 1, max: 24, step: 1, value: 9 },
+          epaisseur: { type: 'range', label: 'Épaisseur', min: 0.3, max: 4, step: 0.05, value: 0.9 },
+        },
+        'Couleur': {
+          fond: { type: 'color', label: 'Fond', value: PG[0] },
+          encre: { type: 'color', label: 'Texte', value: PG[1] },
+          trait: { type: 'color', label: 'Motifs', value: PG[2] },
+          colorer: { type: 'toggle', label: 'Colorer les bandes', value: false },
+          couleurs: { type: 'palette', label: 'Couleurs des bandes', value: [BIEN[2], BIEN[3], BIEN[4]], show: (q) => q.colorer },
+        },
+      },
+      presets: {
+        'Bois': {},
+        'Relief': { champ: 'relief', bandes: 0.08, lignes: 3, motif: 'traits', densite: 6, police: 'serif', corps: 11, fond: P60[0], encre: P60[1], trait: '#a3a2a6' },
+        'Vagues': { champ: 'vagues', bandes: 0.14, lignes: 5, motif: 'hachures', echelle: 1.3, corps: 14, police: 'grotesque', majuscules: true, approche: 0.12, texte: 'MARÉE HAUTE · MARÉE BASSE · ', defilement: 1.4 },
+        'Tourbillon': { champ: 'tourbillon', bandes: 0.09, lignes: 3, motif: 'pointilles', densite: 8, corps: 12, fond: '#151413', encre: '#ecebe8', trait: '#6b6966', defilement: -1 },
+        'Topographie': { champ: 'relief', echelle: 1.6, bandes: 0.05, lignes: 2, alternance: 'deux', motif: 'mixte', densite: 5, corps: 9, police: 'mono', fond: MENTHE[0], encre: MENTHE[1], trait: MENTHE[3], epaisseur: 0.7 },
+        'Biennale': { champ: 'vagues', bandes: 0.16, lignes: 4, motif: 'traits', densite: 12, colorer: true, couleurs: [BIEN[2], BIEN[3], BIEN[4]], fond: BIEN[0], encre: BIEN[1], trait: BIEN[1], police: 'grotesque', graisse: '700', corps: 15, majuscules: true, texte: 'BIENNALE DES FORMES — ', epaisseur: 1.6 },
+        'Thermique': { champ: 'tourbillon', echelle: 0.8, bandes: 0.12, lignes: 4, colorer: true, couleurs: [THERM[1], THERM[2], THERM[3], THERM[4]], fond: THERM[0], encre: '#1c1c2c', trait: '#1c1c2c', motif: 'hachures', densite: 10, police: 'serif' },
+        'Tout texte': { alternance: 'texte', bandes: 0.06, lignes: 3, corps: 10, champ: 'bois', echelle: 1.3 },
+        'Photocopie': { champ: 'relief', echelle: 0.7, bandes: 0.2, lignes: 7, motif: 'hachures', densite: 18, epaisseur: 0.6, fond: PHOTO[0], encre: PHOTO[1], trait: PHOTO[2], police: 'mono', corps: 10, majuscules: true, texte: 'COPIE CONFORME 0042 — ' },
+        'Éventail': { champ: 'tourbillon', echelle: 1.4, bandes: 0.1, colorer: true, couleurs: [EV[1], EV[2], EV[3], EV[4]], fond: '#efe9dd', encre: EV[0], trait: EV[0], motif: 'mixte', corps: 12 },
+      },
+      brand(colors) {
+        return { fond: colors[0], encre: colors[1] || '#111111', trait: colors[2] || colors[1] || '#777777', couleurs: colors.slice(2).length ? colors.slice(2, 8) : [colors[1] || '#111111'] };
+      },
+      pointer: {
+        move: (q) => { hover = { x: q.x, y: q.y }; },
+        down: (q) => { hover = { x: q.x, y: q.y }; pressed = { x: q.x, y: q.y, moved: false }; },
+        drag: (q) => { hover = { x: q.x, y: q.y }; if (pressed && Math.hypot(q.x - pressed.x, q.y - pressed.y) > 6) pressed.moved = true; },
+        up: () => {
+          if (pressed && !pressed.moved) {
+            // Un nœud : bosse ou creux en alternance, au plus 8 (le plus ancien s'en va).
+            const { w, h } = app.size, u = Math.min(w, h);
+            nodes.push({ x: pressed.x / u, y: pressed.y / u, a: 0, s: nodes.length % 2 ? -1 : 1 });
+            if (nodes.length > 8) nodes.shift();
+          }
+          pressed = null;
+        },
+        wheel: (q, dy) => app.set('bandes', Math.max(0.03, Math.min(0.4, Math.round((p.bandes + dy * 0.0001) * 1000) / 1000))),
+      },
+      onChange(k) { if (k === '*' || ['texte', 'police', 'graisse', 'majuscules', 'corps', '_logo'].includes(k)) widths = null; if (k === '*') nodes = []; },
+      onSeed() { seed(); nodes = []; },
+      export: { name: 'calligramme', svg: () => toSVG() },
+    });
+    const p = app.params;
+    canvas.addEventListener('pointerleave', () => { if (!pressed) hover = null; });
+    if (document.fonts) document.fonts.addEventListener('loadingdone', () => { widths = null; });
+
+    function seed() { const r = app.rng(13); seedV = Array.from({ length: 24 }, () => r()); }
+    seed();
+    function family() {
+      if (p.police === 'AtelierBrand') return "'AtelierBrand', sans-serif";
+      return FONTS[p.police] || FONTS.serif;
+    }
+    const fontCss = () => `${p.police === 'italique' ? 'italic ' : ''}${p.graisse} ${p.corps}px ${family()}`;
+
+    // ——— Champ de hauteur ———
+    // Coordonnées normalisées : x, y divisés par le petit côté.
+    function field(x, y) {
+      const S = seedV, e = p.echelle, ph = fieldPh;
+      // Bruit doux : somme de sinus croisés (déterministe, animé par la phase).
+      const n = Math.sin(x * 3.1 * e + S[0] * 6 + ph) * Math.sin(y * 2.7 * e + S[1] * 6 - ph * 0.7) * 0.5
+        + Math.sin(x * 5.3 * e - y * 4.1 * e + S[2] * 6 + ph * 1.3) * 0.25
+        + Math.sin(x * 9.7 * e + y * 8.3 * e + S[3] * 6 - ph * 0.9) * 0.1;
+      let v;
+      switch (p.champ) {
+        case 'relief': {
+          v = 0;
+          for (let k = 0; k < 5; k++) {
+            const cx = (0.2 + S[4 + k] * 1.4) + 0.05 * Math.sin(ph * 0.5 + k), cy = 0.1 + S[9 + k] * 0.8 + 0.05 * Math.cos(ph * 0.4 + k * 2);
+            const r = (0.18 + S[14 + k] * 0.25) / e, d2 = ((x - cx) ** 2 + (y - cy) ** 2) / (r * r);
+            v += (k % 2 ? 0.6 : 1) * Math.exp(-d2);
+          }
+          v += n * 0.25;
+          break;
+        }
+        case 'vagues': v = y * 1.2 * e + n * 0.35 + 0.08 * Math.sin(x * 2.2 * e + ph * 1.5); break;
+        case 'tourbillon': {
+          const cx = 0.5 * aspect() + 0.1 * Math.sin(ph * 0.3), cy = 0.5 + 0.08 * Math.cos(ph * 0.4);
+          const dx = x - cx, dy = y - cy, r = Math.hypot(dx, dy), a = Math.atan2(dy, dx);
+          v = r * 1.6 * e + 0.1 * Math.sin(a * 3 + r * 9 * e - ph * 2) + n * 0.12;
+          break;
+        }
+        default: {
+          // Bois : cernes étirés autour d'un cœur, déformés par le bruit (veines).
+          const cx = 0.3 + S[5] * 0.6 * aspect(), cy = 0.35 + S[6] * 0.3;
+          const dx = (x - cx) * 0.35, dy = y - cy;
+          v = Math.hypot(dx, dy) * 1.5 * e + n * 0.22 + 0.04 * Math.sin(x * 14 * e + ph);
+        }
+      }
+      // Pointeur et nœuds.
+      for (const N of nodes) {
+        const d2 = ((x - N.x) ** 2 + (y - N.y) ** 2) / 0.012;
+        v += N.s * N.a * 0.22 * Math.exp(-d2);
+      }
+      if (hoverN && bump > 0.001) {
+        const d2 = ((x - hoverN.x) ** 2 + (y - hoverN.y) ** 2) / 0.02;
+        v += bump * 0.18 * Math.exp(-d2);
+      }
+      return v;
+    }
+    let hoverN = null;
+    const aspect = () => app.size.w / Math.min(app.size.w, app.size.h);
+
+    // ——— Lignes de niveau (marching squares sans bord, chaînes ouvertes ou fermées) ———
+    // Tampons réutilisés ; seules les cellules dont [min, max] contient le seuil sont visitées.
+    let CB = null;
+    function contourBuffers(W, H) {
+      const NH = W * H;
+      if (CB && CB.NH === NH) return CB;
+      CB = { NH, adj: new Int32Array(NH * 4).fill(-1), qx: new Float32Array(NH * 2), qy: new Float32Array(NH * 2), seen: new Uint8Array(NH * 2), touched: new Int32Array(NH * 2), cmin: new Float32Array(NH), cmax: new Float32Array(NH) };
+      return CB;
+    }
+    function contours(f, W, H, th) {
+      const B = CB, NH = W * H, adj = B.adj, qx = B.qx, qy = B.qy, seen = B.seen, touched = B.touched;
+      let nt = 0;
+      const link = (a, b) => {
+        if (adj[a * 2] < 0) { adj[a * 2] = b; touched[nt++] = a; } else adj[a * 2 + 1] = b;
+        if (adj[b * 2] < 0) { adj[b * 2] = a; touched[nt++] = b; } else adj[b * 2 + 1] = a;
+      };
+      const hE = (i, j, a, b) => { const id = j * W + i; qx[id] = i + (th - a) / (b - a); qy[id] = j; return id; };
+      const vE = (i, j, a, b) => { const id = NH + j * W + i; qx[id] = i; qy[id] = j + (th - a) / (b - a); return id; };
+      const cmin = B.cmin, cmax = B.cmax;
+      for (let j = 0; j < H - 1; j++) for (let i = 0; i < W - 1; i++) {
+        const ci = j * W + i;
+        if (th < cmin[ci] || th >= cmax[ci]) continue;
+        const a = f[ci], b = f[ci + 1], c = f[ci + W + 1], d = f[ci + W];
+        const k = (a >= th) | ((b >= th) << 1) | ((c >= th) << 2) | ((d >= th) << 3);
+        if (k === 0 || k === 15) continue;
+        const e0 = () => hE(i, j, a, b), e2 = () => hE(i, j + 1, d, c), e3 = () => vE(i, j, a, d), e1 = () => vE(i + 1, j, b, c);
+        const mid = (a + b + c + d) / 4 >= th;
+        switch (k) {
+          case 1: case 14: link(e3(), e0()); break;
+          case 2: case 13: link(e0(), e1()); break;
+          case 3: case 12: link(e3(), e1()); break;
+          case 4: case 11: link(e1(), e2()); break;
+          case 6: case 9: link(e0(), e2()); break;
+          case 7: case 8: link(e3(), e2()); break;
+          case 5: if (mid) { link(e0(), e1()); link(e2(), e3()); } else { link(e3(), e0()); link(e1(), e2()); } break;
+          case 10: if (mid) { link(e3(), e0()); link(e1(), e2()); } else { link(e0(), e1()); link(e2(), e3()); } break;
+        }
+      }
+      const out = [];
+      const walk = (s) => {
+        const pts = [];
+        let prev = -1, cur = s;
+        while (cur >= 0 && !seen[cur]) {
+          seen[cur] = 1; pts.push(qx[cur], qy[cur]);
+          const n0 = adj[cur * 2], n1 = adj[cur * 2 + 1];
+          const nx = n0 >= 0 && n0 !== prev && !seen[n0] ? n0 : (n1 >= 0 && n1 !== prev && !seen[n1] ? n1 : -1);
+          prev = cur; cur = nx;
+        }
+        if (pts.length >= 8) out.push(pts);
+      };
+      // D'abord les extrémités (chaînes ouvertes, parcourues d'un bout à l'autre), puis les boucles.
+      for (let t = 0; t < nt; t++) { const s = touched[t]; if (!seen[s] && adj[s * 2 + 1] < 0) walk(s); }
+      for (let t = 0; t < nt; t++) { const s = touched[t]; if (!seen[s]) walk(s); }
+      for (let t = 0; t < nt; t++) { const s = touched[t]; adj[s * 2] = adj[s * 2 + 1] = -1; seen[s] = 0; }
+      return out;
+    }
+
+    // ——— Construction de la scène ———
+    function glyphWidths() {
+      if (widths) return widths;
+      ctx.save(); ctx.font = fontCss();
+      let txt = String(p.texte || '').replace(/\s+/g, ' ');
+      if (p.majuscules) txt = txt.toUpperCase();
+      if (!txt.trim()) txt = '— ';
+      const chars = Array.from(txt), map = new Map();
+      for (const c of chars) if (!map.has(c)) map.set(c, ctx.measureText(c).width);
+      ctx.restore();
+      const adv = chars.map((c) => map.get(c) + p.approche * p.corps);
+      let total = 0; for (const a of adv) total += a;
+      widths = { chars, adv, total: Math.max(total, 1) };
+      return widths;
+    }
+    function hash(a, b) { const s = Math.sin(a * 127.1 + b * 311.7) * 43758.5453; return s - Math.floor(s); }
+
+    // Calcule les lignes : [{ pts:[x,y,...] (px), kind:'texte'|'traits'|..., band, idx }]
+    function build(w, h) {
+      const u = Math.min(w, h), step = Math.max(4, Math.min(w, h) / 150);
+      const W = Math.ceil(w / step) + 1, H = Math.ceil(h / step) + 1;
+      const f = new Float32Array(W * H);
+      let lo = Infinity, hi = -Infinity;
+      hoverN = hover ? { x: hover.x / u, y: hover.y / u } : hoverN;
+      for (let j = 0; j < H; j++) for (let i = 0; i < W; i++) {
+        const v = field((i * step) / u, (j * step) / u);
+        f[j * W + i] = v; if (v < lo) lo = v; if (v > hi) hi = v;
+      }
+      const B = contourBuffers(W, H);
+      for (let j = 0; j < H - 1; j++) for (let i = 0; i < W - 1; i++) {
+        const ci = j * W + i, a = f[ci], b = f[ci + 1], c = f[ci + W + 1], d = f[ci + W];
+        B.cmin[ci] = Math.min(a, b, c, d); B.cmax[ci] = Math.max(a, b, c, d);
+      }
+      // Largeur de bande exprimée à l'écran : on la convertit en unités du champ avec la pente
+      // typique (médiane du gradient), pour garder un écart lisible quel que soit le champ.
+      const gs = [];
+      for (let j = 1; j < H - 1; j += 3) for (let i = 1; i < W - 1; i += 3) {
+        const c = j * W + i; gs.push(Math.hypot(f[c + 1] - f[c - 1], f[c + W] - f[c - W]) / (2 * step));
+      }
+      gs.sort((x, y) => x - y);
+      const g50 = gs[Math.floor(gs.length * 0.5)] || 1e-3;
+      const bw = Math.max(1e-4, p.bandes * u * g50), lines = [];
+      const kinds = ['traits', 'pointilles', 'hachures'];
+      for (let b = Math.floor(lo / bw); b <= Math.ceil(hi / bw); b++) {
+        let kind;
+        if (p.alternance === 'texte') kind = 'texte';
+        else if (p.alternance === 'deux') kind = ((b % 3) + 3) % 3 === 0 ? 'texte' : 'motif';
+        else kind = ((b % 2) + 2) % 2 === 0 ? 'texte' : 'motif';
+        let style = 'texte';
+        if (kind === 'motif') style = p.motif === 'mixte' ? kinds[((Math.floor(b / 2) % 3) + 3) % 3] : p.motif;
+        const m = style === 'texte' ? p.lignes : p.densite;
+        for (let l = 0; l < m; l++) {
+          const th = (b + (l + 0.5) / m) * bw;
+          if (th <= lo || th >= hi) continue;
+          for (const c of contours(f, W, H, th)) {
+            // Lissage léger (moyenne glissante), puis passage en pixels.
+            const n = c.length / 2, pts = new Float32Array(c.length);
+            for (let k = 0; k < n; k++) {
+              const k0 = Math.max(0, k - 1), k1 = Math.min(n - 1, k + 1);
+              pts[k * 2] = ((c[k0 * 2] + c[k * 2] * 2 + c[k1 * 2]) / 4) * step;
+              pts[k * 2 + 1] = ((c[k0 * 2 + 1] + c[k * 2 + 1] * 2 + c[k1 * 2 + 1]) / 4) * step;
+            }
+            lines.push({ pts, style, band: b, idx: l, gap: bw / m });
+          }
+        }
+      }
+      // Écart entre lignes voisines, en pixels, au point (x, y) : (pas de niveau) / |gradient|.
+      const spacing = (x, y, gap) => {
+        const i = Math.min(W - 2, Math.max(0, Math.floor(x / step))), j = Math.min(H - 2, Math.max(0, Math.floor(y / step)));
+        const c = j * W + i, gx = (f[c + 1] - f[c]) / step, gy = (f[c + W] - f[c]) / step;
+        return gap / (Math.hypot(gx, gy) + 1e-9);
+      };
+      return { lines, spacing };
+    }
+    let built = null, builtKey = '';
+    function buildCached(w, h) {
+      const key = [w, h, Math.round(fieldPh * 300), Math.round(bump * 50), hover ? Math.round(hover.x / 3) + ',' + Math.round(hover.y / 3) : '-', nodes.map((N) => N.x.toFixed(3) + N.y.toFixed(3) + N.a.toFixed(2)).join(';'), p.champ, p.echelle, p.bandes, p.lignes, p.densite, p.alternance, p.motif, seedV[0]].join('|');
+      if (key !== builtKey || !built) { built = build(w, h); builtKey = key; }
+      return built;
+    }
+
+    // Parcourt une polyligne et appelle fn(x, y, angle) tous les « pas » (abscisse curviligne).
+    function along(pts, startS, stepFn, fn) {
+      const n = pts.length / 2;
+      // Sens de lecture : les parties hautes de la ligne se lisent à l'endroit (de gauche à droite).
+      // Le déplacement horizontal est pondéré par la hauteur : vaut pour les boucles et les « U ».
+      let ymin = Infinity, ymax = -Infinity;
+      for (let k = 0; k < n; k++) { const y = pts[k * 2 + 1]; if (y < ymin) ymin = y; if (y > ymax) ymax = y; }
+      let score = 0;
+      for (let k = 0; k < n - 1; k++) {
+        const y = (pts[k * 2 + 1] + pts[k * 2 + 3]) / 2, wgt = 1 + 3 * (1 - (y - ymin) / (ymax - ymin + 1));
+        score += (pts[k * 2 + 2] - pts[k * 2]) * wgt;
+      }
+      const rev = score < 0;
+      const X = (k) => pts[(rev ? n - 1 - k : k) * 2], Y = (k) => pts[(rev ? n - 1 - k : k) * 2 + 1];
+      let s = 0, next = startS, k = 0, i = 0;
+      while (next < 0) next += stepFn(i++);
+      for (k = 0; k < n - 1; k++) {
+        const x0 = X(k), y0 = Y(k), x1 = X(k + 1), y1 = Y(k + 1), d = Math.hypot(x1 - x0, y1 - y0);
+        if (d <= 0) continue;
+        while (s + d >= next) {
+          const t = (next - s) / d;
+          if (fn(x0 + (x1 - x0) * t, y0 + (y1 - y0) * t, Math.atan2(y1 - y0, x1 - x0), i) === false) return;
+          next += stepFn(i++);
+        }
+        s += d;
+      }
+    }
+
+    function scene(w, h, emit) {
+      const { lines, spacing } = buildCached(w, h), G = glyphWidths();
+      const minText = p.corps * 0.82, minLine = Math.max(1.6, p.epaisseur * 2.2);
+      const pal = p.colorer && p.couleurs && p.couleurs.length ? p.couleurs : null;
+      for (const L of lines) {
+        const col = pal ? pal[((L.band % pal.length) + pal.length) % pal.length] : null;
+        if (L.style === 'texte') {
+          // Le texte défile ; chaque ligne commence ailleurs dans le texte.
+          const off = hash(L.band, L.idx) * G.total;
+          const s0 = -((scroll * p.corps + off) % G.total + G.total) % G.total;
+          along(L.pts, s0, (i) => G.adv[i % G.chars.length], (x, y, a, i) => {
+            const c = G.chars[i % G.chars.length];
+            // Là où les lignes se serrent trop, on saute la lettre (pas de chevauchement).
+            if (c !== ' ' && spacing(x, y, L.gap) >= minText) emit.glyph(c, x, y, a, G.adv[i % G.chars.length], col || p.encre);
+          });
+        } else if (L.style === 'traits') {
+          // Découpe en tronçons là où l'écart reste lisible.
+          let run = [];
+          for (let k = 0; k < L.pts.length; k += 2) {
+            if (spacing(L.pts[k], L.pts[k + 1], L.gap) >= minLine) run.push(L.pts[k], L.pts[k + 1]);
+            else { if (run.length >= 4) emit.line(run, col || p.trait, p.epaisseur); run = []; }
+          }
+          if (run.length >= 4) emit.line(run, col || p.trait, p.epaisseur);
+        } else if (L.style === 'pointilles') {
+          const gap = p.epaisseur * 4 + 3;
+          const dots = [];
+          along(L.pts, (scroll * 3) % gap, () => gap, (x, y) => { if (spacing(x, y, L.gap) >= minLine * 1.5) dots.push(x, y); });
+          if (dots.length) emit.dots(dots, p.epaisseur * 0.75, col || p.trait);
+        } else {
+          const gap = p.epaisseur * 3 + 3, len = p.corps * 0.45;
+          const segs = [];
+          along(L.pts, (scroll * 3) % gap, () => gap, (x, y, a) => {
+            if (spacing(x, y, L.gap) < minLine * 1.5) return;
+            const nx = -Math.sin(a) * len, ny = Math.cos(a) * len, tx = Math.cos(a) * len * 0.35, ty = Math.sin(a) * len * 0.35;
+            segs.push(x - nx - tx, y - ny - ty, x + nx + tx, y + ny + ty);
+          });
+          if (segs.length) emit.segs(segs, col || p.trait, p.epaisseur * 0.8);
+        }
+      }
+    }
+
+    // ——— Rendu canvas ———
+    app.loop((t, dt) => {
+      const { w, h, dpr } = app.size;
+      dt = Math.min(0.05, dt || 0);
+      clock = t;
+      fieldPh += dt * p.evolution * 0.6;
+      scroll += dt * p.defilement * 2.5;
+      bump += ((hover ? 1 : 0) - bump) * (1 - Math.exp(-dt * 4));
+      for (const N of nodes) N.a += (1 - N.a) * (1 - Math.exp(-dt * 3));
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = p.fond;
+      ctx.fillRect(0, 0, w, h);
+      ctx.font = fontCss();
+      ctx.textBaseline = 'middle'; ctx.textAlign = 'left';
+      ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+      let lastFill = null;
+      scene(w, h, {
+        glyph(c, x, y, a, adv, col) {
+          const ca = Math.cos(a), sa = Math.sin(a);
+          ctx.setTransform(ca * dpr, sa * dpr, -sa * dpr, ca * dpr, x * dpr, y * dpr);
+          if (col !== lastFill) { ctx.fillStyle = col; lastFill = col; }
+          ctx.fillText(c, -adv / 2 + p.approche * p.corps / 2, 0);
+        },
+        line(pts, col, lw) {
+          ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+          ctx.strokeStyle = col; ctx.lineWidth = lw;
+          ctx.beginPath(); ctx.moveTo(pts[0], pts[1]);
+          for (let k = 2; k < pts.length; k += 2) ctx.lineTo(pts[k], pts[k + 1]);
+          ctx.stroke();
+        },
+        dots(pts, r, col) {
+          ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+          ctx.fillStyle = col; lastFill = col; ctx.beginPath();
+          for (let k = 0; k < pts.length; k += 2) { ctx.moveTo(pts[k] + r, pts[k + 1]); ctx.arc(pts[k], pts[k + 1], r, 0, TAU); }
+          ctx.fill();
+        },
+        segs(pts, col, lw) {
+          ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+          ctx.strokeStyle = col; ctx.lineWidth = lw; ctx.beginPath();
+          for (let k = 0; k < pts.length; k += 4) { ctx.moveTo(pts[k], pts[k + 1]); ctx.lineTo(pts[k + 2], pts[k + 3]); }
+          ctx.stroke();
+        },
+      });
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      app.finish(ctx);
+    });
+
+    // ——— Export SVG ———
+    function toSVG() {
+      const { w, h } = app.size;
+      const f = (v) => Math.round(v * 100) / 100;
+      const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      let txt = '', geo = '';
+      scene(w, h, {
+        glyph(c, x, y, a, adv, col) {
+          txt += `<text transform="translate(${f(x)} ${f(y)}) rotate(${f(a * 180 / Math.PI)})" x="${f(-adv / 2 + p.approche * p.corps / 2)}" fill="${col}">${esc(c)}</text>\n`;
+        },
+        line(pts, col, lw) {
+          let d = '';
+          for (let k = 0; k < pts.length; k += 2) d += (k ? ' ' : '') + f(pts[k]) + ',' + f(pts[k + 1]);
+          geo += `<polyline points="${d}" fill="none" stroke="${col}" stroke-width="${f(lw)}"/>\n`;
+        },
+        dots(pts, r, col) { for (let k = 0; k < pts.length; k += 2) geo += `<circle cx="${f(pts[k])}" cy="${f(pts[k + 1])}" r="${f(r)}" fill="${col}"/>\n`; },
+        segs(pts, col, lw) {
+          let d = '';
+          for (let k = 0; k < pts.length; k += 4) d += `M${f(pts[k])} ${f(pts[k + 1])}L${f(pts[k + 2])} ${f(pts[k + 3])}`;
+          geo += `<path d="${d}" fill="none" stroke="${col}" stroke-width="${f(lw)}"/>\n`;
+        },
+      });
+      const fam = family().replace(/"/g, "'");
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">\n<rect width="100%" height="100%" fill="${p.fond}"/>\n<g stroke-linecap="round" stroke-linejoin="round">\n${geo}</g>\n<g font-family="${fam}"${p.police === 'italique' ? ' font-style="italic"' : ''} font-weight="${p.graisse}" font-size="${p.corps}" dominant-baseline="central">\n${txt}</g>\n</svg>`;
+    }
+  </script>
+</body>
+</html>
