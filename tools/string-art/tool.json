@@ -1,0 +1,15 @@
+{
+  "slug": "string-art",
+  "title": "String art",
+  "type": "generative",
+  "description": "Des fils pointillés tendus entre des nœuds en étoile, en cercle ou sur un logo ; chaque fil est une corde vibrante qu'on pince au pointeur, plus aiguë quand elle est courte.",
+  "tags": ["fils", "corde", "pointilles", "vibration", "logo", "svg"],
+  "inspiration": [
+    "Moodboard de Noé, fiche 12 — fils tendus et pointillés en étoile",
+    "Cordes vibrantes : modes propres sin(nπx), corde pincée (références physique-maths)",
+    "Palettes papier, trame-nuit, orbite, photocopie, kegelbahn, menthe, biennale"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
