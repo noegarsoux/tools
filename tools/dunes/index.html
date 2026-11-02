@@ -1,0 +1,263 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Dunes</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Dunes : modèle de plaques de Bas Werner (1995). Le désert est une grille de hauteurs en plaques de sable.
+    // Le vent arrache une plaque, la fait sauter de L cases ; elle retombe avec une probabilité plus forte sur
+    // du sable que sur le sol nu, et toujours dans l'ombre au vent d'une crête. Les avalanches gardent l'angle
+    // de repos. Peu de sable : des barkhanes en croissant ; beaucoup : des dunes transverses qui avancent.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const PYR = PAL('pyramides'), EVT = PAL('eventail'), KB = PAL('kegelbahn'), ORB = PAL('orbite'), SALON = PAL('salon');
+
+    let frameN = 0, W = 0, H = 0, h = null, simKey = '', frozen = false, rng = Math.random, gust = 0, drag = null, buf = null, img = null, mask = null, maskKey = null, events = 0;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.07, vignette: 0.2 },
+      hint: 'Glissez pour verser du sable · touchez pour une bourrasque · molette : force du vent',
+      notes: 'Werner découpe le sable en plaques. À chaque instant, une plaque prise au hasard est soulevée et emportée de quelques cases par le vent ; elle se pose plus volontiers sur du sable que sur le sol nu, et se pose toujours à l’abri d’une crête. Quand une pente dépasse l’angle de repos, le sable s’éboule. Ces trois règles suffisent à faire naître des barkhanes, dunes en croissant qui avancent cornes en avant, ou des cordons transverses quand le sable abonde.',
+      params: {
+        'Désert': {
+          terrain: { type: 'select', label: 'Départ', options: { plat: 'Nappe de sable', tas: 'Tas épars', logo: 'Logo en sable' }, value: 'tas' },
+          image: { type: 'file', label: 'Logo', accept: 'image/*', show: (q) => q.terrain === 'logo' },
+          sable: { type: 'range', label: 'Quantité de sable', min: 0.1, max: 1, step: 0.01, value: 0.42 },
+          echelle: { type: 'range', label: 'Échelle', min: 100, max: 300, step: 1, value: 200 },
+          vent: { type: 'range', label: 'Force du vent (saut)', min: 1, max: 6, step: 1, value: 3 },
+          vitesse: { type: 'range', label: 'Vitesse', min: 0, max: 1, step: 0.01, value: 0.45 },
+          depot: { type: 'range', label: 'Adhérence du sable', min: 0, max: 1, step: 0.01, value: 0.55 },
+        },
+        'Lumière': {
+          soleil: { type: 'range', label: 'Direction du soleil', min: 0, max: 360, step: 1, value: 205 },
+          hauteur: { type: 'range', label: 'Hauteur du soleil', min: 5, max: 70, step: 1, value: 28 },
+          relief: { type: 'range', label: 'Relief', min: 0.2, max: 3, step: 0.05, value: 1.2 },
+          rides: { type: 'range', label: 'Rides de vent', min: 0, max: 1, step: 0.01, value: 0.4 },
+          courbes: { type: 'range', label: 'Courbes de niveau', min: 0, max: 1, step: 0.01, value: 0 },
+        },
+        'Couleurs': {
+          clair: { type: 'color', label: 'Sable au soleil', value: '#f3d6a4' },
+          ombre: { type: 'color', label: 'Sable à l’ombre', value: '#8a4a2e' },
+          sol: { type: 'color', label: 'Sol nu', value: '#5b3b2a' },
+        },
+      },
+      presets: {
+        'Barkhanes': {},
+        'Cordons transverses': { terrain: 'plat', sable: 0.85, vent: 3, soleil: 160 },
+        'Erg au couchant': { terrain: 'plat', sable: 0.6, hauteur: 9, clair: '#ffb070', ombre: '#3b1d33', sol: '#4a2a34', relief: 1.6 },
+        'Logo de sable': { terrain: 'logo', sable: 0.7, vitesse: 0.3 },
+        'Topographie': { courbes: 0.9, rides: 0, clair: '#f2efe8', ombre: '#c9c2b3', sol: '#e5e0d4', relief: 0.6, hauteur: 50 },
+        'Lune': { clair: '#e8e8ea', ombre: '#2a2a33', sol: '#4a4a52', hauteur: 12, rides: 0.15, sable: 0.5 },
+        'Pyramides': { clair: '#e9cf94', ombre: PYR[6], sol: PYR[0], soleil: 240 },
+        'Éventail': { clair: '#e8c56a', ombre: EVT[1], sol: EVT[0], terrain: 'plat', sable: 0.7 },
+        'Orbite': { clair: ORB[2], ombre: ORB[0], sol: ORB[1], hauteur: 18 },
+        'Kegelbahn': { clair: KB[1], ombre: KB[2], sol: KB[0], terrain: 'plat', sable: 0.55, courbes: 0.4 },
+      },
+      brand(colors) {
+        const lum = (x) => { const n = parseInt(x.slice(1), 16); return ((n >> 16) & 255) * 0.299 + ((n >> 8) & 255) * 0.587 + (n & 255) * 0.114; };
+        const all = colors.slice().sort((a, b) => lum(b) - lum(a));
+        return { clair: all[0], ombre: all[Math.min(all.length - 1, Math.max(1, Math.floor(all.length / 2)))], sol: all[all.length - 1] };
+      },
+      pointer: {
+        down: (q) => { drag = { x: q.x, y: q.y, moved: false }; },
+        drag: (q) => { if (!drag) return; const d = Math.hypot(q.x - drag.x, q.y - drag.y); if (d > 4) { drag.moved = true; pour(drag.x, drag.y, q.x, q.y); drag.x = q.x; drag.y = q.y; } },
+        up: () => { if (drag && !drag.moved) gust = 1; drag = null; },
+        wheel: (q, dy) => app.set('vent', Math.max(1, Math.min(6, p.vent + (dy > 0 ? -1 : 1)))),
+      },
+      onChange(k) { if (k === 'image') maskKey = null; if (k === '*' || ['terrain', 'sable', 'echelle', 'image'].includes(k)) simKey = ''; frozen = false; },
+      onSeed() { simKey = ''; frozen = false; },
+      export: { name: 'dunes', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    const hex = (x) => { const n = parseInt(x.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; };
+    function mulberry(a) { return () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+
+    // ——— Logo ———
+    function logoMask() {
+      const img0 = p.image || app.logoImg, key = (img0 ? (img0.src || 'c') : 'demo') + W + 'x' + H;
+      if (key === maskKey && mask) return mask; maskKey = key;
+      const c = document.createElement('canvas'); c.width = W; c.height = H; const x = c.getContext('2d', { willReadFrequently: true });
+      const L = Math.min(W, H) * 0.7, cx = W * 0.38, cy = H / 2;
+      if (img0) { const iw = img0.naturalWidth || img0.width, ih = img0.naturalHeight || img0.height, k = L / Math.max(iw, ih); x.drawImage(img0, cx - iw * k / 2, cy - ih * k / 2, iw * k, ih * k); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(cx, cy, L * 0.48, 0, TAU); x.arc(cx, cy, L * 0.26, 0, TAU, true); x.fill('evenodd'); x.fillRect(cx - L * 0.06, cy - L * 0.5, L * 0.12, L); }
+      const d = x.getImageData(0, 0, W, H).data, a = new Float32Array(W * H); let transp = 0; for (let i = 3; i < d.length; i += 4) if (d[i] < 128) transp++;
+      const useA = transp > W * H * 0.05;
+      for (let i = 0; i < W * H; i++) { const l = (d[i * 4] * 0.2126 + d[i * 4 + 1] * 0.7152 + d[i * 4 + 2] * 0.0722) / 255; a[i] = useA ? d[i * 4 + 3] / 255 : (d[i * 4 + 3] > 128 && l < 0.5 ? 1 : 0); }
+      mask = a; return a;
+    }
+
+    // ——— Simulation (grille torique, vent vers +x) ———
+    function resetSim() {
+      const { w: cw, h: ch } = app.size; W = Math.round(p.echelle); H = Math.max(20, Math.round(W * ch / cw));
+      h = new Int16Array(W * H); rng = mulberry(app.seed * 4099 + 17); events = 0;
+      const S = p.sable;
+      if (p.terrain === 'plat') { const m = Math.round(S * 8); for (let i = 0; i < W * H; i++) h[i] = m + (rng() < (S * 8) % 1 ? 1 : 0) + (rng() < 0.3 ? 1 : 0); }
+      else if (p.terrain === 'tas') {
+        const n = Math.round(6 + S * 30), tot = S * W * H * 2.4;
+        for (let k = 0; k < n; k++) {
+          const cx = rng() * W, cy = rng() * H, r = 4 + rng() * Math.min(W, H) * 0.08, vol = tot / n;
+          const h0 = vol / (Math.PI * r * r / 3);
+          for (let y = Math.floor(cy - r); y <= cy + r; y++) for (let x = Math.floor(cx - r); x <= cx + r; x++) { const d = Math.hypot(x - cx, y - cy); if (d < r) { const i = ((y % H + H) % H) * W + ((x % W + W) % W); h[i] += Math.round(h0 * (1 - d / r)); } }
+        }
+      } else {
+        const m = logoMask(); for (let i = 0; i < W * H; i++) h[i] = Math.round(m[i] * (6 + S * 14)) + (rng() < S * 0.3 ? 1 : 0);
+      }
+      for (let i = 0; i < W * H * 2; i++) avalanche(Math.floor(rng() * W * H));
+    }
+    const idx = (x, y) => ((y + H) % H) * W + ((x + W) % W);
+    const TAN = 0.27; // ombre au vent : ~15°, en plaques par case
+    function inShadow(x, y) {
+      const hc = h[y * W + x];
+      for (let d = 1; d <= 24; d++) { const hu = h[y * W + ((x - d + W) % W)]; if (hu - hc > d * TAN * 3) return true; if (hu - hc < -2) break; }
+      return false;
+    }
+    // éboulements : différence de plus de 2 plaques entre voisines (angle de repos)
+    const NX = [1, -1, 0, 0, 1, -1, 1, -1], NY = [0, 0, 1, -1, 1, 1, -1, -1];
+    function avalanche(i0) {
+      const st = [i0]; let guard = 0;
+      while (st.length && guard++ < 400) {
+        const i = st.pop(), x = i % W, y = (i / W) | 0;
+        let best = -1, bd = 0;
+        for (let k = 0; k < 8; k++) { const j = idx(x + NX[k], y + NY[k]), d = (h[i] - h[j]) / (k < 4 ? 1 : 1.414); if (d > 2 && d > bd) { bd = d; best = j; } }
+        if (best >= 0) { h[i]--; h[best]++; st.push(best, i); }
+        // la case a peut-être creusé une pente au-dessus d'elle
+        for (let k = 0; k < 4; k++) { const j = idx(x + NX[k], y + NY[k]); if (h[j] - h[i] > 2) st.push(j); }
+      }
+    }
+    function event() {
+      const i = Math.floor(rng() * W * H); if (h[i] <= 0) return;
+      let x = i % W, y = (i / W) | 0; if (inShadow(x, y)) return;
+      h[i]--; avalanche(idx(x - 1, y)); avalanche(i);
+      const L = p.vent + (gust > 0.3 ? 2 : 0), ps = 0.3 + p.depot * 0.6, pn = ps * 0.3;
+      for (let hop = 0; hop < 60; hop++) {
+        x = (x + L) % W; if (rng() < 0.12) y = (y + (rng() < 0.5 ? 1 : H - 1)) % H; // légère dispersion latérale
+        const j = y * W + x;
+        if (inShadow(x, y) || rng() < (h[j] > 0 ? ps : pn)) { h[j]++; avalanche(j); return; }
+      }
+      h[y * W + x]++;
+    }
+    function pour(x0, y0, x1, y1) {
+      const { w: cw, h: ch } = app.size, n = Math.max(1, Math.ceil(Math.hypot(x1 - x0, y1 - y0) / 6));
+      for (let s = 0; s <= n; s++) {
+        const gx = Math.round(((x0 + (x1 - x0) * s / n) / cw) * W), gy = Math.round(((y0 + (y1 - y0) * s / n) / ch) * H), r = 3;
+        for (let dy = -r; dy <= r; dy++) for (let dx = -r; dx <= r; dx++) { const d = Math.hypot(dx, dy); if (d <= r) { const j = idx(gx + dx, gy + dy); h[j] += Math.round(2 * (1 - d / r)) + 1; } }
+        for (let dy = -r; dy <= r; dy++) for (let dx = -r; dx <= r; dx++) avalanche(idx(gx + dx, gy + dy));
+      }
+    }
+
+    // ——— Rendu : éclairage calculé par case (pente + ombre portée), puis interpolé par pixel ———
+    let LC = null, ZC = null, HB = null;
+    function render() {
+      const { w: cw, h: ch, dpr } = app.size, RW = app.thumbnail ? Math.round(cw * dpr) : Math.min(720, Math.round(cw * Math.min(dpr, 1.5) * 0.5)), RH = Math.round(RW * ch / cw);
+      if (!buf || buf.width !== RW || buf.height !== RH) { buf = document.createElement('canvas'); buf.width = RW; buf.height = RH; img = buf.getContext('2d').createImageData(RW, RH); }
+      const D = img.data, CL = hex(p.clair), CO = hex(p.ombre), CS = hex(p.sol);
+      const az = p.soleil * Math.PI / 180, el = p.hauteur * Math.PI / 180, lx = Math.cos(az) * Math.cos(el), ly = Math.sin(az) * Math.cos(el), lz = Math.sin(el);
+      const rel = p.relief * 0.55, rid = p.rides, cv = p.courbes, ambient = 0.18, W1 = W + 1, norm = 1 / Math.max(0.25, lz + 0.35);
+      if (!LC || LC.length !== W1 * (H + 1)) { LC = new Float32Array(W1 * (H + 1)); ZC = new Float32Array(W1 * (H + 1)); HB = new Float32Array(W * H); }
+      // relief adouci (flou 3×3 en croix) : les plaques ne se voient plus en escalier
+      for (let y = 0; y < H; y++) { const yu = ((y + H - 1) % H) * W, yd = ((y + 1) % H) * W, yr = y * W; for (let x = 0; x < W; x++) { const xl = (x + W - 1) % W, xr = (x + 1) % W; HB[yr + x] = h[yr + x] * 0.4 + (h[yr + xl] + h[yr + xr] + h[yu + x] + h[yd + x]) * 0.15; } }
+      const hz = HB;
+      const tz = Math.tan(el) / rel, OX = [], OY = [], TH = []; for (let s = 1; s <= 14; s++) { OX.push(Math.round(Math.cos(az) * s)); OY.push(Math.round(Math.sin(az) * s)); TH.push(s * tz); }
+      for (let y = 0; y <= H; y++) {
+        const yy = y % H, yu = (yy + H - 1) % H, yd = (yy + 1) % H;
+        for (let x = 0; x <= W; x++) {
+          const xx = x % W, xl = (xx + W - 1) % W, xr = (xx + 1) % W, z = hz[yy * W + xx];
+          const dzx = (hz[yy * W + xr] - hz[yy * W + xl]) * 0.5 * rel, dzy = (hz[yd * W + xx] - hz[yu * W + xx]) * 0.5 * rel;
+          const nl = Math.sqrt(dzx * dzx + dzy * dzy + 1);
+          let lit = Math.max(0, (-dzx * lx - dzy * ly + lz) / nl);
+          if (el < 1.2 && lit > 0) for (let s = 0; s < 14; s++) { let ax = xx + OX[s], ay = yy + OY[s]; if (ax < 0) ax += W; else if (ax >= W) ax -= W; if (ay < 0) ay += H; else if (ay >= H) ay -= H; if (hz[ay * W + ax] - z > TH[s] + 0.3) { lit *= 0.42; break; } }
+          LC[y * W1 + x] = Math.min(1.2, ambient + (1 - ambient) * lit * norm); ZC[y * W1 + x] = z;
+        }
+      }
+      const sx = W / RW, sy = H / RH;
+      for (let y = 0; y < RH; y++) {
+        const gy = y * sy, y0 = Math.floor(gy), fy = gy - y0;
+        for (let x = 0; x < RW; x++) {
+          const gx = x * sx, x0 = Math.floor(gx), fx = gx - x0, i = y0 * W1 + x0;
+          const w00 = (1 - fx) * (1 - fy), w10 = fx * (1 - fy), w01 = (1 - fx) * fy, w11 = fx * fy;
+          const z = ZC[i] * w00 + ZC[i + 1] * w10 + ZC[i + W1] * w01 + ZC[i + W1 + 1] * w11;
+          let l = LC[i] * w00 + LC[i + 1] * w10 + LC[i + W1] * w01 + LC[i + W1 + 1] * w11;
+          // rides : ondulations perpendiculaires au vent, éclairées par leur pente
+          if (rid > 0 && z > 1) l -= Math.cos(gx * 2.1 + Math.sin(gy * 0.3 + gx * 0.07) * 2.6 + Math.sin(gy * 1.3) * 0.6) * rid * 0.22 * Math.min(1, (z - 1) / 3);
+          const lm = Math.max(0, Math.min(1, l)), sand = Math.max(0, Math.min(1, (z - 1.1) / 1.8));
+          let r = CO[0] + (CL[0] - CO[0]) * lm, g = CO[1] + (CL[1] - CO[1]) * lm, b = CO[2] + (CL[2] - CO[2]) * lm;
+          if (l > 1) { const e = (l - 1) * 2; r += (255 - r) * e; g += (255 - g) * e; b += (255 - b) * e; }
+          const gs = 0.55 + 0.45 * Math.min(1, l); r = CS[0] * gs + (r - CS[0] * gs) * sand; g = CS[1] * gs + (g - CS[1] * gs) * sand; b = CS[2] * gs + (b - CS[2] * gs) * sand;
+          if (cv > 0 && z > 0.5) { const q = z / 2.5, f = Math.abs(q - Math.round(q)); const line = Math.max(0, 1 - f / 0.07) * cv; r += (CO[0] * 0.6 - r) * line; g += (CO[1] * 0.6 - g) * line; b += (CO[2] * 0.6 - b) * line; }
+          const o = (y * RW + x) * 4; D[o] = r; D[o + 1] = g; D[o + 2] = b; D[o + 3] = 255;
+        }
+      }
+      buf.getContext('2d').putImageData(img, 0, 0); return buf;
+    }
+
+    app.loop((tt, dt) => {
+      dt = Math.min(0.05, dt || 0);
+      const { w, h: ch, dpr } = app.size;
+      const key = [p.terrain, p.sable, p.echelle, w, ch, app.seed, maskKey].join();
+      if (key !== simKey) { resetSim(); simKey = [p.terrain, p.sable, p.echelle, w, ch, app.seed, maskKey].join(); }
+      if (app.thumbnail) { if (!frozen) { resetSim(); const n = W * H * 45; for (let i = 0; i < n; i++) event(); frozen = true; } }
+      else {
+        const n = Math.round(W * H * (0.02 + p.vitesse * p.vitesse * 0.5) * (1 + gust * 2) * dt * 60);
+        for (let i = 0; i < n; i++) event(); events += n; gust = Math.max(0, gust - dt * 0.6);
+      }
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high';
+      if (!buf || app.thumbnail || (frameN++ & 1) === 0 || drag) render();
+      ctx.drawImage(buf, 0, 0, w, ch);
+      app.finish(ctx);
+    });
+
+    // ——— Export SVG : courbes de niveau du désert ———
+    function toSVG() {
+      const { w, h: ch } = app.size, sx = w / W, sy = ch / H, out = [];
+      out.push(`<rect width="100%" height="100%" fill="${p.sol}"/>`);
+      // relief lissé (deux flous 3×3) pour des courbes propres
+      let A = Float32Array.from(h), B = new Float32Array(W * H);
+      for (let it = 0; it < 2; it++) { for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { let s = 0; for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) s += A[idx(x + dx, y + dy)]; B[y * W + x] = s / 9; } [A, B] = [B, A]; }
+      HS = A;
+      let mx = 0; for (let i = 0; i < W * H; i++) if (A[i] > mx) mx = A[i];
+      const n = 12, dark = lumHex(p.sol) > 140;
+      for (let k = 1; k <= n; k++) {
+        const lv = 1.2 + (mx - 1.2) * (k - 1) / n, t = k / n;
+        const col = dark ? mixHex(p.ombre, '#000000', 0.35 + 0.3 * t) : mixHex(p.ombre, p.clair, Math.min(1, 0.25 + t)), d = iso(lv).map((L) => 'M' + L.map(([x, y]) => (x * sx).toFixed(1) + ' ' + (y * sy).toFixed(1)).join('L')).join('');
+        if (d) out.push(`<path d="${d}" fill="none" stroke="${col}" stroke-width="${(0.6 + t * 1.2).toFixed(2)}" stroke-linejoin="round"/>`);
+      }
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${ch}" viewBox="0 0 ${w} ${ch}">\n${out.join('\n')}\n</svg>`;
+    }
+    let HS = null;
+    const lumHex = (x) => { const c = hex(x); return c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114; };
+    const mixHex = (a, b, t) => { const A = hex(a), B = hex(b); return '#' + A.map((v, i) => Math.round(v + (B[i] - v) * t).toString(16).padStart(2, '0')).join(''); };
+    function iso(level) {
+      // marching squares avec interpolation, segments chaînés (bords non périodiques pour l'export)
+      const pos = new Map(), next = new Map(), E = (i, j, d) => (j * (W + 1) + i) * 2 + d, V = (x, y) => HS[y * W + x];
+      const ep = (a, b, A, B) => { const t = (level - a) / (b - a); return [A[0] + (B[0] - A[0]) * t, A[1] + (B[1] - A[1]) * t]; };
+      for (let j = 0; j < H - 1; j++) for (let i = 0; i < W - 1; i++) {
+        const a = V(i, j), b = V(i + 1, j), c = V(i + 1, j + 1), d = V(i, j + 1);
+        const k = (a >= level ? 8 : 0) | (b >= level ? 4 : 0) | (c >= level ? 2 : 0) | (d >= level ? 1 : 0); if (k === 0 || k === 15) continue;
+        const T = E(i, j, 0), R = E(i + 1, j, 1), B = E(i, j + 1, 0), L = E(i, j, 1);
+        if (!pos.has(T)) pos.set(T, ep(a, b, [i, j], [i + 1, j])); if (!pos.has(B)) pos.set(B, ep(d, c, [i, j + 1], [i + 1, j + 1]));
+        if (!pos.has(L)) pos.set(L, ep(a, d, [i, j], [i, j + 1])); if (!pos.has(R)) pos.set(R, ep(b, c, [i + 1, j], [i + 1, j + 1]));
+        const S = (u, v) => next.set(u, v);
+        switch (k) { case 1: S(B, L); break; case 2: S(R, B); break; case 3: S(R, L); break; case 4: S(T, R); break; case 5: S(T, L); S(B, R); break; case 6: S(T, B); break; case 7: S(T, L); break;
+          case 8: S(L, T); break; case 9: S(B, T); break; case 10: S(L, B); S(R, T); break; case 11: S(R, T); break; case 12: S(L, R); break; case 13: S(B, R); break; case 14: S(L, B); break; }
+      }
+      const loops = [], starts = new Set(next.keys()); for (const v of next.values()) starts.delete(v);
+      const walk = (k) => { const L = []; let g = 0; while (k !== undefined && next.has(k) && g++ < 1e5) { L.push(pos.get(k)); const n2 = next.get(k); next.delete(k); k = n2; } if (k !== undefined && pos.has(k)) L.push(pos.get(k)); return L; };
+      for (const s of starts) if (next.has(s)) { const L = walk(s); if (L.length > 2) loops.push(L); }
+      while (next.size) { const L = walk(next.keys().next().value); if (L.length > 2) loops.push(L.concat([L[0]])); }
+      return loops;
+    }
+  </script>
+</body>
+</html>
