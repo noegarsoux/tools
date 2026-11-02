@@ -1,0 +1,358 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pluie de texte</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Pluie de texte : chaque mot tombe en colonne de pavés (une lettre par pavé). Tant qu'il
+    // tombe, le mot reste rigide ; au premier contact il se désagrège en pavés libres (Verlet,
+    // collisions de disques, rebonds, frottement) qui s'empilent au fond. Le pointeur les pousse.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2, QUART = Math.PI / 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const CODE = PAL('code'), KB = PAL('kegelbahn'), BIEN = PAL('biennale'), BIT = PAL('bitmap'), MENTHE = PAL('menthe');
+    const GR = PAL('good-room'), P60 = PAL('papier-60'), PIX = PAL('pixels'), SALON = PAL('salon');
+    const FONTS = {
+      mono: "'Courier New', Courier, monospace",
+      grotesque: "'Helvetica Neue', Helvetica, Arial, sans-serif",
+      serif: "Georgia, 'Times New Roman', Times, serif",
+      arrondie: "'Arial Rounded MT Bold', 'Helvetica Rounded', 'Nunito', 'Varela Round', 'Helvetica Neue', Arial, sans-serif",
+    };
+    const H = 1 / 120;
+
+    let cells = [], groups = [], colsNext = [], wordIdx = 0, words = [], rand = Math.random, acc = 0, simT = 0;
+    let trap = 0, lastSize = '', ptr = null, pressed = null, needReset = true;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.04, vignette: 0 },
+      hint: 'Survolez pour pousser les pavés · touchez pour les faire sauter · molette : débit',
+      notes: 'Chaque mot tombe en colonne, une lettre par pavé, puis se désagrège au premier choc. Quand le fond est plein, une trappe s’ouvre, ou les plus anciens pavés s’effacent, ou la pile reste.',
+      params: {
+        'Texte': {
+          texte: { type: 'textarea', label: 'Mots (séparés par des espaces)', value: 'FUNCTION RETURN CONST WHILE IMPORT EXPORT ASYNC AWAIT CLASS BREAK', rows: 4 },
+          police: { type: 'font', label: 'Police', options: { mono: 'Machine', grotesque: 'Grotesque', serif: 'Sérif', arrondie: 'Arrondie' }, value: 'mono' },
+          graisse: { type: 'segmented', label: 'Graisse', options: { 400: 'Normale', 700: 'Grasse', 900: 'Noire' }, value: '700' },
+          majuscules: { type: 'toggle', label: 'Majuscules', value: true },
+          lecture: { type: 'segmented', label: 'Lettres', options: { droites: 'Droites', tournees: 'Tournées' }, value: 'droites' },
+        },
+        'Pluie': {
+          colonnes: { type: 'range', label: 'Colonnes', min: 6, max: 48, step: 1, value: 18 },
+          debit: { type: 'range', label: 'Débit', min: 0.05, max: 2, step: 0.01, value: 0.45 },
+          vitesse: { type: 'range', label: 'Vitesse de chute', min: 0, max: 1, step: 0.01, value: 0.35 },
+          gravite: { type: 'range', label: 'Gravité', min: 0.1, max: 2, step: 0.01, value: 1 },
+          rebond: { type: 'range', label: 'Rebond', min: 0, max: 0.9, step: 0.01, value: 0.3 },
+          desagregation: { type: 'range', label: 'Désagrégation', min: 0, max: 1, step: 0.01, value: 0.45 },
+          frottement: { type: 'range', label: 'Frottement', min: 0, max: 1, step: 0.01, value: 0.35 },
+        },
+        'Pile': {
+          vidange: { type: 'segmented', label: 'Quand c’est plein', options: { trappe: 'Trappe', fondu: 'Fondu', pile: 'Pile' }, value: 'trappe' },
+          remplissage: { type: 'range', label: 'Hauteur de la pile', min: 0.15, max: 0.9, step: 0.01, value: 0.5 },
+        },
+        'Pavés': {
+          arrondi: { type: 'range', label: 'Arrondi', min: 0, max: 0.5, step: 0.01, value: 0.12 },
+          ecart: { type: 'range', label: 'Écart', min: 0, max: 0.3, step: 0.01, value: 0.06 },
+          corps: { type: 'range', label: 'Corps de la lettre', min: 0.3, max: 1.1, step: 0.01, value: 0.72 },
+        },
+        'Couleur': {
+          fond: { type: 'color', label: 'Fond', value: CODE[0] },
+          couleurs: { type: 'palette', label: 'Couleurs des pavés', value: [CODE[1], CODE[2], CODE[3], CODE[4], CODE[5]] },
+          repartition: { type: 'segmented', label: 'Une couleur par', options: { mot: 'Mot', lettre: 'Lettre', colonne: 'Colonne' }, value: 'mot' },
+          contraste: { type: 'toggle', label: 'Lettres contrastées automatiquement', value: false },
+          lettre: { type: 'color', label: 'Lettres', value: CODE[6], show: (q) => !q.contraste },
+        },
+      },
+      presets: {
+        'Code': {},
+        'Averse': { colonnes: 34, debit: 1.4, vitesse: 0.7, desagregation: 0.8, rebond: 0.45, remplissage: 0.4, texte: 'IF ELSE FOR LET VAR NEW TRY CATCH NULL TRUE FALSE', corps: 0.8 },
+        'Kegelbahn': { texte: 'BOWLING BAR KEGELBAHN STRIKE SPARE', police: 'grotesque', graisse: '900', fond: KB[0], couleurs: [KB[1], KB[2], KB[3], KB[4], KB[5]], contraste: true, arrondi: 0.3, colonnes: 14, rebond: 0.5 },
+        'Biennale': { texte: 'BIENNALE DES FORMES JUIN 2026 ENTRÉE LIBRE', police: 'grotesque', graisse: '700', fond: BIEN[0], couleurs: [BIEN[2], BIEN[3], BIEN[4]], lettre: BIEN[1], colonnes: 12, arrondi: 0.5, vidange: 'fondu', desagregation: 0.3 },
+        'Empilement': { texte: 'BLOC PILE TAS MUR', vitesse: 0.15, rebond: 0, desagregation: 0, frottement: 0.9, vidange: 'pile', remplissage: 0.85, colonnes: 16, repartition: 'colonne', fond: P60[0], couleurs: [P60[1], '#55545a', '#8a8990'], lettre: P60[0], arrondi: 0.04, ecart: 0.1 },
+        'Confettis': { texte: 'FÊTE BAL DANSE JOIE', police: 'arrondie', graisse: '700', majuscules: false, repartition: 'lettre', desagregation: 1, rebond: 0.7, frottement: 0.1, colonnes: 22, fond: SALON[0], couleurs: [SALON[2], SALON[3], SALON[4], '#4a7bd6'], lettre: SALON[1], arrondi: 0.5, gravite: 0.7 },
+        'Bitmap': { texte: 'PIXEL GRID BYTE BIT DATA', police: 'mono', fond: BIT[0], couleurs: [BIT[2], BIT[3], BIT[4], BIT[1]], contraste: true, arrondi: 0, ecart: 0, colonnes: 26, lecture: 'tournees', desagregation: 0.6 },
+        'Good Room': { texte: 'GOOD ROOM CLUB VENDREDI SAMEDI', police: 'grotesque', graisse: '900', fond: GR[0], couleurs: [GR[1], GR[2], GR[3], GR[4]], lettre: GR[0], colonnes: 10, arrondi: 0.2, debit: 0.3, vidange: 'fondu' },
+        'Menthe': { texte: 'jardin menthe été frais', majuscules: false, police: 'serif', graisse: '400', fond: MENTHE[0], couleurs: [MENTHE[2], MENTHE[3]], lettre: MENTHE[1], colonnes: 15, arrondi: 0.35, gravite: 0.5, vitesse: 0.15, rebond: 0.2 },
+        'Pixels': { texte: 'PLAY GAME OVER LEVEL UP', police: 'mono', graisse: '700', fond: '#2a2a2a', couleurs: [PIX[1], PIX[2], PIX[3], PIX[4], PIX[5]], contraste: true, colonnes: 30, ecart: 0.12, arrondi: 0, repartition: 'lettre', debit: 0.9 },
+      },
+      brand(colors) {
+        const rest = colors.slice(1);
+        return { fond: colors[0], couleurs: (rest.length ? rest : ['#111111']).slice(0, 6), contraste: true };
+      },
+      pointer: {
+        move: (q) => { ptr = { x: q.x, y: q.y, vx: q.vx, vy: q.vy }; },
+        down: (q) => { pressed = { x: q.x, y: q.y, moved: false }; },
+        drag: (q) => { if (pressed && Math.hypot(q.x - pressed.x, q.y - pressed.y) > 6) pressed.moved = true; },
+        up: (q) => { if (pressed && !pressed.moved) blast(pressed.x, pressed.y); pressed = null; },
+        wheel: (q, dy) => app.set('debit', Math.max(0.05, Math.min(2, Math.round((p.debit - dy * 0.001) * 100) / 100))),
+      },
+      onChange(k) {
+        if (k === '*' || ['colonnes', 'texte', 'majuscules'].includes(k)) needReset = true;
+      },
+      onSeed() { needReset = true; },
+      export: { name: 'pluie-de-texte', svg: () => toSVG() },
+    });
+    const p = app.params;
+    canvas.addEventListener('pointerleave', () => { if (!pressed) ptr = null; });
+
+    // ——— Utilitaires ———
+    function hex(c) {
+      let s = String(c || '#000').replace('#', '');
+      if (s.length === 3) s = s.split('').map((x) => x + x).join('');
+      const n = parseInt(s.slice(0, 6), 16) || 0;
+      return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+    }
+    function inkFor(col) {
+      if (!p.contraste) return p.lettre;
+      const [r, g, b] = hex(col).map((v) => { v /= 255; return v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); });
+      return 0.2126 * r + 0.7152 * g + 0.0722 * b > 0.3 ? '#111111' : '#f6f4ef';
+    }
+    function family() { return p.police === 'AtelierBrand' ? "'AtelierBrand', sans-serif" : (FONTS[p.police] || FONTS.mono); }
+    const pitch = () => app.size.w / p.colonnes;
+
+    // ——— Mots, apparition ———
+    function wordList() {
+      let t = String(p.texte || '');
+      if (p.majuscules) t = t.toUpperCase();
+      const list = t.split(/\s+/).filter(Boolean).map((w) => Array.from(w).slice(0, 14));
+      return list.length ? list : [['·']];
+    }
+    function reset() {
+      needReset = false;
+      rand = app.rng(11);
+      words = wordList();
+      cells = []; groups = []; trap = 0; wordIdx = Math.floor(rand() * words.length); acc = 0; simT = 0;
+      colsNext = Array.from({ length: p.colonnes }, () => rand() * 2.5);
+      lastSize = app.size.w + 'x' + app.size.h;
+      // Pré-remplissage : on fait tourner la simulation pour ouvrir sur une pile déjà formée.
+      const t0 = performance.now(), budget = t0 + (/thumbnail/.test(location.search) ? 1500 : 450);
+      let n = 0;
+      while (n < 120 * 9 && performance.now() < budget) { step(H, true); n++; }
+      window.__prerollSteps = [n, Math.round(performance.now() - t0)];
+    }
+    function pal() { return p.couleurs && p.couleurs.length ? p.couleurs : ['#888888']; }
+    function spawn(col) {
+      const s = pitch(), w = words[wordIdx % words.length]; wordIdx++;
+      const P = pal(), base = Math.floor(rand() * P.length);
+      const x = (col + 0.5) * s, top = -w.length * s - s * 0.5;
+      const v0 = (0.15 + p.vitesse * 1.2) * app.size.h;
+      const g = { cells: [], vy: v0, alive: true };
+      w.forEach((ch, i) => {
+        const color = p.repartition === 'lettre' ? P[Math.floor(rand() * P.length)] : p.repartition === 'colonne' ? P[col % P.length] : P[base];
+        const c = { x, y: top + (i + 0.5) * s, px: x, py: 0, a: 0, va: 0, ch, color, g, age: 0, fade: 1, contact: 0 };
+        c.py = c.y - v0 * H;
+        g.cells.push(c); cells.push(c);
+      });
+      groups.push(g);
+    }
+    function breakGroup(g, impactV) {
+      if (!g.alive) return;
+      g.alive = false;
+      const s = pitch(), d = p.desagregation;
+      g.cells.forEach((c, i) => {
+        // Désagrégation : chaque pavé repart avec un écart latéral et une rotation au hasard.
+        const kx = (rand() - 0.5) * d * s * 0.22 * (0.4 + (g.cells.length - i) / g.cells.length);
+        const vy = Math.min(impactV, app.size.h * 2) * H * (1 - d * 0.35 * rand());
+        c.px = c.x - kx; c.py = c.y - vy;
+        c.va = (rand() - 0.5) * d * 14;
+        c.g = null;
+      });
+    }
+    function blast(x, y) {
+      const s = pitch(), R = s * 5.5;
+      for (const c of cells) {
+        const dx = c.x - x, dy = c.y - y, d = Math.hypot(dx, dy);
+        if (d > R) continue;
+        if (c.g) breakGroup(c.g, c.g.vy);
+        const k = (1 - d / R) * s * 0.55 / Math.max(d, s * 0.3);
+        c.px -= dx * k; c.py -= dy * k + (1 - d / R) * s * 0.25;
+        c.va += (rand() - 0.5) * 20;
+      }
+    }
+
+    // ——— Simulation ———
+    const grid = new Map();
+    function step(h, pre) {
+      const { w, h: Hh } = app.size, s = pitch(), r = s * 0.5, g = p.gravite * Hh * 1.6;
+      simT += h;
+      const P = pal();
+      // Capacité : nombre de pavés pour la hauteur de pile voulue.
+      const cap = p.colonnes * (Hh / s) * p.remplissage * 0.92;
+      let free = 0;
+      for (const c of cells) if (!c.g) free++;
+      if (p.vidange === 'trappe') {
+        // La trappe s'ouvre quand c'est plein et se referme quand il reste à peu près la moitié de la pile.
+        if (trap <= 0 && free > cap) trap = 0.3;
+        else if (trap > 0 && trap < 0.05 && free > cap * 0.6) trap = 0.05;
+      } else if (p.vidange === 'fondu' && free > cap) {
+        let k = Math.ceil((free - cap) * 0.02) + 1;
+        for (const c of cells) { if (!c.g && c.fade >= 1 && k-- > 0) c.fade = 0.999; }
+      }
+      if (trap > 0) trap -= h;
+      // Apparitions par colonne (pas de nouvelle pluie si la pile est pleine en mode « Pile »).
+      const full = p.vidange === 'pile' && free > cap;
+      if (!full) {
+        for (let i = 0; i < colsNext.length; i++) {
+          colsNext[i] -= h;
+          if (colsNext[i] <= 0) { spawn(i); colsNext[i] = (0.6 + rand() * 1.8) / p.debit; }
+        }
+      }
+      // Mots rigides en chute.
+      for (const G of groups) {
+        if (!G.alive) continue;
+        G.vy = Math.min(G.vy + g * h * 0.5, Hh * 2.4);
+        for (const c of G.cells) { c.py = c.y; c.y += G.vy * h; c.px = c.x; }
+        const last = G.cells[G.cells.length - 1];
+        if (trap <= 0 && last.y > Hh - r) { breakGroup(G, G.vy); continue; }
+      }
+      // Pavés libres : Verlet.
+      const damp = 0.999;
+      for (const c of cells) {
+        if (c.g) continue;
+        const vx = (c.x - c.px) * damp, vy = (c.y - c.py) * damp;
+        c.px = c.x; c.py = c.y;
+        c.x += vx; c.y += vy + g * h * h;
+        c.a += c.va * h; c.va *= 0.985;
+        c.age += h;
+        if (c.fade < 1) c.fade -= h * 1.2;
+      }
+      // Collisions (disques de diamètre s), grille de hachage.
+      grid.clear();
+      for (let i = 0; i < cells.length; i++) {
+        const c = cells[i], k = Math.floor(c.x / s) + ',' + Math.floor(c.y / s);
+        let b = grid.get(k); if (!b) grid.set(k, b = []); b.push(i);
+        c.contact = Math.max(0, c.contact - 1);
+      }
+      const D = s * 0.985, D2 = D * D, e = p.rebond, fr = p.frottement;
+      for (let it = 0; it < 3; it++) {
+        for (let i = 0; i < cells.length; i++) {
+          const a = cells[i], gx = Math.floor(a.x / s), gy = Math.floor(a.y / s);
+          for (let ox = -1; ox <= 1; ox++) for (let oy = -1; oy <= 1; oy++) {
+            const b = grid.get((gx + ox) + ',' + (gy + oy)); if (!b) continue;
+            for (const j of b) {
+              if (j <= i) continue;
+              const c = cells[j];
+              if (a.g && a.g === c.g) continue;
+              const dx = c.x - a.x, dy = c.y - a.y, d2 = dx * dx + dy * dy;
+              if (d2 >= D2 || d2 < 1e-6) continue;
+              const d = Math.sqrt(d2), o = (D - d) / d;
+              // Un mot qui touche un pavé posé se désagrège ; un mot rigide ne bouge pas.
+              if (a.g && !c.g) { breakGroup(a.g, a.g.vy); }
+              if (c.g && !a.g) { breakGroup(c.g, c.g.vy); }
+              const wa = a.g ? 0 : 0.5, wc = c.g ? 0 : 0.5, ws = wa + wc || 1;
+              a.x -= dx * o * (wa / ws); a.y -= dy * o * (wa / ws);
+              c.x += dx * o * (wc / ws); c.y += dy * o * (wc / ws);
+              a.contact = c.contact = 3;
+              // Frottement tangentiel : on freine le glissement relatif.
+              if (fr > 0 && it === 0) {
+                const nx = dx / d, ny = dy / d;
+                const rvx = (c.x - c.px) - (a.x - a.px), rvy = (c.y - c.py) - (a.y - a.py);
+                const vt = rvx * -ny + rvy * nx, f = vt * fr * 0.25;
+                if (!a.g) { a.px -= -ny * f; a.py -= nx * f; }
+                if (!c.g) { c.px += -ny * f; c.py += nx * f; }
+              }
+            }
+          }
+        }
+        // Bords et fond (le fond s'ouvre quand la trappe est ouverte).
+        for (const c of cells) {
+          if (c.g) continue;
+          if (c.x < r) { const vx = c.x - c.px; c.x = r; c.px = c.x + vx * e; }
+          if (c.x > w - r) { const vx = c.x - c.px; c.x = w - r; c.px = c.x + vx * e; }
+          if (trap <= 0 && c.y > Hh - r && c.y < Hh + r) {
+            const vy = c.y - c.py, vx = c.x - c.px;
+            c.y = Hh - r; c.py = c.y + vy * e; c.px = c.x - vx * (1 - fr * 0.3);
+            c.contact = 3;
+          }
+        }
+      }
+      // Au repos, les pavés se recalent d'équerre ; en vol ils tournent.
+      for (const c of cells) {
+        if (c.g || !c.contact) continue;
+        const tgt = Math.round(c.a / QUART) * QUART;
+        c.a += (tgt - c.a) * 0.08; c.va *= 0.9;
+      }
+      // Pousser au pointeur.
+      if (ptr && !pre && (Math.abs(ptr.vx) + Math.abs(ptr.vy)) > 0.5) {
+        const R = s * 2.6;
+        for (const c of cells) {
+          const dx = c.x - ptr.x, dy = c.y - ptr.y, d = Math.hypot(dx, dy);
+          if (d > R) continue;
+          if (c.g) breakGroup(c.g, c.g.vy);
+          const k = (1 - d / R) * 0.35;
+          c.px -= ptr.vx * k * 0.5 + dx / (d + 1) * k * 2; c.py -= ptr.vy * k * 0.5 + dy / (d + 1) * k * 2;
+        }
+        ptr.vx *= 0.5; ptr.vy *= 0.5;
+      }
+      // Ménage : ce qui sort par le bas ou s'est effacé.
+      if (cells.some((c) => c.y > Hh + s * 2 || c.fade <= 0)) {
+        cells = cells.filter((c) => c.y <= Hh + s * 2 && c.fade > 0);
+        for (const G of groups) if (G.alive) G.cells = G.cells.filter((c) => c.y <= Hh + s * 2);
+      }
+      groups = groups.filter((G) => G.alive && G.cells.length);
+    }
+
+    // ——— Rendu ———
+    function drawCells(fn) {
+      const s = pitch(), side = s * (1 - p.ecart), rad = side * p.arrondi, fs = side * p.corps;
+      const turned = p.lecture === 'tournees';
+      for (const c of cells) {
+        if (c.y < -s || c.y > app.size.h + s) continue;
+        fn(c, side, rad, fs, turned ? c.a + QUART : c.a, Math.max(0, Math.min(1, c.fade)));
+      }
+    }
+    app.loop((t, dt) => {
+      const { w, h, dpr } = app.size;
+      if (needReset || lastSize !== w + 'x' + h) reset();
+      acc += Math.min(0.05, dt || 0.016);
+      let n = 0;
+      while (acc >= H && n < 6) { step(H, false); acc -= H; n++; }
+      if (n === 6) acc = 0;
+
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = p.fond;
+      ctx.fillRect(0, 0, w, h);
+      ctx.font = `${p.graisse} 100px ${family()}`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      drawCells((c, side, rad, fs, ang, al) => {
+        const ca = Math.cos(c.a), sa = Math.sin(c.a);
+        ctx.setTransform(ca * dpr, sa * dpr, -sa * dpr, ca * dpr, c.x * dpr, c.y * dpr);
+        ctx.globalAlpha = al;
+        ctx.fillStyle = c.color;
+        ctx.beginPath(); ctx.roundRect(-side / 2, -side / 2, side, side, rad); ctx.fill();
+        const k = fs / 100, cg = Math.cos(ang - c.a), sg = Math.sin(ang - c.a);
+        ctx.transform(cg * k, sg * k, -sg * k, cg * k, 0, side * 0.03);
+        ctx.fillStyle = inkFor(c.color);
+        ctx.fillText(c.ch, 0, 0);
+      });
+      ctx.globalAlpha = 1;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      app.finish(ctx);
+    });
+
+    // ——— Export SVG ———
+    function toSVG() {
+      const { w, h } = app.size;
+      const r = (v) => Math.round(v * 100) / 100;
+      const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      let body = '';
+      drawCells((c, side, rad, fs, ang, al) => {
+        const deg = r(c.a * 180 / Math.PI), tdeg = r((ang - c.a) * 180 / Math.PI);
+        body += `<g transform="translate(${r(c.x)} ${r(c.y)}) rotate(${deg})"${al < 1 ? ` opacity="${r(al)}"` : ''}><rect x="${r(-side / 2)}" y="${r(-side / 2)}" width="${r(side)}" height="${r(side)}" rx="${r(rad)}" fill="${c.color}"/><text y="${r(side * 0.03)}" font-size="${r(fs)}" fill="${inkFor(c.color)}"${tdeg ? ` transform="rotate(${tdeg})"` : ''}>${esc(c.ch)}</text></g>\n`;
+      });
+      const fam = family().replace(/"/g, "'");
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">\n<rect width="100%" height="100%" fill="${p.fond}"/>\n<g font-family="${fam}" font-weight="${p.graisse}" text-anchor="middle" dominant-baseline="central">\n${body}</g>\n</svg>`;
+    }
+  </script>
+</body>
+</html>

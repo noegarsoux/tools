@@ -1,0 +1,15 @@
+{
+  "slug": "pluie-texte",
+  "title": "Pluie de texte",
+  "type": "typography",
+  "description": "Des mots qui tombent en colonnes de pavés colorés, se désagrègent au choc, rebondissent et s’empilent ; le pointeur pousse et fait sauter les pavés.",
+  "tags": ["chute", "physique", "paves", "typographie", "svg", "motion"],
+  "inspiration": [
+    "Pluie de code en blocs colorés (moodboard 16)",
+    "Physique de Verlet et empilement de corps (The Nature of Code)",
+    "references/moodboard.md ; palettes code, kegelbahn, biennale, bitmap, good-room, pixels"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
