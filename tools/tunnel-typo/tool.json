@@ -1,0 +1,15 @@
+{
+  "slug": "tunnel-typo",
+  "title": "Tunnel typographique",
+  "type": "typography",
+  "description": "Un mot répété en anneaux extrudés, en spirale ou le long des parois d’un tunnel qui défile, se tord et s’oriente vers le pointeur.",
+  "tags": ["tunnel", "perspective", "typographie", "3d", "svg", "motion"],
+  "inspiration": [
+    "Tunnels de texte en boucle de Kiel Danger",
+    "Typographie cinétique en perspective (génériques, motion design 3D)",
+    "references/shaders.md ; palettes kegelbahn, biennale, acide, luzern, salon, good-room"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}

@@ -1,0 +1,347 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tunnel typographique</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Tunnel typographique : un mot répété le long d'anneaux (ou d'une spirale, ou des parois)
+    // placés en profondeur. La caméra avance dans le tunnel ; chaque lettre est projetée en
+    // perspective par une transformation affine locale (approximation au centre du glyphe),
+    // ce qui permet le même dessin en canvas et en SVG (<text> + matrix).
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const KB = PAL('kegelbahn'), SALON = PAL('salon'), BIEN = PAL('biennale'), ACIDE = PAL('acide'), LUZ = PAL('luzern');
+    const CODE = PAL('code'), GR = PAL('good-room'), P60 = PAL('papier-60'), ORB = PAL('orbite'), PIX = PAL('pixels');
+    const FONTS = {
+      grotesque: "'Helvetica Neue', Helvetica, Arial, sans-serif",
+      etroite: "'Helvetica Neue', Helvetica, Arial, sans-serif",
+      serif: "Georgia, 'Times New Roman', Times, serif",
+      mono: "'Courier New', Courier, monospace",
+    };
+    const DEPTH = 16, NEAR = 0.22;
+
+    let zcam = 0, rot = 0, boost = 0, spin = 0;
+    const steer = { x: 0, y: 0 };
+    let pressed = null, widthCache = null;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.035, vignette: 0.25 },
+      hint: 'Survolez pour orienter le tunnel · glissez pour le tordre · touchez pour accélérer · molette : vitesse',
+      notes: 'Le texte se répète le long de chaque anneau et s’ajuste pour en faire le tour exact. En spirale, il court sans fin le long d’une hélice ; en parois, il file sur les murs vers le fond.',
+      params: {
+        'Texte': {
+          texte: { type: 'textarea', label: 'Texte', value: 'TUNNEL · TUNNEL · ', rows: 2 },
+          police: { type: 'font', label: 'Police', options: { grotesque: 'Grotesque', etroite: 'Étroite', serif: 'Sérif', mono: 'Machine' }, value: 'grotesque' },
+          graisse: { type: 'segmented', label: 'Graisse', options: { 400: 'Normale', 700: 'Grasse', 900: 'Noire' }, value: '900' },
+          majuscules: { type: 'toggle', label: 'Majuscules', value: true },
+          approche: { type: 'range', label: 'Approche', min: -0.1, max: 0.8, step: 0.01, value: 0.04 },
+        },
+        'Tunnel': {
+          disposition: { type: 'segmented', label: 'Disposition', options: { anneaux: 'Anneaux', spirale: 'Spirale', parois: 'Parois' }, value: 'anneaux' },
+          section: { type: 'segmented', label: 'Section', options: { 0: 'Cercle', 3: 'Triangle', 4: 'Carré', 6: 'Hexagone' }, value: '0' },
+          voies: { type: 'range', label: 'Voies sur les parois', min: 2, max: 16, step: 1, value: 8, show: (q) => q.disposition === 'parois' },
+          anneaux: { type: 'range', label: 'Anneaux visibles', min: 6, max: 48, step: 1, value: 22 },
+          corps: { type: 'range', label: 'Corps des lettres', min: 0.08, max: 0.7, step: 0.01, value: 0.3 },
+          lecture: { type: 'segmented', label: 'Lecture', options: { interieur: 'Vers le centre', exterieur: 'Vers le dehors' }, value: 'interieur' },
+          extrusion: { type: 'range', label: 'Extrusion', min: 0, max: 1, step: 0.01, value: 0.45 },
+        },
+        'Mouvement': {
+          vitesse: { type: 'range', label: 'Vitesse', min: -4, max: 8, step: 0.05, value: 1.6 },
+          rotation: { type: 'range', label: 'Rotation', min: -1.5, max: 1.5, step: 0.01, value: 0.12 },
+          torsion: { type: 'range', label: 'Torsion', min: -0.6, max: 0.6, step: 0.01, value: 0.08 },
+          courbe: { type: 'range', label: 'Courbure', min: 0, max: 1, step: 0.01, value: 0.35 },
+          respiration: { type: 'range', label: 'Respiration', min: 0, max: 1, step: 0.01, value: 0.15 },
+        },
+        'Couleur': {
+          fond: { type: 'color', label: 'Fond', value: KB[0] },
+          couleurs: { type: 'palette', label: 'Couleurs', value: [KB[1], KB[2], KB[3]] },
+          flancs: { type: 'color', label: 'Flancs (extrusion)', value: '#000000' },
+          coloration: { type: 'segmented', label: 'Coloration', options: { anneaux: 'Par anneau', lettres: 'Par lettre', uni: 'Unie' }, value: 'anneaux' },
+          brouillard: { type: 'range', label: 'Brouillard', min: 0, max: 1, step: 0.01, value: 0.55 },
+        },
+      },
+      presets: {
+        'Tunnel': {},
+        'Spirale': { disposition: 'spirale', texte: 'SPIRALE SANS FIN ✦ ', anneaux: 30, corps: 0.24, rotation: 0.35, torsion: 0, vitesse: 1.2, coloration: 'lettres', fond: BIEN[0], couleurs: [BIEN[1], BIEN[2], BIEN[1], BIEN[3]], flancs: BIEN[4], brouillard: 0.7, extrusion: 0.3, courbe: 0.2 },
+        'Couloir': { disposition: 'parois', section: '4', voies: 8, texte: 'SORTIE → SORTIE → ', police: 'etroite', corps: 0.34, vitesse: 2.6, rotation: 0, torsion: 0, courbe: 0.15, respiration: 0, fond: '#0b0b0b', couleurs: [ACIDE[2], ACIDE[3]], coloration: 'lettres', extrusion: 0.2, brouillard: 0.75 },
+        'Hexagone': { section: '6', texte: 'HEX ', anneaux: 28, corps: 0.34, torsion: 0.2, rotation: 0, fond: LUZ[0], couleurs: [LUZ[3], LUZ[4], LUZ[1]], flancs: LUZ[3], brouillard: 0.35, extrusion: 0.6 },
+        'Extrudé': { texte: 'DEEP ', anneaux: 12, corps: 0.6, extrusion: 1, vitesse: 1, torsion: 0.25, rotation: 0.05, courbe: 0.5, fond: SALON[0], couleurs: [SALON[2], SALON[3], SALON[4]], flancs: SALON[1], brouillard: 0.4 },
+        'Serpent': { texte: 'ssssss ', majuscules: false, police: 'serif', graisse: '700', courbe: 1, vitesse: 2.4, anneaux: 34, corps: 0.26, respiration: 0.5, torsion: -0.15, fond: GR[0], couleurs: [GR[1], GR[2], GR[3], GR[4]], coloration: 'anneaux', extrusion: 0.35 },
+        'Papier': { texte: 'ÉDITION · PAPIER · ', fond: P60[0], couleurs: [P60[1]], flancs: '#b9b8b4', coloration: 'uni', brouillard: 0.85, extrusion: 0.5, section: '4', torsion: 0.12, rotation: 0, courbe: 0.2 },
+        'Code': { texte: '01001110 ', police: 'mono', graisse: '700', disposition: 'spirale', section: '4', anneaux: 40, corps: 0.2, vitesse: 3, rotation: -0.3, fond: CODE[6], couleurs: [CODE[3], CODE[4], CODE[1]], coloration: 'lettres', flancs: '#000000', brouillard: 0.6, extrusion: 0.15 },
+        'Orbite': { texte: 'ORBITE ', police: 'serif', graisse: '400', majuscules: true, lecture: 'exterieur', anneaux: 18, corps: 0.36, rotation: 0.5, torsion: 0.35, courbe: 0, respiration: 0.3, fond: ORB[1], couleurs: [ORB[0], ORB[2]], flancs: '#3a1306', brouillard: 0.5, extrusion: 0.55 },
+        'Pixels': { texte: 'PLAY ▶ ', police: 'mono', section: '3', anneaux: 26, corps: 0.3, rotation: 0.3, torsion: -0.3, vitesse: 2, fond: '#1b1b1b', couleurs: [PIX[1], PIX[2], PIX[3], PIX[4], PIX[5]], coloration: 'anneaux', brouillard: 0.45, extrusion: 0.4 },
+      },
+      brand(colors) {
+        const rest = colors.slice(1);
+        return { fond: colors[0], couleurs: (rest.length ? rest : ['#ffffff']).slice(0, 6), flancs: mix(colors[0], '#000000', 0.55) };
+      },
+      pointer: {
+        down: (q) => { pressed = { x: q.x, y: q.y, moved: false }; },
+        drag: (q) => {
+          if (!pressed) return;
+          if (Math.hypot(q.x - pressed.x, q.y - pressed.y) > 6) pressed.moved = true;
+          // Glisser horizontalement tord le tunnel ; l'élan continue après le relâchement.
+          spin = q.vx * 0.006;
+          rot += spin;
+        },
+        up: () => {
+          if (pressed && !pressed.moved) boost += 6 + Math.abs(p.vitesse) * 2;
+          pressed = null;
+        },
+        wheel: (q, dy) => app.set('vitesse', Math.max(-4, Math.min(8, Math.round((p.vitesse - dy * 0.004) * 20) / 20))),
+      },
+      onChange(k) { if (k === '*' || ['texte', 'police', 'graisse', 'majuscules', '_logo'].includes(k)) widthCache = null; },
+      onSeed() { zcam = app.rng(3)() * 40; rot = app.rng(5)() * TAU; },
+      export: { name: 'tunnel-typographique', svg: () => toSVG() },
+    });
+    const p = app.params;
+    if (document.fonts) document.fonts.addEventListener('loadingdone', () => { widthCache = null; });
+    zcam = app.rng(3)() * 40; rot = app.rng(5)() * TAU;
+
+    // ——— Couleurs ———
+    function hex(c) {
+      let s = String(c || '#000').replace('#', '');
+      if (s.length === 3) s = s.split('').map((x) => x + x).join('');
+      const n = parseInt(s.slice(0, 6), 16) || 0;
+      return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+    }
+    function mix(a, b, t) {
+      const A = hex(a), B = hex(b);
+      const r = A.map((v, i) => Math.round(v + (B[i] - v) * t));
+      return '#' + r.map((v) => v.toString(16).padStart(2, '0')).join('');
+    }
+    let colorCache = new Map();
+    function fogged(col, fog) {
+      const key = col + '|' + Math.round(fog * 40);
+      let v = colorCache.get(key);
+      if (!v) { v = mix(col, p.fond, Math.round(fog * 40) / 40); colorCache.set(key, v); if (colorCache.size > 4000) colorCache = new Map(); }
+      return v;
+    }
+
+    // ——— Texte : largeurs des glyphes à 100 px ———
+    function family() { return p.police === 'AtelierBrand' ? "'AtelierBrand', sans-serif" : (FONTS[p.police] || FONTS.grotesque); }
+    function glyphs() {
+      if (widthCache) return widthCache;
+      let txt = String(p.texte || '').replace(/\s*\n\s*/g, ' ');
+      if (p.majuscules) txt = txt.toUpperCase();
+      if (!txt.trim()) txt = '· ';
+      const chars = Array.from(txt);
+      ctx.save();
+      ctx.font = `${p.graisse} 100px ${family()}`;
+      const sx = p.police === 'etroite' ? 0.68 : 1;
+      const w = chars.map((c) => Math.max(8, ctx.measureText(c).width * sx));
+      ctx.restore();
+      widthCache = { chars, w, key: family() + p.graisse };
+      return widthCache;
+    }
+    // Mise en ligne en unités du monde pour un corps donné : centres et largeur totale.
+    function run(fs) {
+      const G = glyphs(), k = fs / 100, tr = p.approche * fs;
+      const centers = [];
+      let x = 0;
+      for (let i = 0; i < G.chars.length; i++) {
+        const a = G.w[i] * k + tr;
+        centers.push(x + a / 2);
+        x += a;
+      }
+      return { chars: G.chars, centers, total: Math.max(x, fs * 0.5) };
+    }
+
+    // ——— Géométrie du tunnel ———
+    // Section : point et tangente sur le périmètre (abscisse curviligne s), rayon 1.
+    function sides() { return +p.section || 0; }
+    function perimeter() { const n = sides(); return n ? n * 2 * Math.sin(Math.PI / n) : TAU; }
+    function onSection(s) {
+      const n = sides(), P = perimeter();
+      s = ((s % P) + P) % P;
+      if (!n) { const a = s; return [Math.cos(a), Math.sin(a), -Math.sin(a), Math.cos(a)]; }
+      const L = P / n, k = Math.floor(s / L), f = (s - k * L) / L;
+      const a0 = Math.PI / 2 + Math.PI / n + (k / n) * TAU, a1 = a0 + TAU / n;
+      const x0 = Math.cos(a0), y0 = Math.sin(a0), x1 = Math.cos(a1), y1 = Math.sin(a1);
+      const dx = x1 - x0, dy = y1 - y0, dl = Math.hypot(dx, dy);
+      return [x0 + dx * f, y0 + dy * f, dx / dl, dy / dl];
+    }
+    const cxw = (Z) => Math.sin(Z * 0.21) + 0.5 * Math.sin(Z * 0.47 + 1.3);
+    const cyw = (Z) => 0.7 * Math.sin(Z * 0.17 + 2.1) + 0.35 * Math.sin(Z * 0.39 + 0.4);
+    const dcx = (Z) => 0.21 * Math.cos(Z * 0.21) + 0.235 * Math.cos(Z * 0.47 + 1.3);
+    const dcy = (Z) => 0.119 * Math.cos(Z * 0.17 + 2.1) + 0.1365 * Math.cos(Z * 0.39 + 0.4);
+
+    // Projection d'un point (x, y) de la section à la profondeur Z (monde) vers l'écran.
+    function makeProj(w, h, t) {
+      const f = Math.min(w, h) * 0.5, A = p.courbe * 1.6;
+      const zc = zcam, c0x = cxw(zc), c0y = cyw(zc), d0x = dcx(zc), d0y = dcy(zc);
+      const resp = p.respiration * 0.22, tor = p.torsion;
+      return (x, y, Z) => {
+        const z = Z - zc;
+        if (z < NEAR * 0.5) return null;
+        const r = 1 + resp * Math.sin(Z * 0.8 - t * 2.2);
+        const a = rot + tor * Z, ca = Math.cos(a), sa = Math.sin(a);
+        const X = (x * ca - y * sa) * r + A * (cxw(Z) - c0x - d0x * z) + steer.x * 0.75 * z;
+        const Y = (x * sa + y * ca) * r + A * (cyw(Z) - c0y - d0y * z) + steer.y * 0.75 * z;
+        return [w / 2 + X * f / z, h / 2 + Y * f / z];
+      };
+    }
+
+    // ——— Scène : appelle emit(ch, a, b, c, d, e, f, couleur, opacité) du fond vers l'avant ———
+    function scene(w, h, t, emit) {
+      const proj = makeProj(w, h, t);
+      const gap = DEPTH / p.anneaux, fs = p.corps * Math.min(1, gap * 1.6 + 0.12);
+      const pal = p.couleurs && p.couleurs.length ? p.couleurs : ['#ffffff'];
+      const R = run(fs), P = perimeter(), E = p.extrusion * Math.min(0.32, gap * 0.4);
+      const inward = p.lecture === 'interieur', sxg = p.police === 'etroite' ? 0.68 : 1, k = fs / 100;
+      const zc = zcam;
+
+      // Glyphe en (x, y) sur la section à la profondeur Z, de direction d'écriture (tx, ty) dans
+      // le plan de la section, ou le long de l'axe si along = true.
+      function glyph(ch, x, y, tx, ty, Z, along, col) {
+        const z = Z - zc;
+        if (z < NEAR || z > DEPTH) return;
+        const near = Math.min(1, (z - NEAR) / (NEAR * 2.2));
+        const fogLin = Math.pow(z / DEPTH, 0.9) * p.brouillard;
+        const fog = Math.max(fogLin, Math.max(0, (z - DEPTH * 0.8) / (DEPTH * 0.2)));
+        // Normale vers l'axe (dans le plan) : les hauts de lettres pointent vers le centre.
+        let nx = -ty, ny = tx;
+        if (nx * x + ny * y > 0) { nx = -nx; ny = -ny; }
+        const up = inward ? 1 : -1;
+        const eps = 0.02;
+        // Extrusion : couches assez serrées à l'écran (≈ 1,5 px) pour un volume continu.
+        const A = proj(x, y, Z); if (!A) return;
+        // Taille du glyphe à l'écran : on saute ce qui est invisible ou hors cadre.
+        const gs = fs * Math.min(w, h) * 0.5 / z;
+        if (gs < 0.9) return;
+        if (A[0] < -gs * 2 || A[0] > w + gs * 2 || A[1] < -gs * 2 || A[1] > h + gs * 2) return;
+        let n = 0;
+        if (E > 0 && gs > 2.5) {
+          const B = proj(x, y, Z + E);
+          if (B) n = Math.min(18, Math.ceil(Math.hypot(A[0] - B[0], A[1] - B[1]) / 2.2));
+        }
+        for (let j = n; j >= 0; j--) {
+          const Zj = Z + (n ? (j / n) * E : 0);
+          const O = proj(x, y, Zj); if (!O) return;
+          let ex, ey;
+          if (along) { const Q = proj(x, y, Zj + eps); if (!Q) return; ex = [(Q[0] - O[0]) / eps, (Q[1] - O[1]) / eps]; }
+          else { const Q = proj(x + tx * eps, y + ty * eps, Zj); if (!Q) return; ex = [(Q[0] - O[0]) / eps, (Q[1] - O[1]) / eps]; }
+          // Le bas du glyphe (y canvas) va vers l'extérieur quand on lit depuis l'intérieur.
+          const U = along ? proj(x - tx * eps * up, y - ty * eps * up, Zj) : proj(x - nx * eps * up, y - ny * eps * up, Zj);
+          if (!U) return;
+          ey = [(U[0] - O[0]) / eps, (U[1] - O[1]) / eps];
+          const c = j ? fogged(mix(col, p.flancs, 0.3 + 0.55 * (j / n)), fog) : fogged(col, fog);
+          emit(ch, ex[0] * k * sxg, ex[1] * k * sxg, ey[0] * k, ey[1] * k, O[0], O[1], c, near);
+        }
+      }
+      const colorOf = (ring, letter) => p.coloration === 'uni' ? pal[0]
+        : p.coloration === 'lettres' ? pal[((letter % pal.length) + pal.length) % pal.length]
+        : pal[((ring % pal.length) + pal.length) % pal.length];
+
+      if (p.disposition === 'anneaux') {
+        // Le texte fait le tour exact de chaque anneau : on étire l'approche pour boucler.
+        const reps = Math.max(1, Math.round(P / R.total)), st = P / (reps * R.total);
+        const kmin = Math.ceil((zc + NEAR) / gap), kmax = Math.floor((zc + DEPTH) / gap);
+        for (let ring = kmax; ring >= kmin; ring--) {
+          const Z = ring * gap;
+          for (let m = 0; m < reps; m++) {
+            for (let i = 0; i < R.chars.length; i++) {
+              const ch = R.chars[i]; if (ch === ' ') continue;
+              let s = (m * R.total + R.centers[i]) * st;
+              if (inward) s = -s;
+              const [x, y, tx0, ty0] = onSection(s);
+              const tx = inward ? -tx0 : tx0, ty = inward ? -ty0 : ty0;
+              glyph(ch, x, y, tx, ty, Z, false, colorOf(ring, m * R.chars.length + i));
+            }
+          }
+        }
+      } else if (p.disposition === 'spirale') {
+        // Hélice : un tour du périmètre avance d'un écart entre anneaux.
+        const toZ = gap / P;
+        const sMin = (zc + NEAR) / toZ, sMax = (zc + DEPTH) / toZ;
+        const m0 = Math.floor(sMin / R.total) - 1, m1 = Math.ceil(sMax / R.total);
+        for (let m = m1; m >= m0; m--) {
+          for (let i = R.chars.length - 1; i >= 0; i--) {
+            const ch = R.chars[i]; if (ch === ' ') continue;
+            const sa = m * R.total + R.centers[i], Z = sa * toZ;
+            if (Z < zc + NEAR || Z > zc + DEPTH) continue;
+            const s = inward ? -sa : sa;
+            const [x, y, tx0, ty0] = onSection(s);
+            const tx = inward ? -tx0 : tx0, ty = inward ? -ty0 : ty0;
+            glyph(ch, x, y, tx, ty, Z, false, colorOf(Math.floor(sa / P), m * R.chars.length + i));
+          }
+        }
+      } else {
+        // Parois : le texte file le long de l'axe, une voie par position autour de la section.
+        const lanes = p.voies;
+        const m0 = Math.floor((zc + NEAR) / R.total) - 1, m1 = Math.ceil((zc + DEPTH) / R.total);
+        for (let m = m1; m >= m0; m--) {
+          for (let i = R.chars.length - 1; i >= 0; i--) {
+            const ch = R.chars[i]; if (ch === ' ') continue;
+            const Z = m * R.total + R.centers[i];
+            if (Z < zc + NEAR || Z > zc + DEPTH) continue;
+            for (let l = 0; l < lanes; l++) {
+              const [x, y, tx, ty] = onSection(((l + 0.5) / lanes) * P);
+              // Dans le plan de la section, la « tangente » sert ici de hauteur de lettre.
+              glyph(ch, x, y, tx, ty, Z, true, colorOf(l, m * R.chars.length + i + l));
+            }
+          }
+        }
+      }
+    }
+
+    // ——— Rendu ———
+    app.loop((t, dt) => {
+      const { w, h, dpr } = app.size;
+      dt = Math.min(0.05, dt || 0.016);
+      // Orientation : la caméra regarde vers le pointeur, sinon flâne doucement.
+      const P = app.pointer;
+      const tx = P.inside ? (P.x / w - 0.5) * 1.6 : 0.18 * Math.sin(t * 0.31);
+      const ty = P.inside ? (P.y / h - 0.5) * 1.6 : 0.12 * Math.sin(t * 0.23 + 1);
+      const kk = 1 - Math.exp(-dt * 3);
+      steer.x += (tx - steer.x) * kk; steer.y += (ty - steer.y) * kk;
+      zcam += dt * (p.vitesse + boost);
+      boost *= Math.exp(-dt * 2.2);
+      if (!pressed) { rot += spin; spin *= Math.exp(-dt * 2); }
+      rot += dt * p.rotation;
+
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = p.fond;
+      ctx.fillRect(0, 0, w, h);
+      ctx.font = `${p.graisse} 100px ${family()}`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      scene(w, h, t, (ch, a, b, c, d, e, f, col, al) => {
+        ctx.setTransform(a * dpr, b * dpr, c * dpr, d * dpr, e * dpr, f * dpr);
+        ctx.globalAlpha = al;
+        ctx.fillStyle = col;
+        ctx.fillText(ch, 0, 0);
+      });
+      ctx.globalAlpha = 1;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      app.finish(ctx);
+    });
+
+    // ——— Export SVG : mêmes glyphes, en <text> avec leur matrice ———
+    function toSVG() {
+      const { w, h } = app.size;
+      const r = (v) => Math.round(v * 1000) / 1000;
+      const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      let body = '';
+      scene(w, h, app.time, (ch, a, b, c, d, e, f, col, al) => {
+        body += `<text transform="matrix(${r(a)} ${r(b)} ${r(c)} ${r(d)} ${r(e)} ${r(f)})" fill="${col}"${al < 1 ? ` fill-opacity="${r(al)}"` : ''}>${esc(ch)}</text>\n`;
+      });
+      const fam = family().replace(/"/g, "'");
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">\n<rect width="100%" height="100%" fill="${p.fond}"/>\n<g font-family="${fam}" font-weight="${p.graisse}" font-size="100" text-anchor="middle" dominant-baseline="central">\n${body}</g>\n</svg>`;
+    }
+  </script>
+</body>
+</html>
