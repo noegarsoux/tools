@@ -1,0 +1,15 @@
+{
+  "slug": "cerfs-volants",
+  "title": "Cerfs-volants",
+  "type": "motion",
+  "description": "Des cerfs-volants aux couleurs de la marque qui montent avec le vent, dessinent des huit au bout de leur corde et traînent des queues de rubans.",
+  "tags": ["cerfs-volants", "vent", "ciel", "verlet", "logo", "svg"],
+  "inspiration": [
+    "Festivals de cerfs-volants (Dieppe, Berck-sur-Mer)",
+    "Chaînes de Verlet pour les queues et rubans",
+    "Palettes biennale, kegelbahn, salon, bitmap"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
