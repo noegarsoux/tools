@@ -1,0 +1,15 @@
+{
+  "slug": "aurore",
+  "title": "Aurore",
+  "type": "motion",
+  "description": "Des rideaux d'aurore polaire aux couleurs de la marque : plis qui ondulent, rayons, couronne au zénith ou logo lumineux, au-dessus d'un lac ou de montagnes.",
+  "tags": ["aurore", "lumiere", "nuit", "ciel", "logo", "svg"],
+  "inspiration": [
+    "Aurores boréales : rideaux, rayons et couronnes",
+    "Photographies d'aurores en Laponie et au Yukon",
+    "references/physique-maths.md ; palettes kegelbahn, good-room, menthe, luzern"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}

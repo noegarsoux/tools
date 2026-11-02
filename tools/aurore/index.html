@@ -1,0 +1,385 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Aurore</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Aurore : des rideaux d'aurore polaire aux couleurs de la marque. Chaque rideau est une courbe qui
+    // ondule et se replie sur elle-même ; le long de cette courbe se dressent des rayons verticaux
+    // (lisière basse vive, haut qui s'éteint), additionnés en lumière. Couronne vue du zénith, ou logo.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const KB = PAL('kegelbahn'), GR = PAL('good-room'), MENTHE = PAL('menthe'), THER = PAL('thermique'), LUZ = PAL('luzern'), PIX = PAL('pixels'), ACIDE = PAL('acide'), BIEN = PAL('biennale');
+
+    let time = 40, pulses = [], kicks = [], drag = null;
+    let sprF = null, aurCv = null, aurX = null, glowCv = null, glowX = null, logoCv = null, logoX = null, spr = null, sprKey = '';
+    let mask = null, maskKey = null, stars = [], starKey = '', land = null, landKey = '';
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.06, vignette: 0.2 },
+      hint: 'Touchez le ciel pour un sursaut de lumière · glissez pour pousser les plis · molette : vitesse',
+      notes: 'Une aurore se dessine comme un rideau : une courbe horizontale qui ondule et se replie, d’où montent des rayons verticaux. La lisière basse est la plus vive (les électrons s’y arrêtent), le haut s’éteint vers le violet. Là où le rideau se replie, les couches s’additionnent et brillent davantage.',
+      params: {
+        'Aurore': {
+          forme: { type: 'select', label: 'Forme', options: { rideaux: 'Rideaux', couronne: 'Couronne', logo: 'Logo' }, value: 'rideaux' },
+          image: { type: 'file', label: 'Logo', accept: 'image/*', show: (q) => q.forme === 'logo' },
+          rideaux: { type: 'range', label: 'Rideaux', min: 1, max: 6, step: 1, value: 3 },
+          plis: { type: 'range', label: 'Plis', min: 0, max: 2, step: 0.01, value: 1.1 },
+          hauteur: { type: 'range', label: 'Hauteur', min: 0.1, max: 0.9, step: 0.01, value: 0.45 },
+          rayons: { type: 'range', label: 'Rayons', min: 0, max: 1, step: 0.01, value: 0.65 },
+          intensite: { type: 'range', label: 'Intensité', min: 0.2, max: 2.5, step: 0.05, value: 1 },
+          vitesse: { type: 'range', label: 'Vitesse', min: 0, max: 3, step: 0.05, value: 1 },
+          couleurs: { type: 'palette', label: 'Lisière, corps, sommet', value: ['#d8ffe4', '#36ec8a', '#a64ad8'] },
+        },
+        'Ciel': {
+          ciel: { type: 'color', label: 'Ciel', value: '#050914' },
+          horizon: { type: 'color', label: 'Horizon', value: '#0f1c2a' },
+          etoiles: { type: 'range', label: 'Étoiles', min: 0, max: 1200, step: 10, value: 500 },
+          paysage: { type: 'select', label: 'Paysage', options: { montagnes: 'Montagnes', foret: 'Forêt', lac: 'Lac', aucun: 'Aucun' }, value: 'lac' },
+          sol: { type: 'color', label: 'Sol', value: '#03060a' },
+        },
+      },
+      presets: {
+        'Lac': {},
+        'Couronne': { forme: 'couronne', paysage: 'foret', hauteur: 0.6, rayons: 0.85, couleurs: ['#e6ffe8', '#3cf08c', '#d24a86'] },
+        'Logo': { forme: 'logo', rideaux: 2, intensite: 1.2, paysage: 'montagnes' },
+        'Rouge': { couleurs: ['#ffd6c8', '#ff3d4a', '#6a1f8a'], ciel: '#07040c', horizon: '#1a0a14', hauteur: 0.7, plis: 0.6 },
+        'Kegelbahn': { couleurs: [KB[3], KB[1], KB[2]], ciel: KB[0], horizon: '#160a1c', sol: '#020102', rideaux: 4 },
+        'Good Room': { couleurs: [GR[4], GR[1], GR[3]], ciel: GR[0], horizon: '#1c1f24', paysage: 'montagnes' },
+        'Menthe': { couleurs: ['#f2fff8', MENTHE[2], MENTHE[3]], ciel: MENTHE[1], horizon: '#24302c', paysage: 'foret', rayons: 0.4 },
+        'Thermique': { couleurs: [THER[3], THER[2], THER[1]], ciel: '#0a0a24', horizon: '#20143a', plis: 1.6, rideaux: 4 },
+        'Luzern': { couleurs: [LUZ[4], LUZ[0], LUZ[1]], ciel: LUZ[3], horizon: '#2a1a12', sol: '#0a0604', forme: 'couronne' },
+        'Pixels': { couleurs: ['#f2fff4', PIX[5], PIX[4]], ciel: '#060814', rideaux: 5, plis: 1.8, rayons: 1, vitesse: 1.6 },
+        'Acide': { couleurs: [ACIDE[3], ACIDE[2], '#4a5a18'], ciel: ACIDE[1], horizon: '#25281a', sol: '#0a0a08', forme: 'logo' },
+        'Calme': { rideaux: 1, plis: 0.4, vitesse: 0.4, rayons: 0.3, hauteur: 0.35, paysage: 'lac', etoiles: 900 },
+        'Tempête': { rideaux: 6, plis: 2, vitesse: 2.6, intensite: 0.85, rayons: 0.9, hauteur: 0.75 },
+        'Biennale': { couleurs: [BIEN[0], BIEN[3], BIEN[2]], ciel: BIEN[1], horizon: '#2a1414', sol: '#050303', paysage: 'aucun' },
+      },
+      brand(colors) {
+        const lum = (h) => { const n = parseInt(h.slice(1), 16); return ((n >> 16) & 255) * 0.299 + ((n >> 8) & 255) * 0.587 + (n & 255) * 0.114; };
+        const all = colors.slice().sort((a, b) => lum(a) - lum(b));
+        const bright = all.slice(1).reverse();
+        const cols = [bright[0] || '#ffffff', bright[1] || bright[0] || '#36ec8a', bright[2] || bright[1] || bright[0] || '#a64ad8'];
+        return { ciel: all[0], horizon: all[0], couleurs: cols };
+      },
+      pointer: {
+        down: (q) => { drag = { x0: q.x, y0: q.y, lx: q.x, moved: false }; },
+        drag: (q) => {
+          if (!drag) return;
+          if (Math.hypot(q.x - drag.x0, q.y - drag.y0) > 8) drag.moved = true;
+          const d = q.x - drag.lx; drag.lx = q.x;
+          if (Math.abs(d) > 0.5) { kicks.push({ x: q.x, d: d * 2.2, t: 0 }); if (kicks.length > 60) kicks.shift(); }
+        },
+        up: (q) => { if (drag && !drag.moved) pulses.push({ x: q.x, y: q.y, t: 0 }); drag = null; },
+        wheel: (q, dy) => app.set('vitesse', Math.max(0, Math.min(3, +(p.vitesse + (dy > 0 ? -0.1 : 0.1)).toFixed(2)))),
+      },
+      onChange(k) { if (k === 'image') maskKey = null; },
+      onSeed() { pulses = []; kicks = []; starKey = ''; landKey = ''; },
+      export: { name: 'aurore', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    // ——— Outils ———
+    const hex = (h) => { const n = parseInt(h.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; };
+    const mix = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+    const dark = () => { const [r, g, b] = hex(p.ciel); return r * 0.3 + g * 0.6 + b * 0.1 < 110; };
+    function hash(n) { const s = Math.sin(n * 127.1 + app.seed * 0.013) * 43758.5453; return s - Math.floor(s); }
+    function vnoise(x, o) { const i = Math.floor(x), f = x - i, u = f * f * (3 - 2 * f); return hash(i + o) * (1 - u) + hash(i + 1 + o) * u; }
+    const Q = 0.34;
+    const horizonY = () => app.size.h * (p.paysage === 'aucun' ? 1 : p.paysage === 'lac' ? 0.74 : 0.8);
+
+    // dégradé vertical d'un rayon (1 × 256 px) : lisière basse vive, corps, sommet qui s'éteint
+    function profile(v) {
+      const edge = Math.min(1, v / 0.035);
+      return Math.min(1, edge * Math.pow(1 - v, 1.35) * (0.4 + 0.9 * Math.exp(-v * 9)));
+    }
+    function colorAt(v) {
+      const c = p.couleurs.length >= 3 ? p.couleurs : [p.couleurs[0] || '#ffffff', p.couleurs[1] || p.couleurs[0] || '#36ec8a', p.couleurs[1] || p.couleurs[0] || '#a64ad8'];
+      const a = hex(c[0]), b = hex(c[1]), d = hex(c[2]);
+      return v < 0.12 ? mix(a, b, v / 0.12) : mix(b, d, Math.min(1, Math.pow((v - 0.12) / 0.6, 1.1)));
+    }
+    function sprite() {
+      const key = p.couleurs.join();
+      if (spr && sprKey === key) return spr;
+      sprKey = key; spr = document.createElement('canvas'); spr.width = 1; spr.height = 256;
+      const x = spr.getContext('2d'), im = x.createImageData(1, 256);
+      for (let j = 0; j < 256; j++) {
+        const v = (255 - j) / 255, c = colorAt(v), a = profile(v);
+        im.data[j * 4] = c[0]; im.data[j * 4 + 1] = c[1]; im.data[j * 4 + 2] = c[2]; im.data[j * 4 + 3] = Math.round(a * 255);
+      }
+      x.putImageData(im, 0, 0);
+      sprF = document.createElement('canvas'); sprF.width = 1; sprF.height = 256;
+      const xf = sprF.getContext('2d'); xf.translate(0, 256); xf.scale(1, -1); xf.drawImage(spr, 0, 0);
+      return spr;
+    }
+
+    // ——— Rayons : striures, sursauts, poussées ———
+    function rayLight(xr, s, k) {
+      const t = time * p.vitesse;
+      const a = Math.sin(xr * 0.11 + t * 0.9 + k * 3) * Math.sin(xr * 0.047 - t * 0.6 + k), b = vnoise(xr * 0.08 + t * 0.7, k * 101);
+      const ray = Math.max(0, 0.5 + 0.5 * a) * 0.6 + b * 0.4;
+      let L = (1 - p.rayons) + p.rayons * ray * ray * 2;
+      L *= 0.35 + 0.65 * vnoise(s * 6 + t * 0.12, k * 37 + 9);
+      return L * (1 + pulseAt(xr));
+    }
+    function pulseAt(x) {
+      let v = 0; const { w } = app.size;
+      for (const q of pulses) {
+        const c = w * 0.2, sg = w * 0.07 + q.t * w * 0.03, amp = 4.5 * Math.exp(-q.t * 0.8);
+        const d1 = x - (q.x + c * q.t), d2 = x - (q.x - c * q.t), d0 = x - q.x;
+        v += amp * (Math.exp(-d1 * d1 / (sg * sg)) + Math.exp(-d2 * d2 / (sg * sg)) + 0.8 * Math.exp(-q.t * 3) * Math.exp(-d0 * d0 / (sg * sg * 2)));
+      }
+      return v;
+    }
+    function kickAt(x) {
+      let v = 0; const S = app.size.w * 0.12;
+      for (const q of kicks) { const d = x - q.x; v += q.d * Math.exp(-d * d / (S * S)) * Math.exp(-q.t * 0.7); }
+      return v;
+    }
+
+    // ——— Rideaux : liste des rayons (x, bas, hauteur, lumière, largeur) ———
+    function curtainRays() {
+      const { w, h } = app.size, t = time * p.vitesse, out = [];
+      const n = p.rideaux, N = Math.round(Math.min(420, Math.max(160, w * 0.3)));
+      for (let k = 0; k < n; k++) {
+        const r = (i) => hash(k * 17.3 + i * 3.1);
+        const base = h * (0.42 + 0.24 * (n > 1 ? k / (n - 1) : 0.5) + (r(1) - 0.5) * 0.08);
+        const ph = [r(2) * TAU, r(3) * TAU, r(4) * TAU, r(5) * TAU], fq = 9 + r(6) * 8, f2 = 21 + r(7) * 14;
+        const sp = 0.5 + r(8);
+        const hk = (0.6 + r(9) * 0.6) * (1 - 0.25 * (n > 1 ? k / (n - 1) : 0));
+        let px = null;
+        for (let i = 0; i < N; i++) {
+          const s = i / (N - 1), u = -0.15 + s * 1.3;
+          let x = w * u + p.plis * w * 0.075 * (Math.sin(fq * u + t * 0.22 * sp + ph[0]) + 0.55 * Math.sin(f2 * u - t * 0.37 * sp + ph[1]));
+          x += kickAt(w * u);
+          const y = base + h * 0.07 * Math.sin(5.3 * u + t * 0.15 * sp + ph[2]) + h * 0.03 * Math.sin(13 * u - t * 0.25 + ph[3]);
+          const H = h * p.hauteur * hk * (0.55 + 0.45 * vnoise(u * 4 + t * 0.08, k * 13)) * (0.8 + 0.2 * Math.sin(u * 30 + t));
+          const wd = px == null ? 2 : Math.max(1.4, Math.abs(x - px) * 1.3);
+          px = x;
+          out.push({ x, y, H, L: rayLight(x, s, k) * (0.65 + 0.35 * (1 - k / Math.max(1, n))), wd });
+        }
+      }
+      return out;
+    }
+    // couronne : vue sous le rideau, les rayons convergent vers le zénith magnétique
+    function crownRays() {
+      const { w, h } = app.size, t = time * p.vitesse, out = [], S = Math.max(w, h);
+      const cx = w * 0.5 + kickAt(w * 0.5) * 0.5, cy = h * 0.3, N = 300;
+      for (let i = 0; i < N; i++) {
+        const th = i / N * TAU + Math.sin(i * 0.37 + t * 0.2) * 0.02 * p.plis;
+        const r0 = S * (0.005 + 0.03 * vnoise(i * 0.09 + t * 0.15, 5) * p.plis), len = S * p.hauteur * 0.6 * (0.45 + 0.55 * vnoise(i * 0.05 - t * 0.1, 7) + 0.3 * vnoise(i * 0.31 + t * 0.4, 8));
+        const xr = cx + Math.cos(th) * (r0 + len * 0.3);
+        out.push({ th, cx, cy, r0, len, L: 1.7 * rayLight(i * 4.3, i / N, 2) * (1 + pulseAt(xr) * 0.5), wd: S * (0.006 + 0.01 * hash(i * 1.7)) });
+      }
+      return out;
+    }
+
+    // ——— Logo : colonnes du masque, rayons dressés sur leur bord bas ———
+    function logoMask() {
+      const img = p.image || app.logoImg, key = (img ? (img.src || 'c') : 'demo') + app.size.w + 'x' + app.size.h;
+      if (key === maskKey && mask) return mask;
+      maskKey = key;
+      const { w, h } = app.size, q = 0.5, W = Math.ceil(w * q), Hh = Math.ceil(h * q);
+      const c = document.createElement('canvas'); c.width = W; c.height = Hh; const x = c.getContext('2d', { willReadFrequently: true });
+      const sz = Math.min(w, h) * 0.5 * q, cx = W / 2, cy = Hh * 0.36;
+      if (img) {
+        const iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height, k = sz / Math.max(iw, ih);
+        const t = document.createElement('canvas'); t.width = W; t.height = Hh; const tx = t.getContext('2d', { willReadFrequently: true });
+        tx.drawImage(img, cx - iw * k / 2, cy - ih * k / 2, iw * k, ih * k);
+        const d = tx.getImageData(0, 0, W, Hh), dd = d.data;
+        let transp = 0; for (let i = 3; i < dd.length; i += 4) if (dd[i] < 128) transp++;
+        const useA = transp > (W * Hh) - (sz * sz) * 0.98 && transp < W * Hh * 0.995;
+        for (let i = 0; i < dd.length; i += 4) {
+          const l = (dd[i] * 0.2126 + dd[i + 1] * 0.7152 + dd[i + 2] * 0.0722) / 255;
+          const on = useA ? dd[i + 3] > 128 : dd[i + 3] > 128 && l < 0.5;
+          dd[i] = dd[i + 1] = dd[i + 2] = 255; dd[i + 3] = on ? 255 : 0;
+        }
+        x.putImageData(d, 0, 0);
+      } else {
+        x.fillStyle = '#fff'; x.beginPath(); x.arc(cx, cy, sz * 0.47, 0, TAU); x.arc(cx, cy, sz * 0.29, 0, TAU, true); x.fill('evenodd');
+        x.fillRect(cx - sz * 0.06, cy - sz * 0.5, sz * 0.12, sz);
+      }
+      const d = x.getImageData(0, 0, W, Hh).data, cols = [];
+      for (let i = 0; i < W; i++) {
+        let top = -1, bot = -1;
+        for (let j = 0; j < Hh; j++) if (d[(j * W + i) * 4 + 3] > 128) { if (top < 0) top = j; bot = j; }
+        if (top >= 0) cols.push({ x: (i + 0.5) / q, top: top / q, bot: (bot + 1) / q });
+      }
+      mask = { cv: c, cols, q };
+      return mask;
+    }
+
+    // ——— Étoiles et paysage ———
+    function ensureStars() {
+      const { w, h } = app.size, key = w + 'x' + h + ':' + p.etoiles + ':' + app.seed;
+      if (key === starKey) return; starKey = key; stars = [];
+      let sd = (app.seed * 2654435761 >>> 0) || 1; const r = () => { sd ^= sd << 13; sd >>>= 0; sd ^= sd >> 17; sd ^= sd << 5; sd >>>= 0; return sd / 4294967296; };
+      for (let i = 0; i < p.etoiles; i++) { const m = r(); stars.push({ x: r() * w, y: Math.pow(r(), 1.3) * h * 0.85, r: 0.35 + m * m * 1.2, a: 0.25 + r() * 0.75, ph: r() * TAU, f: 1 + r() * 3 }); }
+    }
+    function ensureLand() {
+      const { w, h } = app.size, key = w + 'x' + h + ':' + p.paysage + ':' + app.seed;
+      if (key === landKey) return land; landKey = key;
+      const hy = horizonY(), pts = [], trees = [];
+      if (p.paysage === 'aucun') return (land = null);
+      const fb = (x, o) => vnoise(x, o) * 0.55 + vnoise(x * 2.3, o + 50) * 0.3 + vnoise(x * 5.1, o + 90) * 0.15;
+      const step = 4;
+      if (p.paysage === 'montagnes') for (let x = 0; x <= w + step; x += step) { const u = x / w; pts.push([x, hy - h * (0.04 + 0.2 * Math.pow(fb(u * 3.2, 11), 1.6))]); }
+      else if (p.paysage === 'lac') for (let x = 0; x <= w + step; x += step) { const u = x / w; pts.push([x, hy - h * (0.008 + 0.09 * Math.pow(fb(u * 4, 21), 2.2))]); }
+      else {
+        for (let x = 0; x <= w + step; x += step) { const u = x / w; pts.push([x, hy - h * (0.03 + 0.05 * fb(u * 2, 31))]); }
+        const S = Math.min(w, h);
+        for (let x = -10; x < w + 10;) { const u = x / w, gy = hy - h * (0.03 + 0.05 * fb(u * 2, 31)), th = S * (0.05 + 0.11 * hash(x * 0.37 + 3)); trees.push([x, gy + 2, th]); x += th * (0.18 + 0.25 * hash(x * 0.91)); }
+      }
+      return (land = { pts, trees, hy });
+    }
+    function landPath(x) {
+      const { w, h } = app.size;
+      x.beginPath(); x.moveTo(0, h);
+      for (const [a, b] of land.pts) x.lineTo(a, b);
+      x.lineTo(w, h); x.closePath();
+      for (const [tx, ty, th] of land.trees) {
+        const bw = th * 0.32, tiers = 4;
+        x.moveTo(tx - 1.2, ty); x.lineTo(tx - 1.2, ty - th * 0.15);
+        for (let i = 0; i < tiers; i++) { const yb = ty - th * (0.12 + i * 0.2), wi = bw * (1 - i * 0.2); x.lineTo(tx - wi, yb); x.lineTo(tx - wi * 0.35, yb - th * 0.08); }
+        x.lineTo(tx, ty - th);
+        for (let i = tiers - 1; i >= 0; i--) { const yb = ty - th * (0.12 + i * 0.2), wi = bw * (1 - i * 0.2); x.lineTo(tx + wi * 0.35, yb - th * 0.08); x.lineTo(tx + wi, yb); }
+        x.lineTo(tx + 1.2, ty - th * 0.15); x.lineTo(tx + 1.2, ty); x.closePath();
+      }
+    }
+
+    // ——— Rendu de l'aurore dans un tampon basse résolution (le flou vient de l'agrandissement) ———
+    function renderAurora(rays, crown) {
+      const { w, h } = app.size, q = Q, W = Math.ceil(w * q), Hh = Math.ceil(h * q);
+      if (!aurCv || aurCv.width !== W || aurCv.height !== Hh) {
+        aurCv = document.createElement('canvas'); aurCv.width = W; aurCv.height = Hh; aurX = aurCv.getContext('2d');
+        logoCv = document.createElement('canvas'); logoCv.width = W; logoCv.height = Hh; logoX = logoCv.getContext('2d');
+        glowCv = document.createElement('canvas'); glowCv.width = Math.ceil(W / 6); glowCv.height = Math.ceil(Hh / 6); glowX = glowCv.getContext('2d');
+      }
+      const sp = sprite(), g = p.intensite * 0.32;
+      aurX.setTransform(1, 0, 0, 1, 0, 0); aurX.clearRect(0, 0, W, Hh);
+      aurX.setTransform(q, 0, 0, q, 0, 0); aurX.globalCompositeOperation = 'lighter';
+      if (crown) {
+        for (const r of rays) {
+          const a = Math.min(1, r.L * g); if (a < 0.01) continue;
+          aurX.globalAlpha = a; aurX.setTransform(q * Math.cos(r.th + Math.PI / 2), q * Math.sin(r.th + Math.PI / 2), -q * Math.sin(r.th + Math.PI / 2), q * Math.cos(r.th + Math.PI / 2), r.cx * q, r.cy * q);
+          // repère tourné : le rayon part du zénith vers l'extérieur ; lisière vive côté extérieur, il s'éteint vers le centre
+          aurX.drawImage(sprF, -r.wd / 2, -(r.r0 + r.len), r.wd, r.len);
+        }
+        aurX.setTransform(q, 0, 0, q, 0, 0);
+      } else {
+        for (const r of rays) {
+          const a = Math.min(1, r.L * g); if (a < 0.01) continue;
+          aurX.globalAlpha = a; aurX.drawImage(sp, r.x - r.wd / 2, r.y - r.H, r.wd, r.H);
+        }
+      }
+      if (p.forme === 'logo') {
+        const m = logoMask(), t = time * p.vitesse;
+        logoX.setTransform(1, 0, 0, 1, 0, 0); logoX.globalCompositeOperation = 'source-over'; logoX.clearRect(0, 0, W, Hh);
+        logoX.setTransform(q, 0, 0, q, 0, 0); logoX.globalCompositeOperation = 'lighter';
+        for (const c of m.cols) {
+          const a = Math.min(1, rayLight(c.x, c.x / w, 4) * g * 1.6); if (a < 0.01) continue;
+          const H = (c.bot - c.top) * (1.15 + 0.25 * vnoise(c.x * 0.02 + t * 0.2, 3));
+          logoX.globalAlpha = a; logoX.drawImage(sp, c.x - 1.2, c.bot - H, 2.4 / q, H);
+          logoX.globalAlpha = a * 0.35; logoX.drawImage(sp, c.x - 1.2, c.bot - H * 1.6, 2.4 / q, H * 1.6);
+        }
+        logoX.setTransform(1, 0, 0, 1, 0, 0); logoX.globalAlpha = 1;
+        logoX.globalCompositeOperation = 'destination-in'; logoX.drawImage(m.cv, 0, 0, W, Hh);
+        aurX.setTransform(1, 0, 0, 1, 0, 0); aurX.globalAlpha = 1; aurX.drawImage(logoCv, 0, 0);
+      }
+      aurX.globalAlpha = 1; aurX.globalCompositeOperation = 'source-over'; aurX.setTransform(1, 0, 0, 1, 0, 0);
+      glowX.clearRect(0, 0, glowCv.width, glowCv.height); glowX.drawImage(aurCv, 0, 0, glowCv.width, glowCv.height);
+    }
+
+    app.loop((t, dt) => {
+      const { w, h, dpr } = app.size;
+      dt = Math.min(0.05, dt || 0);
+      time += dt;
+      for (const q of pulses) q.t += dt; pulses = pulses.filter((q) => q.t < 5);
+      for (const q of kicks) q.t += dt; kicks = kicks.filter((q) => q.t < 6);
+      ensureStars(); ensureLand();
+      const crown = p.forme === 'couronne';
+      const rays = crown ? crownRays() : curtainRays();
+      renderAurora(rays, crown);
+
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      const hy = horizonY();
+      const sk = ctx.createLinearGradient(0, 0, 0, hy); sk.addColorStop(0, p.ciel); sk.addColorStop(1, p.horizon);
+      ctx.fillStyle = sk; ctx.fillRect(0, 0, w, h);
+      // étoiles qui scintillent
+      ctx.fillStyle = '#fff';
+      for (const s of stars) { ctx.globalAlpha = s.a * (0.6 + 0.4 * Math.sin(time * s.f + s.ph)); ctx.fillRect(s.x, s.y, s.r, s.r); }
+      ctx.globalAlpha = 1;
+      const D = dark();
+      ctx.globalCompositeOperation = D ? 'lighter' : 'source-over';
+      ctx.globalAlpha = 0.55; ctx.drawImage(glowCv, 0, 0, w, h);
+      ctx.globalAlpha = 1; ctx.drawImage(aurCv, 0, 0, w, h);
+      ctx.globalCompositeOperation = 'source-over';
+      if (land) {
+        if (p.paysage === 'lac') {
+          // reflet : le ciel renversé sous la rive, en bandes qui ondulent
+          ctx.fillStyle = p.horizon; ctx.fillRect(0, hy, w, h - hy);
+          const band = 4, Hw = h - hy;
+          ctx.globalCompositeOperation = D ? 'lighter' : 'source-over';
+          for (let y = 0; y < Hw; y += band) {
+            const src = hy - y * 1.1 - band, off = Math.sin(y * 0.4 + time * 2.4) * (0.8 + y * 0.05) + Math.sin(y * 0.13 - time * 1.3) * 1.5;
+            if (src < 0) break;
+            ctx.globalAlpha = 0.55 * (1 - y / Hw * 0.5);
+            ctx.drawImage(aurCv, 0, src * Q, aurCv.width, band * 1.1 * Q, off, hy + y, w, band);
+          }
+          ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over';
+          ctx.save(); ctx.beginPath(); ctx.rect(0, 0, w, hy); ctx.clip(); ctx.fillStyle = p.sol; landPath(ctx); ctx.fill(); ctx.restore();
+          // les collines se reflètent aussi
+          ctx.save(); ctx.beginPath(); ctx.rect(0, hy, w, h - hy); ctx.clip(); ctx.translate(0, hy * 2); ctx.scale(1, -1);
+          ctx.globalAlpha = 0.8; ctx.fillStyle = p.sol; landPath(ctx); ctx.fill(); ctx.restore(); ctx.globalAlpha = 1;
+          ctx.fillStyle = 'rgba(255,255,255,0.06)'; ctx.fillRect(0, hy, w, 1);
+        } else {
+          ctx.fillStyle = p.sol; landPath(ctx); ctx.fill('nonzero');
+        }
+      }
+      app.finish(ctx);
+    });
+
+    function toSVG() {
+      const { w, h } = app.size, f = (v) => v.toFixed(1), out = [];
+      const crown = p.forme === 'couronne', rays = crown ? crownRays() : curtainRays(), g = p.intensite * 0.32;
+      const stops = [0, 0.1, 0.25, 0.45, 0.7, 0.9, 1].map((o) => { const v = 1 - o, c = colorAt(v); return `<stop offset="${o}" stop-color="rgb(${c.map(Math.round).join(',')})" stop-opacity="${profile(v).toFixed(3)}"/>`; }).join('');
+      for (const r of rays) {
+        const a = Math.min(1, r.L * g); if (a < 0.02) continue;
+        if (crown) {
+          const deg = (r.th + Math.PI / 2) * 180 / Math.PI;
+          out.push(`<rect x="${f(-r.wd / 2)}" y="${f(-(r.r0 + r.len))}" width="${f(r.wd)}" height="${f(r.len)}" fill="url(#rayF)" opacity="${a.toFixed(2)}" transform="translate(${f(r.cx)} ${f(r.cy)}) rotate(${deg.toFixed(2)})"/>`);
+        } else out.push(`<rect x="${f(r.x - r.wd / 2)}" y="${f(r.y - r.H)}" width="${f(r.wd)}" height="${f(r.H)}" fill="url(#ray)" opacity="${a.toFixed(2)}"/>`);
+      }
+      let logo = '';
+      if (p.forme === 'logo') {
+        const m = logoMask(), lr = [];
+        for (const c of m.cols) { const a = Math.min(1, rayLight(c.x, c.x / w, 4) * g * 1.6); if (a < 0.02) continue; lr.push(`<rect x="${f(c.x - 1.2)}" y="${f(c.top - (c.bot - c.top) * 0.15)}" width="${f(2.4 / m.q)}" height="${f((c.bot - c.top) * 1.15)}" fill="url(#ray)" opacity="${a.toFixed(2)}"/>`); }
+        logo = `<mask id="lm" maskUnits="userSpaceOnUse" x="0" y="0" width="${w}" height="${h}"><image href="${m.cv.toDataURL()}" x="0" y="0" width="${w}" height="${h}" preserveAspectRatio="none"/></mask><g mask="url(#lm)">${lr.join('')}</g>`;
+      }
+      const st = stars.map((s) => `<rect x="${f(s.x)}" y="${f(s.y)}" width="${f(s.r)}" height="${f(s.r)}" fill="#fff" opacity="${s.a.toFixed(2)}"/>`).join('');
+      const hy = horizonY();
+      let ground = '';
+      if (land) {
+        const pts = land.pts.map(([a, b]) => `${f(a)} ${f(b)}`).join('L');
+        const trees = land.trees.map(([tx, ty, th]) => { const bw = th * 0.32, o = [`M${f(tx - 1.2)} ${f(ty)}`, `L${f(tx - 1.2)} ${f(ty - th * 0.15)}`]; for (let i = 0; i < 4; i++) { const yb = ty - th * (0.12 + i * 0.2), wi = bw * (1 - i * 0.2); o.push(`L${f(tx - wi)} ${f(yb)}L${f(tx - wi * 0.35)} ${f(yb - th * 0.08)}`); } o.push(`L${f(tx)} ${f(ty - th)}`); for (let i = 3; i >= 0; i--) { const yb = ty - th * (0.12 + i * 0.2), wi = bw * (1 - i * 0.2); o.push(`L${f(tx + wi * 0.35)} ${f(yb - th * 0.08)}L${f(tx + wi)} ${f(yb)}`); } o.push(`L${f(tx + 1.2)} ${f(ty - th * 0.15)}L${f(tx + 1.2)} ${f(ty)}Z`); return o.join(''); }).join('');
+        const d = `M0 ${h}L${pts}L${w} ${h}Z${trees}`;
+        ground = p.paysage === 'lac'
+          ? `<rect x="0" y="${f(hy)}" width="${w}" height="${f(h - hy)}" fill="${p.horizon}"/><g clip-path="url(#eau)"><g transform="translate(0 ${f(hy * 2)}) scale(1 -1)" opacity="0.5"><g style="mix-blend-mode:screen">${out.join('')}</g><path d="${d}" fill="${p.sol}"/></g></g><path d="${d}" fill="${p.sol}" clip-path="url(#air)"/>`
+          : `<path d="${d}" fill="${p.sol}"/>`;
+      }
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">\n<defs><linearGradient id="ciel" x1="0" y1="0" x2="0" y2="${f(hy)}" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="${p.ciel}"/><stop offset="1" stop-color="${p.horizon}"/></linearGradient><linearGradient id="ray" x1="0" y1="0" x2="0" y2="1">${stops}</linearGradient><linearGradient id="rayF" x1="0" y1="1" x2="0" y2="0">${stops}</linearGradient><filter id="flou" x="-10%" y="-10%" width="120%" height="120%"><feGaussianBlur stdDeviation="1.2"/></filter><clipPath id="eau"><rect x="0" y="${f(hy)}" width="${w}" height="${f(h - hy)}"/></clipPath><clipPath id="air"><rect x="0" y="0" width="${w}" height="${f(hy)}"/></clipPath></defs>\n<rect width="100%" height="100%" fill="url(#ciel)"/>\n<g>${st}</g>\n<g style="mix-blend-mode:${dark() ? 'screen' : 'normal'}" filter="url(#flou)">${out.join('\n')}${logo}</g>\n${ground}\n</svg>`;
+    }
+  </script>
+</body>
+</html>
