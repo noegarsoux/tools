@@ -1,0 +1,265 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ferrofluide</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Ferrofluide : une flaque de liquide magnétique vue de dessus. Au-dessus d'un champ assez fort,
+    // la surface se hérisse de pointes rangées en nid d'abeilles (instabilité de Rosensweig) ; l'aimant
+    // se promène, la flaque le suit, les pointes poussent ou s'affaissent. Le liquide noir et brillant
+    // reflète un ciel aux couleurs de la marque. La flaque peut aussi prendre la forme du logo.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const BIEN = PAL('biennale'), KB = PAL('kegelbahn'), SALON = PAL('salon'), MENTHE = PAL('menthe'), THER = PAL('thermique'), GR = PAL('good-room'), PIX = PAL('pixels'), ACIDE = PAL('acide');
+
+    let Al = null, drops = [], dKey = '', time = 0, mag = { x: 0, y: 0, on: 1, level: 0 }, drag = null, buf = null, img = null, Hh = null, logoF = null, logoKey = null, frozen = false, envLut = null, envKey = '';
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.04, vignette: 0.3 },
+      hint: 'Glissez pour déplacer l’aimant · touchez pour l’allumer ou l’éteindre · molette : force',
+      notes: 'Un ferrofluide est une huile chargée de nanoparticules de fer. Sous un champ magnétique assez fort, sa surface plane devient instable : elle se hérisse de pointes régulièrement espacées, en nid d’abeilles. Ici, les pointes se placent sur un réseau hexagonal centré sur l’aimant, leur hauteur suit l’intensité du champ, et la flaque, faite de gouttes qui fusionnent, est attirée vers lui.',
+      params: {
+        'Fluide': {
+          forme: { type: 'select', label: 'Forme', options: { flaque: 'Flaque', logo: 'Logo' }, value: 'flaque' },
+          image: { type: 'file', label: 'Logo', accept: 'image/*', show: (q) => q.forme === 'logo' },
+          quantite: { type: 'range', label: 'Quantité de fluide', min: 0.3, max: 1.6, step: 0.01, value: 0.9 },
+          fluide: { type: 'color', label: 'Fluide', value: '#0c0c10' },
+          reflets: { type: 'palette', label: 'Reflets', value: ['#f2b0c8', '#4b6cf0', '#f2e640'] },
+          brillance: { type: 'range', label: 'Brillance', min: 0, max: 1, step: 0.01, value: 0.8 },
+        },
+        'Aimant': {
+          force: { type: 'range', label: 'Force', min: 0, max: 1, step: 0.01, value: 0.7 },
+          portee: { type: 'range', label: 'Portée', min: 0.1, max: 0.6, step: 0.01, value: 0.26 },
+          parcours: { type: 'range', label: 'Promenade', min: 0, max: 1, step: 0.01, value: 0.4 },
+          pulsation: { type: 'range', label: 'Pulsation', min: 0, max: 1, step: 0.01, value: 0.35 },
+        },
+        'Pointes': {
+          espacement: { type: 'range', label: 'Espacement', min: 0.02, max: 0.09, step: 0.001, value: 0.055 },
+          hauteur: { type: 'range', label: 'Hauteur', min: 0.2, max: 2, step: 0.01, value: 1 },
+          finesse: { type: 'range', label: 'Finesse', min: 0, max: 1, step: 0.01, value: 0.5 },
+        },
+        'Fond': {
+          fond: { type: 'color', label: 'Plateau', value: '#e9e6df' },
+        },
+      },
+      presets: {
+        'Flaque': {},
+        'Hérisson': { force: 1, portee: 0.34, hauteur: 1.5, finesse: 0.8, quantite: 1.2 },
+        'Petite goutte': { quantite: 0.45, portee: 0.16, espacement: 0.03, parcours: 0.7 },
+        'Logo': { forme: 'logo', espacement: 0.032, hauteur: 1.1, parcours: 0 },
+        'Repos': { force: 0.25, pulsation: 0.6 },
+        'Pointes fines': { espacement: 0.028, finesse: 1, hauteur: 1.3 },
+        'Biennale': { reflets: [BIEN[2], BIEN[3], BIEN[4]], fond: BIEN[0] },
+        'Kegelbahn': { reflets: [KB[1], KB[2], KB[3]], fond: '#141014', fluide: '#050506' },
+        'Salon': { reflets: [SALON[2], SALON[3], SALON[4]], fond: SALON[0] },
+        'Menthe': { reflets: [MENTHE[2], MENTHE[0], MENTHE[3]], fond: MENTHE[0], fluide: MENTHE[1] },
+        'Thermique': { reflets: [THER[2], THER[3], THER[5]], fond: THER[0], fluide: '#14123a' },
+        'Good Room': { reflets: [GR[1], GR[2], GR[3], GR[4]], fond: GR[0], fluide: '#030303', brillance: 1 },
+        'Acide': { reflets: [ACIDE[2], ACIDE[3]], fond: ACIDE[0], forme: 'logo', espacement: 0.03 },
+      },
+      brand(colors) {
+        const lum = (h) => { const n = parseInt(h.slice(1), 16); return ((n >> 16) & 255) * 0.299 + ((n >> 8) & 255) * 0.587 + (n & 255) * 0.114; };
+        const all = colors.slice().sort((a, b) => lum(b) - lum(a));
+        const dark = all[all.length - 1];
+        return { fond: all[0], fluide: lum(dark) < 60 ? dark : '#0c0c10', reflets: all.slice(1, -1).length ? all.slice(1, -1) : all };
+      },
+      pointer: {
+        down: (q) => { drag = { x: q.x, y: q.y, x0: q.x, y0: q.y, moved: false }; },
+        drag: (q) => { if (!drag) return; drag.x = q.x; drag.y = q.y; if (Math.hypot(q.x - drag.x0, q.y - drag.y0) > 6) drag.moved = true; },
+        up: (q) => { if (drag && !drag.moved) mag.on = mag.on ? 0 : 1; drag = null; },
+        wheel: (q, dy) => app.set('force', Math.max(0, Math.min(1, +(p.force + (dy > 0 ? -0.05 : 0.05)).toFixed(2)))),
+      },
+      onChange(k) { if (['quantite', 'forme'].includes(k)) dKey = ''; if (k === 'image') { logoKey = null; logoF = null; } frozen = false; },
+      onSeed() { dKey = ''; frozen = false; },
+      export: { name: 'ferrofluide', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    const hex = (h) => { const n = parseInt(h.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; };
+    const rgb = (c) => `rgb(${Math.round(c[0])},${Math.round(c[1])},${Math.round(c[2])})`;
+    const mixc = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+    const sstep = (a, b, x) => { const t = Math.max(0, Math.min(1, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
+    function hash(n) { const s = Math.sin(n * 127.1 + app.seed * 0.0131) * 43758.5453; return s - Math.floor(s); }
+    function vnoise(x, o) { const i = Math.floor(x), f = x - i, u = f * f * (3 - 2 * f); return hash(i + o) * (1 - u) + hash(i + 1 + o) * u; }
+
+    // ——— Champ du logo : masque flouté (forme de la flaque et intensité du champ) ———
+    function logoField(bw, bh, q) {
+      const img0 = p.image || app.logoImg, key = [img0 ? (img0.src || 'c') : 'demo', bw, bh].join();
+      if (logoF && logoKey === key) return logoF; logoKey = key;
+      const c = document.createElement('canvas'); c.width = bw; c.height = bh; const x = c.getContext('2d', { willReadFrequently: true });
+      const L = Math.min(bw, bh) * 0.72, ox = (bw - L) / 2, oy = (bh - L) / 2;
+      const m = document.createElement('canvas'); m.width = m.height = 256; const mx = m.getContext('2d', { willReadFrequently: true });
+      if (img0) {
+        const iw = img0.naturalWidth || img0.width, ih = img0.naturalHeight || img0.height, k = 256 * 0.94 / Math.max(iw, ih);
+        mx.drawImage(img0, (256 - iw * k) / 2, (256 - ih * k) / 2, iw * k, ih * k);
+        const d = mx.getImageData(0, 0, 256, 256), a = d.data; let transp = 0; for (let i = 3; i < a.length; i += 4) if (a[i] < 128) transp++;
+        const useA = transp > 256 * 256 * 0.05;
+        for (let i = 0; i < a.length; i += 4) { const l = (a[i] * 0.2126 + a[i + 1] * 0.7152 + a[i + 2] * 0.0722) / 255, on = useA ? a[i + 3] / 255 : (a[i + 3] > 128 && l < 0.5 ? 1 : 0); a[i] = a[i + 1] = a[i + 2] = 255; a[i + 3] = on * 255; }
+        mx.putImageData(d, 0, 0);
+      } else { mx.fillStyle = '#fff'; mx.beginPath(); mx.arc(128, 128, 118, 0, TAU); mx.arc(128, 128, 66, 0, TAU, true); mx.fill('evenodd'); mx.fillRect(110, 6, 36, 244); }
+      x.fillStyle = '#000'; x.fillRect(0, 0, bw, bh);
+      x.filter = `blur(${Math.max(1, L * 0.018)}px)`; x.drawImage(m, ox, oy, L, L); x.filter = 'none';
+      const d = x.getImageData(0, 0, bw, bh).data, F = new Float32Array(bw * bh);
+      for (let i = 0; i < bw * bh; i++) F[i] = d[i * 4] / 255;
+      logoF = { F, bw, bh }; return logoF;
+    }
+
+    // ——— Gouttes de la flaque (métaboules) ———
+    function build() {
+      const { w, h } = app.size, key = [w, h, p.quantite, p.forme, app.seed].join();
+      if (key === dKey) return; dKey = key;
+      const S = Math.min(w, h), n = 14;
+      drops = [];
+      for (let i = 0; i < n; i++) { const a = hash(i + 1) * TAU, r = S * 0.12 * Math.sqrt(hash(i + 2)); drops.push({ x: w / 2 + Math.cos(a) * r, y: h / 2 + Math.sin(a) * r, vx: 0, vy: 0, r: S * 0.075 * Math.sqrt(p.quantite) * (0.7 + hash(i + 3) * 0.6), ph: hash(i + 4) * 100 }); }
+      mag.x = w / 2; mag.y = h / 2; frozen = false;
+    }
+    function step(dt) {
+      const { w, h } = app.size, S = Math.min(w, h);
+      time += dt;
+      // l'aimant se promène (huit lent) sauf si on le tient
+      if (drag) { mag.x += (drag.x - mag.x) * Math.min(1, dt * 8); mag.y += (drag.y - mag.y) * Math.min(1, dt * 8); }
+      else if (p.forme !== 'logo') { const a = p.parcours, tx = w / 2 + Math.sin(time * 0.31) * w * 0.22 * a, ty = h / 2 + Math.sin(time * 0.53 + 1) * h * 0.18 * a; mag.x += (tx - mag.x) * Math.min(1, dt * 1.5); mag.y += (ty - mag.y) * Math.min(1, dt * 1.5); }
+      const tgt = mag.on ? p.force * (1 - p.pulsation * 0.5 + p.pulsation * 0.5 * Math.sin(time * 1.3)) : 0;
+      mag.level += (tgt - mag.level) * Math.min(1, dt * 3);
+      if (p.forme === 'logo') return;
+      // les gouttes suivent l'aimant, se repoussent un peu et s'étalent quand il faiblit
+      const R = S * p.portee;
+      for (const d of drops) {
+        const dx = mag.x - d.x, dy = mag.y - d.y, dist = Math.hypot(dx, dy) + 1e-3, pull = (0.25 + 1.6 * mag.level) * Math.min(1, dist / (R * 0.6));
+        d.vx += dx / dist * pull * S * 0.9 * dt; d.vy += dy / dist * pull * S * 0.9 * dt;
+        for (const o of drops) { if (o === d) continue; const ex = d.x - o.x, ey = d.y - o.y, e = Math.hypot(ex, ey) + 1e-3, rr = (d.r + o.r) * (0.8 - 0.3 * mag.level); if (e < rr) { const k = (rr - e) / e * 4; d.vx += ex * k * dt; d.vy += ey * k * dt; } }
+        d.vx += (vnoise(time * 0.4 + d.ph, 3) - 0.5) * S * 0.6 * dt; d.vy += (vnoise(time * 0.4 + d.ph, 5) - 0.5) * S * 0.6 * dt;
+        d.vx *= Math.exp(-dt * 3); d.vy *= Math.exp(-dt * 3);
+        d.x += d.vx * dt; d.y += d.vy * dt;
+      }
+    }
+
+    // ——— Reflets : table de couleurs du « ciel » reflété ———
+    function envTable() {
+      const key = p.reflets.join() + p.fond;
+      if (envLut && envKey === key) return envLut; envKey = key;
+      const cols = (p.reflets.length ? p.reflets : ['#ffffff']).map(hex), n = 256; envLut = new Float32Array(n * 3);
+      for (let i = 0; i < n; i++) { const t = i / (n - 1) * (cols.length - 1), k = Math.min(cols.length - 2, Math.floor(t)), f = cols.length > 1 ? t - k : 0, c = cols.length > 1 ? mixc(cols[k], cols[k + 1], f) : cols[0]; envLut[i * 3] = c[0]; envLut[i * 3 + 1] = c[1]; envLut[i * 3 + 2] = c[2]; }
+      return envLut;
+    }
+
+    function render() {
+      const { w, h } = app.size, S = Math.min(w, h), q = 0.4, bw = Math.ceil(w * q), bh = Math.ceil(h * q), n = bw * bh;
+      if (!buf) buf = document.createElement('canvas');
+      if (buf.width !== bw || buf.height !== bh) { buf.width = bw; buf.height = bh; img = null; }
+      const bx = buf.getContext('2d', { willReadFrequently: true });
+      if (!img) { img = bx.createImageData(bw, bh); Hh = new Float32Array(n); Al = new Float32Array(n); }
+      const D = img.data, H = Hh, AL = Al, isLogo = p.forme === 'logo', LF = isLogo ? logoField(bw, bh, q) : null;
+      // réseau hexagonal centré sur l'aimant (en pixels du tampon)
+      const a = S * p.espacement * q, rs = a * (0.5 + 0.12 * p.finesse), hmax = a * 1.3 * p.hauteur, Rq = S * p.portee * q, lvl = mag.level;
+      const mx = isLogo ? bw / 2 : mag.x * q, my = isLogo ? bh / 2 : mag.y * q, th = time * 0.05, ct = Math.cos(th), st = Math.sin(th), hy = a * Math.sqrt(3) / 2;
+      const Bc = 0.18, dq = drops.map((d) => [d.x * q, d.y * q, (d.r * q) ** 2]);
+      const puddle = (x, y) => { if (isLogo) { const i = Math.max(0, Math.min(bw - 1, x | 0)), j = Math.max(0, Math.min(bh - 1, y | 0)); return LF.F[j * bw + i] * 2.4 * Math.sqrt(p.quantite); } let F = 0; for (const d of dq) { const dx = x - d[0], dy = y - d[1]; F += d[2] / (dx * dx + dy * dy + 1); } return F; };
+      const field = (x, y) => { if (isLogo) { const i = Math.max(0, Math.min(bw - 1, x | 0)), j = Math.max(0, Math.min(bh - 1, y | 0)); let B = LF.F[j * bw + i] * lvl; if (drag) { const dx = x - drag.x * q, dy = y - drag.y * q; B += 0.6 * Math.exp(-(dx * dx + dy * dy) / (Rq * Rq * 0.3)) * mag.on; } return B; } const dx = x - mx, dy = y - my; return lvl * Math.exp(-(dx * dx + dy * dy) / (Rq * Rq)); };
+      // hauteur de chaque pointe, calculée une fois par nœud du réseau
+      const spikeH = new Map();
+      const spike = (iu, iv) => {
+        const k = iu * 4096 + iv; let v = spikeH.get(k); if (v !== undefined) return v;
+        const lx = (iu + iv * 0.5) * a, ly = iv * hy, X = mx + lx * ct - ly * st, Y = my + lx * st + ly * ct;
+        const B = field(X, Y), F = puddle(X, Y), wob = 1 + 0.08 * Math.sin(time * 2.1 + iu * 1.7 + iv * 2.3);
+        v = B > Bc && F > 1.25 ? hmax * Math.min(1, (B - Bc) / (1 - Bc)) ** 0.7 * sstep(1.25, 2.2, F) * wob : 0;
+        spikeH.set(k, v); return v;
+      };
+      for (let j = 0; j < bh; j++) for (let i = 0; i < bw; i++) {
+        const o = j * bw + i, x = i + 0.5, y = j + 0.5, F = puddle(x, y);
+        if (F < 0.92) { H[o] = -1; continue; }
+        AL[o] = sstep(0.92, 0.985, F);
+        let hgt = a * 0.35 * sstep(0.95, 2.4, F) + field(x, y) * a * 0.5 * sstep(1, 2, F);
+        // pointes voisines (coordonnées axiales)
+        const rx = x - mx, ry = y - my, lx = rx * ct + ry * st, ly = -rx * st + ry * ct, fv = ly / hy, fu = lx / a - fv * 0.5, iu0 = Math.floor(fu), iv0 = Math.floor(fv);
+        for (let du = 0; du <= 1; du++) for (let dv = 0; dv <= 1; dv++) {
+          const iu = iu0 + du, iv = iv0 + dv, sh = spike(iu, iv); if (sh <= 0) continue;
+          const cx = (iu + iv * 0.5) * a, cy = iv * hy, d = Math.hypot(lx - cx, ly - cy);
+          if (d < rs) { const t = 1 - d / rs; hgt += sh * (p.finesse * t + (1 - p.finesse) * t * t * (3 - 2 * t)) * (1 - 0.15 * Math.pow(t, 8)); }
+        }
+        H[o] = hgt;
+      }
+      // ombrage : normale par différences finies, reflet du « ciel », spéculaire
+      const env = envTable(), base = hex(p.fluide), bg = hex(p.fond), gl = p.brillance, sh = Math.max(1, S * 0.012 * q);
+      const lxv = -0.45, lyv = -0.6, lzv = 0.66;
+      for (let j = 0; j < bh; j++) for (let i = 0; i < bw; i++) {
+        const o = j * bw + i, d4 = o * 4, hc = H[o];
+        if (hc < 0) {
+          // plateau, avec l'ombre portée de la flaque
+          const sx = Math.min(bw - 1, Math.max(0, i - Math.round(sh))), sy = Math.min(bh - 1, Math.max(0, j - Math.round(sh * 1.4)));
+          const sF = H[sy * bw + sx] >= 0 ? 0.22 : 0;
+          D[d4] = bg[0] * (1 - sF); D[d4 + 1] = bg[1] * (1 - sF); D[d4 + 2] = bg[2] * (1 - sF); D[d4 + 3] = 255; continue;
+        }
+        const hl = H[o - (i > 0 ? 1 : 0)], hr = H[o + (i < bw - 1 ? 1 : 0)], hu = H[o - (j > 0 ? bw : 0)], hd = H[o + (j < bh - 1 ? bw : 0)];
+        let nx = -((hr < 0 ? hc - a * 0.5 : hr) - (hl < 0 ? hc - a * 0.5 : hl)) * 0.5, ny = -((hd < 0 ? hc - a * 0.5 : hd) - (hu < 0 ? hc - a * 0.5 : hu)) * 0.5, nz = 1;
+        const nl = Math.hypot(nx, ny, nz); nx /= nl; ny /= nl; nz /= nl;
+        // vue de dessus : réflexion de (0,0,1)
+        const rx2 = 2 * nz * nx, ry2 = 2 * nz * ny, rz2 = 2 * nz * nz - 1;
+        const t = Math.max(0, Math.min(255, (0.5 + rx2 * 0.45 - ry2 * 0.35) * 255)) | 0;
+        const fres = 0.06 + 0.94 * Math.pow(1 - nz, 3);
+        const spec = Math.pow(Math.max(0, rx2 * lxv + ry2 * lyv + rz2 * lzv), 40) * gl * 1.6 + Math.pow(Math.max(0, -rx2 * 0.6 + ry2 * 0.5 + rz2 * 0.62), 10) * gl * 0.25;
+        const e = Math.min(0.9, (0.03 + fres * 0.9) * (0.3 + 0.7 * gl)), dif = 0.85 + 0.15 * nz;
+        D[d4] = base[0] * dif * (1 - e) + env[t * 3] * e + 255 * spec;
+        D[d4 + 1] = base[1] * dif * (1 - e) + env[t * 3 + 1] * e + 255 * spec;
+        D[d4 + 2] = base[2] * dif * (1 - e) + env[t * 3 + 2] * e + 255 * spec;
+        const al = AL[o]; if (al < 1) { D[d4] = bg[0] + (D[d4] - bg[0]) * al; D[d4 + 1] = bg[1] + (D[d4 + 1] - bg[1]) * al; D[d4 + 2] = bg[2] + (D[d4 + 2] - bg[2]) * al; }
+        D[d4 + 3] = 255;
+      }
+      bx.putImageData(img, 0, 0);
+      return buf;
+    }
+
+    app.loop((tt, dt) => {
+      const { w, h, dpr } = app.size;
+      dt = Math.min(1 / 30, dt || 0);
+      build();
+      if (app.thumbnail) { if (!frozen) { for (let i = 0; i < 60 * 4; i++) step(1 / 60); frozen = true; } }
+      else step(dt);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high';
+      ctx.drawImage(render(), 0, 0, w, h);
+      app.finish(ctx);
+    });
+
+    // SVG : contour de la flaque (marching squares du tampon) et pointes en disques ombrés
+    function toSVG() {
+      const { w, h } = app.size, q = buf ? buf.width / w : 0.4, bw = buf.width, bh = buf.height, f = (v) => v.toFixed(1), out = [];
+      const at = (i, j) => (i < 0 || j < 0 || i >= bw || j >= bh) ? 0 : (Hh[j * bw + i] >= 0 ? 1 : 0);
+      const segs = [];
+      for (let j = -1; j < bh; j++) for (let i = -1; i < bw; i++) {
+        const c = at(i, j) * 8 + at(i + 1, j) * 4 + at(i + 1, j + 1) * 2 + at(i, j + 1);
+        if (c === 0 || c === 15) continue;
+        const T = [i + 1, j + 0.5], R = [i + 1.5, j + 1], B = [i + 1, j + 1.5], L = [i + 0.5, j + 1];
+        const S2 = (a, b) => segs.push([a[0] / q, a[1] / q, b[0] / q, b[1] / q]);
+        ({ 1: () => S2(B, L), 2: () => S2(R, B), 3: () => S2(R, L), 4: () => S2(T, R), 5: () => { S2(T, L); S2(B, R); }, 6: () => S2(T, B), 7: () => S2(T, L), 8: () => S2(L, T), 9: () => S2(B, T), 10: () => { S2(L, B); S2(R, T); }, 11: () => S2(R, T), 12: () => S2(L, R), 13: () => S2(B, R), 14: () => S2(L, B) })[c]();
+      }
+      const d = segs.map((s) => `M${f(s[0])} ${f(s[1])}L${f(s[2])} ${f(s[3])}`).join('');
+      const env = p.reflets.length ? p.reflets : ['#ffffff'];
+      const defs = `<linearGradient id="env" x1="0" y1="1" x2="1" y2="0">${env.map((c, i) => `<stop offset="${env.length > 1 ? i / (env.length - 1) : 0}" stop-color="${c}"/>`).join('')}</linearGradient><radialGradient id="sp" cx="0.38" cy="0.32" r="0.7"><stop offset="0" stop-color="#fff"/><stop offset="0.12" stop-color="#fff" stop-opacity="0.9"/><stop offset="0.35" stop-color="${env[0]}" stop-opacity="0.5"/><stop offset="0.6" stop-color="${p.fluide}"/><stop offset="1" stop-color="${p.fluide}"/></radialGradient>`;
+      out.push(`<rect width="100%" height="100%" fill="${p.fond}"/>`);
+      out.push(`<path d="${d}" fill="none" stroke="${p.fluide}" stroke-width="${f(2 / q)}" stroke-linecap="round"/>`);
+      // remplissage : pixels de la flaque regroupés par lignes
+      let fill = '';
+      for (let j = 0; j < bh; j++) { let s = -1; for (let i = 0; i <= bw; i++) { const on = i < bw && Hh[j * bw + i] >= 0; if (on && s < 0) s = i; if (!on && s >= 0) { fill += `M${f(s / q)} ${f(j / q)}h${f((i - s) / q)}v${f(1 / q + 0.4)}h${f(-(i - s) / q)}Z`; s = -1; } } }
+      out.push(`<path d="${fill}" fill="${p.fluide}"/>`);
+      // pointes : maxima locaux du relief
+      const a = Math.min(w, h) * p.espacement;
+      for (let j = 1; j < bh - 1; j++) for (let i = 1; i < bw - 1; i++) {
+        const o = j * bw + i, v = Hh[o]; if (v < a * 0.45 * q) continue;
+        if (v >= Hh[o - 1] && v > Hh[o + 1] && v >= Hh[o - bw] && v > Hh[o + bw] && v >= Hh[o - bw - 1] && v > Hh[o + bw + 1]) out.push(`<circle cx="${f(i / q)}" cy="${f(j / q)}" r="${f(a * (0.42 + 0.1 * p.finesse))}" fill="url(#sp)"/>`);
+      }
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">\n<defs>${defs}</defs>\n${out.join('\n')}\n</svg>`;
+    }
+  </script>
+</body>
+</html>

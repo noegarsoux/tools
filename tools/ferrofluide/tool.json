@@ -1,0 +1,15 @@
+{
+  "slug": "ferrofluide",
+  "title": "Ferrofluide",
+  "type": "motion",
+  "description": "Une flaque de ferrofluide vue de dessus qui suit l'aimant et se hérisse de pointes en nid d'abeilles, noire et brillante, avec reflets de marque.",
+  "tags": ["ferrofluide", "magnetisme", "relief", "brillance", "logo", "svg"],
+  "inspiration": [
+    "Instabilité de Rosensweig (pointes des ferrofluides)",
+    "Sachiko Kodama, sculptures de ferrofluide",
+    "Palettes biennale, kegelbahn, good-room, thermique"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
