@@ -1,0 +1,15 @@
+{
+  "slug": "marbre",
+  "title": "Marbre",
+  "type": "webgl",
+  "description": "Du domain warping à deux niveaux coloré par un dégradé de marque : lavis, veines de marbre ou aplats qui coulent, et remous laissés au pointeur.",
+  "tags": ["marbre", "domain-warping", "bruit", "shader", "degrade", "logo"],
+  "inspiration": [
+    "Inigo Quilez, Domain Warping (warp à deux niveaux)",
+    "references/shaders.md : warp(p, k)",
+    "Papiers marbrés ; palettes luzern, kegelbahn, menthe, biennale, acide, thermique, eventail"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
