@@ -1,0 +1,416 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Stippling Voronoï</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Stippling Voronoï : une image (logo, photo ou formes en mouvement) rendue en points, par relaxation
+    // de Lloyd pondérée (Adrian Secord, 2002). À chaque image, chaque point glisse vers le centre de gravité
+    // de sa cellule de Voronoï, pondéré par la densité : les points se répartissent régulièrement tout en
+    // suivant les tons. Les cellules sont calculées sur une trame réduite, avec une grille de voisinage.
+    // Les points qui n'ont plus rien à porter sont replacés par tirage selon la densité : ils affluent.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const P60 = PAL('papier-60'), NUIT = PAL('trame-nuit'), BIEN = PAL('biennale'), KB = PAL('kegelbahn');
+    const MENTHE = PAL('menthe'), ACIDE = PAL('acide'), LU = PAL('luzern'), ORB = PAL('orbite'), PHOTO = PAL('photocopie');
+
+    let ready = false, pts = null, N = 0, RW = 0, RH = 0, dens = null, cdf = null, mass = null, avg = null, area = null;
+    let srcDirty = true, srcStatic = null, paint = null, hover = null, tour = null, tourAge = 1e9, lastT = 0, rnd = Math.random;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.04, vignette: 0 },
+      hint: 'Survol : les points affluent vers le pointeur · glissez pour peindre de la densité · molette : nombre de points',
+      notes: 'Chaque point glisse vers le centre de gravité de sa cellule de Voronoï, pondéré par l’image : les points se répartissent régulièrement en suivant les tons. Les points sans rien à porter renaissent là où l’image est dense.',
+      params: {
+        'Source': {
+          source: { type: 'segmented', label: 'Image', options: { formes: 'Formes', logo: 'Logo', image: 'Image', ondes: 'Ondes' }, value: 'formes' },
+          image: { type: 'file', label: 'Logo ou image', accept: 'image/*', show: (q) => q.source === 'logo' || q.source === 'image' },
+          contraste: { type: 'range', label: 'Contraste', min: 0.3, max: 4, step: 0.01, value: 1.6 },
+          inverser: { type: 'toggle', label: 'Inverser les tons', value: false },
+          plancher: { type: 'range', label: 'Densité minimale', min: 0, max: 0.3, step: 0.005, value: 0.01 },
+          mouvement: { type: 'range', label: 'Mouvement de l’image', min: 0, max: 1, step: 0.01, value: 0.5 },
+        },
+        'Points': {
+          nombre: { type: 'range', label: 'Nombre de points', min: 200, max: 12000, step: 50, value: 4000 },
+          taille: { type: 'range', label: 'Taille', min: 0.2, max: 2.5, step: 0.01, value: 1 },
+          modulation: { type: 'range', label: 'Taille selon la densité', min: 0, max: 1, step: 0.01, value: 0.55 },
+          relaxation: { type: 'range', label: 'Relaxation', min: 0.05, max: 1, step: 0.01, value: 0.5 },
+          rendu: { type: 'segmented', label: 'Rendu', options: { points: 'Points', carres: 'Carrés', traits: 'Traits', trace: 'Tracé continu' }, value: 'points' },
+        },
+        'Couleur': {
+          fond: { type: 'color', label: 'Fond', value: P60[0] },
+          encre: { type: 'color', label: 'Encre', value: P60[1] },
+          accent: { type: 'color', label: 'Accent (zones les plus denses)', value: '#e5452a' },
+          accents: { type: 'range', label: 'Part de l’accent', min: 0, max: 1, step: 0.01, value: 0 },
+        },
+      },
+      presets: {
+        'Formes': {},
+        'Logo': { source: 'logo', nombre: 3500, contraste: 2.2, plancher: 0, taille: 0.8, modulation: 0.35, mouvement: 0.3 },
+        'Tracé continu': { rendu: 'trace', nombre: 2500, taille: 0.7, fond: BIEN[0], encre: BIEN[1], modulation: 0 },
+        'Nuit': { fond: NUIT[0], encre: NUIT[1], nombre: 7000, taille: 0.7, inverser: false, contraste: 1.2, accent: NUIT[2], accents: 0 },
+        'Ondes': { source: 'ondes', nombre: 5000, taille: 1, modulation: 0.8, fond: MENTHE[0], encre: MENTHE[1], accent: MENTHE[3], accents: 0.25 },
+        'Carrés': { rendu: 'carres', nombre: 2200, taille: 1.3, modulation: 0.8, fond: ACIDE[2], encre: ACIDE[1] },
+        'Traits': { rendu: 'traits', nombre: 3500, taille: 1.1, fond: LU[4], encre: LU[1], accent: LU[0], accents: 0.3 },
+        'Kegelbahn': { fond: KB[0], encre: KB[1], accent: KB[3], accents: 0.35, nombre: 5000, contraste: 2, source: 'ondes' },
+        'Orbite': { fond: ORB[0], encre: ORB[1], accent: ORB[2], accents: 0.2, nombre: 3000, taille: 1.4, modulation: 0.9 },
+        'Photocopie': { fond: PHOTO[0], encre: PHOTO[1], nombre: 10000, taille: 0.55, modulation: 0.2, contraste: 2.5 },
+      },
+      brand(colors) {
+        return { fond: colors[0], encre: colors[1] || colors[0], accent: colors[2] || colors[1] || colors[0] };
+      },
+      pointer: {
+        move: (q) => { hover = { x: q.x, y: q.y }; },
+        down: (q) => { brush(q.x, q.y); },
+        drag: (q) => { brush(q.x, q.y); hover = { x: q.x, y: q.y }; },
+        wheel: (q, dy) => app.set('nombre', Math.max(200, Math.min(12000, Math.round((p.nombre - dy * 4) / 50) * 50))),
+      },
+      onChange(k) {
+        if (!ready) return;
+        if (k === '*' || k === 'source' || k === 'image' || k === '_logo') { srcDirty = true; if (k === '*' || k === 'source') paint = null; }
+        if (k === 'nombre') resize();
+        if (k === 'rendu') tourAge = 1e9;
+      },
+      onSeed() { if (ready) { pts = null; blobs.length = 0; } },
+      export: { name: 'stippling-voronoi', svg: () => toSVG() },
+    });
+    const p = app.params;
+    canvas.addEventListener('pointerleave', () => { hover = null; });
+
+    // ——— Trame de densité ———
+    function grid() {
+      const { w, h } = app.size, k = Math.min(1, 520 / Math.max(w, h));
+      return [Math.max(32, Math.round(w * k)), Math.max(32, Math.round(h * k))];
+    }
+    // Image ou logo : luminance à la taille de la trame (1 = encre).
+    function loadStatic() {
+      srcStatic = null;
+      const img = p.source === 'logo' ? (p.image || app.logoImg) : p.source === 'image' ? p.image : null;
+      const cv = document.createElement('canvas'); cv.width = RW; cv.height = RH;
+      const x = cv.getContext('2d', { willReadFrequently: true });
+      x.fillStyle = '#fff'; x.fillRect(0, 0, RW, RH);
+      if (img) {
+        const iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height;
+        // Logo : contenu, centré ; image : en couverture.
+        const k = p.source === 'logo' ? Math.min(RW, RH) * 0.78 / Math.max(iw, ih) : Math.max(RW / iw, RH / ih);
+        x.drawImage(img, (RW - iw * k) / 2, (RH - ih * k) / 2, iw * k, ih * k);
+      } else if (p.source === 'logo') {
+        // Sans logo : un disque percé d'un anneau, la marque par défaut de l'atelier.
+        const c = Math.min(RW, RH) * 0.39;
+        x.fillStyle = '#000'; x.beginPath(); x.arc(RW / 2, RH / 2, c, 0, TAU); x.fill();
+        x.fillStyle = '#fff'; x.beginPath(); x.arc(RW / 2, RH / 2, c * 0.72, 0, TAU); x.arc(RW / 2, RH / 2, c * 0.58, 0, TAU, true); x.fill();
+      } else {
+        // Image demandée mais absente : un dégradé en losange, pour garder une image lisible.
+        const g = x.createLinearGradient(0, 0, RW, RH); g.addColorStop(0, '#fff'); g.addColorStop(1, '#000');
+        x.fillStyle = g; x.fillRect(0, 0, RW, RH);
+      }
+      const d = x.getImageData(0, 0, RW, RH).data;
+      srcStatic = new Float32Array(RW * RH);
+      for (let i = 0; i < srcStatic.length; i++) srcStatic[i] = 1 - (d[i * 4] * 0.2126 + d[i * 4 + 1] * 0.7152 + d[i * 4 + 2] * 0.0722) / 255;
+      srcDirty = false;
+    }
+    // Formes : des taches douces qui dérivent ; ondes : des anneaux concentriques qui se croisent.
+    const blobs = [];
+    function makeBlobs() {
+      const r = app.rng(11); blobs.length = 0;
+      // Quelques grandes masses, des petites taches et des trous : une image à plusieurs échelles.
+      for (let i = 0; i < 9; i++) blobs.push({ x: 0.08 + r() * 0.84, y: 0.1 + r() * 0.8, s: i < 3 ? 0.14 + r() * 0.1 : 0.04 + r() * 0.07, ph: r() * TAU, f: 0.5 + r(), w: i % 4 === 3 ? -0.7 : i < 3 ? 0.55 : 0.75 });
+    }
+    function field(t) {
+      const n = RW * RH, U = Math.min(RW, RH), m = p.mouvement;
+      if (!dens || dens.length !== n) { dens = new Float32Array(n); mass = null; }
+      if ((p.source === 'logo' || p.source === 'image') && (srcDirty || !srcStatic || srcStatic.length !== n)) loadStatic();
+      if (p.source === 'formes') {
+        if (!blobs.length) makeBlobs();
+        const B = blobs.map((b) => ({
+          x: (b.x + Math.cos(t * 0.3 * b.f * m + b.ph) * 0.12 * m) * RW, y: (b.y + Math.sin(t * 0.23 * b.f * m + b.ph) * 0.12 * m) * RH,
+          s2: Math.pow(b.s * U * (1 + 0.25 * m * Math.sin(t * 0.5 + b.ph)), 2), w: b.w,
+        }));
+        for (let j = 0; j < RH; j++) for (let i = 0; i < RW; i++) {
+          let v = 0;
+          for (const b of B) { const dx = i - b.x, dy = j - b.y; v += b.w * Math.exp(-(dx * dx + dy * dy) / (2 * b.s2)); }
+          dens[j * RW + i] = Math.max(0, Math.min(1, v));
+        }
+      } else if (p.source === 'ondes') {
+        const cs = [[0.3, 0.4], [0.72, 0.62], [0.55, 0.2]];
+        for (let j = 0; j < RH; j++) for (let i = 0; i < RW; i++) {
+          let v = 0;
+          for (let c = 0; c < 3; c++) {
+            const dx = i - cs[c][0] * RW, dy = j - cs[c][1] * RH, d = Math.sqrt(dx * dx + dy * dy) / U;
+            v += Math.cos(d * 24 - t * 1.6 * m - c * 2) * Math.exp(-d * 1.2);
+          }
+          dens[j * RW + i] = 0.5 + 0.35 * v;
+        }
+      } else {
+        // Logo / image : légère respiration pour que les points ne se figent pas.
+        const br = 1 + 0.12 * m * Math.sin(t * 0.8);
+        for (let i = 0; i < n; i++) dens[i] = srcStatic[i] * br;
+      }
+      // Tons : inversion, contraste, plancher, peinture et pointeur.
+      const g = p.contraste, fl = p.plancher;
+      let hx = -1, hy = -1, hr = 0;
+      if (hover) { hx = hover.x / app.size.w * RW; hy = hover.y / app.size.h * RH; hr = U * 0.09; }
+      for (let j = 0; j < RH; j++) for (let i = 0; i < RW; i++) {
+        const k = j * RW + i;
+        let v = Math.max(0, Math.min(1, dens[k]));
+        if (p.inverser) v = 1 - v;
+        v = Math.pow(v, g);
+        if (paint) v = Math.min(1, v + paint[k]);
+        if (hr) { const dx = i - hx, dy = j - hy; v = Math.min(1, v + 0.9 * Math.exp(-(dx * dx + dy * dy) / (hr * hr))); }
+        dens[k] = fl + (1 - fl) * v;
+      }
+    }
+    function brush(x, y) {
+      if (!RW) return;
+      if (!paint || paint.length !== RW * RH) paint = new Float32Array(RW * RH);
+      const cx = x / app.size.w * RW, cy = y / app.size.h * RH, r = Math.min(RW, RH) * 0.05;
+      for (let j = Math.max(0, Math.floor(cy - r * 2)); j < Math.min(RH, cy + r * 2); j++)
+        for (let i = Math.max(0, Math.floor(cx - r * 2)); i < Math.min(RW, cx + r * 2); i++) {
+          const dx = i - cx, dy = j - cy;
+          paint[j * RW + i] = Math.min(1, paint[j * RW + i] + 0.35 * Math.exp(-(dx * dx + dy * dy) / (r * r)));
+        }
+    }
+
+    // ——— Points ———
+    function buildCDF() {
+      const n = RW * RH;
+      if (!cdf || cdf.length !== n) cdf = new Float64Array(n);
+      let s = 0;
+      for (let i = 0; i < n; i++) { s += dens[i]; cdf[i] = s; }
+      return s;
+    }
+    function sample(total) {
+      // Tirage selon la densité (recherche dichotomique dans la fonction de répartition).
+      const u = rnd() * total;
+      let lo = 0, hi = cdf.length - 1;
+      while (lo < hi) { const m = (lo + hi) >> 1; if (cdf[m] < u) lo = m + 1; else hi = m; }
+      return [lo % RW + rnd(), Math.floor(lo / RW) + rnd()];
+    }
+    function seedPoints() {
+      rnd = app.rng(5);
+      N = p.nombre; pts = new Float32Array(N * 2);
+      const tot = buildCDF();
+      for (let i = 0; i < N; i++) { const s = sample(tot); pts[i * 2] = s[0]; pts[i * 2 + 1] = s[1]; }
+      tourAge = 1e9;
+    }
+    function resize() {
+      if (!pts) return;
+      const n = p.nombre, np = new Float32Array(n * 2), tot = buildCDF();
+      for (let i = 0; i < n; i++) {
+        if (i < N) { np[i * 2] = pts[i * 2]; np[i * 2 + 1] = pts[i * 2 + 1]; }
+        else { const s = sample(tot); np[i * 2] = s[0]; np[i * 2 + 1] = s[1]; }
+      }
+      pts = np; N = n; tourAge = 1e9;
+    }
+
+    // Une itération de Lloyd pondérée : chaque pixel de la trame va au point le plus proche
+    // (grille de voisinage, recherche en anneaux), qui accumule son centre de gravité.
+    let cellHead = null, cellNext = null;
+    function lloyd() {
+      const cs = Math.max(1, Math.sqrt(RW * RH / N) * 1.2), gw = Math.ceil(RW / cs) + 1, gh = Math.ceil(RH / cs) + 1;
+      if (!cellHead || cellHead.length !== gw * gh) cellHead = new Int32Array(gw * gh);
+      cellHead.fill(-1);
+      if (!cellNext || cellNext.length !== N) cellNext = new Int32Array(N);
+      for (let i = 0; i < N; i++) {
+        const gx = Math.min(gw - 1, Math.max(0, (pts[i * 2] / cs) | 0)), gy = Math.min(gh - 1, Math.max(0, (pts[i * 2 + 1] / cs) | 0)), c = gy * gw + gx;
+        cellNext[i] = cellHead[c]; cellHead[c] = i;
+      }
+      const sx = new Float64Array(N), sy = new Float64Array(N), sw = new Float64Array(N), sc = new Float64Array(N), sm = new Float64Array(N);
+      for (let j = 0; j < RH; j++) {
+        const py = j + 0.5, gy = Math.min(gh - 1, (py / cs) | 0);
+        for (let i = 0; i < RW; i++) {
+          const px = i + 0.5, gx = Math.min(gw - 1, (px / cs) | 0);
+          let best = -1, bd = 1e18;
+          for (let r = 0; r < 64; r++) {
+            const y0 = gy - r, y1 = gy + r, x0 = gx - r, x1 = gx + r;
+            for (let yy = y0; yy <= y1; yy++) {
+              if (yy < 0 || yy >= gh) continue;
+              const edge = yy === y0 || yy === y1;
+              for (let xx = x0; xx <= x1; xx += (edge ? 1 : x1 - x0 || 1)) {
+                if (xx < 0 || xx >= gw) continue;
+                for (let q = cellHead[yy * gw + xx]; q >= 0; q = cellNext[q]) {
+                  const dx = pts[q * 2] - px, dy = pts[q * 2 + 1] - py, d = dx * dx + dy * dy;
+                  if (d < bd) { bd = d; best = q; }
+                }
+              }
+            }
+            // Au-delà de cet anneau, aucun point ne peut être plus proche.
+            if (best >= 0 && bd <= (r * cs) * (r * cs)) break;
+          }
+          if (best < 0) continue;
+          const w = dens[j * RW + i];
+          sx[best] += px * w; sy[best] += py * w; sw[best] += w; sc[best] += 1; if (w > sm[best]) sm[best] = w;
+        }
+      }
+      // Déplacement vers le centre de gravité ; les points sans masse renaissent ailleurs.
+      const rl = p.relaxation, tot = buildCDF();
+      if (!avg || avg.length !== N) { avg = new Float32Array(N).fill(0.5); area = new Float32Array(N).fill(RW * RH / N); }
+      let reborn = 0;
+      for (let i = 0; i < N; i++) {
+        if (sw[i] > 1e-6) {
+          pts[i * 2] += (sx[i] / sw[i] - pts[i * 2]) * rl;
+          pts[i * 2 + 1] += (sy[i] / sw[i] - pts[i * 2 + 1]) * rl;
+          avg[i] = sw[i] / Math.max(1, sc[i]);
+          // Aire utile : la masse rapportée au pic local (un point en bord de forme n'enfle pas).
+          area[i] += (sw[i] / Math.max(1e-6, sm[i]) - area[i]) * 0.5;
+        }
+        if ((sw[i] < 0.02 * (RW * RH / N) * (tot / (RW * RH)) || sc[i] === 0) && reborn < N * 0.02) {
+          const s = sample(tot); pts[i * 2] = s[0]; pts[i * 2 + 1] = s[1]; avg[i] = 0.3; reborn++;
+        }
+      }
+    }
+
+    // Tracé continu : plus proche voisin glouton, recalculé régulièrement.
+    function buildTour() {
+      const cs = Math.max(1, Math.sqrt(RW * RH / N) * 1.5), gw = Math.ceil(RW / cs) + 1, gh = Math.ceil(RH / cs) + 1;
+      const cells = Array.from({ length: gw * gh }, () => []);
+      for (let i = 0; i < N; i++) cells[Math.min(gh - 1, (pts[i * 2 + 1] / cs) | 0) * gw + Math.min(gw - 1, (pts[i * 2] / cs) | 0)].push(i);
+      const used = new Uint8Array(N), order = new Int32Array(N);
+      let cur = 0; used[0] = 1; order[0] = 0;
+      for (let k = 1; k < N; k++) {
+        const x = pts[cur * 2], y = pts[cur * 2 + 1], gx = Math.min(gw - 1, (x / cs) | 0), gy = Math.min(gh - 1, (y / cs) | 0);
+        let best = -1, bd = 1e18;
+        for (let r = 0; r < Math.max(gw, gh); r++) {
+          for (let yy = gy - r; yy <= gy + r; yy++) {
+            if (yy < 0 || yy >= gh) continue;
+            const edge = yy === gy - r || yy === gy + r;
+            for (let xx = gx - r; xx <= gx + r; xx += (edge ? 1 : 2 * r || 1)) {
+              if (xx < 0 || xx >= gw) continue;
+              const c = cells[yy * gw + xx];
+              for (let m = c.length - 1; m >= 0; m--) {
+                const q = c[m];
+                if (used[q]) { c[m] = c[c.length - 1]; c.pop(); continue; }
+                const dx = pts[q * 2] - x, dy = pts[q * 2 + 1] - y, d = dx * dx + dy * dy;
+                if (d < bd) { bd = d; best = q; }
+              }
+            }
+          }
+          if (best >= 0 && bd <= (r * cs) * (r * cs)) break;
+        }
+        if (best < 0) break;
+        used[best] = 1; order[k] = best; cur = best;
+      }
+      tour = order; tourAge = 0;
+    }
+
+    // ——— Dessin ———
+    const hex = (h) => { const n = parseInt(String(h).slice(1, 7), 16) || 0; return [n >> 16 & 255, n >> 8 & 255, n & 255]; };
+    // Taille : une part de la cellule réelle du point (jamais de chevauchement massif dans les zones denses),
+    // modulée par la densité : le ton vient du nombre de points et de leur taille.
+    function dotSize(i) {
+      const { w, h } = app.size, a = avg ? Math.min(1, avg[i]) : 0.5;
+      const cell = Math.sqrt((area ? area[i] : RW * RH / N) * (w / RW) * (h / RH));
+      const glob = Math.sqrt(w * h / N);
+      return Math.min(cell, glob * 1.4) * 0.48 * p.taille * (1 - p.modulation + p.modulation * Math.sqrt(a));
+    }
+    function isAccent(i) { return p.accents > 0 && avg && avg[i] > 1 - p.accents * 0.6 && ((i * 2654435761) >>> 0) % 100 < 100 * p.accents; }
+    function shapes(emit) {
+      const { w, h } = app.size, kx = w / RW, ky = h / RH;
+      for (let i = 0; i < N; i++) {
+        const x = pts[i * 2] * kx, y = pts[i * 2 + 1] * ky, r = dotSize(i);
+        if (r < 0.05) continue;
+        emit(i, x, y, r);
+      }
+    }
+    function gradAt(i) {
+      // Direction des traits : perpendiculaire au gradient de densité (les traits suivent les contours).
+      const x = Math.min(RW - 2, Math.max(1, pts[i * 2] | 0)), y = Math.min(RH - 2, Math.max(1, pts[i * 2 + 1] | 0)), k = y * RW + x;
+      return Math.atan2(dens[k + RW] - dens[k - RW], dens[k + 1] - dens[k - 1]) + Math.PI / 2;
+    }
+    function draw() {
+      const { w, h, dpr } = app.size;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = p.fond; ctx.fillRect(0, 0, w, h);
+      if (p.rendu === 'trace') {
+        if (!tour || tour.length !== N) return;
+        const kx = w / RW, ky = h / RH;
+        ctx.strokeStyle = p.encre; ctx.lineWidth = Math.max(0.4, Math.sqrt(w * h / N) * 0.12 * p.taille); ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+        ctx.beginPath();
+        // Les longs sauts du plus proche voisin glouton sont levés : le trait reprend plus loin.
+        const jump = Math.pow(Math.sqrt(w * h / N) * 3.2, 2);
+        let px = 0, py = 0;
+        for (let k = 0; k < N; k++) {
+          const i = tour[k], x = pts[i * 2] * kx, y = pts[i * 2 + 1] * ky;
+          if (k && (x - px) * (x - px) + (y - py) * (y - py) < jump) ctx.lineTo(x, y); else ctx.moveTo(x, y);
+          px = x; py = y;
+        }
+        ctx.stroke();
+        return;
+      }
+      for (const pass of [0, 1]) {
+        ctx.fillStyle = pass ? p.accent : p.encre; ctx.strokeStyle = ctx.fillStyle;
+        const path = new Path2D();
+        shapes((i, x, y, r) => {
+          if (isAccent(i) !== !!pass) return;
+          if (p.rendu === 'points') { path.moveTo(x + r, y); path.arc(x, y, r, 0, TAU); }
+          else if (p.rendu === 'carres') { const s = r * 1.7; path.rect(x - s / 2, y - s / 2, s, s); }
+          else { const a = gradAt(i), L = r * 2.4, c = Math.cos(a) * L, s = Math.sin(a) * L; path.moveTo(x - c, y - s); path.lineTo(x + c, y + s); }
+        });
+        if (p.rendu === 'traits') { ctx.lineWidth = Math.max(0.5, Math.sqrt(w * h / N) * 0.16 * p.taille); ctx.lineCap = 'round'; ctx.stroke(path); }
+        else ctx.fill(path);
+      }
+    }
+
+    function toSVG() {
+      const { w, h } = app.size, f = (v) => v.toFixed(1);
+      const body = [];
+      if (p.rendu === 'trace' && tour) {
+        const kx = w / RW, ky = h / RH;
+        let d = '', px = 0, py = 0;
+        const jump = Math.pow(Math.sqrt(w * h / N) * 3.2, 2);
+        for (let k = 0; k < N; k++) {
+          const i = tour[k], x = pts[i * 2] * kx, y = pts[i * 2 + 1] * ky;
+          d += (k && (x - px) * (x - px) + (y - py) * (y - py) < jump ? 'L' : 'M') + f(x) + ' ' + f(y);
+          px = x; py = y;
+        }
+        body.push(`<path d="${d}" fill="none" stroke="${p.encre}" stroke-width="${Math.max(0.4, Math.sqrt(w * h / N) * 0.12 * p.taille).toFixed(2)}" stroke-linejoin="round" stroke-linecap="round"/>`);
+      } else {
+        for (const pass of [0, 1]) {
+          let d = '';
+          const col = pass ? p.accent : p.encre;
+          shapes((i, x, y, r) => {
+            if (isAccent(i) !== !!pass) return;
+            if (p.rendu === 'points') d += `M${f(x - r)} ${f(y)}a${f(r)} ${f(r)} 0 1 0 ${f(2 * r)} 0a${f(r)} ${f(r)} 0 1 0 ${f(-2 * r)} 0`;
+            else if (p.rendu === 'carres') { const s = r * 1.7; d += `M${f(x - s / 2)} ${f(y - s / 2)}h${f(s)}v${f(s)}h${f(-s)}z`; }
+            else { const a = gradAt(i), L = r * 2.4, c = Math.cos(a) * L, s = Math.sin(a) * L; d += `M${f(x - c)} ${f(y - s)}L${f(x + c)} ${f(y + s)}`; }
+          });
+          if (!d) continue;
+          body.push(p.rendu === 'traits'
+            ? `<path d="${d}" fill="none" stroke="${col}" stroke-width="${Math.max(0.5, Math.sqrt(w * h / N) * 0.16 * p.taille).toFixed(2)}" stroke-linecap="round"/>`
+            : `<path d="${d}" fill="${col}"/>`);
+        }
+      }
+      return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}"><rect width="100%" height="100%" fill="${p.fond}"/>${body.join('')}</svg>`;
+    }
+
+    function render(t, dt) {
+      const [gw, gh] = grid();
+      if (gw !== RW || gh !== RH) {
+        // La trame suit le cadre : les points sont remis à l'échelle.
+        if (pts && RW) for (let i = 0; i < N; i++) { pts[i * 2] *= gw / RW; pts[i * 2 + 1] *= gh / RH; }
+        RW = gw; RH = gh; srcDirty = true; paint = null; tourAge = 1e9;
+      }
+      field(t);
+      if (!pts) { seedPoints(); for (let i = 0; i < 12; i++) lloyd(); }
+      if (dt > 0) lloyd();
+      if (p.rendu === 'trace' && (tourAge++ > 6 || !tour || tour.length !== N)) buildTour();
+      draw();
+      app.finish(ctx);
+    }
+
+    ready = true;
+    app.loop((t, dt) => { lastT = t; render(t, dt); });
+  </script>
+</body>
+</html>
