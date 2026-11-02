@@ -1,0 +1,14 @@
+{
+  "slug": "pyramides",
+  "title": "Pyramides",
+  "type": "pattern",
+  "description": "Des rangées d'ellipses colorées qui forment des pyramides en miroir : profil réglable, défilement vertical en boucle parfaite, respiration et gonflement au pointeur.",
+  "tags": ["ellipses", "pyramide", "rangees", "boucle", "motif", "svg"],
+  "inspiration": [
+    "Moodboard de Noé, fiche 15 — pyramides d'ellipses sur fond taupe, bandes au bord",
+    "Palettes pyramides, good-room, kegelbahn, salon, papier-60, bitmap, menthe, biennale"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}

@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pyramides</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Pyramides : des rangées d'ellipses dont le nombre suit un profil périodique (dents de scie,
+    // losange, sinus, marches). Les rangées défilent verticalement d'un cycle entier par boucle
+    // et respirent avec une onde qui parcourt la hauteur ; le pointeur fait gonfler les ellipses.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const PY = PAL('pyramides'), GOOD = PAL('good-room'), KB = PAL('kegelbahn'), SALON = PAL('salon'), P60 = PAL('papier-60');
+    const BIT = PAL('bitmap'), CODE = PAL('code'), MENTHE = PAL('menthe'), BIEN = PAL('biennale');
+
+    let lens = null, lensA = 0, scrollOff = 0, dragY = null;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: 15,
+      finish: true,
+      hint: 'Survolez pour gonfler les ellipses · glissez verticalement pour faire défiler',
+      notes: 'Le nombre d’ellipses de chaque rangée suit un profil périodique. Le défilement avance d’un nombre entier de cycles par boucle et la respiration bat un nombre entier de fois : la boucle est parfaite et s’exporte en vidéo sans raccord.',
+      params: {
+        'Structure': {
+          profil: { type: 'segmented', label: 'Profil', options: { scie: 'Dents de scie', losange: 'Losange', sinus: 'Sinus', marches: 'Marches' }, value: 'losange' },
+          periode: { type: 'range', label: 'Rangées par pente', min: 2, max: 40, step: 1, value: 9 },
+          min: { type: 'range', label: 'Ellipses au plus étroit', min: 1, max: 12, step: 1, value: 1 },
+          max: { type: 'range', label: 'Ellipses au plus large', min: 2, max: 40, step: 1, value: 9 },
+          colonnes: { type: 'range', label: 'Pyramides côte à côte', min: 1, max: 6, step: 1, value: 2 },
+          decalage: { type: 'range', label: 'Décalage entre pyramides', min: 0, max: 1, step: 0.01, value: 0.5 },
+          rangees: { type: 'range', label: 'Rangées visibles', min: 6, max: 90, step: 1, value: 26 },
+          largeur: { type: 'segmented', label: 'Largeur des ellipses', options: { fixe: 'Fixe (pyramide)', etiree: 'Étirée (rangée pleine)' }, value: 'fixe' },
+        },
+        'Ellipses': {
+          forme: { type: 'segmented', label: 'Forme', options: { ellipse: 'Ellipse', pilule: 'Pilule', losange: 'Losange', demi: 'Demi' }, value: 'ellipse' },
+          espace: { type: 'range', label: 'Espacement', min: 0, max: 0.6, step: 0.01, value: 0.08 },
+          contour: { type: 'range', label: 'Contour', min: 0, max: 6, step: 0.1, value: 0 },
+        },
+        'Mouvement': {
+          boucle: { type: 'range', label: 'Boucle (s)', min: 4, max: 60, step: 0.5, value: 16 },
+          defilement: { type: 'range', label: 'Cycles défilés par boucle', min: -3, max: 3, step: 1, value: 1 },
+          respiration: { type: 'range', label: 'Respiration', min: 0, max: 0.8, step: 0.01, value: 0.28 },
+          battements: { type: 'range', label: 'Battements par boucle', min: 1, max: 8, step: 1, value: 2 },
+          onde: { type: 'range', label: 'Ondes par cycle', min: 0, max: 4, step: 1, value: 1 },
+          loupe: { type: 'range', label: 'Gonflement au pointeur', min: 0, max: 1.5, step: 0.01, value: 0.7 },
+        },
+        'Couleur': {
+          fond: { type: 'color', label: 'Fond', value: PY[0] },
+          palette: { type: 'palette', label: 'Ellipses', value: PY.slice(1) },
+          repartition: { type: 'segmented', label: 'Répartition', options: { hasard: 'Hasard', rangee: 'Par rangée', colonne: 'Par colonne', miroir: 'Miroir' }, value: 'hasard' },
+          trait: { type: 'color', label: 'Contour', value: PY[6] },
+          bord: { type: 'range', label: 'Bandes au bord', min: 0, max: 0.25, step: 0.005, value: 0.04 },
+        },
+      },
+      presets: {
+        'Pyramides': {},
+        'Scie': { profil: 'scie', periode: 12, min: 1, max: 12, colonnes: 1, rangees: 36, espace: 0.12, repartition: 'rangee', defilement: -1, respiration: 0.18, bord: 0.06 },
+        'Good Room': { profil: 'sinus', periode: 10, min: 2, max: 14, colonnes: 3, decalage: 0.5, rangees: 30, forme: 'pilule', espace: 0.18, fond: GOOD[0], palette: GOOD.slice(1), repartition: 'miroir', bord: 0, respiration: 0.35 },
+        'Kegelbahn': { profil: 'marches', periode: 6, min: 2, max: 8, colonnes: 2, rangees: 18, largeur: 'etiree', forme: 'losange', espace: 0.04, fond: KB[0], palette: KB.slice(1), repartition: 'colonne', bord: 0.08, respiration: 0.2 },
+        'Salon': { profil: 'losange', periode: 5, min: 1, max: 5, colonnes: 4, decalage: 0, rangees: 20, forme: 'demi', espace: 0.06, fond: SALON[0], palette: SALON.slice(1), repartition: 'hasard', bord: 0, contour: 0, respiration: 0.4, battements: 3 },
+        'Papier': { profil: 'losange', periode: 14, min: 1, max: 15, colonnes: 1, rangees: 56, espace: 0.22, fond: P60[0], palette: [P60[1]], contour: 0, bord: 0.02, respiration: 0.5, onde: 2, trait: P60[1] },
+        'Bitmap': { profil: 'scie', periode: 7, min: 1, max: 7, colonnes: 3, decalage: 0.33, rangees: 28, largeur: 'etiree', forme: 'pilule', espace: 0.1, fond: BIT[0], palette: BIT.slice(1), repartition: 'rangee', contour: 1.6, trait: BIT[1], bord: 0.05 },
+        'Contours menthe': { profil: 'sinus', periode: 16, min: 1, max: 18, colonnes: 1, rangees: 44, espace: 0.02, fond: MENTHE[1], palette: [MENTHE[1]], contour: 1.4, trait: MENTHE[2], bord: 0, respiration: 0.3, onde: 2 },
+        'Biennale': { profil: 'losange', periode: 4, min: 1, max: 4, colonnes: 5, decalage: 0.5, rangees: 16, espace: 0.1, fond: BIEN[0], palette: BIEN.slice(1), repartition: 'miroir', bord: 0.03, respiration: 0.22, battements: 1 },
+      },
+      brand(colors) {
+        return { fond: colors[0], palette: colors.length > 1 ? colors.slice(1) : colors, trait: colors[1] || colors[0] };
+      },
+      pointer: {
+        move: (q) => { lens = { x: q.x, y: q.y }; },
+        down: (q) => { dragY = { y: q.y, s0: scrollOff }; lens = { x: q.x, y: q.y }; },
+        drag: (q) => { lens = { x: q.x, y: q.y }; if (dragY) scrollOff = dragY.s0 + (q.y - dragY.y) / Math.max(1, app.size.h / p.rangees); },
+        up: () => { dragY = null; },
+      },
+      onChange: (key) => { if (key === '*') scrollOff = 0; },
+      export: { name: 'pyramides', svg: () => exportSVG() },
+    });
+    const p = app.params;
+    canvas.addEventListener('pointerleave', () => { lens = null; });
+
+    // Profil sur une pente : renvoie une valeur dans [0, 1] pour la rangée r ; cycle = longueur en rangées.
+    function cycleLen() { return p.profil === 'scie' || p.profil === 'marches' ? p.periode : 2 * p.periode; }
+    function profile(r) {
+      const L = cycleLen(), x = ((r % L) + L) % L;
+      if (p.profil === 'scie') return p.periode > 1 ? x / (p.periode - 1) : 1;
+      if (p.profil === 'marches') { const steps = Math.max(2, Math.round(p.periode / 2)); return Math.floor(x / p.periode * steps) / (steps - 1); }
+      if (p.profil === 'sinus') return 0.5 - 0.5 * Math.cos(TAU * x / L);
+      const half = p.periode; return x <= half ? x / half : (L - x) / half; // losange
+    }
+    function countAt(r) { const lo = Math.min(p.min, p.max), hi = Math.max(p.min, p.max); return Math.max(1, Math.round(lo + (hi - lo) * profile(r))); }
+
+    // Couleur : tirage déterministe par (rangée dans le cycle, colonne, pyramide) pour que la boucle raccorde.
+    function hash(a, b, c) { let h = (a * 374761393 + b * 668265263 + c * 2147483647 + app.seed * 1442695041) | 0; h = Math.imul(h ^ (h >>> 13), 1274126177); return ((h ^ (h >>> 16)) >>> 0) / 4294967296; }
+    function colorOf(r, i, n, k) {
+      const pal = p.palette, L = cycleLen(), rr = ((r % L) + L) % L, m = pal.length;
+      if (p.repartition === 'rangee') return pal[rr % m];
+      if (p.repartition === 'colonne') return pal[(i + k) % m];
+      if (p.repartition === 'miroir') return pal[(Math.min(i, n - 1 - i) + rr) % m];
+      return pal[Math.floor(hash(rr, i, k) * m) % m];
+    }
+
+    function draw(t, sink) {
+      const { w, h } = app.size, L = cycleLen();
+      const rowH = h / p.rangees, ph = t / p.boucle;
+      const scroll = ph * L * p.defilement + scrollOff;
+      const fl = Math.floor(scroll), fr = scroll - fl;
+      const bw = p.bord * w, x0 = bw, x1 = w - bw, colW = (x1 - x0) / p.colonnes;
+      const maxN = Math.max(p.min, p.max), cellW = colW / maxN;
+      const lensR = Math.min(w, h) * 0.22;
+      // Bandes au bord : les couleurs de rangée défilent avec la grille.
+      for (let j = -1; j <= p.rangees + 1; j++) {
+        const r = j - fl, y = (j + fr) * rowH;
+        if (bw > 0) { const c = p.palette[(((r % L) + L) % L) % p.palette.length]; sink.rect(0, y, bw, rowH + 0.5, c); sink.rect(w - bw, y, bw, rowH + 0.5, c); }
+        for (let k = 0; k < p.colonnes; k++) {
+          // Décalage entre pyramides : les voisines sont déphasées d'une fraction du cycle.
+          const rk = r + Math.round(k * p.decalage * L), n = countAt(rk);
+          const cx = x0 + colW * (k + 0.5), cy = y + rowH / 2;
+          const ew = p.largeur === 'etiree' ? colW / n : cellW;
+          const breath = 1 + p.respiration * Math.sin(TAU * (ph * p.battements - rk / L * p.onde));
+          for (let i = 0; i < n; i++) {
+            const ex = cx + (i - (n - 1) / 2) * ew;
+            // La respiration s'arrête au contact des voisines ; seul le pointeur fait déborder.
+            let s = Math.min(breath, 1 / Math.max(0.05, 1 - p.espace));
+            if (lens && p.loupe > 0) { const d = Math.hypot(ex - lens.x, cy - lens.y) / lensR; if (d < 1) s *= 1 + p.loupe * lensA * (1 - d * d) ** 2; }
+            const rx = Math.max(0.3, ew * (1 - p.espace) / 2 * Math.min(s, 2.2)), ry = Math.max(0.3, rowH * (1 - p.espace) / 2 * Math.min(s, 2.2));
+            sink.shape(ex, cy, rx, ry, colorOf(rk, i, n, k));
+          }
+        }
+      }
+    }
+
+    const canvasSink = {
+      rect(x, y, ww, hh, c) { ctx.fillStyle = c; ctx.fillRect(x, y, ww, hh); },
+      shape(x, y, rx, ry, c) {
+        ctx.fillStyle = c; ctx.beginPath();
+        if (p.forme === 'losange') { ctx.moveTo(x, y - ry); ctx.lineTo(x + rx, y); ctx.lineTo(x, y + ry); ctx.lineTo(x - rx, y); ctx.closePath(); }
+        else if (p.forme === 'pilule') { const r = Math.min(rx, ry); ctx.roundRect(x - rx, y - ry, 2 * rx, 2 * ry, r); }
+        else if (p.forme === 'demi') { ctx.ellipse(x, y + ry, rx, 2 * ry, 0, Math.PI, TAU); ctx.closePath(); }
+        else ctx.ellipse(x, y, rx, ry, 0, 0, TAU);
+        ctx.fill();
+        if (p.contour > 0) { ctx.strokeStyle = p.trait; ctx.lineWidth = p.contour; ctx.stroke(); }
+      },
+    };
+
+    app.loop((t, dt) => {
+      const { w, h, dpr } = app.size;
+      lensA += ((lens ? 1 : 0) - lensA) * Math.min(1, (dt || 0.016) * 6);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = p.fond; ctx.fillRect(0, 0, w, h);
+      draw(t, canvasSink);
+      app.finish(ctx);
+    });
+
+    function exportSVG() {
+      const { w, h } = app.size, f = (v) => Math.round(v * 100) / 100;
+      const out = [`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}">`, `<rect width="${w}" height="${h}" fill="${p.fond}"/>`];
+      const st = p.contour > 0 ? ` stroke="${p.trait}" stroke-width="${f(p.contour)}"` : '';
+      draw(app.time, {
+        rect(x, y, ww, hh, c) { out.push(`<rect x="${f(x)}" y="${f(y)}" width="${f(ww)}" height="${f(hh)}" fill="${c}"/>`); },
+        shape(x, y, rx, ry, c) {
+          if (y + ry < -2 || y - ry > h + 2) return;
+          if (p.forme === 'losange') out.push(`<path d="M${f(x)} ${f(y - ry)}L${f(x + rx)} ${f(y)}L${f(x)} ${f(y + ry)}L${f(x - rx)} ${f(y)}Z" fill="${c}"${st}/>`);
+          else if (p.forme === 'pilule') out.push(`<rect x="${f(x - rx)}" y="${f(y - ry)}" width="${f(2 * rx)}" height="${f(2 * ry)}" rx="${f(Math.min(rx, ry))}" fill="${c}"${st}/>`);
+          else if (p.forme === 'demi') out.push(`<path d="M${f(x - rx)} ${f(y + ry)}A${f(rx)} ${f(2 * ry)} 0 0 1 ${f(x + rx)} ${f(y + ry)}Z" fill="${c}"${st}/>`);
+          else out.push(`<ellipse cx="${f(x)}" cy="${f(y)}" rx="${f(rx)}" ry="${f(ry)}" fill="${c}"${st}/>`);
+        },
+      });
+      out.push('</svg>');
+      return `${out[0]}\n<defs><clipPath id="cadre"><rect width="${w}" height="${h}"/></clipPath></defs>\n<g clip-path="url(#cadre)">\n${out.slice(1, -1).join('\n')}\n</g>\n</svg>`;
+    }
+  </script>
+</body>
+</html>
