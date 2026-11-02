@@ -1,0 +1,250 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Harmonie différentielle</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Harmonie différentielle (John Whitney) : le point de rang i tourne i fois plus vite que le
+    // premier. Toutes les vitesses sont des multiples d'une même base, donc le système se
+    // réaligne exactement à chaque cycle, en passant par des figures symétriques à chaque
+    // fraction simple du cycle (1/2, 1/3, 1/4…). Positions analytiques : traînes et export exacts.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const ACIDE = PAL('acide'), KB = PAL('kegelbahn'), ORB = PAL('orbite'), LUZ = PAL('luzern'), THERM = PAL('thermique');
+    const GLY = PAL('glyphes'), P60 = PAL('papier-60'), MENTHE = PAL('menthe'), GR = PAL('good-room'), BIEN = PAL('biennale');
+
+    let offset = 0, warp = 0, drag = null, hover = null;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.04, vignette: 0.2 },
+      hint: 'Glissez pour remonter le temps · touchez pour sauter au prochain réalignement · molette : nombre de points',
+      notes: 'Chaque point tourne à une vitesse proportionnelle à son rang. À la fin d’un cycle tout se réaligne ; aux fractions simples du cycle apparaissent des figures à 2, 3, 4… branches.',
+      params: {
+        'Système': {
+          points: { type: 'range', label: 'Points', min: 6, max: 240, step: 1, value: 96 },
+          figure: { type: 'select', label: 'Figure', options: { spirale: 'Spirale', cercle: 'Cercle', rosace: 'Rosace', lissajous: 'Lissajous', onde: 'Onde' }, value: 'spirale' },
+          harmonique: { type: 'range', label: 'Harmonique', min: 1, max: 9, step: 1, value: 3, show: (q) => q.figure === 'rosace' || q.figure === 'lissajous' },
+          dephasage: { type: 'range', label: 'Déphasage entre rangs', min: 0, max: 1, step: 0.005, value: 0 },
+          contresens: { type: 'toggle', label: 'Rangs impairs à contresens', value: false },
+          miroirs: { type: 'range', label: 'Miroirs', min: 1, max: 8, step: 1, value: 1 },
+          rayon: { type: 'range', label: 'Rayon', min: 0.1, max: 0.5, step: 0.005, value: 0.42 },
+        },
+        'Temps': {
+          cycle: { type: 'range', label: 'Durée d’un cycle (s)', min: 6, max: 240, step: 1, value: 90 },
+          traine: { type: 'range', label: 'Traîne', min: 0, max: 1, step: 0.01, value: 0.6 },
+        },
+        'Rendu': {
+          trace: { type: 'segmented', label: 'Points', options: { disques: 'Disques', anneaux: 'Anneaux', aucun: 'Aucun' }, value: 'disques' },
+          taille: { type: 'range', label: 'Taille des points', min: 0.5, max: 14, step: 0.1, value: 4.4 },
+          croissance: { type: 'range', label: 'Taille selon le rang', min: -1, max: 1, step: 0.01, value: 0.4 },
+          liaison: { type: 'segmented', label: 'Liaisons', options: { aucune: 'Aucune', chaine: 'Chaîne', rayons: 'Rayons', paires: 'Paires' }, value: 'aucune' },
+          epaisseur: { type: 'range', label: 'Épaisseur des traits', min: 0.25, max: 6, step: 0.05, value: 1.6 },
+          lueur: { type: 'toggle', label: 'Lueur additive', value: true },
+        },
+        'Couleur': {
+          fond: { type: 'color', label: 'Fond', value: '#0d0d0c' },
+          couleurs: { type: 'palette', label: 'Dégradé selon le rang', value: [ACIDE[2], ACIDE[3], '#e05527'] },
+          opacite: { type: 'range', label: 'Opacité', min: 0.1, max: 1, step: 0.01, value: 0.95 },
+        },
+      },
+      presets: {
+        'Spirale': {},
+        'Permutations': { lueur: false, figure: 'cercle', points: 48, liaison: 'chaine', trace: 'aucun', epaisseur: 0.8, traine: 0, cycle: 120, fond: P60[0], couleurs: [P60[1]], opacite: 0.85 },
+        'Rosace': { figure: 'rosace', harmonique: 3, contresens: true, points: 120, taille: 2.6, traine: 0.7, croissance: -0.3, fond: ORB[1], couleurs: [ORB[0], ORB[2]], lueur: true },
+        'Lissajous': { figure: 'lissajous', harmonique: 2, points: 90, taille: 2.6, traine: 0.5, fond: '#0b0d1c', couleurs: [THERM[2], THERM[3], THERM[5]], lueur: true, cycle: 150 },
+        'Onde': { lueur: false, figure: 'onde', points: 64, liaison: 'chaine', taille: 5, croissance: 0, traine: 0.25, fond: MENTHE[0], couleurs: [MENTHE[1], MENTHE[3]], epaisseur: 1.6, cycle: 60 },
+        'Kaléidoscope': { figure: 'rosace', harmonique: 5, miroirs: 6, points: 40, taille: 3, traine: 0.4, liaison: 'paires', epaisseur: 0.6, fond: KB[0], couleurs: [KB[1], KB[2], KB[3]], lueur: true, cycle: 100 },
+        'Rayons': { lueur: false, figure: 'spirale', points: 160, trace: 'anneaux', taille: 4, croissance: 0.8, liaison: 'rayons', epaisseur: 0.4, traine: 0, fond: LUZ[4], couleurs: [LUZ[1], LUZ[0], LUZ[3]], opacite: 0.8 },
+        'Contresens': { figure: 'spirale', contresens: true, points: 96, traine: 0.5, taille: 3.8, fond: GR[0], couleurs: [GR[1], GR[2], GR[3], GR[4]], lueur: true },
+        'Glyphes': { figure: 'cercle', points: 36, dephasage: 0.5, lueur: false, taille: 9, croissance: -0.6, liaison: 'chaine', epaisseur: 2.4, traine: 0.15, fond: GLY[1], couleurs: [GLY[2], GLY[3], GLY[4], GLY[5], GLY[6]], cycle: 45 },
+        'Biennale': { lueur: false, figure: 'spirale', points: 40, taille: 10, croissance: 0.5, traine: 0.1, liaison: 'chaine', epaisseur: 1, trace: 'disques', fond: BIEN[0], couleurs: [BIEN[2], BIEN[3], BIEN[4], BIEN[1]], cycle: 80, opacite: 1 },
+      },
+      brand(colors) {
+        const rest = colors.slice(1);
+        return { fond: colors[0], couleurs: (rest.length ? rest : ['#ffffff']).slice(0, 6) };
+      },
+      pointer: {
+        move: (q) => { hover = { x: q.x, y: q.y }; },
+        down: (q) => { drag = { x: q.x, start: offset, moved: false }; },
+        drag: (q) => {
+          if (!drag) return;
+          const dx = q.x - drag.x;
+          if (Math.abs(dx) > 6) drag.moved = true;
+          // Glisser : on fait défiler le temps (une largeur d'écran ≈ un cinquième de cycle).
+          if (drag.moved) offset = drag.start + dx / app.size.w * 0.2;
+        },
+        up: () => {
+          if (drag && !drag.moved) {
+            // Toucher : on file jusqu'au prochain réalignement (prochaine fraction 1/4 du cycle).
+            const ph = phase(app.time), next = Math.floor(ph * 4 + 1e-3) / 4 + 0.25;
+            warp = next - ph;
+          }
+          drag = null;
+        },
+        wheel: (q, dy) => app.set('points', Math.max(6, Math.min(240, Math.round(p.points - dy * 0.05)))),
+      },
+      onSeed() { offset = app.rng(7)(); },
+      export: { name: 'harmonie-differentielle', svg: () => toSVG() },
+    });
+    const p = app.params;
+    canvas.addEventListener('pointerleave', () => { if (!drag) hover = null; });
+    offset = app.rng(7)();
+
+    // ——— Couleurs : dégradé le long des rangs ———
+    function hex(c) {
+      let s = String(c || '#000').replace('#', '');
+      if (s.length === 3) s = s.split('').map((x) => x + x).join('');
+      const n = parseInt(s.slice(0, 6), 16) || 0;
+      return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+    }
+    function ramp(u) {
+      const P = (p.couleurs && p.couleurs.length ? p.couleurs : ['#ffffff']).map(hex);
+      if (P.length === 1) return P[0];
+      const x = Math.max(0, Math.min(1, u)) * (P.length - 1), i = Math.min(P.length - 2, Math.floor(x)), f = x - i;
+      return P[i].map((v, k) => Math.round(v + (P[i + 1][k] - v) * f));
+    }
+    const css = (c, a) => `rgba(${c[0]},${c[1]},${c[2]},${Math.round(a * 1000) / 1000})`;
+
+    // ——— Temps et positions ———
+    function phase(t) { return t / p.cycle + offset; }
+    // Position du point de rang i (1..N) à la phase ph, en unités du rayon (centre 0,0).
+    function pos(i, ph) {
+      const N = p.points, dir = p.contresens && i % 2 ? -1 : 1;
+      const a = dir * i * TAU * ph + i * p.dephasage * TAU / N - Math.PI / 2;
+      const u = i / N, k = p.harmonique;
+      switch (p.figure) {
+        case 'cercle': return [Math.cos(a), Math.sin(a)];
+        case 'rosace': {
+          // Le rayon pulse au rythme du rang inverse : chaque point trace sa propre rosace.
+          const rr = 0.15 + 0.85 * (Math.cos(k * (N + 1 - i) * TAU * ph) * 0.5 + 0.5);
+          return [Math.cos(a) * rr, Math.sin(a) * rr];
+        }
+        case 'lissajous': { const th = a + Math.PI / 2; return [Math.sin(th) * (0.3 + 0.7 * u), Math.sin(k * th + Math.PI / 4) * (0.3 + 0.7 * u)]; }
+        case 'onde': return [-1 + 2 * (i - 0.5) / N, Math.sin(a + Math.PI / 2) * 0.7];
+        default: { const r = 0.08 + 0.92 * u; return [Math.cos(a) * r, Math.sin(a) * r]; }
+      }
+    }
+
+    // ——— Scène commune au canvas et au SVG ———
+    // emit.line(pts, couleur, alpha, largeur) ; emit.dot(x, y, r, couleur, alpha, plein)
+    function scene(w, h, ph, emit) {
+      const N = p.points, R = Math.min(w, h) * p.rayon, cx = w / 2, cy = h / 2;
+      const M = p.miroirs, al = p.opacite;
+      const rots = Array.from({ length: M }, (_, m) => [Math.cos(m * TAU / M), Math.sin(m * TAU / M)]);
+      const tf = (q, r) => [cx + (q[0] * r[0] - q[1] * r[1]) * R, cy + (q[0] * r[1] + q[1] * r[0]) * R];
+      const lens = hover ? (x, y) => { const d = Math.hypot(x - hover.x, y - hover.y) / (Math.min(w, h) * 0.14); return 1 + 1.4 * Math.exp(-d * d); } : () => 1;
+      const cur = [];
+      for (let i = 1; i <= N; i++) cur.push(pos(i, ph));
+      const col = (i) => ramp(N > 1 ? (i - 1) / (N - 1) : 0);
+
+      // Traînes : chaque point balaie le même angle (le rapide laisse une traîne aussi longue que le lent).
+      if (p.traine > 0) {
+        const S = 22, span = p.traine * 0.45;
+        for (let i = 1; i <= N; i++) {
+          const dph = span / i, c = col(i);
+          const pts = [];
+          for (let s = 0; s <= S; s++) pts.push(pos(i, ph - dph * s / S));
+          for (const r of rots) {
+            const sp = pts.map((q) => tf(q, r));
+            // Par tronçons d'opacité décroissante.
+            const chunks = 5;
+            for (let k = 0; k < chunks; k++) {
+              const a0 = Math.floor(k * S / chunks), a1 = Math.floor((k + 1) * S / chunks);
+              emit.line(sp.slice(a0, a1 + 1), c, al * 0.6 * Math.pow(1 - k / chunks, 1.5), p.epaisseur * (1 - k / chunks * 0.6));
+            }
+          }
+        }
+      }
+      // Liaisons à l'instant courant.
+      if (p.liaison !== 'aucune') {
+        for (const r of rots) {
+          const sp = cur.map((q) => tf(q, r));
+          if (p.liaison === 'chaine') {
+            for (let i = 0; i < N - 1; i++) emit.line([sp[i], sp[i + 1]], col(i + 1), al * 0.7, p.epaisseur);
+          } else if (p.liaison === 'rayons') {
+            const c0 = tf([0, 0], r);
+            for (let i = 0; i < N; i++) emit.line([c0, sp[i]], col(i + 1), al * 0.45, p.epaisseur);
+          } else {
+            // Paires : chaque point relié à son « double » (rang 2i), qui tourne deux fois plus vite.
+            for (let i = 0; 2 * i + 1 < N; i++) emit.line([sp[i], sp[2 * i + 1]], col(i + 1), al * 0.55, p.epaisseur);
+          }
+        }
+      }
+      // Points.
+      if (p.trace !== 'aucun') {
+        for (const r of rots) {
+          for (let i = 1; i <= N; i++) {
+            const [x, y] = tf(cur[i - 1], r), u = N > 1 ? (i - 1) / (N - 1) : 0;
+            const g = p.croissance >= 0 ? 1 + p.croissance * (u * 2 - 0.4) : 1 + -p.croissance * ((1 - u) * 2 - 0.4);
+            const rad = Math.max(0.3, p.taille * Math.max(0.25, g) * lens(x, y) * Math.min(w, h) / 900);
+            emit.dot(x, y, rad, col(i), al, p.trace === 'disques');
+          }
+        }
+      }
+    }
+
+    // ——— Rendu canvas ———
+    app.loop((t, dt) => {
+      const { w, h, dpr } = app.size;
+      // Saut au prochain réalignement : on avance vite, avec un amorti.
+      if (warp > 1e-4) { const d = Math.min(warp, Math.max(0.0006, warp * Math.min(1, (dt || 0.016) * 3.5))); offset += d; warp -= d; }
+      const ph = phase(t);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = p.fond;
+      ctx.fillRect(0, 0, w, h);
+      if (p.lueur) ctx.globalCompositeOperation = 'lighter';
+      ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+      const k = Math.min(w, h) / 900;
+      scene(w, h, ph, {
+        line(pts, c, a, lw) {
+          if (pts.length < 2 || a <= 0.002) return;
+          ctx.strokeStyle = css(c, a); ctx.lineWidth = lw * k;
+          ctx.beginPath(); ctx.moveTo(pts[0][0], pts[0][1]);
+          for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
+          ctx.stroke();
+        },
+        dot(x, y, r, c, a, fill) {
+          ctx.beginPath(); ctx.arc(x, y, r, 0, TAU);
+          if (fill) { ctx.fillStyle = css(c, a); ctx.fill(); }
+          else { ctx.strokeStyle = css(c, a); ctx.lineWidth = Math.max(0.6, r * 0.28); ctx.stroke(); }
+        },
+      });
+      ctx.globalCompositeOperation = 'source-over';
+      app.finish(ctx);
+    });
+
+    // ——— Export SVG ———
+    function toSVG() {
+      const { w, h } = app.size, k = Math.min(w, h) / 900;
+      const f = (v) => Math.round(v * 100) / 100;
+      const rgb = (c) => `rgb(${c[0]},${c[1]},${c[2]})`;
+      let body = '';
+      scene(w, h, phase(app.time), {
+        line(pts, c, a, lw) {
+          if (pts.length < 2 || a <= 0.002) return;
+          body += `<polyline points="${pts.map((q) => f(q[0]) + ',' + f(q[1])).join(' ')}" fill="none" stroke="${rgb(c)}" stroke-opacity="${f(a)}" stroke-width="${f(lw * k)}"/>\n`;
+        },
+        dot(x, y, r, c, a, fill) {
+          body += fill ? `<circle cx="${f(x)}" cy="${f(y)}" r="${f(r)}" fill="${rgb(c)}" fill-opacity="${f(a)}"/>\n`
+            : `<circle cx="${f(x)}" cy="${f(y)}" r="${f(r)}" fill="none" stroke="${rgb(c)}" stroke-opacity="${f(a)}" stroke-width="${f(Math.max(0.6, r * 0.28))}"/>\n`;
+        },
+      });
+      const blend = p.lueur ? ' style="mix-blend-mode:screen"' : '';
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">\n<rect width="100%" height="100%" fill="${p.fond}"/>\n<g stroke-linecap="round" stroke-linejoin="round"${blend}>\n${body}</g>\n</svg>`;
+    }
+  </script>
+</body>
+</html>
