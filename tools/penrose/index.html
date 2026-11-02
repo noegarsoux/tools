@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pavage de Penrose</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Pavage de Penrose, et ses cousins à symétrie 7, 8, 9, 12 : la méthode des multigrilles de
+    // de Bruijn. On superpose n familles de droites parallèles, tournées de 360°/n ; chaque croisement
+    // de deux droites devient un losange. Le pavage obtenu ne se répète jamais. Les décalages des
+    // grilles dérivent lentement (un glissement « phason ») : des losanges basculent, localement,
+    // sans que l'ordre d'ensemble se défasse.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const P60 = PAL('papier-60'), KB = PAL('kegelbahn'), BIEN = PAL('biennale'), GR = PAL('good-room'), LU = PAL('luzern');
+    const EV = PAL('eventail'), MENTHE = PAL('menthe'), PYR = PAL('pyramides'), SAL = PAL('salon'), NUIT = PAL('trame-nuit');
+
+    let hover = null, drag = null, phason = [0, 0], gam0 = [], lastT = 0, stamps = {};
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.03, vignette: 0 },
+      hint: 'Glissez pour faire basculer les losanges (glissement phason) · survol : les tuiles se soulèvent · molette : taille des tuiles',
+      notes: 'Avec 5 familles de droites, on obtient le pavage P3 de Penrose (losanges de 72° et 36°). Avec n familles, il y a n/2 sortes de losanges. Les arcs dessinés sur chaque tuile se raccordent d’une tuile à l’autre en courbes continues.',
+      params: {
+        'Pavage': {
+          symetrie: { type: 'segmented', label: 'Symétrie', options: { 5: '5', 7: '7', 8: '8', 9: '9', 12: '12' }, value: '5' },
+          taille: { type: 'range', label: 'Taille des tuiles (px)', min: 8, max: 120, step: 1, value: 42 },
+          rotation: { type: 'range', label: 'Rotation (°)', min: -180, max: 180, step: 1, value: 0 },
+          joint: { type: 'range', label: 'Joint entre les tuiles', min: 0, max: 0.2, step: 0.005, value: 0.03 },
+        },
+        'Mouvement': {
+          vitesse: { type: 'range', label: 'Vitesse du glissement', min: 0, max: 1, step: 0.01, value: 0.25 },
+          amplitude: { type: 'range', label: 'Amplitude du glissement', min: 0, max: 2, step: 0.01, value: 0.6 },
+          derive: { type: 'range', label: 'Défilement', min: -1, max: 1, step: 0.01, value: 0.1 },
+          soulevement: { type: 'range', label: 'Soulèvement au survol', min: 0, max: 1, step: 0.01, value: 0.5 },
+        },
+        'Dessin': {
+          style: { type: 'segmented', label: 'Style', options: { aplats: 'Aplats', arcs: 'Arcs', contours: 'Contours', logo: 'Logo' }, value: 'arcs' },
+          epaisseur: { type: 'range', label: 'Épaisseur des arcs', min: 0.02, max: 0.4, step: 0.005, value: 0.12 },
+          coloration: { type: 'segmented', label: 'Coloration', options: { type: 'Par forme', orientation: 'Par orientation', anneaux: 'Par anneau' }, value: 'type' },
+        },
+        'Couleur': {
+          fond: { type: 'color', label: 'Fond et joints', value: P60[1] },
+          couleurs: { type: 'palette', label: 'Couleurs des tuiles', value: ['#e5452a', P60[0], '#f2b0c8', '#486cfc'] },
+          trait: { type: 'color', label: 'Arcs et contours', value: P60[1] },
+        },
+      },
+      presets: {
+        'Penrose': {},
+        'Aplats': { style: 'aplats', joint: 0.06, couleurs: [BIEN[2], BIEN[3], BIEN[4]], fond: BIEN[1] },
+        'Octogonal': { symetrie: '8', taille: 34, style: 'aplats', couleurs: [KB[1], KB[2], KB[3], KB[5]], fond: KB[0], joint: 0.04 },
+        'Heptagonal': { symetrie: '7', style: 'arcs', taille: 30, couleurs: [GR[1], GR[2], GR[3]], fond: GR[0], trait: GR[0], epaisseur: 0.16 },
+        'Douze': { symetrie: '12', taille: 22, style: 'aplats', coloration: 'anneaux', couleurs: [LU[0], LU[1], LU[2], LU[4]], fond: LU[3], joint: 0.05 },
+        'Logo': { style: 'logo', taille: 56, couleurs: [P60[0], '#f2b0c8'], fond: P60[1], trait: '#e5452a', joint: 0.04 },
+        'Contours': { style: 'contours', taille: 26, fond: '#f4f3f0', trait: '#111111', couleurs: ['#f4f3f0'], epaisseur: 0.04, symetrie: '9' },
+        'Éventail': { style: 'arcs', coloration: 'orientation', couleurs: EV, fond: EV[0], trait: '#f0e8d8', taille: 48, epaisseur: 0.18 },
+        'Menthe': { style: 'arcs', couleurs: [MENTHE[2], MENTHE[0]], fond: MENTHE[1], trait: MENTHE[3], taille: 64, epaisseur: 0.22 },
+        'Nuit': { style: 'contours', fond: NUIT[0], trait: NUIT[1], couleurs: [NUIT[0]], taille: 18, symetrie: '12', epaisseur: 0.03, amplitude: 1.2 },
+      },
+      brand(colors) {
+        const rest = colors.slice(1);
+        return { fond: colors[0], couleurs: (rest.length ? rest : ['#ffffff']).slice(0, 6), trait: colors[0] };
+      },
+      pointer: {
+        move: (q) => { hover = { x: q.x, y: q.y }; },
+        down: (q) => { drag = { x: q.x, y: q.y, p: phason.slice() }; },
+        drag: (q) => {
+          if (!drag) return;
+          const U = Math.min(app.size.w, app.size.h);
+          phason = [drag.p[0] + (q.x - drag.x) / U * 2.5, drag.p[1] + (q.y - drag.y) / U * 2.5];
+          hover = { x: q.x, y: q.y };
+        },
+        up: () => { drag = null; },
+        wheel: (q, dy) => app.set('taille', Math.max(8, Math.min(120, Math.round(p.taille * Math.exp(-dy * 0.001))))),
+      },
+      onChange(k) { if (k === '*') phason = [0, 0]; if (k === '*' || k === '_logo') stamps = {}; },
+      onSeed() { reseed(); },
+      export: { name: 'penrose', svg: () => toSVG() },
+    });
+    const p = app.params;
+    canvas.addEventListener('pointerleave', () => { hover = null; });
+
+    function reseed() { const r = app.rng(41); gam0 = Array.from({ length: 12 }, () => r() * 0.8 + 0.1); }
+    reseed();
+
+    // ——— Multigrille ———
+    function tiles(t) {
+      const { w, h } = app.size, n = +p.symetrie, E = [], Ep = [];
+      const rot = p.rotation * Math.PI / 180;
+      for (let i = 0; i < n; i++) {
+        const a = TAU * i / n;
+        E.push([Math.cos(a + rot), Math.sin(a + rot)]);
+        // Espace perpendiculaire : le même cercle parcouru deux fois plus vite (glissement phason).
+        Ep.push([Math.cos(2 * a), Math.sin(2 * a)]);
+      }
+      const s = t * p.vitesse, A = p.amplitude;
+      const gam = E.map((_, i) => gam0[i] + A * 0.3 * Math.sin(s * (0.5 + 0.13 * i) + i * 1.9) + phason[0] * Ep[i][0] + phason[1] * Ep[i][1]);
+      // Défilement : une translation lente, qui revient à décaler toutes les grilles ensemble.
+      const pan = [Math.cos(s * 0.21) * p.derive * 4 + s * p.derive, Math.sin(s * 0.17) * p.derive * 4];
+      const L = p.taille, cx = w / 2, cy = h / 2;
+      const Rs = Math.hypot(w, h) / 2 + L * 2, X = Rs / L / (n / 2) + 2;
+      const out = [];
+      for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) {
+        const ei = E[i], ej = E[j], det = ei[0] * ej[1] - ei[1] * ej[0];
+        if (Math.abs(det) < 1e-9) continue;
+        const gi = gam[i] + pan[0] * ei[0] + pan[1] * ei[1], gj = gam[j] + pan[0] * ej[0] + pan[1] * ej[1];
+        const K = Math.ceil(X) + 1;
+        for (let ki = -K; ki <= K; ki++) for (let kj = -K; kj <= K; kj++) {
+          // Intersection des droites x·eᵢ + γᵢ = kᵢ et x·eⱼ + γⱼ = kⱼ.
+          const bi = ki - gi, bj = kj - gj;
+          const x = (bi * ej[1] - bj * ei[1]) / det, y = (ei[0] * bj - ej[0] * bi) / det;
+          // Indices de toutes les grilles en ce point ; autour du croisement, kᵢ vaut kᵢ − 1 ou kᵢ :
+          // le sommet de base prend kᵢ − 1 et kⱼ − 1, les trois autres ajoutent eᵢ, eⱼ.
+          let px = 0, py = 0;
+          for (let m = 0; m < n; m++) {
+            const k = m === i ? ki - 1 : m === j ? kj - 1 : Math.floor(x * E[m][0] + y * E[m][1] + gam[m] + pan[0] * E[m][0] + pan[1] * E[m][1]);
+            px += k * E[m][0]; py += k * E[m][1];
+          }
+          const P0 = [cx + px * L, cy + py * L];
+          if (P0[0] < -L * 3 || P0[1] < -L * 3 || P0[0] > w + L * 3 || P0[1] > h + L * 3) continue;
+          const P1 = [P0[0] + ei[0] * L, P0[1] + ei[1] * L], P2 = [P1[0] + ej[0] * L, P1[1] + ej[1] * L], P3 = [P0[0] + ej[0] * L, P0[1] + ej[1] * L];
+          const d = j - i, kind = Math.min(d, n - d);
+          out.push({ pts: [P0, P1, P2, P3], kind, i, j, c: [(P0[0] + P2[0]) / 2, (P0[1] + P2[1]) / 2], ang: Math.atan2(ei[1] + ej[1], ei[0] + ej[0]) });
+        }
+      }
+      return out;
+    }
+
+    function colorOf(tl, cols) {
+      const n = cols.length, N = +p.symetrie;
+      if (p.coloration === 'orientation') return cols[(tl.i + tl.j) % n];
+      if (p.coloration === 'anneaux') { const { w, h } = app.size, r = Math.hypot(tl.c[0] - w / 2, tl.c[1] - h / 2) / (p.taille * 2.2); return cols[(Math.floor(r) + tl.kind) % n]; }
+      return cols[(tl.kind - 1) % n];
+    }
+
+    function logoStamp(col) {
+      if (stamps[col]) return stamps[col];
+      const S = 128, cv = document.createElement('canvas'); cv.width = cv.height = S;
+      const x = cv.getContext('2d'), img = app.logoImg;
+      if (img) {
+        const iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height, k = S / Math.max(iw, ih);
+        x.drawImage(img, (S - iw * k) / 2, (S - ih * k) / 2, iw * k, ih * k);
+        x.globalCompositeOperation = 'source-in'; x.fillStyle = col; x.fillRect(0, 0, S, S);
+      } else {
+        x.fillStyle = col;
+        x.beginPath(); x.arc(S / 2, S / 2, S * 0.48, 0, TAU); x.arc(S / 2, S / 2, S * 0.32, 0, TAU, true); x.fill();
+        x.beginPath(); x.arc(S / 2, S / 2, S * 0.18, 0, TAU); x.fill();
+      }
+      return (stamps[col] = cv);
+    }
+
+    // Géométrie finale d'une tuile : rétrécie par le joint, soulevée près du pointeur.
+    function shape(tl) {
+      const jn = p.joint, U = Math.min(app.size.w, app.size.h);
+      let k = 1 - jn * 2;
+      if (hover && p.soulevement > 0) { const d = Math.hypot(tl.c[0] - hover.x, tl.c[1] - hover.y), R = U * 0.14; k *= 1 - p.soulevement * 0.35 * Math.exp(-(d * d) / (R * R)); }
+      return tl.pts.map(([x, y]) => [tl.c[0] + (x - tl.c[0]) * k, tl.c[1] + (y - tl.c[1]) * k]);
+    }
+
+    // Arcs de décoration : centrés sur deux coins opposés.
+    function arcs(tl, P) {
+      const L = Math.hypot(P[1][0] - P[0][0], P[1][1] - P[0][1]), out = [];
+      // Rayon d'une demi-arête : chaque arc part du milieu d'un côté et finit au milieu du côté voisin,
+      // donc les arcs se raccordent toujours d'une tuile à l'autre.
+      const a = (A, B) => Math.atan2(B[1] - A[1], B[0] - A[0]), r1 = L / 2, r2 = L / 2;
+      // Coin 0 : entre P1 et P3 ; coin 2 : entre P3 et P1 (par l'autre côté).
+      out.push({ c: P[0], r: r1, a0: a(P[0], P[1]), a1: a(P[0], P[3]) });
+      out.push({ c: P[2], r: r2, a0: a(P[2], P[3]), a1: a(P[2], P[1]) });
+      return out;
+    }
+    const sweep = (a0, a1) => { let d = a1 - a0; while (d > Math.PI) d -= TAU; while (d < -Math.PI) d += TAU; return d; };
+
+    function draw(t) {
+      const { w, h, dpr } = app.size, T = tiles(t), cols = p.couleurs.length ? p.couleurs : ['#ffffff'];
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = p.fond; ctx.fillRect(0, 0, w, h);
+      ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+      for (const tl of T) {
+        const P = shape(tl);
+        ctx.beginPath(); ctx.moveTo(P[0][0], P[0][1]); for (let q = 1; q < 4; q++) ctx.lineTo(P[q][0], P[q][1]); ctx.closePath();
+        if (p.style !== 'contours') { ctx.fillStyle = colorOf(tl, cols); ctx.fill(); }
+        else { ctx.strokeStyle = p.trait; ctx.lineWidth = Math.max(0.6, p.taille * p.epaisseur); ctx.stroke(); }
+        if (p.style === 'arcs') {
+          ctx.strokeStyle = p.trait; ctx.lineWidth = Math.max(0.6, p.taille * p.epaisseur);
+          ctx.beginPath();
+          for (const ar of arcs(tl, P)) { const d = sweep(ar.a0, ar.a1); ctx.moveTo(ar.c[0] + Math.cos(ar.a0) * ar.r, ar.c[1] + Math.sin(ar.a0) * ar.r); ctx.arc(ar.c[0], ar.c[1], ar.r, ar.a0, ar.a0 + d, d < 0); }
+          ctx.stroke();
+        } else if (p.style === 'logo' && tl.kind === 1) {
+          const s = p.taille * 0.32;
+          ctx.save(); ctx.translate(tl.c[0], tl.c[1]); ctx.rotate(tl.ang + Math.PI / 2);
+          ctx.drawImage(logoStamp(p.trait), -s, -s, s * 2, s * 2); ctx.restore();
+        }
+      }
+    }
+
+    function toSVG() {
+      const { w, h } = app.size, T = tiles(lastT), cols = p.couleurs.length ? p.couleurs : ['#ffffff'], f = (v) => +v.toFixed(2), lw = f(Math.max(0.6, p.taille * p.epaisseur));
+      let s = `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">\n<rect width="100%" height="100%" fill="${p.fond}"/>\n`;
+      let deco = '';
+      for (const tl of T) {
+        const P = shape(tl), d = `M${P.map((q) => `${f(q[0])} ${f(q[1])}`).join('L')}Z`;
+        s += p.style === 'contours' ? `<path d="${d}" fill="none" stroke="${p.trait}" stroke-width="${lw}" stroke-linejoin="round"/>\n` : `<path d="${d}" fill="${colorOf(tl, cols)}"/>\n`;
+        if (p.style === 'arcs') for (const ar of arcs(tl, P)) {
+          const dd = sweep(ar.a0, ar.a1), a1 = ar.a0 + dd;
+          deco += `M${f(ar.c[0] + Math.cos(ar.a0) * ar.r)} ${f(ar.c[1] + Math.sin(ar.a0) * ar.r)}A${f(ar.r)} ${f(ar.r)} 0 0 ${dd > 0 ? 1 : 0} ${f(ar.c[0] + Math.cos(a1) * ar.r)} ${f(ar.c[1] + Math.sin(a1) * ar.r)}`;
+        }
+        if (p.style === 'logo' && tl.kind === 1) {
+          const r = p.taille * 0.32;
+          s += `<g fill="${p.trait}"><path fill-rule="evenodd" d="M${f(tl.c[0] - r * 0.96)} ${f(tl.c[1])}a${f(r * 0.96)} ${f(r * 0.96)} 0 1 0 ${f(r * 1.92)} 0a${f(r * 0.96)} ${f(r * 0.96)} 0 1 0 ${f(-r * 1.92)} 0zM${f(tl.c[0] - r * 0.64)} ${f(tl.c[1])}a${f(r * 0.64)} ${f(r * 0.64)} 0 1 0 ${f(r * 1.28)} 0a${f(r * 0.64)} ${f(r * 0.64)} 0 1 0 ${f(-r * 1.28)} 0z"/><circle cx="${f(tl.c[0])}" cy="${f(tl.c[1])}" r="${f(r * 0.36)}"/></g>\n`;
+        }
+      }
+      if (deco) s += `<path d="${deco}" fill="none" stroke="${p.trait}" stroke-width="${lw}" stroke-linecap="round"/>\n`;
+      return s + '</svg>';
+    }
+
+    app.loop((t) => { lastT = t; draw(t); app.finish(ctx); });
+  </script>
+</body>
+</html>
