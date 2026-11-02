@@ -1,0 +1,15 @@
+{
+  "slug": "signal",
+  "title": "Signal",
+  "type": "filter",
+  "description": "Un logo, des formes, des barres ou une image passés par un signal abîmé : couches de couleur décalées, tranches qui glissent, blocs corrompus, par rafales.",
+  "tags": ["glitch", "signal", "decalage", "video", "logo", "image"],
+  "inspiration": [
+    "Esthétique du glitch et du datamoshing (Rosa Menkman, The Glitch Moment(um), 2011)",
+    "Séparation des couches d’impression et défauts de repérage",
+    "references/techniques.md ; palettes papier-60, good-room, biennale, code"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}

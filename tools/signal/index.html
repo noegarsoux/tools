@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Signal</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Signal : un sujet (logo, formes, barres ou image) passe par un signal abîmé. Ses couches de
+    // couleur se décalent, des tranches horizontales glissent, des blocs se corrompent et la trame
+    // garde une rémanence. Les dégâts tiennent quelques images puis changent, par rafales.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const P60 = PAL('papier-60'), BIEN = PAL('biennale'), MENTHE = PAL('menthe'), KB = PAL('kegelbahn'), GR = PAL('good-room'), THER = PAL('thermique');
+    const NUIT = PAL('trame-nuit'), LUZ = PAL('luzern'), SALON = PAL('salon'), BITMAP = PAL('bitmap'), CODE = PAL('code'), ACIDE = PAL('acide');
+
+    const mk = () => { const c = document.createElement('canvas'); return [c, c.getContext('2d')]; };
+    const [subC, sub] = mk(), [tintC, tint] = mk(), [compC, comp] = mk(), [prevC, prev] = mk(), [tinyC, tiny] = mk();
+    let W = 0, H = 0, hover = null, drag = null, burst = 0, nextBurst = 1, hold = 0, plan = null, smear = 0, maskImg = null, maskKey = null;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.05, vignette: 0 },
+      hint: 'Le pointeur abîme le signal autour de lui · glissez pour étirer les tranches · touchez pour une rafale · molette : intensité',
+      notes: 'Le sujet est séparé en couches de couleur décalées (multiplication sur fond clair, addition sur fond sombre), puis découpé en tranches qui glissent et en blocs corrompus. Le tirage change toutes les quelques images.',
+      params: {
+        'Sujet': {
+          sujet: { type: 'select', label: 'Sujet', options: { logo: 'Logo', formes: 'Formes', barres: 'Barres', image: 'Image' }, value: 'logo' },
+          image: { type: 'file', label: 'Image ou logo', accept: 'image/*', show: (q) => q.sujet === 'image' || q.sujet === 'logo' },
+          echelle: { type: 'range', label: 'Taille du sujet', min: 0.2, max: 1.2, step: 0.01, value: 0.62 },
+        },
+        'Signal': {
+          intensite: { type: 'range', label: 'Intensité', min: 0, max: 1, step: 0.01, value: 0.45 },
+          decalage: { type: 'range', label: 'Décalage des couches', min: 0, max: 60, step: 1, value: 14 },
+          tranches: { type: 'range', label: 'Tranches qui glissent', min: 0, max: 1, step: 0.01, value: 0.5 },
+          blocs: { type: 'range', label: 'Blocs corrompus', min: 0, max: 1, step: 0.01, value: 0.35 },
+          lignes: { type: 'range', label: 'Lignes de balayage', min: 0, max: 1, step: 0.01, value: 0.3 },
+          remanence: { type: 'range', label: 'Rémanence', min: 0, max: 0.95, step: 0.01, value: 0.4 },
+          rafales: { type: 'range', label: 'Rafales par minute', min: 0, max: 60, step: 1, value: 14 },
+          tenue: { type: 'range', label: 'Tenue d’un tirage (images)', min: 1, max: 20, step: 1, value: 4 },
+        },
+        'Couleur': {
+          fond: { type: 'color', label: 'Fond', value: P60[0] },
+          couleurs: { type: 'palette', label: 'Couches (2 à 4)', value: ['#e5452a', '#4b6cf0', '#f2e640'] },
+        },
+      },
+      presets: {
+        'Signal': {},
+        'Nuit': { fond: NUIT[0], couleurs: [GR[1], GR[4], GR[2]], decalage: 18, lignes: 0.5 },
+        'Formes': { sujet: 'formes', fond: BIEN[0], couleurs: [BIEN[2], BIEN[3], BIEN[1]], echelle: 0.8, tranches: 0.7, intensite: 0.55 },
+        'Barres': { sujet: 'barres', fond: '#f4f4f2', couleurs: [CODE[1], CODE[5], CODE[2]], echelle: 1, tranches: 0.8, blocs: 0.5, decalage: 22 },
+        'Calme': { intensite: 0.18, decalage: 8, tranches: 0.25, blocs: 0.1, rafales: 6, remanence: 0.2, lignes: 0.15 },
+        'Panne': { intensite: 0.9, decalage: 40, tranches: 1, blocs: 0.8, rafales: 40, remanence: 0.7, tenue: 2 },
+        'Kegelbahn': { sujet: 'formes', fond: KB[0], couleurs: [KB[1], KB[2], KB[3]], decalage: 20, lignes: 0.45 },
+        'Thermique': { sujet: 'barres', fond: THER[0], couleurs: [THER[1], THER[2], THER[3]], intensite: 0.5, blocs: 0.6 },
+        'Bitmap': { fond: BITMAP[0], couleurs: [BITMAP[2], BITMAP[3], BITMAP[4]], blocs: 0.7, tenue: 8, decalage: 10 },
+        'Menthe': { sujet: 'formes', fond: MENTHE[0], couleurs: [MENTHE[3], MENTHE[1]], decalage: 12, remanence: 0.7 },
+        'Luzern': { fond: LUZ[0], couleurs: [LUZ[1], LUZ[4], LUZ[3]], decalage: 26, tranches: 0.6, lignes: 0.2 },
+        'Acide': { sujet: 'barres', fond: ACIDE[1], couleurs: [ACIDE[2], ACIDE[3]], decalage: 30, intensite: 0.7, remanence: 0.6 },
+      },
+      brand(colors) {
+        const c = colors.slice(1).length ? colors.slice(1) : ['#111111'];
+        return { fond: colors[0], couleurs: c.slice(0, 4) };
+      },
+      pointer: {
+        move: (q) => { hover = { x: q.x, y: q.y }; },
+        down: (q) => { drag = { x: q.x, y: q.y, lx: q.x, moved: false }; },
+        drag: (q) => {
+          hover = { x: q.x, y: q.y };
+          if (!drag) return;
+          if (Math.hypot(q.x - drag.x, q.y - drag.y) > 6) drag.moved = true;
+          smear += (q.x - drag.lx) * 1.5; drag.lx = q.x; hold = 0;
+        },
+        up: () => { if (drag && !drag.moved) { burst = 1; hold = 0; } drag = null; },
+        wheel: (q, dy) => app.set('intensite', Math.max(0, Math.min(1, Math.round((p.intensite + (dy > 0 ? -0.05 : 0.05)) * 100) / 100))),
+      },
+      onChange(k) { if (k === 'image' || k === 'sujet') maskKey = null; },
+      export: { name: 'signal', svg: () => toSVG() },
+    });
+    const p = app.params;
+    canvas.addEventListener('pointerleave', () => { hover = null; });
+
+    // ——— Sujet : formes noires sur transparent ———
+    function logoSource() {
+      const img = p.image || (p.sujet === 'logo' ? app.logoImg : null), key = img ? (img.src || 'c') : 'demo';
+      if (key === maskKey && maskImg) return maskImg;
+      maskKey = key;
+      const M = 600, c = document.createElement('canvas'); c.width = c.height = M; const x = c.getContext('2d', { willReadFrequently: true });
+      if (img) {
+        const iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height, k = M / Math.max(iw, ih);
+        x.drawImage(img, (M - iw * k) / 2, (M - ih * k) / 2, iw * k, ih * k);
+        // Les pixels sombres (ou opaques) deviennent l'encre.
+        const d = x.getImageData(0, 0, M, M), a = d.data;
+        let transp = 0; for (let i = 3; i < a.length; i += 16) if (a[i] < 128) transp++;
+        const useA = transp > a.length / 16 * 0.05;
+        for (let i = 0; i < a.length; i += 4) { const l = (a[i] * 0.2126 + a[i + 1] * 0.7152 + a[i + 2] * 0.0722) / 255; const v = useA ? a[i + 3] : (1 - l) * a[i + 3]; a[i] = a[i + 1] = a[i + 2] = 0; a[i + 3] = p.sujet === 'image' && !useA ? Math.round(Math.pow(v / 255, 0.9) * 255) : (v > 128 ? 255 : 0); }
+        x.putImageData(d, 0, 0);
+      } else {
+        x.fillStyle = '#000'; x.beginPath(); x.arc(300, 300, 280, 0, TAU); x.arc(300, 300, 160, 0, TAU, true); x.fill('evenodd'); x.fillRect(266, 10, 68, 580);
+      }
+      maskImg = c;
+      return c;
+    }
+    function drawSubject(t) {
+      sub.setTransform(1, 0, 0, 1, 0, 0); sub.clearRect(0, 0, W, H);
+      const S = Math.min(W, H) * p.echelle;
+      sub.fillStyle = '#000';
+      if (p.sujet === 'formes') {
+        const r = app.rng(3);
+        for (let k = 0; k < 5; k++) {
+          const a = t * (0.15 + k * 0.05) * (k % 2 ? -1 : 1) + r() * TAU, cx = W / 2 + Math.cos(a) * S * (0.2 + 0.3 * r()), cy = H / 2 + Math.sin(a * 1.3) * S * (0.15 + 0.2 * r()), s = S * (0.1 + r() * 0.13), kind = k % 4;
+          sub.save(); sub.translate(cx, cy); sub.rotate(a * 0.6);
+          sub.beginPath();
+          if (kind === 0) sub.arc(0, 0, s, 0, TAU);
+          else if (kind === 1) sub.rect(-s * 0.8, -s * 0.8, s * 1.6, s * 1.6);
+          else if (kind === 2) { sub.moveTo(0, -s); sub.lineTo(s * 0.95, s * 0.7); sub.lineTo(-s * 0.95, s * 0.7); sub.closePath(); }
+          else { sub.rect(-s * 1.6, -s * 0.22, s * 3.2, s * 0.44); }
+          sub.fill(); sub.restore();
+        }
+      } else if (p.sujet === 'barres') {
+        // Barres verticales de largeurs variées, qui respirent.
+        const r = app.rng(9), x0 = (W - W * p.echelle) / 2, x1 = W - x0, y0 = (H - H * p.echelle * 0.8) / 2;
+        let x = x0;
+        while (x < x1) { const bw = (0.004 + r() * r() * 0.05) * W * (1 + 0.4 * Math.sin(t * 0.8 + x * 0.01)), gap = (0.004 + r() * 0.03) * W; sub.fillRect(x, y0, Math.min(bw, x1 - x), H * p.echelle * 0.8); x += bw + gap; }
+      } else {
+        const src = logoSource(), k = S / src.width * (1 + Math.sin(t * 0.9) * 0.02);
+        sub.drawImage(src, W / 2 - src.width * k / 2, H / 2 - src.height * k / 2, src.width * k, src.height * k);
+      }
+    }
+
+    // ——— Tirage des dégâts (tenu quelques images) ———
+    function roll(I) {
+      const r = app.random, n = Math.max(2, (p.couleurs.length || 1)), off = [];
+      for (let k = 0; k < n; k++) { const a = r() * TAU, m = p.decalage * (0.4 + I * 1.4) * (k ? 1 : 0.15); off.push([Math.cos(a) * m, Math.sin(a) * m * 0.35]); }
+      const slices = [];
+      let y = 0;
+      while (y < H) {
+        const hgt = Math.max(2, Math.round((r() < 0.7 ? r() * 0.04 : r() * 0.16) * H));
+        const near = hover ? Math.exp(-Math.pow((y + hgt / 2 - hover.y) / (H * 0.12), 2)) : 0;
+        const on = r() < p.tranches * (0.15 + I * 0.85) + near * 0.9;
+        const dx = on ? (r() - 0.5) * W * (0.03 + I * 0.25 + near * 0.2) : 0;
+        slices.push([y, hgt, dx]); y += hgt;
+      }
+      const blocks = [], nb = Math.round(p.blocs * (2 + I * 26));
+      for (let k = 0; k < nb; k++) {
+        const bw = (0.03 + r() * 0.22) * W, bh = (0.01 + r() * 0.07) * H, bx = r() * (W - bw), by = r() * (H - bh);
+        blocks.push({ x: bx, y: by, w: bw, h: bh, kind: Math.floor(r() * 3), sx: r() * (W - bw), sy: by + (r() - 0.5) * H * 0.1, c: Math.floor(r() * 8), px: 4 + Math.floor(r() * 14) });
+      }
+      return { off, slices, blocks };
+    }
+
+    function render(t, dt, live) {
+      const { w, h } = app.size;
+      if (W !== Math.round(w) || H !== Math.round(h)) {
+        W = Math.round(w); H = Math.round(h);
+        for (const c of [subC, tintC, compC, prevC]) { c.width = W; c.height = H; }
+        prev.fillStyle = p.fond; prev.fillRect(0, 0, W, H);
+      }
+      // Intensité : base, rafales qui retombent, et le pointeur.
+      if (live) {
+        if (p.rafales > 0 && t > nextBurst) { burst = Math.max(burst, 0.6 + app.random() * 0.4); nextBurst = t + (60 / p.rafales) * (0.4 + app.random() * 1.2); }
+        burst = Math.max(0, burst - dt * 1.4);
+        smear *= Math.pow(0.04, dt);
+      }
+      const I = Math.min(1, p.intensite * 0.7 + burst * 0.8 * Math.max(0.3, p.intensite + 0.2));
+      if (!plan || hold <= 0) { plan = roll(I); hold = Math.round(p.tenue); } else if (live) hold--;
+      drawSubject(t);
+      // 1. Couches de couleur décalées.
+      const dark = (() => { const n = parseInt(p.fond.slice(1), 16); return ((n >> 16) & 255) * 0.299 + ((n >> 8) & 255) * 0.587 + (n & 255) * 0.114 < 110; })();
+      comp.globalCompositeOperation = 'source-over'; comp.globalAlpha = 1;
+      comp.fillStyle = p.fond; comp.fillRect(0, 0, W, H);
+      const cols = p.couleurs.length ? p.couleurs : ['#111111'];
+      // Sur fond sombre, les couches s'additionnent (centre clair, franges colorées) ; sur fond clair,
+      // la première couleur passe devant et les autres dépassent en franges décalées.
+      const order = dark ? cols.map((_, k) => k) : cols.map((_, k) => cols.length - 1 - k);
+      for (const k of order) {
+        tint.globalCompositeOperation = 'source-over'; tint.clearRect(0, 0, W, H); tint.drawImage(subC, 0, 0);
+        tint.globalCompositeOperation = 'source-in'; tint.fillStyle = cols[k]; tint.fillRect(0, 0, W, H);
+        const o = plan.off[k % plan.off.length];
+        comp.globalCompositeOperation = dark && cols.length > 1 ? 'screen' : 'source-over';
+        comp.drawImage(tintC, o[0], o[1]);
+      }
+      comp.globalCompositeOperation = 'source-over';
+      // 2. Rémanence : l'image précédente persiste, légèrement décalée.
+      if (p.remanence > 0) { comp.globalAlpha = p.remanence * (0.35 + I * 0.4); comp.drawImage(prevC, (smear * 0.2) + (I > 0.5 ? 2 : 0), 0); comp.globalAlpha = 1; }
+      // 3. Tranches qui glissent (copie de la composition).
+      tint.globalCompositeOperation = 'source-over'; tint.drawImage(compC, 0, 0);
+      for (const [y, hh, dx] of plan.slices) {
+        const d = dx + smear * (hover ? Math.exp(-Math.pow((y - hover.y) / (H * 0.2), 2)) : 0.4);
+        if (Math.abs(d) < 0.5) continue;
+        comp.drawImage(tintC, 0, y, W, hh, d, y, W, hh);
+        if (d > 0) comp.drawImage(tintC, W - d, y, d, hh, 0, y, d, hh); else comp.drawImage(tintC, 0, y, -d, hh, W + d, y, -d, hh);
+      }
+      // 4. Blocs : copie déplacée, pixelisation ou aplat de couleur.
+      tint.drawImage(compC, 0, 0);
+      for (const b of plan.blocks) {
+        if (b.kind === 0) comp.drawImage(tintC, b.sx, Math.max(0, Math.min(H - b.h, b.sy)), b.w, b.h, b.x, b.y, b.w, b.h);
+        else if (b.kind === 1) {
+          const tw = Math.max(1, Math.round(b.w / b.px)), th = Math.max(1, Math.round(b.h / b.px));
+          tinyC.width = tw; tinyC.height = th; tiny.drawImage(tintC, b.x, b.y, b.w, b.h, 0, 0, tw, th);
+          comp.imageSmoothingEnabled = false; comp.drawImage(tinyC, 0, 0, tw, th, b.x, b.y, b.w, b.h); comp.imageSmoothingEnabled = true;
+        } else { comp.fillStyle = cols[b.c % cols.length]; comp.globalAlpha = 0.85; comp.fillRect(b.x, b.y, b.w, Math.max(2, b.h * 0.25)); comp.globalAlpha = 1; }
+      }
+      // 5. Lignes de balayage.
+      if (p.lignes > 0) {
+        comp.fillStyle = dark ? '#ffffff' : '#000000'; comp.globalAlpha = p.lignes * 0.12;
+        const off = (t * 40) % 3;
+        for (let y = off; y < H; y += 3) comp.fillRect(0, y, W, 1);
+        comp.globalAlpha = 1;
+      }
+      if (live) { prev.globalAlpha = 1; prev.drawImage(compC, 0, 0); }
+    }
+
+    app.loop((t, dt) => {
+      const { w, h, dpr } = app.size;
+      dt = Math.min(0.05, dt || 0);
+      render(t, dt, true);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.drawImage(compC, 0, 0, w, h);
+      app.finish(ctx);
+    });
+
+    function toSVG() {
+      const { w, h } = app.size;
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">\n<rect width="100%" height="100%" fill="${p.fond}"/>\n<image href="${compC.toDataURL('image/png')}" x="0" y="0" width="${w}" height="${h}" preserveAspectRatio="none"/>\n</svg>`;
+    }
+  </script>
+</body>
+</html>
