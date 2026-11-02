@@ -1,0 +1,15 @@
+{
+  "slug": "neon",
+  "title": "Néon",
+  "type": "motion",
+  "description": "Une enseigne en tubes de néon aux couleurs de la marque : logo ou formes en verre lumineux qui s'allument, grésillent et se reflètent au sol.",
+  "tags": ["neon", "lumiere", "enseigne", "nuit", "logo", "svg"],
+  "inspiration": [
+    "Enseignes au néon des bars et des cinémas",
+    "Dan Flavin et François Morellet, installations de tubes lumineux",
+    "references/techniques.md ; palettes kegelbahn, good-room, luzern"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}

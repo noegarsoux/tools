@@ -1,0 +1,399 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Néon</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Néon : une enseigne en tubes de néon aux couleurs de la marque, sur un mur. Le contour du logo
+    // (ou une composition de formes) devient un tube de verre : cœur presque blanc, gaine colorée,
+    // halo sur le mur, reflet au sol. Les tubes s'allument en hésitant, grésillent, clignotent.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const KB = PAL('kegelbahn'), GR = PAL('good-room'), LUZ = PAL('luzern'), PIX = PAL('pixels'), ACIDE = PAL('acide'), THER = PAL('thermique'), BIEN = PAL('biennale'), MENTHE = PAL('menthe');
+
+    let tubes = [], tubesKey = '', drawn = [], drag = null, time = 0, wallCv = null, wallKey = '';
+    let glowCv = null, glowX = null, nearCv = null, nearX = null, vecCache = null, vecKey = null;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.05, vignette: 0.3 },
+      hint: 'Touchez un tube pour l’éteindre ou le rallumer · glissez pour dessiner un nouveau tube · molette : lueur',
+      notes: 'Un tube de néon se dessine en trois couches : un cœur presque blanc, la gaine de verre colorée, et le halo que la lumière projette sur le mur. Les tubes s’allument en hésitant (l’arc électrique s’amorce), puis grésillent de temps en temps.',
+      params: {
+        'Enseigne': {
+          motif: { type: 'select', label: 'Motif', options: { logo: 'Logo', formes: 'Formes', vagues: 'Vagues', cadres: 'Cadres' }, value: 'logo' },
+          image: { type: 'file', label: 'Logo', accept: 'image/*', show: (q) => q.motif === 'logo' },
+          elements: { type: 'range', label: 'Éléments', min: 2, max: 14, step: 1, value: 7, show: (q) => q.motif !== 'logo' },
+          taille: { type: 'range', label: 'Taille', min: 0.3, max: 0.95, step: 0.01, value: 0.62 },
+          epaisseur: { type: 'range', label: 'Épaisseur du tube', min: 2, max: 18, step: 0.5, value: 7 },
+          couleurs: { type: 'palette', label: 'Tubes', value: ['#ff3d7f', '#3de8ff', '#fff06a', '#ff8a3d'] },
+        },
+        'Lumière': {
+          lueur: { type: 'range', label: 'Lueur', min: 0, max: 2, step: 0.05, value: 1 },
+          scintillement: { type: 'range', label: 'Grésillement', min: 0, max: 1, step: 0.01, value: 0.3 },
+          sequence: { type: 'select', label: 'Séquence', options: { fixe: 'Allumé', allumage: 'Allumage en boucle', clignotant: 'Clignotant' }, value: 'allumage' },
+          reflet: { type: 'range', label: 'Reflet au sol', min: 0, max: 1, step: 0.01, value: 0.4 },
+        },
+        'Mur': {
+          mur: { type: 'select', label: 'Mur', options: { brique: 'Briques', beton: 'Béton', carrelage: 'Carrelage', uni: 'Uni' }, value: 'brique' },
+          fond: { type: 'color', label: 'Mur', value: '#1a1416' },
+        },
+      },
+      presets: {
+        'Bar': {},
+        'Logo bleu': { couleurs: ['#3de8ff'], mur: 'beton', fond: '#121619', sequence: 'fixe' },
+        'Formes': { motif: 'formes', elements: 8, couleurs: ['#ff3d7f', '#3de8ff', '#fff06a', '#9d6bff'] },
+        'Vagues': { motif: 'vagues', elements: 6, couleurs: ['#ff3d7f', '#ff8a3d', '#fff06a'], mur: 'carrelage', fond: '#10141a' },
+        'Cadres': { motif: 'cadres', elements: 5, couleurs: ['#3de8ff', '#ff3d7f'], sequence: 'clignotant', mur: 'uni', fond: '#0c0c10' },
+        'Kegelbahn': { couleurs: [KB[1], KB[2], KB[3]], fond: KB[0], mur: 'brique', motif: 'formes' },
+        'Good Room': { couleurs: [GR[1], GR[2], GR[3], GR[4]], fond: GR[0], mur: 'beton' },
+        'Luzern': { couleurs: [LUZ[0], LUZ[1], LUZ[2]], fond: LUZ[3], mur: 'brique', motif: 'vagues', elements: 4 },
+        'Acide': { couleurs: [ACIDE[2]], fond: ACIDE[1], mur: 'beton', scintillement: 0.6 },
+        'Pixels': { couleurs: [PIX[5], PIX[4], PIX[2]], fond: '#0e0f14', mur: 'carrelage', motif: 'cadres', elements: 7 },
+        'Panne': { scintillement: 1, sequence: 'fixe', couleurs: ['#ff5a3d'], lueur: 0.8 },
+        'Fin': { epaisseur: 3, lueur: 1.4, mur: 'uni', fond: '#08080b', motif: 'formes', elements: 12 },
+        'Jour': { fond: '#d9d4cc', mur: 'beton', lueur: 0.5, reflet: 0.1, couleurs: [BIEN[2], '#2f4fa8'] },
+      },
+      brand(colors) {
+        const lum = (h) => { const n = parseInt(h.slice(1), 16); return ((n >> 16) & 255) * 0.299 + ((n >> 8) & 255) * 0.587 + (n & 255) * 0.114; };
+        const all = colors.slice().sort((a, b) => lum(a) - lum(b));
+        const fond = all[0], tubes = all.slice(1).filter((c) => lum(c) > 60);
+        return { fond, couleurs: tubes.length ? tubes : ['#ffffff'] };
+      },
+      pointer: {
+        down: (q) => { drag = { pts: [[q.x, q.y]], moved: false, x0: q.x, y0: q.y }; },
+        drag: (q) => {
+          if (!drag) return;
+          if (Math.hypot(q.x - drag.x0, q.y - drag.y0) > 10) drag.moved = true;
+          const l = drag.pts[drag.pts.length - 1];
+          if (Math.hypot(q.x - l[0], q.y - l[1]) > 6) drag.pts.push([q.x, q.y]);
+        },
+        up: (q) => {
+          if (!drag) return;
+          if (!drag.moved) toggleAt(q.x, q.y);
+          else if (drag.pts.length > 3) {
+            const pts = chaikin(drag.pts, false, 2), cols = p.couleurs.length ? p.couleurs : ['#ffffff'];
+            const t = newTube(pts.map(([x, y]) => [x / app.size.w, y / app.size.h]), false, cols[(drawn.length + tubes.length) % cols.length], true);
+            t.on0 = time; drawn.push(t);
+          }
+          drag = null;
+        },
+        wheel: (q, dy) => app.set('lueur', Math.max(0, Math.min(2, +(p.lueur + (dy > 0 ? -0.05 : 0.05)).toFixed(2)))),
+      },
+      onChange(k) { if (k === 'image') vecKey = null; if (['motif', 'image', 'elements', 'taille', 'couleurs'].includes(k)) tubesKey = ''; },
+      onSeed() { tubesKey = ''; drawn = []; },
+      export: { name: 'neon', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    const hex = (h) => { const n = parseInt(h.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; };
+    const mixW = (h, t) => { const [r, g, b] = hex(h); return `rgb(${Math.round(r + (255 - r) * t)},${Math.round(g + (255 - g) * t)},${Math.round(b + (255 - b) * t)})`; };
+    const dim = (h, t) => { const [r, g, b] = hex(h); return `rgb(${Math.round(r * t)},${Math.round(g * t)},${Math.round(b * t)})`; };
+    function hash(n) { const s = Math.sin(n * 127.1 + app.seed * 0.0131) * 43758.5453; return s - Math.floor(s); }
+
+    // ——— Lissage et contour du logo ———
+    function chaikin(pts, closed, it) {
+      let a = pts;
+      for (let k = 0; k < it; k++) {
+        const b = [], n = a.length, m = closed ? n : n - 1;
+        if (!closed) b.push(a[0]);
+        for (let i = 0; i < m; i++) { const p0 = a[i], p1 = a[(i + 1) % n]; b.push([p0[0] * 0.75 + p1[0] * 0.25, p0[1] * 0.75 + p1[1] * 0.25], [p0[0] * 0.25 + p1[0] * 0.75, p0[1] * 0.25 + p1[1] * 0.75]); }
+        if (!closed) b.push(a[n - 1]);
+        a = b;
+      }
+      return a;
+    }
+    function logoLoops() {
+      const img = p.image || app.logoImg, key = img ? (img.src || 'c') : 'demo';
+      if (key === vecKey && vecCache) return vecCache;
+      vecKey = key;
+      const L = 240, c = document.createElement('canvas'); c.width = c.height = L; const x = c.getContext('2d', { willReadFrequently: true });
+      if (img) { const iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height, k = L * 0.9 / Math.max(iw, ih); x.drawImage(img, (L - iw * k) / 2, (L - ih * k) / 2, iw * k, ih * k); }
+      else {
+        // démo : un anneau traversé d'une barre, et un point
+        x.fillStyle = '#000'; x.beginPath(); x.arc(120, 120, 100, 0, TAU); x.arc(120, 120, 62, 0, TAU, true); x.fill('evenodd');
+        x.fillRect(108, 6, 24, 228); x.beginPath(); x.arc(196, 40, 18, 0, TAU); x.fill();
+      }
+      const d = x.getImageData(0, 0, L, L).data, g = new Float32Array(L * L);
+      let transp = 0; for (let i = 3; i < d.length; i += 16) if (d[i] < 128) transp++;
+      const useA = transp > d.length / 16 * 0.05;
+      for (let i = 0; i < L * L; i++) { const a = d[i * 4 + 3] / 255, l = (d[i * 4] * 0.2126 + d[i * 4 + 1] * 0.7152 + d[i * 4 + 2] * 0.0722) / 255; g[i] = useA ? a : (1 - l) * a; }
+      const loops = marching(g, L, L, 0.5).map((lp) => { const pts = []; for (let i = 0; i < lp.length; i += 2) pts.push([lp[i] / L - 0.5, lp[i + 1] / L - 0.5]); return pts; }).filter((pts) => pts.length > 4);
+      // cadrage : boîte englobante au centre
+      let x0 = 1, y0 = 1, x1 = -1, y1 = -1;
+      for (const l of loops) for (const [a, b] of l) { x0 = Math.min(x0, a); x1 = Math.max(x1, a); y0 = Math.min(y0, b); y1 = Math.max(y1, b); }
+      const S = Math.max(x1 - x0, y1 - y0) || 1, mx = (x0 + x1) / 2, my = (y0 + y1) / 2;
+      vecCache = loops.map((l) => chaikin(l.map(([a, b]) => [(a - mx) / S, (b - my) / S]), true, 2));
+      return vecCache;
+    }
+    function marching(g, W, H, T) {
+      const hid = (x, y) => (y * W + x) * 2, vid = (x, y) => (y * W + x) * 2 + 1;
+      const link = new Map();
+      const add = (a, b) => { (link.get(a) || link.set(a, []).get(a)).push(b); (link.get(b) || link.set(b, []).get(b)).push(a); };
+      const pos = (id) => {
+        const e = id >> 1, x = e % W, y = (e - x) / W;
+        if (id & 1) { const a = g[y * W + x], b = g[(y + 1) * W + x]; return [x, y + (T - a) / (b - a || 1e-6)]; }
+        const a = g[y * W + x], b = g[y * W + x + 1]; return [x + (T - a) / (b - a || 1e-6), y];
+      };
+      for (let y = 0; y < H - 1; y++) for (let x = 0; x < W - 1; x++) {
+        const a = g[y * W + x] > T, b = g[y * W + x + 1] > T, c = g[(y + 1) * W + x + 1] > T, d = g[(y + 1) * W + x] > T;
+        const code = (a << 3) | (b << 2) | (c << 1) | d;
+        if (code === 0 || code === 15) continue;
+        const t = hid(x, y), bo = hid(x, y + 1), l = vid(x, y), r = vid(x + 1, y);
+        const center = (g[y * W + x] + g[y * W + x + 1] + g[(y + 1) * W + x + 1] + g[(y + 1) * W + x]) / 4 > T;
+        switch (code) {
+          case 1: case 14: add(l, bo); break;
+          case 2: case 13: add(bo, r); break;
+          case 3: case 12: add(l, r); break;
+          case 4: case 11: add(t, r); break;
+          case 6: case 9: add(t, bo); break;
+          case 7: case 8: add(l, t); break;
+          case 5: if (center) { add(l, t); add(bo, r); } else { add(t, r); add(l, bo); } break;
+          case 10: if (center) { add(t, r); add(l, bo); } else { add(l, t); add(bo, r); } break;
+        }
+      }
+      const seen = new Set(), loops = [];
+      for (const start of link.keys()) {
+        if (seen.has(start)) continue;
+        const lp = []; let prev = -1, cur = start, guard = 0;
+        while (guard++ < 200000) {
+          seen.add(cur); const [px, py] = pos(cur); lp.push(px, py);
+          const nb = link.get(cur); const nx = nb[0] !== prev ? nb[0] : nb[1];
+          if (nx == null || nx === start || seen.has(nx)) break;
+          prev = cur; cur = nx;
+        }
+        if (lp.length >= 8) loops.push(simplify(lp, 0.6));
+      }
+      return loops;
+    }
+    function simplify(lp, eps) {
+      const n = lp.length / 2;
+      if (n < 6) return lp;
+      let far = 0, fd = -1;
+      for (let i = 1; i < n; i++) { const d = (lp[i * 2] - lp[0]) ** 2 + (lp[i * 2 + 1] - lp[1]) ** 2; if (d > fd) { fd = d; far = i; } }
+      const keep = new Uint8Array(n); keep[0] = keep[far] = 1;
+      const stack = [[0, far], [far, n]];
+      while (stack.length) {
+        const [a, b] = stack.pop();
+        if (b - a < 2) continue;
+        const ax = lp[a * 2], ay = lp[a * 2 + 1], bx = lp[(b % n) * 2], by = lp[(b % n) * 2 + 1];
+        const dx = bx - ax, dy = by - ay, L = Math.hypot(dx, dy) || 1e-9;
+        let mi = -1, md = eps;
+        for (let i = a + 1; i < b; i++) { const d = Math.abs((lp[i * 2] - ax) * dy - (lp[i * 2 + 1] - ay) * dx) / L; if (d > md) { md = d; mi = i; } }
+        if (mi >= 0) { keep[mi] = 1; stack.push([a, mi], [mi, b]); }
+      }
+      const out = [];
+      for (let i = 0; i < n; i++) if (keep[i]) out.push(lp[i * 2], lp[i * 2 + 1]);
+      return out;
+    }
+
+    // ——— Tubes ———
+    // un tube : points en coordonnées normalisées (0..1 de la scène), fermé ou non, couleur, état
+    function newTube(pts, closed, col, user) {
+      return { pts, closed, col, user: !!user, on: true, on0: 0, delay: 0, b: 0, dip: 0, faulty: false, id: Math.random() };
+    }
+    function buildTubes() {
+      const { w, h } = app.size, key = [p.motif, p.elements, p.taille, p.couleurs.join(), app.seed, vecKey, w, h].join();
+      if (key === tubesKey) return; tubesKey = key;
+      const cols = p.couleurs.length ? p.couleurs : ['#ffffff'], S = Math.min(w, h) * p.taille, cx = w / 2, cy = h * 0.42;
+      const N = (x, y) => [x / w, y / h], r = (i) => hash(i * 7.31 + 1);
+      const out = [];
+      if (p.motif === 'logo') {
+        const loops = logoLoops();
+        loops.forEach((l, i) => out.push(newTube(l.map(([a, b]) => N(cx + a * S, cy + b * S)), true, cols[i % cols.length])));
+      } else if (p.motif === 'vagues') {
+        const n = p.elements;
+        for (let k = 0; k < n; k++) {
+          const y0 = cy - S * 0.45 + (n > 1 ? k / (n - 1) : 0.5) * S * 0.9, amp = S * (0.03 + 0.05 * r(k)), f = 2 + Math.floor(r(k + 9) * 3), ph = r(k + 3) * TAU, pts = [];
+          for (let i = 0; i <= 80; i++) { const u = i / 80, x = cx - S * 0.75 + u * S * 1.5; pts.push(N(x, y0 + Math.sin(u * f * TAU + ph) * amp)); }
+          out.push(newTube(pts, false, cols[k % cols.length]));
+        }
+      } else if (p.motif === 'cadres') {
+        const n = p.elements;
+        for (let k = 0; k < n; k++) {
+          const s = 1 - k / n * 0.85, W = S * 1.3 * s, H = S * 0.8 * s, R = Math.min(W, H) * 0.12, pts = [];
+          const x0 = cx - W / 2, y0 = cy - H / 2;
+          const corner = (ax, ay, a0) => { for (let i = 0; i <= 6; i++) { const a = a0 + i / 6 * Math.PI / 2; pts.push(N(ax + Math.cos(a) * R, ay + Math.sin(a) * R)); } };
+          corner(x0 + W - R, y0 + R, -Math.PI / 2); corner(x0 + W - R, y0 + H - R, 0); corner(x0 + R, y0 + H - R, Math.PI / 2); corner(x0 + R, y0 + R, Math.PI);
+          out.push(newTube(pts, true, cols[k % cols.length]));
+        }
+      } else {
+        // formes : cercles, arcs, zigzags, éclairs, spirales, étoiles, posés autour du centre
+        const n = p.elements;
+        for (let k = 0; k < n; k++) {
+          // disposition en tournesol (angle d'or) : les formes se partagent la place sans s'empiler
+          const kind = (k + Math.floor(r(1) * 6)) % 6, a = k * 2.39996 + r(2) * TAU, d = Math.sqrt((k + 0.5) / n) * S * 0.5;
+          const x = cx + Math.cos(a) * d * 1.35, y = cy + Math.sin(a) * d * 0.85, s = S * 0.42 / Math.sqrt(n) * (0.75 + 0.45 * r(k + 50)), rot = r(k + 70) * TAU;
+          const pts = [], tr = (u, v) => N(x + u * Math.cos(rot) - v * Math.sin(rot), y + u * Math.sin(rot) + v * Math.cos(rot));
+          let closed = false;
+          if (kind === 0) { for (let i = 0; i < 48; i++) { const t = i / 48 * TAU; pts.push(tr(Math.cos(t) * s, Math.sin(t) * s)); } closed = true; }
+          else if (kind === 1) { const span = Math.PI * (0.6 + r(k + 5) * 0.9); for (let i = 0; i <= 40; i++) { const t = -span / 2 + i / 40 * span; pts.push(tr(Math.cos(t) * s, Math.sin(t) * s)); } }
+          else if (kind === 2) { const m = 4 + Math.floor(r(k + 6) * 4); for (let i = 0; i <= m; i++) pts.push(tr(-s + i / m * 2 * s, (i % 2 ? 1 : -1) * s * 0.25)); }
+          else if (kind === 3) { pts.push(tr(-s * 0.2, -s), tr(s * 0.25, -s * 0.1), tr(-s * 0.1, 0), tr(s * 0.3, s)); }
+          else if (kind === 4) { for (let i = 0; i <= 70; i++) { const t = i / 70 * TAU * 2.2, rr = s * (0.15 + 0.85 * i / 70); pts.push(tr(Math.cos(t) * rr, Math.sin(t) * rr)); } }
+          else { const m = 5; for (let i = 0; i < m * 2; i++) { const t = i / (m * 2) * TAU - Math.PI / 2, rr = i % 2 ? s * 0.45 : s; pts.push(tr(Math.cos(t) * rr, Math.sin(t) * rr)); } closed = true; }
+          out.push(newTube(kind === 2 || kind === 3 || kind === 5 ? pts : pts, closed, cols[k % cols.length]));
+        }
+      }
+      out.forEach((t, i) => { t.delay = i * 0.35 + hash(i + 11) * 0.3; t.faulty = hash(i + 31) < p.scintillement * 0.35; });
+      tubes = out;
+    }
+
+    // ——— Allumage, grésillement, clignotement ———
+    function brightness(t, i) {
+      if (!t.on) return 0;
+      let T = time - t.on0;
+      const cyc = 14;
+      if (p.sequence === 'allumage' && !t.user) { const c = time % cyc; if (c > cyc - 1.2) return 0; T = c; }
+      T -= t.user ? 0 : t.delay;
+      if (T < 0) return 0;
+      // amorçage : quelques éclats avant de tenir
+      if (T < 0.7) { const k = Math.floor(T * 22); return hash(k * 3.7 + i * 13 + Math.floor(time / cyc) * 5) < 0.45 ? 0.9 : 0.08; }
+      let b = 1;
+      if (p.sequence === 'clignotant' && !t.user) b = (Math.floor(time * 1.2) + i) % 2 ? 1 : 0.05;
+      // petites baisses aléatoires, et un tube fatigué qui grésille
+      const s = p.scintillement;
+      const n = Math.floor(time * 18), hk = hash(n * 1.3 + i * 17.7);
+      if (hk < s * 0.04) b *= 0.25;
+      if (t.faulty) { const m = Math.floor(time * 30); b *= hash(m * 2.1 + i) < 0.35 * s + 0.1 ? 0.15 + 0.3 * hash(m) : 1; }
+      return b * (0.96 + 0.04 * Math.sin(time * 120 + i));
+    }
+    function toggleAt(x, y) {
+      const { w, h } = app.size; let best = null, bd = 30 * 30;
+      for (const t of tubes.concat(drawn)) for (const [u, v] of t.pts) { const d = (u * w - x) ** 2 + (v * h - y) ** 2; if (d < bd) { bd = d; best = t; } }
+      if (best) { best.on = !best.on; if (best.on) { best.on0 = time; best.user = true; } }
+    }
+
+    // ——— Mur ———
+    function wall() {
+      const { w, h, dpr } = app.size, key = [w, h, dpr, p.mur, p.fond, app.seed].join();
+      if (key === wallKey && wallCv) return wallCv; wallKey = key;
+      wallCv = document.createElement('canvas'); wallCv.width = Math.ceil(w * dpr); wallCv.height = Math.ceil(h * dpr);
+      const x = wallCv.getContext('2d'); x.scale(dpr, dpr);
+      x.fillStyle = p.fond; x.fillRect(0, 0, w, h);
+      const [r, g, b] = hex(p.fond), S = Math.min(w, h);
+      const shade = (k, a) => `rgba(${Math.round(r * k)},${Math.round(g * k)},${Math.round(b * k)},${a})`;
+      if (p.mur === 'brique') {
+        const bh = S * 0.045, bw = bh * 2.6, j = Math.max(1, bh * 0.1);
+        for (let row = 0, y = 0; y < h; row++, y += bh) for (let xx = (row % 2 ? -bw / 2 : 0); xx < w; xx += bw) {
+          const v = 0.8 + 0.4 * hash(row * 31.7 + xx * 0.13);
+          x.fillStyle = shade(v, 1); x.fillRect(xx + j / 2, y + j / 2, bw - j, bh - j);
+          x.fillStyle = shade(1.6, 0.06); x.fillRect(xx + j / 2, y + j / 2, bw - j, 1);
+        }
+        x.fillStyle = shade(0.5, 0.0);
+      } else if (p.mur === 'carrelage') {
+        const t = S * 0.06, j = 1.2;
+        x.fillStyle = shade(0.6, 1); x.fillRect(0, 0, w, h);
+        for (let y = 0; y < h; y += t) for (let xx = 0; xx < w; xx += t) { const v = 0.95 + 0.12 * hash(xx * 0.7 + y * 1.3); x.fillStyle = shade(v, 1); x.fillRect(xx + j, y + j, t - j * 2, t - j * 2); const gr = x.createLinearGradient(xx, y, xx + t, y + t); gr.addColorStop(0, 'rgba(255,255,255,0.05)'); gr.addColorStop(1, 'rgba(0,0,0,0.05)'); x.fillStyle = gr; x.fillRect(xx + j, y + j, t - j * 2, t - j * 2); }
+      } else if (p.mur === 'beton') {
+        const c = document.createElement('canvas'), q = 4; c.width = Math.ceil(w / q); c.height = Math.ceil(h / q);
+        const cx = c.getContext('2d'), im = cx.createImageData(c.width, c.height);
+        for (let i = 0; i < c.width * c.height; i++) { const v = 0.85 + 0.3 * (hash(i * 0.917) * 0.5 + hash(Math.floor(i / 3) * 1.7) * 0.5); im.data[i * 4] = r * v; im.data[i * 4 + 1] = g * v; im.data[i * 4 + 2] = b * v; im.data[i * 4 + 3] = 255; }
+        cx.putImageData(im, 0, 0); x.globalAlpha = 0.9; x.drawImage(c, 0, 0, w, h); x.globalAlpha = 1;
+        // trous de banche
+        for (let yy = h * 0.12; yy < h; yy += h * 0.33) for (let xx = w * 0.1; xx < w; xx += w * 0.2) { x.fillStyle = shade(0.55, 1); x.beginPath(); x.arc(xx, yy, S * 0.006, 0, TAU); x.fill(); }
+      }
+      // sol : bande sombre en bas, qui recevra le reflet
+      if (p.reflet > 0) { const fy = floorY(); const gr = x.createLinearGradient(0, fy, 0, h); gr.addColorStop(0, shade(0.45, 1)); gr.addColorStop(1, shade(0.25, 1)); x.fillStyle = gr; x.fillRect(0, fy, w, h - fy); x.fillStyle = 'rgba(255,255,255,0.05)'; x.fillRect(0, fy, w, 1); }
+      return wallCv;
+    }
+    const floorY = () => app.size.h * (1 - 0.2 * Math.min(1, p.reflet * 2.5));
+
+    // ——— Dessin ———
+    function strokeTube(x, t, w, h) {
+      x.beginPath();
+      t.pts.forEach(([u, v], i) => (i ? x.lineTo(u * w, v * h) : x.moveTo(u * w, v * h)));
+      if (t.closed) x.closePath();
+      x.stroke();
+    }
+    // halo d'un tube, calculé une fois (flou coûteux) puis posé à chaque image avec sa luminosité
+    function haloSprite(t, w, h, lw) {
+      const key = [t.col, lw, w, h].join();
+      if (t.halo && t.haloKey === key) return t.halo;
+      t.haloKey = key;
+      let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+      for (const [u, v] of t.pts) { x0 = Math.min(x0, u * w); x1 = Math.max(x1, u * w); y0 = Math.min(y0, v * h); y1 = Math.max(y1, v * h); }
+      const m = lw * 7 + 40, q = 0.5;
+      x0 -= m; y0 -= m; x1 += m; y1 += m;
+      const cv = document.createElement('canvas'); cv.width = Math.max(1, Math.ceil((x1 - x0) * q)); cv.height = Math.max(1, Math.ceil((y1 - y0) * q));
+      const x = cv.getContext('2d'); x.lineCap = x.lineJoin = 'round'; x.strokeStyle = t.col;
+      x.setTransform(q, 0, 0, q, -x0 * q, -y0 * q);
+      x.filter = `blur(${(lw * 2.2 + 12) * q}px)`; x.globalAlpha = 0.5; x.lineWidth = lw * 7; strokeTube(x, t, w, h);
+      x.filter = `blur(${Math.max(1, lw * 0.5)}px)`; x.globalAlpha = 0.9; x.lineWidth = lw * 2.2; strokeTube(x, t, w, h);
+      x.filter = 'none';
+      t.halo = { cv, x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+      return t.halo;
+    }
+    app.loop((tt, dt) => {
+      const { w, h, dpr } = app.size;
+      dt = Math.min(0.05, dt || 0); time += dt;
+      if (app.thumbnail) time = 3;
+      buildTubes();
+      const all = tubes.concat(drawn), lw = p.epaisseur, br = all.map((t, i) => brightness(t, i));
+      all.forEach((t) => haloSprite(t, w, h, lw));
+
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.drawImage(wall(), 0, 0, w, h);
+      const light = (() => { const [r, g, b] = hex(p.fond); return r * 0.3 + g * 0.6 + b * 0.1 > 140; })();
+      ctx.globalCompositeOperation = light ? 'multiply' : 'lighter';
+      all.forEach((t, i) => { if (br[i] < 0.02) return; const c = t.halo; ctx.globalAlpha = Math.min(1, br[i] * p.lueur * (light ? 0.35 : 1)); ctx.drawImage(c.cv, c.x, c.y, c.w, c.h); });
+      ctx.globalCompositeOperation = 'source-over'; ctx.globalAlpha = 1;
+      // supports : petites pattes sombres qui tiennent le tube
+      ctx.lineCap = ctx.lineJoin = 'round';
+      all.forEach((t, i) => {
+        // verre éteint : gaine terne et un reflet fin
+        ctx.strokeStyle = dim(t.col, 0.35); ctx.globalAlpha = 0.85; ctx.lineWidth = lw; strokeTube(ctx, t, w, h);
+        ctx.globalAlpha = 1;
+        if (br[i] > 0.02) {
+          ctx.globalAlpha = br[i]; ctx.strokeStyle = mixW(t.col, 0.25); ctx.lineWidth = lw; strokeTube(ctx, t, w, h);
+          ctx.strokeStyle = mixW(t.col, light ? 0.35 : 0.8); ctx.lineWidth = lw * 0.38; strokeTube(ctx, t, w, h);
+          ctx.globalAlpha = 1;
+        } else { ctx.strokeStyle = 'rgba(255,255,255,0.18)'; ctx.lineWidth = Math.max(0.6, lw * 0.15); strokeTube(ctx, t, w, h); }
+        // électrodes aux extrémités d'un tube ouvert
+        if (!t.closed) for (const e of [t.pts[0], t.pts[t.pts.length - 1]]) { ctx.fillStyle = '#2a2a2a'; ctx.beginPath(); ctx.arc(e[0] * w, e[1] * h, lw * 0.75, 0, TAU); ctx.fill(); }
+      });
+      // tracé en cours
+      if (drag && drag.moved) { ctx.strokeStyle = 'rgba(255,255,255,0.5)'; ctx.setLineDash([4, 6]); ctx.lineWidth = 1.5; ctx.beginPath(); drag.pts.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y))); ctx.stroke(); ctx.setLineDash([]); }
+      // reflet au sol : halo renversé et flou
+      if (p.reflet > 0 && !light) {
+        const fy = floorY();
+        ctx.save(); ctx.beginPath(); ctx.rect(0, fy, w, h - fy); ctx.clip();
+        ctx.globalCompositeOperation = 'lighter';
+        ctx.translate(0, fy * 2); ctx.scale(1, -1);
+        all.forEach((t, i) => { if (br[i] < 0.02) return; const c = t.halo; ctx.globalAlpha = Math.min(1, br[i] * p.reflet * 0.6 * Math.max(0.6, p.lueur)); ctx.drawImage(c.cv, c.x, c.y, c.w, c.h); });
+        ctx.restore(); ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over';
+      }
+      app.finish(ctx);
+    });
+
+    function toSVG() {
+      const { w, h } = app.size, f = (v) => v.toFixed(1), all = tubes.concat(drawn), lw = p.epaisseur;
+      const path = (t) => t.pts.map(([u, v], i) => (i ? 'L' : 'M') + f(u * w) + ' ' + f(v * h)).join('') + (t.closed ? 'Z' : '');
+      const br = all.map((t, i) => brightness(t, i));
+      const light = (() => { const [r, g, b] = hex(p.fond); return r * 0.3 + g * 0.6 + b * 0.1 > 140; })();
+      const glow = [], tube = [];
+      all.forEach((t, i) => {
+        const d = path(t);
+        tube.push(`<path d="${d}" stroke="${dim(t.col, 0.35)}" stroke-opacity="0.85" stroke-width="${lw}"/>`);
+        if (br[i] > 0.02) {
+          glow.push(`<path d="${d}" stroke="${t.col}" stroke-opacity="${(br[i] * 0.9).toFixed(2)}" stroke-width="${lw * 7}" filter="url(#large)"/><path d="${d}" stroke="${t.col}" stroke-opacity="${br[i].toFixed(2)}" stroke-width="${lw * 2.2}" filter="url(#proche)"/>`);
+          tube.push(`<path d="${d}" stroke="${mixW(t.col, 0.25)}" stroke-opacity="${br[i].toFixed(2)}" stroke-width="${lw}"/><path d="${d}" stroke="${mixW(t.col, 0.8)}" stroke-opacity="${br[i].toFixed(2)}" stroke-width="${f(lw * 0.38)}"/>`);
+        }
+      });
+      const fy = floorY();
+      const floor = p.reflet > 0 ? `<rect x="0" y="${f(fy)}" width="${w}" height="${f(h - fy)}" fill="${dim(p.fond, 0.4)}"/>${light ? '' : `<g clip-path="url(#sol)"><g transform="translate(0 ${f(fy * 2)}) scale(1 -1)" opacity="${(p.reflet * 0.6).toFixed(2)}" style="mix-blend-mode:screen">${glow.join('')}</g></g>`}` : '';
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">\n<defs><filter id="large" filterUnits="userSpaceOnUse" x="0" y="0" width="${w}" height="${h}"><feGaussianBlur stdDeviation="${f(lw * 2.4 + 10)}"/></filter><filter id="proche" filterUnits="userSpaceOnUse" x="0" y="0" width="${w}" height="${h}"><feGaussianBlur stdDeviation="${f(lw * 0.7 + 1)}"/></filter><clipPath id="sol"><rect x="0" y="${f(fy)}" width="${w}" height="${f(h - fy)}"/></clipPath></defs>\n<image href="${wall().toDataURL('image/jpeg', 0.85)}" x="0" y="0" width="${w}" height="${h}"/>\n${floor}\n<g fill="none" stroke-linecap="round" stroke-linejoin="round">\n<g style="mix-blend-mode:${light ? 'multiply' : 'screen'}" opacity="${Math.min(1, 0.7 * p.lueur).toFixed(2)}">${light ? '' : glow.join('')}</g>\n${tube.join('\n')}\n</g>\n</svg>`;
+    }
+  </script>
+</body>
+</html>
