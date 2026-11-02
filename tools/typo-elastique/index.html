@@ -1,0 +1,254 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Typo élastique</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Typo élastique sur grille : chaque ligne du texte est une rangée, chaque lettre une case.
+    // Les largeurs de colonnes et les hauteurs de rangées suivent une onde, du hasard lissé ou le pointeur,
+    // à travers des ressorts (dépassement, rebond). Chaque glyphe est étiré pour remplir sa case :
+    // ses limites réelles d'encre sont mesurées, puis une matrice d'échelle l'ajuste à la case.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const BIEN = PAL('biennale'), KB = PAL('kegelbahn'), SALON = PAL('salon'), GR = PAL('good-room'), LUZ = PAL('luzern');
+    const P60 = PAL('papier-60'), ACIDE = PAL('acide'), PIX = PAL('pixels'), MENTHE = PAL('menthe'), ORB = PAL('orbite'), NUIT = PAL('trame-nuit');
+    const FONTS = {
+      grotesque: "'Helvetica Neue', Helvetica, Arial, sans-serif",
+      serif: "Georgia, 'Times New Roman', Times, serif",
+      mono: "'Courier New', Courier, monospace",
+    };
+    const REF = 200;
+
+    let rows = [], hover = null, drag = null, pull = null, phases = [], glyphCache = new Map();
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.03, vignette: 0 },
+      hint: 'Survolez pour gonfler les lettres · attrapez une lettre et tirez · molette : amplitude',
+      notes: 'Une ligne de texte = une rangée de la grille. Les lettres sont étirées pour remplir exactement leur case : les polices grasses donnent les plus beaux contrastes. Les ressorts règlent le rebond.',
+      params: {
+        'Texte': {
+          texte: { type: 'textarea', label: 'Texte', value: 'ÉLASTIQUE\nGRILLE\nTYPO', rows: 3 },
+          police: { type: 'font', label: 'Police', options: { grotesque: 'Grotesque', serif: 'Sérif', mono: 'Machine' }, value: 'grotesque' },
+          graisse: { type: 'segmented', label: 'Graisse', options: { 400: 'Normale', 700: 'Grasse', 900: 'Noire' }, value: '900' },
+          gouttiere: { type: 'range', label: 'Gouttière', min: 0, max: 0.2, step: 0.005, value: 0.03 },
+          marge: { type: 'range', label: 'Marge', min: 0, max: 0.2, step: 0.005, value: 0.05 },
+        },
+        'Élasticité': {
+          mouvement: { type: 'segmented', label: 'Mouvement', options: { onde: 'Onde', hasard: 'Hasard', marches: 'Marches', calme: 'Calme' }, value: 'onde' },
+          ampX: { type: 'range', label: 'Amplitude horizontale', min: 0, max: 0.95, step: 0.01, value: 0.7 },
+          ampY: { type: 'range', label: 'Amplitude verticale', min: 0, max: 0.95, step: 0.01, value: 0.45 },
+          frequence: { type: 'range', label: 'Fréquence', min: 0.2, max: 3, step: 0.01, value: 1 },
+          vitesse: { type: 'range', label: 'Vitesse', min: 0, max: 3, step: 0.01, value: 1 },
+          pointeur: { type: 'range', label: 'Force du pointeur', min: 0, max: 4, step: 0.05, value: 2 },
+          raideur: { type: 'range', label: 'Raideur des ressorts', min: 10, max: 400, step: 1, value: 120 },
+          amorti: { type: 'range', label: 'Amorti', min: 2, max: 40, step: 0.5, value: 11 },
+        },
+        'Couleur': {
+          fond: { type: 'color', label: 'Fond', value: BIEN[0] },
+          encre: { type: 'color', label: 'Encre', value: BIEN[1] },
+          cases: { type: 'segmented', label: 'Cases', options: { aucune: 'Aucune', alterne: 'Alternées', tendues: 'Tendues' }, value: 'aucune' },
+          accents: { type: 'palette', label: 'Couleurs des cases', value: [BIEN[2], BIEN[3], BIEN[4]], show: (q) => q.cases !== 'aucune' },
+        },
+      },
+      presets: {
+        'Élastique': {},
+        'Affiche': { texte: 'GRAND\nPETIT\nGRAND', fond: SALON[0], encre: SALON[1], cases: 'tendues', accents: [SALON[2], SALON[3], SALON[4]], ampX: 0.85, ampY: 0.6, gouttiere: 0.06 },
+        'Kegelbahn': { texte: 'KEGEL\nBAHN', fond: KB[0], encre: KB[3], cases: 'alterne', accents: [KB[1], KB[2], KB[5], KB[4]], mouvement: 'marches', ampX: 0.8, ampY: 0.7, raideur: 220, amorti: 6 },
+        'Serif': { texte: 'Lettres\nen fuite', police: 'serif', graisse: '700', fond: P60[0], encre: P60[1], mouvement: 'onde', frequence: 0.6, ampX: 0.6, ampY: 0.2 },
+        'Machine': { texte: 'ABC\nDEF\nGHI\nJKL', police: 'mono', graisse: '700', fond: ACIDE[1], encre: ACIDE[2], mouvement: 'hasard', ampX: 0.9, ampY: 0.9, gouttiere: 0.08, raideur: 60, amorti: 5 },
+        'Pixels': { texte: 'PIXEL\nPIXEL\nPIXEL', fond: PIX[0], encre: '#111111', cases: 'alterne', accents: [PIX[1], PIX[2], PIX[3], PIX[4], PIX[5]], frequence: 2, ampX: 0.75, ampY: 0.4 },
+        'Good Room': { texte: 'GOOD\nROOM', fond: GR[0], encre: GR[1], cases: 'tendues', accents: [GR[2], GR[3], GR[4]], mouvement: 'hasard', ampX: 0.7, ampY: 0.8 },
+        'Menthe': { texte: 'souple', police: 'serif', graisse: '400', fond: MENTHE[0], encre: MENTHE[1], ampX: 0.9, ampY: 0, frequence: 1.6, vitesse: 1.4, marge: 0.08 },
+        'Luzern': { texte: 'LU\nZE\nRN', fond: LUZ[0], encre: LUZ[4], cases: 'alterne', accents: [LUZ[1], LUZ[2], LUZ[3]], mouvement: 'marches', ampX: 0.6, ampY: 0.85, gouttiere: 0.02, marge: 0.02 },
+        'Nuit': { texte: 'TENSION\nDÉTENTE', fond: NUIT[0], encre: NUIT[1], ampX: 0.95, ampY: 0.3, frequence: 0.8, raideur: 300, amorti: 4 },
+        'Orbite': { texte: 'O\nR\nB', fond: ORB[0], encre: ORB[1], mouvement: 'calme', pointeur: 3.5, gouttiere: 0.04, marge: 0.12 },
+      },
+      brand(colors) {
+        return { fond: colors[0], encre: colors[1] || '#111111', accents: (colors.slice(2).length ? colors.slice(2) : [colors[1] || '#111111']).slice(0, 6) };
+      },
+      pointer: {
+        move: (q) => { hover = { x: q.x, y: q.y }; },
+        down: (q) => {
+          const c = cellAt(q.x, q.y);
+          drag = { x: q.x, y: q.y, cell: c, moved: false };
+        },
+        drag: (q) => {
+          if (!drag) return;
+          hover = { x: q.x, y: q.y };
+          if (Math.hypot(q.x - drag.x, q.y - drag.y) > 4) drag.moved = true;
+          // Tirer une lettre : sa colonne et sa rangée suivent l'écart au point de départ.
+          if (drag.cell) pull = { r: drag.cell.r, k: drag.cell.k, dx: q.x - drag.x, dy: q.y - drag.y };
+        },
+        up: () => {
+          if (drag && !drag.moved && drag.cell) kick(drag.cell);
+          drag = null; pull = null;
+        },
+        wheel: (q, dy) => { const d = -dy * 0.0008; app.set('ampX', clamp(p.ampX + d, 0, 0.95)); app.set('ampY', clamp(p.ampY + d, 0, 0.95)); },
+      },
+      onChange(k) { if (k === 'texte' || k === '*') rows = []; if (k === 'police' || k === 'graisse' || k === '*') { glyphCache.clear(); rows.forEach((r) => { r.base = null; }); } },
+      onSeed() { reseed(); },
+      export: { name: 'typo-elastique', svg: () => toSVG() },
+    });
+    const p = app.params;
+    const clamp = (x, a, b) => Math.max(a, Math.min(b, x));
+    canvas.addEventListener('pointerleave', () => { if (!drag) hover = null; });
+    if (document.fonts) document.fonts.addEventListener('loadingdone', () => { glyphCache.clear(); rows.forEach((r) => { r.base = null; }); });
+
+    function reseed() { const r = app.rng(3); phases = Array.from({ length: 256 }, () => r() * TAU); }
+    reseed();
+
+    function family() { return p.police === 'AtelierBrand' ? "'AtelierBrand', sans-serif" : (FONTS[p.police] || FONTS.grotesque); }
+    function fontStr(size) { return `${p.graisse} ${size}px ${family()}`; }
+    // Limites d'encre d'un glyphe à la taille de référence (mises en cache).
+    function glyph(ch) {
+      let g = glyphCache.get(ch);
+      if (!g) {
+        ctx.save(); ctx.font = fontStr(REF); ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+        const m = ctx.measureText(ch); ctx.restore();
+        g = { l: m.actualBoundingBoxLeft || 0, r: m.actualBoundingBoxRight || m.width, a: m.actualBoundingBoxAscent || REF * 0.7, d: m.actualBoundingBoxDescent || 0, adv: m.width };
+        if (g.l + g.r < 1 || g.a + g.d < 1) g.empty = true;
+        glyphCache.set(ch, g);
+      }
+      return g;
+    }
+
+    // ——— Rangées et ressorts ———
+    function buildRows() {
+      const lines = String(p.texte || ' ').split('\n').map((l) => l.replace(/\s+$/, '')).filter((l, i, a) => l.length || a.length === 1);
+      rows = lines.map((l) => {
+        const chars = [...(l.length ? l : ' ')];
+        return { chars, w: chars.map(() => 1), v: chars.map(() => 0), kick: chars.map(() => 0) };
+      });
+      rowSpring = { h: rows.map(() => 1), v: rows.map(() => 0) };
+    }
+    let rowSpring = { h: [], v: [] };
+    function kick(c) { if (rows[c.r]) rows[c.r].v[c.k] += 6; rowSpring.v[c.r] += 4; }
+
+    function geom(w, h) {
+      const m = Math.min(w, h) * p.marge;
+      return { x0: m, y0: m, W: w - 2 * m, H: h - 2 * m };
+    }
+    // Poids cibles : base × onde / hasard / marches × lentille du pointeur.
+    function targets(n, axisAmp, t, salt, ptr, centers, base) {
+      const out = new Array(n), f = p.frequence, v = p.vitesse;
+      for (let k = 0; k < n; k++) {
+        const u = n > 1 ? k / (n - 1) : 0.5;
+        let s = 0;
+        if (p.mouvement === 'onde') s = Math.sin(u * TAU * f * 0.5 * Math.max(1, n / 4) - t * v * 2 + salt * 0.9);
+        else if (p.mouvement === 'hasard') s = 0.6 * Math.sin(t * v * 0.9 * (0.6 + (phases[(k + salt * 17) & 255] / TAU)) + phases[(k * 3 + salt * 5) & 255]) + 0.4 * Math.sin(t * v * 1.7 + phases[(k * 7 + salt) & 255]);
+        else if (p.mouvement === 'marches') { const step = Math.floor(t * v * 0.8 + salt * 0.37); s = ((step + k) % 3) - 1; }
+        let wv = 1 + axisAmp * s;
+        if (ptr != null && p.pointeur > 0) { const d = (centers[k] - ptr.pos) / ptr.span; wv += p.pointeur * Math.exp(-d * d * 3) * ptr.str; }
+        out[k] = Math.max(0.38, wv) * (base ? base[k] : 1);
+      }
+      return out;
+    }
+    function step(t, dt, w, h) {
+      if (!rows.length) buildRows();
+      const g = geom(w, h), R = rows.length, kS = p.raideur, c = p.amorti;
+      const sub = Math.max(1, Math.ceil(dt / 0.008)), h1 = dt / sub;
+      const ptrIn = hover && hover.x >= 0 && hover.y >= 0 && hover.x <= w && hover.y <= h;
+      // Rangées.
+      const rowsC = [], sumH = rowSpring.h.reduce((a, b) => a + b, 0);
+      let acc = 0; for (let j = 0; j < R; j++) { const hh = (rowSpring.h[j] / sumH) * g.H; rowsC.push(g.y0 + acc + hh / 2); acc += hh; }
+      const tr = targets(R, p.ampY, t, 7, ptrIn ? { pos: hover.y, span: g.H / Math.max(2, R) * 1.2, str: 0.7 } : null, rowsC);
+      if (pull) tr[pull.r] = Math.max(0.2, tr[pull.r] * (1 + pull.dy / (g.H / R) * (pull.dy > 0 ? 1 : 0.6)));
+      integrate(rowSpring.h, rowSpring.v, tr, kS, c, sub, h1);
+      // Colonnes de chaque rangée.
+      for (let j = 0; j < R; j++) {
+        const row = rows[j], n = row.chars.length, sw = row.w.reduce((a, b) => a + b, 0), cent = [];
+        let ax = 0; for (let k = 0; k < n; k++) { const ww = (row.w[k] / sw) * g.W; cent.push(g.x0 + ax + ww / 2); ax += ww; }
+        const near = ptrIn ? Math.exp(-Math.pow((hover.y - rowsC[j]) / (g.H / R), 2) * 1.5) : 0;
+        // Base : la chasse naturelle de chaque lettre (un I reste plus étroit qu'un M).
+        if (!row.base) { const adv = row.chars.map((ch) => (ch === ' ' ? 0.45 : Math.max(0.2, glyph(ch).l + glyph(ch).r))); const m = adv.reduce((a, b) => a + b, 0) / n; row.base = adv.map((x) => 0.45 + 0.55 * (x / m)); }
+        const tc = targets(n, p.ampX, t, j, ptrIn ? { pos: hover.x, span: g.W / Math.max(3, n) * 1.4, str: near } : null, cent, row.base);
+        if (pull && pull.r === j) tc[pull.k] = Math.max(0.2, tc[pull.k] * (1 + Math.abs(pull.dx) / (g.W / n) * 1.2));
+        integrate(row.w, row.v, tc, kS, c, sub, h1);
+      }
+    }
+    function integrate(x, v, target, k, c, sub, h1) {
+      for (let s = 0; s < sub; s++) for (let i = 0; i < x.length; i++) {
+        const a = k * (target[i] - x[i]) - c * v[i];
+        v[i] += a * h1; x[i] = Math.max(0.15, x[i] + v[i] * h1);
+      }
+    }
+
+    // ——— Cases ———
+    function cells(w, h) {
+      const g = geom(w, h), out = [], sumH = rowSpring.h.reduce((a, b) => a + b, 0) || 1;
+      let y = g.y0;
+      rows.forEach((row, j) => {
+        const hh = (rowSpring.h[j] / sumH) * g.H, sw = row.w.reduce((a, b) => a + b, 0) || 1;
+        let x = g.x0;
+        row.chars.forEach((ch, k) => {
+          const ww = (row.w[k] / sw) * g.W;
+          out.push({ r: j, k, ch, x, y, w: ww, h: hh, wt: row.w[k] / (sw / row.chars.length), ht: rowSpring.h[j] / (sumH / rows.length) });
+          x += ww;
+        });
+        y += hh;
+      });
+      return out;
+    }
+    function cellAt(x, y) { const { w, h } = app.size; return cells(w, h).find((c) => x >= c.x && x < c.x + c.w && y >= c.y && y < c.y + c.h) || null; }
+
+    function scene(pen, w, h) {
+      const cs = cells(w, h), gut = Math.min(w, h) * p.gouttiere * 0.5;
+      const A = p.accents && p.accents.length ? p.accents : [p.encre];
+      cs.forEach((c, i) => {
+        if (p.cases === 'alterne') pen.rect(c.x, c.y, c.w, c.h, A[(c.k + c.r * 2) % A.length]);
+        else if (p.cases === 'tendues') {
+          // Les cases les plus étirées s'allument.
+          const s = c.wt * c.ht;
+          if (s > 1.25) pen.rect(c.x, c.y, c.w, c.h, A[(c.k + c.r) % A.length]);
+        }
+        if (c.ch === ' ') return;
+        const g = glyph(c.ch);
+        if (g.empty) return;
+        const iw = c.w - gut * 2, ih = c.h - gut * 2;
+        if (iw < 0.5 || ih < 0.5) return;
+        const sx = iw / (g.l + g.r), sy = ih / (g.a + g.d);
+        pen.glyph(c.ch, sx, sy, c.x + gut + g.l * sx, c.y + gut + g.a * sy, p.encre);
+      });
+    }
+
+    // ——— Canvas ———
+    app.loop((t, dt) => {
+      const { w, h, dpr } = app.size;
+      dt = Math.min(0.04, dt || 0);
+      step(t, dt, w, h);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = p.fond; ctx.fillRect(0, 0, w, h);
+      ctx.font = fontStr(REF); ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+      scene({
+        rect(x, y, w2, h2, col) { ctx.fillStyle = col; ctx.fillRect(x, y, w2 + 0.5, h2 + 0.5); },
+        glyph(ch, sx, sy, tx, ty, col) { ctx.setTransform(dpr * sx, 0, 0, dpr * sy, dpr * tx, dpr * ty); ctx.fillStyle = col; ctx.fillText(ch, 0, 0); ctx.setTransform(dpr, 0, 0, dpr, 0, 0); },
+      }, w, h);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      app.finish(ctx);
+    });
+
+    // ——— SVG : texte vivant, une matrice par glyphe ———
+    function toSVG() {
+      const { w, h } = app.size, out = [], f = (v) => Math.round(v * 1000) / 1000;
+      const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      scene({
+        rect: (x, y, w2, h2, col) => out.push(`<rect x="${f(x)}" y="${f(y)}" width="${f(w2)}" height="${f(h2)}" fill="${col}"/>`),
+        glyph: (ch, sx, sy, tx, ty, col) => out.push(`<text transform="matrix(${f(sx)} 0 0 ${f(sy)} ${f(tx)} ${f(ty)})" fill="${col}">${esc(ch)}</text>`),
+      }, w, h);
+      const fam = family().replace(/"/g, "'");
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">\n<rect width="100%" height="100%" fill="${p.fond}"/>\n<g font-family="${fam}" font-weight="${p.graisse}" font-size="${REF}">\n${out.join('\n')}\n</g>\n</svg>`;
+    }
+  </script>
+</body>
+</html>
