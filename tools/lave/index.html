@@ -1,0 +1,341 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Lave</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Lave : des gouttes chauffées par le bas montent, refroidissent en haut et redescendent.
+    // Leur forme est une surface implicite (métaballes à noyau compact) découpée en bandes par
+    // marching squares : les gouttes fusionnent et se séparent sans calcul de collision.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const P60 = PAL('papier-60'), BIEN = PAL('biennale'), MENTHE = PAL('menthe'), KB = PAL('kegelbahn'), GR = PAL('good-room'), THER = PAL('thermique');
+    const NUIT = PAL('trame-nuit'), LUZ = PAL('luzern'), SALON = PAL('salon'), PYR = PAL('pyramides'), ACIDE = PAL('acide'), ORB = PAL('orbite');
+    const ISO = 0.42; // seuil : une goutte seule a pour contour son rayon
+
+    let pad = 0, B = [], hover = null, drag = null, held = -1, field = null, fw = 0, fh = 0, fc = 0, maskCache = null, maskKey = null, logoF = null, logoKey = '', inited = false;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.03, vignette: 0 },
+      hint: 'Le pointeur chauffe les gouttes · glissez pour en tirer une · touchez pour la couper en deux · molette : nombre de gouttes',
+      notes: 'Les gouttes chauffent au fond, montent par flottaison, refroidissent en haut et retombent. Leur contour est l’isoligne d’un champ de métaballes ; les bandes intérieures sont les zones où le champ est plus dense.',
+      params: {
+        'Lampe': {
+          forme: { type: 'select', label: 'Forme', options: { lampe: 'Lampe', capsule: 'Capsule', cadre: 'Tout le cadre', logo: 'Logo en fusion' }, value: 'lampe' },
+          image: { type: 'file', label: 'Logo', accept: 'image/*', show: (q) => q.forme === 'logo' },
+          gouttes: { type: 'range', label: 'Gouttes', min: 2, max: 24, step: 1, value: 9 },
+          taille: { type: 'range', label: 'Taille', min: 0.02, max: 0.14, step: 0.005, value: 0.056 },
+          ecarts: { type: 'range', label: 'Écarts de taille', min: 0, max: 1, step: 0.01, value: 0.5 },
+        },
+        'Mouvement': {
+          chaleur: { type: 'range', label: 'Chaleur', min: 0.1, max: 3, step: 0.05, value: 1 },
+          viscosite: { type: 'range', label: 'Viscosité', min: 0, max: 1, step: 0.01, value: 0.5 },
+          vitesse: { type: 'range', label: 'Vitesse', min: 0.1, max: 3, step: 0.05, value: 1 },
+        },
+        'Rendu': {
+          bandes: { type: 'range', label: 'Bandes', min: 1, max: 4, step: 1, value: 2 },
+          contour: { type: 'range', label: 'Contour', min: 0, max: 5, step: 0.25, value: 0 },
+          lissage: { type: 'range', label: 'Finesse du contour', min: 2, max: 8, step: 1, value: 4 },
+        },
+        'Couleur': {
+          fond: { type: 'color', label: 'Fond', value: P60[0] },
+          liquide: { type: 'color', label: 'Liquide', value: '#f2b0c8' },
+          socle: { type: 'color', label: 'Socle et contour', value: P60[1] },
+          couleurs: { type: 'palette', label: 'Gouttes, du bord au cœur', value: ['#e5452a', '#f2e640', '#f4f3f0'] },
+        },
+      },
+      presets: {
+        'Lampe': {},
+        'Nuit': { fond: NUIT[0], liquide: '#1d1b3a', socle: NUIT[2], couleurs: [GR[2], '#f2c06a', '#fff3c8'], bandes: 3 },
+        'Capsule': { forme: 'capsule', fond: MENTHE[0], liquide: MENTHE[1], socle: MENTHE[1], couleurs: [MENTHE[2], MENTHE[3], MENTHE[0]], gouttes: 7, taille: 0.075 },
+        'Cadre': { forme: 'cadre', fond: KB[0], liquide: KB[0], couleurs: [KB[1], KB[3], KB[2]], gouttes: 12, taille: 0.085, bandes: 3 },
+        'Logo': { forme: 'logo', fond: P60[0], liquide: P60[0], socle: P60[1], couleurs: [P60[1], '#e5452a'], gouttes: 8, taille: 0.05, bandes: 2 },
+        'Thermique': { forme: 'cadre', fond: THER[0], liquide: THER[0], couleurs: [THER[1], THER[4], THER[2], THER[3]], bandes: 4, gouttes: 12, taille: 0.08, chaleur: 1.4 },
+        'Luzern': { forme: 'lampe', fond: LUZ[0], liquide: LUZ[3], socle: LUZ[3], couleurs: [LUZ[1], LUZ[2], LUZ[4]], bandes: 3, gouttes: 8, taille: 0.075 },
+        'Salon': { forme: 'capsule', fond: SALON[0], liquide: SALON[4], socle: SALON[1], couleurs: [SALON[2], SALON[1]], bandes: 2, contour: 2.5, gouttes: 10 },
+        'Biennale': { forme: 'cadre', fond: BIEN[3], liquide: BIEN[3], socle: BIEN[1], couleurs: [BIEN[2], BIEN[4]], bandes: 2, contour: 3, gouttes: 10, taille: 0.09, ecarts: 0.8 },
+        'Acide': { forme: 'logo', fond: ACIDE[1], liquide: ACIDE[1], socle: ACIDE[0], couleurs: [ACIDE[2], ACIDE[3]], bandes: 2, gouttes: 10, taille: 0.045, chaleur: 1.6 },
+        'Pyramides': { forme: 'lampe', fond: PYR[0], liquide: PYR[1], socle: PYR[6], couleurs: [PYR[2], PYR[3], PYR[4]], bandes: 3, gouttes: 6, taille: 0.09, viscosite: 0.75, vitesse: 0.7 },
+        'Orbite': { forme: 'cadre', fond: ORB[2], liquide: ORB[2], socle: ORB[1], couleurs: [ORB[0], ORB[1]], bandes: 2, contour: 0, gouttes: 16, taille: 0.055, ecarts: 1 },
+      },
+      brand(colors) {
+        const c = colors.slice(1).length ? colors.slice(1) : ['#111111'];
+        const lum = (h) => { const n = parseInt(h.slice(1), 16); return ((n >> 16) & 255) * 0.299 + ((n >> 8) & 255) * 0.587 + (n & 255) * 0.114; };
+        const sorted = c.slice().sort((a, b) => lum(a) - lum(b)), dark = sorted[0];
+        const rest = c.filter((x) => x !== dark);
+        return { fond: colors[0], socle: dark, liquide: rest.length > 2 ? rest[rest.length - 1] : colors[0], couleurs: (rest.length > 2 ? rest.slice(0, -1) : rest.length ? rest : c).slice(0, 4) };
+      },
+      pointer: {
+        move: (q) => { hover = { x: q.x, y: q.y }; },
+        down: (q) => {
+          drag = { x: q.x, y: q.y, moved: false };
+          // Attrape la goutte la plus proche si on presse dessus.
+          let bi = -1, bd = Infinity; B.forEach((b, i) => { const d = Math.hypot(b.x - q.x, b.y - q.y) - b.r; if (d < bd) { bd = d; bi = i; } });
+          held = bd < 30 ? bi : -1;
+        },
+        drag: (q) => { hover = { x: q.x, y: q.y }; if (drag && Math.hypot(q.x - drag.x, q.y - drag.y) > 6) drag.moved = true; },
+        up: (q) => {
+          if (drag && !drag.moved) split(q.x, q.y);
+          drag = null; held = -1;
+        },
+        wheel: (q, dy) => app.set('gouttes', Math.max(2, Math.min(24, p.gouttes + (dy > 0 ? -1 : 1)))),
+      },
+      onChange(k) { if (['forme', 'gouttes', 'taille', 'ecarts', '*'].includes(k)) sync(k === 'forme' || k === '*'); if (k === 'image' || k === 'forme') logoKey = ''; },
+      onSeed() { sync(true); },
+      export: { name: 'lave', svg: () => toSVG() },
+    });
+    const p = app.params;
+    canvas.addEventListener('pointerleave', () => { hover = null; });
+
+    // ——— Contenant : demi-largeur intérieure à la hauteur y ———
+    function vessel(w, h) {
+      const S = Math.min(w, h), cx = w / 2;
+      if (p.forme === 'lampe') {
+        const top = h * 0.11, bot = h * 0.8, tw = S * 0.13, bw = S * 0.24;
+        return { cx, top, bot, half: (y) => { const t = Math.min(1, Math.max(0, (y - top) / (bot - top))); return tw + (bw - tw) * Math.pow(t, 1.15) - Math.pow(Math.max(0, t - 0.88) / 0.12, 2) * S * 0.06; }, glass: true };
+      }
+      if (p.forme === 'capsule') {
+        const top = h * 0.07, bot = h * 0.93, R = Math.min(S * 0.24, (bot - top) / 2);
+        return { cx, top, bot, half: (y) => { const d = Math.min(y - top, bot - y); return d >= R ? R : Math.sqrt(Math.max(0, R * R - (R - d) * (R - d))); }, glass: true };
+      }
+      return { cx, top: 0, bot: h, half: () => w / 2, glass: false };
+    }
+
+    // ——— Gouttes ———
+    function newBlob(w, h, r, V) {
+      const rr = r(), S = Math.min(w, h), rad = S * p.taille * (1 - p.ecarts * 0.5 + rr * p.ecarts);
+      const y = V.top + (V.bot - V.top) * (0.15 + r() * 0.75), hw = V.half(y);
+      return { x: V.cx + (r() * 2 - 1) * Math.max(0, hw - rad), y, vx: 0, vy: 0, r: rad, T: r(), ph: r() * TAU };
+    }
+    function sync(full) {
+      const { w, h } = app.size; if (!w) return;
+      const r = app.rng(13), V = vessel(w, h), n = Math.round(p.gouttes);
+      if (full) B = [];
+      const S = Math.min(w, h);
+      for (const b of B) b.r = S * p.taille * (1 - p.ecarts * 0.5 + (b.k ?? 0.5) * p.ecarts);
+      while (B.length < n) { const b = newBlob(w, h, r, V); b.k = (b.r / (S * p.taille) - (1 - p.ecarts * 0.5)) / Math.max(0.01, p.ecarts); B.push(b); }
+      while (B.length > n) B.pop();
+      inited = true;
+    }
+    function split(x, y) {
+      let bi = -1, bd = Infinity; B.forEach((b, i) => { const d = Math.hypot(b.x - x, b.y - y) - b.r; if (d < bd) { bd = d; bi = i; } });
+      const S = Math.min(app.size.w, app.size.h);
+      if (bi >= 0 && bd < 20 && B[bi].r > S * 0.025 && B.length < 30) {
+        const b = B[bi], nr = b.r / Math.SQRT2, a = app.random() * TAU;
+        b.r = nr; const c = { ...b, k: b.k }; b.x += Math.cos(a) * nr * 0.6; b.y += Math.sin(a) * nr * 0.6; c.x -= Math.cos(a) * nr * 0.6; c.y -= Math.sin(a) * nr * 0.6;
+        b.vx += Math.cos(a) * 60; b.vy += Math.sin(a) * 60; c.vx -= Math.cos(a) * 60; c.vy -= Math.sin(a) * 60; c.T = b.T;
+        B.push(c);
+      }
+    }
+
+    function physics(w, h, dt, t) {
+      const V = vessel(w, h), S = Math.min(w, h), heat = p.chaleur, damp = 0.6 + p.viscosite * 2.4;
+      for (let i = 0; i < B.length; i++) {
+        const b = B[i];
+        // Température : chauffe au fond, refroidit en haut.
+        const u = (b.y - V.top) / (V.bot - V.top);
+        // Pas de retour à l'équilibre au milieu : une goutte chaude monte jusqu'en haut, une froide descend jusqu'au fond.
+        b.T += dt * heat * (Math.max(0, u - 0.7) * 3.2 - Math.max(0, 0.3 - u) * 3.2);
+        if (hover && i !== held) { const d = Math.hypot(b.x - hover.x, b.y - hover.y); if (d < S * 0.2) b.T += dt * 1.6 * (1 - d / (S * 0.2)); }
+        b.T = Math.min(1.1, Math.max(-0.1, b.T));
+        // Flottaison, dérive latérale lente, viscosité.
+        let ax = Math.sin(t * 0.37 + b.ph) * S * 0.02, ay = -(b.T - 0.5) * S * 0.55 * heat;
+        if (i === held && hover) { ax = (hover.x - b.x) * 18 - b.vx * 6; ay = (hover.y - b.y) * 18 - b.vy * 6; }
+        // Légère répulsion quand deux gouttes se superposent trop.
+        for (let j = 0; j < B.length; j++) {
+          if (j === i) continue; const o = B[j], dx = b.x - o.x, dy = b.y - o.y, d = Math.hypot(dx, dy) || 1, m = (b.r + o.r) * 0.55;
+          if (d < m) { const f = (m - d) / m * S * 1.2; ax += dx / d * f; ay += dy / d * f; }
+        }
+        b.vx += (ax - b.vx * damp) * dt; b.vy += (ay - b.vy * damp) * dt;
+        b.x += b.vx * dt; b.y += b.vy * dt;
+        // Parois du contenant.
+        const top = V.top + b.r * 0.55, bot = V.bot - b.r * 0.45;
+        if (b.y < top) { b.y = top; b.vy = Math.abs(b.vy) * 0.2; }
+        if (b.y > bot) { b.y = bot; b.vy = -Math.abs(b.vy) * 0.2; }
+        const hw = Math.max(1, V.half(b.y) - b.r * 0.6);
+        if (b.x < V.cx - hw) { b.x = V.cx - hw; b.vx = Math.abs(b.vx) * 0.3; }
+        if (b.x > V.cx + hw) { b.x = V.cx + hw; b.vx = -Math.abs(b.vx) * 0.3; }
+      }
+    }
+
+    // ——— Logo en fusion : masque flouté ajouté au champ ———
+    function logoMask() {
+      const img = p.image || app.logoImg, key = img ? (img.src || 'c') : 'demo';
+      if (key === maskKey) return maskCache;
+      maskKey = key;
+      const M = 220, c = document.createElement('canvas'); c.width = c.height = M; const x = c.getContext('2d', { willReadFrequently: true });
+      if (img) { const iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height, k = M * 0.9 / Math.max(iw, ih); x.drawImage(img, (M - iw * k) / 2, (M - ih * k) / 2, iw * k, ih * k); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(110, 110, 96, 0, TAU); x.arc(110, 110, 56, 0, TAU, true); x.fill('evenodd'); x.fillRect(98, 8, 24, 204); }
+      const d = x.getImageData(0, 0, M, M).data, a = new Float32Array(M * M);
+      let transp = 0; for (let i = 3; i < d.length; i += 16) if (d[i] < 128) transp++;
+      const useA = transp > d.length / 16 * 0.05;
+      for (let i = 0; i < M * M; i++) { const l = (d[i * 4] * 0.2126 + d[i * 4 + 1] * 0.7152 + d[i * 4 + 2] * 0.0722) / 255; a[i] = (useA ? d[i * 4 + 3] > 128 : d[i * 4 + 3] > 128 && l < 0.5) ? 1 : 0; }
+      maskCache = { M, a };
+      return maskCache;
+    }
+    function buildLogoField(w, h) {
+      const key = [fw, fh, fc, maskKey].join('|');
+      if (key === logoKey && logoF) return;
+      const L = logoMask(); logoKey = [fw, fh, fc, maskKey].join('|');
+      logoF = new Float32Array(fw * fh);
+      const S = Math.min(w, h), Z = S * 0.62, x0 = (w - Z) / 2, y0 = (h - Z) / 2;
+      for (let j = 0; j < fh; j++) for (let i = 0; i < fw; i++) {
+        const u = (i * fc - pad - x0) / Z, v = (j * fc - pad - y0) / Z;
+        logoF[j * fw + i] = u >= 0 && v >= 0 && u < 1 && v < 1 ? L.a[Math.floor(v * L.M) * L.M + Math.floor(u * L.M)] : 0;
+      }
+      // Flou en boîte (deux passes) : flancs arrondis qui fondent avec les gouttes.
+      const R = Math.max(1, Math.round(S * 0.012 / fc)), tmp = new Float32Array(fw * fh);
+      for (let pass = 0; pass < 2; pass++) {
+        for (let j = 0; j < fh; j++) for (let i = 0; i < fw; i++) { let s = 0, n = 0; for (let k = -R; k <= R; k++) { const X = i + k; if (X >= 0 && X < fw) { s += logoF[j * fw + X]; n++; } } tmp[j * fw + i] = s / n; }
+        for (let j = 0; j < fh; j++) for (let i = 0; i < fw; i++) { let s = 0, n = 0; for (let k = -R; k <= R; k++) { const Y = j + k; if (Y >= 0 && Y < fh) { s += tmp[Y * fw + i]; n++; } } logoF[j * fw + i] = s / n; }
+      }
+    }
+
+    // ——— Champ et contours ———
+    function computeField(w, h, t) {
+      // Marge autour du cadre : les contours se referment hors champ, jamais sur le bord.
+      fc = Math.round(p.lissage); pad = Math.ceil(Math.min(w, h) * 0.3 / fc) * fc; fw = Math.ceil((w + 2 * pad) / fc) + 3; fh = Math.ceil((h + 2 * pad) / fc) + 3;
+      if (!field || field.length !== fw * fh) field = new Float32Array(fw * fh);
+      field.fill(0);
+      const S = Math.min(w, h);
+      for (const b of B) {
+        // Une goutte qui file s'étire dans le sens de sa vitesse (aire conservée).
+        const sp = Math.hypot(b.vx, b.vy), st = 1 + Math.min(0.9, sp / (S * 0.25)), ux = sp > 1e-3 ? b.vx / sp : 0, uy = sp > 1e-3 ? b.vy / sp : 1;
+        const ka = 1 / (st * st), kp = st, R = b.r * 2, R2 = R * R, E = R * st;
+        const bx = b.x + pad, by = b.y + pad, i0 = Math.max(1, Math.floor((bx - E) / fc)), i1 = Math.min(fw - 2, Math.ceil((bx + E) / fc)), j0 = Math.max(1, Math.floor((by - E) / fc)), j1 = Math.min(fh - 2, Math.ceil((by + E) / fc));
+        for (let j = j0; j <= j1; j++) { const dy = j * fc - by; for (let i = i0; i <= i1; i++) { const dx = i * fc - bx, a = dx * ux + dy * uy, c = -dx * uy + dy * ux, q = 1 - (a * a * ka + c * c * kp) / R2; if (q > 0) field[j * fw + i] += q * q * q; } }
+      }
+      if (p.forme === 'logo') {
+        buildLogoField(w, h);
+        const k = 0.95 + Math.sin(t * 0.8) * 0.12;
+        for (let i = 0; i < field.length; i++) field[i] += logoF[i] * k;
+      }
+      // Bords à zéro pour fermer les contours.
+      for (let i = 0; i < fw; i++) { field[i] = 0; field[(fh - 1) * fw + i] = 0; }
+      for (let j = 0; j < fh; j++) { field[j * fw] = 0; field[j * fw + fw - 1] = 0; }
+    }
+    function marching(g, W, H, T) {
+      const hid = (x, y) => (y * W + x) * 2, vid = (x, y) => (y * W + x) * 2 + 1;
+      const link = new Map();
+      const add = (a, b) => { (link.get(a) || link.set(a, []).get(a)).push(b); (link.get(b) || link.set(b, []).get(b)).push(a); };
+      const pos = (id) => {
+        const e = id >> 1, x = e % W, y = (e - x) / W;
+        if (id & 1) { const a = g[y * W + x], b = g[(y + 1) * W + x]; return [x, y + (T - a) / (b - a || 1e-6)]; }
+        const a = g[y * W + x], b = g[y * W + x + 1]; return [x + (T - a) / (b - a || 1e-6), y];
+      };
+      for (let y = 0; y < H - 1; y++) for (let x = 0; x < W - 1; x++) {
+        const a = g[y * W + x] > T, b = g[y * W + x + 1] > T, c = g[(y + 1) * W + x + 1] > T, d = g[(y + 1) * W + x] > T;
+        const code = (a << 3) | (b << 2) | (c << 1) | d;
+        if (code === 0 || code === 15) continue;
+        const tt = hid(x, y), bo = hid(x, y + 1), l = vid(x, y), r = vid(x + 1, y);
+        const center = (g[y * W + x] + g[y * W + x + 1] + g[(y + 1) * W + x + 1] + g[(y + 1) * W + x]) / 4 > T;
+        switch (code) {
+          case 1: case 14: add(l, bo); break;
+          case 2: case 13: add(bo, r); break;
+          case 3: case 12: add(l, r); break;
+          case 4: case 11: add(tt, r); break;
+          case 6: case 9: add(tt, bo); break;
+          case 7: case 8: add(l, tt); break;
+          case 5: if (center) { add(l, tt); add(bo, r); } else { add(tt, r); add(l, bo); } break;
+          case 10: if (center) { add(tt, r); add(l, bo); } else { add(l, tt); add(bo, r); } break;
+        }
+      }
+      const seen = new Set(), loops = [];
+      for (const start of link.keys()) {
+        if (seen.has(start)) continue;
+        const lp = []; let prev = -1, cur = start, guard = 0;
+        while (guard++ < 200000) {
+          seen.add(cur); const [px, py] = pos(cur); lp.push(px * fc - pad, py * fc - pad);
+          const nb = link.get(cur); const nx = nb[0] !== prev ? nb[0] : nb[1];
+          if (nx == null || nx === start || seen.has(nx)) break;
+          prev = cur; cur = nx;
+        }
+        if (lp.length >= 8) loops.push(lp);
+      }
+      return loops;
+    }
+    function bands() {
+      const n = Math.round(p.bandes), out = [], cols = p.couleurs.length ? p.couleurs : ['#e5452a'];
+      for (let k = 0; k < n; k++) out.push({ T: ISO * (1 + k * 0.55), col: cols[Math.min(k, cols.length - 1)], loops: marching(field, fw, fh, ISO * (1 + k * 0.55)) });
+      return out;
+    }
+
+    // ——— Dessin (canvas ou SVG) ———
+    const smoothPath = (lp) => {
+      // Courbe passant par les milieux des segments : contour lisse sans facettes.
+      const n = lp.length / 2; let d = '';
+      for (let i = 0; i < n; i++) {
+        const a = i, b = (i + 1) % n, mx = (lp[a * 2] + lp[b * 2]) / 2, my = (lp[a * 2 + 1] + lp[b * 2 + 1]) / 2;
+        d += i === 0 ? `M${mx.toFixed(1)} ${my.toFixed(1)}` : `Q${lp[a * 2].toFixed(1)} ${lp[a * 2 + 1].toFixed(1)} ${mx.toFixed(1)} ${my.toFixed(1)}`;
+      }
+      const m0x = (lp[0] + lp[2]) / 2, m0y = (lp[1] + lp[3]) / 2;
+      return d + `Q${lp[0].toFixed(1)} ${lp[1].toFixed(1)} ${m0x.toFixed(1)} ${m0y.toFixed(1)}Z`;
+    };
+    function vesselPaths(w, h) {
+      const V = vessel(w, h); if (!V.glass) return null;
+      const N = 60; let d = '';
+      for (let i = 0; i <= N; i++) { const y = V.top + (V.bot - V.top) * i / N; d += (i ? 'L' : 'M') + (V.cx + V.half(y)).toFixed(1) + ' ' + y.toFixed(1); }
+      for (let i = N; i >= 0; i--) { const y = V.top + (V.bot - V.top) * i / N; d += 'L' + (V.cx - V.half(y)).toFixed(1) + ' ' + y.toFixed(1); }
+      d += 'Z';
+      let base = '', cap = '';
+      if (p.forme === 'lampe') {
+        const S = Math.min(w, h), bw = V.half(V.bot) + S * 0.015, tw = V.half(V.top) + S * 0.01;
+        base = `M${(V.cx - bw).toFixed(1)} ${V.bot.toFixed(1)}L${(V.cx + bw).toFixed(1)} ${V.bot.toFixed(1)}L${(V.cx + bw * 1.18).toFixed(1)} ${(h * 0.97).toFixed(1)}L${(V.cx - bw * 1.18).toFixed(1)} ${(h * 0.97).toFixed(1)}Z`;
+        cap = `M${(V.cx - tw).toFixed(1)} ${V.top.toFixed(1)}L${(V.cx + tw).toFixed(1)} ${V.top.toFixed(1)}L${(V.cx + tw * 0.62).toFixed(1)} ${(h * 0.035).toFixed(1)}L${(V.cx - tw * 0.62).toFixed(1)} ${(h * 0.035).toFixed(1)}Z`;
+      }
+      return { glass: d, base, cap };
+    }
+
+    app.loop((t, dt) => {
+      const { w, h, dpr } = app.size;
+      dt = Math.min(0.05, dt || 0) * p.vitesse;
+      if (!inited) sync(true);
+      const sub = 3; for (let s = 0; s < sub; s++) physics(w, h, dt / sub, t);
+      computeField(w, h, t);
+      const BD = bands(), VP = vesselPaths(w, h);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = p.fond; ctx.fillRect(0, 0, w, h);
+      if (VP) { ctx.fillStyle = p.liquide; ctx.fill(new Path2D(VP.glass)); ctx.save(); ctx.clip(new Path2D(VP.glass)); }
+      else if (p.liquide !== p.fond) { ctx.fillStyle = p.liquide; ctx.fillRect(0, 0, w, h); }
+      for (const b of BD) {
+        if (!b.loops.length) continue;
+        const path = new Path2D(b.loops.map(smoothPath).join(''));
+        ctx.fillStyle = b.col; ctx.fill(path, 'evenodd');
+        if (p.contour > 0 && b === BD[0]) { ctx.strokeStyle = p.socle; ctx.lineWidth = p.contour; ctx.lineJoin = 'round'; ctx.stroke(path); }
+      }
+      if (VP) {
+        ctx.restore();
+        ctx.fillStyle = p.socle;
+        if (VP.base) { ctx.fill(new Path2D(VP.base)); ctx.fill(new Path2D(VP.cap)); }
+        if (p.forme === 'capsule' || p.contour > 0) { ctx.strokeStyle = p.socle; ctx.lineWidth = Math.max(1.5, p.contour); ctx.stroke(new Path2D(VP.glass)); }
+      }
+      app.finish(ctx);
+    });
+
+    function toSVG() {
+      const { w, h } = app.size, BD = bands(), VP = vesselPaths(w, h), out = [];
+      if (VP) out.push(`<clipPath id="verre"><path d="${VP.glass}"/></clipPath>`, `<path d="${VP.glass}" fill="${p.liquide}"/>`);
+      else if (p.liquide !== p.fond) out.push(`<rect width="100%" height="100%" fill="${p.liquide}"/>`);
+      const g = [];
+      for (const b of BD) if (b.loops.length) g.push(`<path d="${b.loops.map(smoothPath).join('')}" fill="${b.col}" fill-rule="evenodd"${p.contour > 0 && b === BD[0] ? ` stroke="${p.socle}" stroke-width="${p.contour}" stroke-linejoin="round"` : ''}/>`);
+      out.push(VP ? `<g clip-path="url(#verre)">${g.join('\n')}</g>` : g.join('\n'));
+      if (VP) {
+        if (VP.base) out.push(`<path d="${VP.base}" fill="${p.socle}"/>`, `<path d="${VP.cap}" fill="${p.socle}"/>`);
+        if (p.forme === 'capsule' || p.contour > 0) out.push(`<path d="${VP.glass}" fill="none" stroke="${p.socle}" stroke-width="${Math.max(1.5, p.contour)}"/>`);
+      }
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">\n<rect width="100%" height="100%" fill="${p.fond}"/>\n${out.join('\n')}\n</svg>`;
+    }
+  </script>
+</body>
+</html>
