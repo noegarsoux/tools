@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Rubans</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Rubans : des bandes plates qui glissent le long d'une courbe 3D (nœud torique, Lissajous, orbites,
+    // vague, hélice) et se vrillent. Repère mobile par transport parallèle, vrille ajoutée par-dessus ;
+    // chaque facette montre le recto ou le verso selon sa normale, ombrée par la lumière, triée en profondeur.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const BIEN = PAL('biennale'), KB = PAL('kegelbahn'), SALON = PAL('salon'), GR = PAL('good-room'), LUZ = PAL('luzern');
+    const P60 = PAL('papier-60'), MENTHE = PAL('menthe'), ORB = PAL('orbite'), ACIDE = PAL('acide'), PYR = PAL('pyramides'), GLY = PAL('glyphes');
+
+    let rotX = -0.35, rotY = 0.4, velY = 0, drag = null, hover = null, flow = 0, bend = null;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.03, vignette: 0 },
+      hint: 'Glissez pour faire tourner · survolez pour plier les rubans · touchez pour changer de courbe · molette : largeur',
+      notes: 'Le recto prend la couleur du ruban, le verso la couleur choisie (ou une version sombre du recto). Les facettes sont triées en profondeur : les rubans passent réellement les uns sous les autres.',
+      params: {
+        'Courbe': {
+          courbe: { type: 'select', label: 'Courbe', options: { noeud: 'Nœud torique', lissajous: 'Lissajous', orbites: 'Orbites', vague: 'Vague', helice: 'Hélice' }, value: 'noeud' },
+          p: { type: 'range', label: 'Tours (p)', min: 1, max: 7, step: 1, value: 2, show: (q) => q.courbe === 'noeud' || q.courbe === 'lissajous' },
+          q: { type: 'range', label: 'Boucles (q)', min: 1, max: 9, step: 1, value: 3, show: (q) => q.courbe === 'noeud' || q.courbe === 'lissajous' },
+          taille: { type: 'range', label: 'Taille', min: 0.3, max: 1.2, step: 0.01, value: 0.78 },
+        },
+        'Rubans': {
+          nombre: { type: 'range', label: 'Nombre de rubans', min: 1, max: 12, step: 1, value: 4 },
+          longueur: { type: 'range', label: 'Longueur', min: 0.05, max: 1, step: 0.01, value: 0.42 },
+          largeur: { type: 'range', label: 'Largeur', min: 0.005, max: 0.15, step: 0.001, value: 0.05 },
+          vrille: { type: 'range', label: 'Vrille', min: 0, max: 12, step: 0.1, value: 3 },
+          vitesse: { type: 'range', label: 'Vitesse', min: 0, max: 2, step: 0.01, value: 0.35 },
+          rotation: { type: 'range', label: 'Rotation lente', min: -1, max: 1, step: 0.01, value: 0.12 },
+          finesse: { type: 'range', label: 'Facettes', min: 60, max: 400, step: 10, value: 220 },
+        },
+        'Couleur': {
+          fond: { type: 'color', label: 'Fond', value: BIEN[0] },
+          couleurs: { type: 'palette', label: 'Recto', value: [BIEN[2], BIEN[3], BIEN[4], BIEN[1]] },
+          verso: { type: 'segmented', label: 'Verso', options: { sombre: 'Recto assombri', couleur: 'Couleur' }, value: 'sombre' },
+          couleurVerso: { type: 'color', label: 'Couleur du verso', value: BIEN[1], show: (q) => q.verso === 'couleur' },
+          lumiere: { type: 'range', label: 'Ombrage', min: 0, max: 1, step: 0.01, value: 0.45 },
+        },
+      },
+      presets: {
+        'Biennale': {},
+        'Trèfle': { courbe: 'noeud', p: 2, q: 3, nombre: 1, longueur: 1, largeur: 0.09, vrille: 6, fond: P60[0], couleurs: [P60[1]], verso: 'couleur', couleurVerso: '#ffffff', lumiere: 0.2 },
+        'Kegelbahn': { courbe: 'lissajous', p: 3, q: 2, taille: 0.7, nombre: 5, longueur: 0.25, largeur: 0.06, vrille: 4, fond: KB[0], couleurs: [KB[1], KB[2], KB[3], KB[4], KB[5]], vitesse: 0.5 },
+        'Orbites': { courbe: 'orbites', nombre: 6, longueur: 0.7, largeur: 0.03, vrille: 2, fond: ORB[1], couleurs: [ORB[0], ORB[2]], verso: 'sombre', lumiere: 0.3 },
+        'Salon': { courbe: 'vague', finesse: 180, nombre: 5, longueur: 1, largeur: 0.07, vrille: 1.5, fond: SALON[0], couleurs: [SALON[2], SALON[3], SALON[4], SALON[1]], vitesse: 0.4 },
+        'Hélice': { courbe: 'helice', nombre: 3, longueur: 1, largeur: 0.08, vrille: 0, fond: LUZ[2], couleurs: [LUZ[0], LUZ[1], LUZ[3]], verso: 'couleur', couleurVerso: LUZ[4], rotation: 0.25 },
+        'Good Room': { courbe: 'noeud', p: 3, q: 5, nombre: 4, longueur: 0.3, largeur: 0.04, vrille: 8, fond: GR[0], couleurs: [GR[1], GR[2], GR[3], GR[4]] },
+        'Menthe': { courbe: 'lissajous', p: 1, q: 2, taille: 0.62, nombre: 2, longueur: 1, largeur: 0.09, vrille: 2.5, fond: MENTHE[0], couleurs: [MENTHE[3], MENTHE[2]], verso: 'couleur', couleurVerso: MENTHE[1], lumiere: 0.6 },
+        'Acide': { courbe: 'noeud', p: 2, q: 5, nombre: 1, longueur: 1, largeur: 0.05, vrille: 10, fond: ACIDE[1], couleurs: [ACIDE[2]], verso: 'couleur', couleurVerso: ACIDE[3] },
+        'Pyramides': { courbe: 'vague', finesse: 150, nombre: 8, longueur: 1, largeur: 0.035, vrille: 3, fond: PYR[0], couleurs: [PYR[2], PYR[3], PYR[4], PYR[5], PYR[1]], vitesse: 0.6 },
+        'Glyphes': { courbe: 'orbites', nombre: 10, longueur: 0.35, largeur: 0.04, vrille: 5, fond: GLY[1], couleurs: [GLY[2], GLY[3], GLY[4], GLY[5], GLY[6]], vitesse: 0.5 },
+      },
+      brand(colors) {
+        const c = colors.slice(1).length ? colors.slice(1) : ['#111111'];
+        return { fond: colors[0], couleurs: c.slice(0, 7), couleurVerso: c[0] };
+      },
+      pointer: {
+        move: (q) => { hover = { x: q.x, y: q.y }; },
+        down: (q) => { drag = { x: q.x, y: q.y, rx: rotX, ry: rotY, moved: false, lx: q.x, lt: performance.now() }; },
+        drag: (q) => {
+          if (!drag) return;
+          if (Math.hypot(q.x - drag.x, q.y - drag.y) > 5) drag.moved = true;
+          if (!drag.moved) return;
+          const now = performance.now();
+          velY = ((q.x - drag.lx) * 0.006) / Math.max(0.008, (now - drag.lt) / 1000) * 0.016;
+          drag.lx = q.x; drag.lt = now;
+          rotY = drag.ry + (q.x - drag.x) * 0.006;
+          rotX = Math.max(-1.4, Math.min(1.4, drag.rx + (q.y - drag.y) * 0.006));
+        },
+        up: () => {
+          if (drag && !drag.moved) { const ks = ['noeud', 'lissajous', 'orbites', 'vague', 'helice']; app.set('courbe', ks[(ks.indexOf(p.courbe) + 1) % ks.length]); }
+          drag = null;
+        },
+        wheel: (q, dy) => app.set('largeur', Math.max(0.005, Math.min(0.15, +(p.largeur - dy * 0.00005).toFixed(4)))),
+      },
+      onChange(k) { if (k === '*') { rotX = -0.35; rotY = 0.4; velY = 0; } },
+      export: { name: 'rubans', svg: () => toSVG() },
+    });
+    const p = app.params;
+    canvas.addEventListener('pointerleave', () => { if (!drag) hover = null; });
+
+    // ——— Courbes 3D (unité ≈ 1), paramètre u ∈ [0, 1), ruban k ———
+    function curve(u, k, n) {
+      const a = u * TAU, P = Math.round(p.p), Q = Math.round(p.q);
+      switch (p.courbe) {
+        case 'lissajous': { const ph = (k / n) * TAU * 0.25; return [Math.sin(P * a + ph) * 0.8, Math.sin(Q * a) * 0.8, Math.cos((P + Q) * 0.5 * a + ph) * 0.6]; }
+        case 'orbites': {
+          // Chaque ruban sur son orbite inclinée.
+          const inc = (k / n) * Math.PI, R = 0.6 + 0.4 * ((k * 0.618) % 1);
+          const x = Math.cos(a) * R, y = Math.sin(a) * R * 0.35;
+          return [x, y * Math.cos(inc) - Math.sin(a) * R * Math.sin(inc) * 0.9, y * Math.sin(inc) + Math.sin(a) * R * Math.cos(inc) * 0.9];
+        }
+        case 'vague': {
+          // Bandes parallèles qui ondulent d'un bord à l'autre (u fait l'aller-retour sur x).
+          const x = (u * 2 - 1) * 1.3, y = ((k + 0.5) / n - 0.5) * 1.4;
+          return [x, y + Math.sin(x * 3 + k * 0.7) * 0.12, Math.sin(x * 2.2 + k * 0.9) * 0.45];
+        }
+        case 'helice': { const ph = (k / n) * TAU; return [Math.cos(a * 3 + ph) * 0.45, (u * 2 - 1) * 0.9, Math.sin(a * 3 + ph) * 0.45]; }
+        default: { // nœud torique (p, q) — plusieurs rubans : brins concentriques, en faisceau
+          const o = (k - (n - 1) / 2) * Math.max(0.05, p.largeur * 1.15), r = 0.55 + (0.25 + o) * Math.cos(Q * a);
+          return [r * Math.cos(P * a), r * Math.sin(P * a), (0.3 + o) * Math.sin(Q * a)];
+        }
+      }
+    }
+    const openCurve = () => p.courbe === 'vague' || p.courbe === 'helice';
+
+    // ——— Construction d'un ruban : échantillons, repère par transport parallèle, vrille ———
+    const sub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+    const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+    const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    const norm = (a) => { const l = Math.hypot(a[0], a[1], a[2]) || 1; return [a[0] / l, a[1] / l, a[2] / l]; };
+    function ribbon(k, n, t) {
+      const M = Math.round(p.finesse * Math.max(0.15, p.longueur)), len = p.longueur, open = openCurve();
+      // Glissement : un ruban fermé file le long de la courbe ; un ruban ouvert ondule sur place.
+      const start = open ? 0 : (flow * 0.1 + k / n) % 1;
+      const span = open ? 1 : len;
+      const pts = [];
+      for (let i = 0; i <= M; i++) {
+        let u = start + (i / M) * span;
+        if (!open) u = ((u % 1) + 1) % 1;
+        const c = curve(u, k, n);
+        if (open) { c[2] += Math.sin(flow * 0.6 + u * 6 + k) * 0.08; c[1] += Math.sin(flow * 0.4 + u * 4 + k * 2) * 0.03; }
+        pts.push(c);
+      }
+      // Repère : tangente, normale transportée (minimise la rotation), binormale.
+      const T = pts.map((c, i) => norm(sub(pts[Math.min(M, i + 1)], pts[Math.max(0, i - 1)])));
+      let N = norm(cross(T[0], Math.abs(T[0][2]) < 0.9 ? [0, 0, 1] : [1, 0, 0]));
+      const frames = [];
+      for (let i = 0; i <= M; i++) {
+        if (i > 0) { const b = cross(T[i - 1], T[i]), s = Math.hypot(b[0], b[1], b[2]); if (s > 1e-6) { const ax = [b[0] / s, b[1] / s, b[2] / s], c = dot(T[i - 1], T[i]), ang = Math.atan2(s, c); N = rotAxis(N, ax, ang); } }
+        const B = cross(T[i], N);
+        const phi = (i / M) * p.vrille * Math.PI * span + flow * 0.8 + k * 1.3;
+        const e = [N[0] * Math.cos(phi) + B[0] * Math.sin(phi), N[1] * Math.cos(phi) + B[1] * Math.sin(phi), N[2] * Math.cos(phi) + B[2] * Math.sin(phi)];
+        frames.push(e);
+      }
+      return { pts, frames, M };
+    }
+    function rotAxis(v, a, ang) {
+      const c = Math.cos(ang), s = Math.sin(ang), d = dot(v, a), cr = cross(a, v);
+      return [v[0] * c + cr[0] * s + a[0] * d * (1 - c), v[1] * c + cr[1] * s + a[1] * d * (1 - c), v[2] * c + cr[2] * s + a[2] * d * (1 - c)];
+    }
+
+    // ——— Couleurs ———
+    function shade(hex, k) {
+      const n = parseInt(hex.slice(1), 16), r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255;
+      const m = (x) => Math.round(Math.max(0, Math.min(255, k < 0 ? x * (1 + k) : x + (255 - x) * k))).toString(16).padStart(2, '0');
+      return '#' + m(r) + m(g) + m(b);
+    }
+
+    // ——— Scène : facettes projetées, triées par profondeur ———
+    function scene(pen, w, h) {
+      const n = Math.round(p.nombre), S = Math.min(w, h) * 0.5 * p.taille, W = Math.min(w, h) * p.largeur;
+      const cy = Math.cos(rotY), sy = Math.sin(rotY), cx = Math.cos(rotX), sx = Math.sin(rotX);
+      const view = (v) => { const x1 = v[0] * cy + v[2] * sy, z1 = -v[0] * sy + v[2] * cy; return [x1, v[1] * cx - z1 * sx, v[1] * sx + z1 * cx]; };
+      const persp = 2.6, P = p.couleurs && p.couleurs.length ? p.couleurs : ['#111111'];
+      const facets = [];
+      for (let k = 0; k < n; k++) {
+        const R = ribbon(k, n, 0), col = P[k % P.length], back = p.verso === 'couleur' ? p.couleurVerso : shade(col, -0.45);
+        const L = [], Rr = [];
+        for (let i = 0; i <= R.M; i++) {
+          const c = view(R.pts[i]), e = view(R.frames[i]), hw = (W / S) * 0.5;
+          L.push([c[0] - e[0] * hw, c[1] - e[1] * hw, c[2] - e[2] * hw]);
+          Rr.push([c[0] + e[0] * hw, c[1] + e[1] * hw, c[2] + e[2] * hw]);
+        }
+        // Pliage au survol : les points proches du pointeur sont repoussés (en profondeur et sur le côté).
+        const proj = (v) => { const f = persp / (persp - v[2]); let X = w / 2 + v[0] * S * f, Y = h / 2 + v[1] * S * f; if (bend) { const dx = X - bend.x, dy = Y - bend.y, d2 = dx * dx + dy * dy, r = S * 0.25, g = Math.exp(-d2 / (r * r)) * 0.35; X += dx * g; Y += dy * g; } return [X, Y]; };
+        for (let i = 0; i < R.M; i++) {
+          const a = L[i], b = Rr[i], c = Rr[i + 1], d = L[i + 1];
+          const nrm = norm(cross(sub(c, a), sub(b, d)));
+          const z = (a[2] + b[2] + c[2] + d[2]) / 4;
+          const lit = 1 - p.lumiere + p.lumiere * Math.abs(nrm[2]);
+          const front = nrm[2] >= 0;
+          const pa = proj(a), pb = proj(b), pc = proj(c), pd = proj(d);
+          facets.push({ z, q: [pa[0], pa[1], pb[0], pb[1], pc[0], pc[1], pd[0], pd[1]], col: shade(front ? col : back, (lit - 1) * 0.9) });
+        }
+      }
+      facets.sort((a, b) => a.z - b.z);
+      for (const f of facets) pen.quad(f.q, f.col);
+    }
+
+    function canvasPen(c) {
+      return { quad(q, col) { c.fillStyle = col; c.strokeStyle = col; c.lineWidth = 0.7; c.lineJoin = 'round'; c.beginPath(); c.moveTo(q[0], q[1]); c.lineTo(q[2], q[3]); c.lineTo(q[4], q[5]); c.lineTo(q[6], q[7]); c.closePath(); c.fill(); c.stroke(); } };
+    }
+
+    app.loop((t, dt) => {
+      const { w, h, dpr } = app.size;
+      dt = Math.min(0.05, dt || 0);
+      flow += dt * p.vitesse * 3;
+      if (!drag) { velY *= Math.pow(0.08, dt); rotY += velY + p.rotation * dt * 0.6; }
+      // Le pli suit le pointeur avec un peu de retard.
+      if (hover && !drag) bend = bend ? { x: bend.x + (hover.x - bend.x) * Math.min(1, dt * 8), y: bend.y + (hover.y - bend.y) * Math.min(1, dt * 8) } : { ...hover };
+      else bend = null;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = p.fond; ctx.fillRect(0, 0, w, h);
+      scene(canvasPen(ctx), w, h);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      app.finish(ctx);
+    });
+
+    function toSVG() {
+      const { w, h } = app.size, out = [], f = (v) => Math.round(v * 100) / 100;
+      scene({ quad(q, col) { out.push(`<polygon points="${f(q[0])},${f(q[1])} ${f(q[2])},${f(q[3])} ${f(q[4])},${f(q[5])} ${f(q[6])},${f(q[7])}" fill="${col}" stroke="${col}" stroke-width="0.7" stroke-linejoin="round"/>`); } }, w, h);
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">\n<rect width="100%" height="100%" fill="${p.fond}"/>\n${out.join('\n')}\n</svg>`;
+    }
+  </script>
+</body>
+</html>
