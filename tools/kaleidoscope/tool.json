@@ -1,0 +1,15 @@
+{
+  "slug": "kaleidoscope",
+  "title": "Kaléidoscope",
+  "type": "pattern",
+  "description": "Formes qui dérivent, image ou logo vus à travers des miroirs : rosaces à n miroirs, pavages de triangles ou de carrés. Glisser fait défiler la source.",
+  "tags": ["kaleidoscope", "symetrie", "miroir", "pavage", "logo", "svg"],
+  "inspiration": [
+    "Kaléidoscope à trois miroirs (Brewster, 1816) et groupes de pavage p3m1, p4m",
+    "Rosaces de vitraux et motifs de carrelage à symétrie miroir",
+    "references/techniques.md ; palettes kegelbahn, biennale, glyphes, luzern, code"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
