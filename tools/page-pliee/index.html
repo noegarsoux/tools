@@ -1,0 +1,469 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Page pliée</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Page pliée : un bloc de texte justifié est rendu dans une texture, puis plaqué sur un maillage
+    // fin déformé dans le vertex shader (ondulation, froissé en crêtes, soulèvement au pointeur,
+    // torsion, pli franc le long d'un axe). La même déformation existe en JS pour l'export SVG
+    // (facettes ombrées + glyphes en <text> avec leur matrice locale) et pour viser la page au pointeur.
+    const canvas = document.querySelector('canvas');
+    const gl = canvas.getContext('webgl2', { alpha: false, antialias: true, depth: true, stencil: false, preserveDrawingBuffer: false });
+    const TAU = Math.PI * 2, DEG = Math.PI / 180;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const PAPIER = PAL('papier'), PG = PAL('papier-gris'), BIEN = PAL('biennale'), PHOTO = PAL('photocopie'), ACIDE = PAL('acide');
+    const KB = PAL('kegelbahn'), MENTHE = PAL('menthe'), LUZ = PAL('luzern'), ORB = PAL('orbite');
+    const FONTS = {
+      serif: "Georgia, 'Times New Roman', Times, serif",
+      grotesque: "'Helvetica Neue', Helvetica, Arial, sans-serif",
+      mono: "'Courier New', Courier, monospace",
+      arrondie: "'Arial Rounded MT Bold', 'Helvetica Rounded', 'Nunito', 'Varela Round', 'Helvetica Neue', Arial, sans-serif",
+    };
+    const TEXTE = 'La page n’est jamais tout à fait plane. Elle garde la mémoire de la main qui l’a tenue, du pli qui l’a rangée, de l’humidité d’un matin. Les lignes suivent ces reliefs sans protester : elles montent, plongent, se resserrent dans les creux et s’étirent sur les crêtes. Lire devient une promenade sur un terrain. On tourne autour d’un mot comme autour d’une colline, on le perd derrière un pli, on le retrouve plus loin, à l’envers, presque effacé par la transparence du papier. ';
+
+    let ptr = null, grab = null, lift = 0, liftV = 0, crumple = 0, ptrUV = [0, 0], texDirty = true, layoutCache = null;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.05, vignette: 0.12, overlay: true },
+      hint: 'Survolez pour soulever la page · glissez pour la tirer vers vous · touchez pour la froisser · molette : pli',
+      notes: 'Le texte se répète pour remplir la page, justifié en colonnes. Au verso, on devine le texte à l’envers selon la transparence du papier.',
+      params: {
+        'Texte': {
+          texte: { type: 'textarea', label: 'Texte (répété pour remplir la page)', value: TEXTE, rows: 6 },
+          police: { type: 'font', label: 'Police', options: { serif: 'Sérif', grotesque: 'Grotesque', mono: 'Machine', arrondie: 'Arrondie' }, value: 'serif' },
+          graisse: { type: 'segmented', label: 'Graisse', options: { 400: 'Normale', 700: 'Grasse', 900: 'Noire' }, value: '400' },
+          majuscules: { type: 'toggle', label: 'Majuscules', value: false },
+          lignes: { type: 'range', label: 'Nombre de lignes', min: 6, max: 110, step: 1, value: 46 },
+          interlignage: { type: 'range', label: 'Interlignage', min: 0.85, max: 1.8, step: 0.01, value: 1.18 },
+          colonnes: { type: 'range', label: 'Colonnes', min: 1, max: 5, step: 1, value: 2 },
+          marge: { type: 'range', label: 'Marges', min: 0, max: 0.2, step: 0.005, value: 0.07 },
+          page: { type: 'segmented', label: 'Format de page', options: { cadre: 'Cadre', portrait: 'Portrait', carre: 'Carré' }, value: 'portrait' },
+        },
+        'Déformation': {
+          ondulation: { type: 'range', label: 'Ondulation', min: 0, max: 1, step: 0.01, value: 0.4 },
+          frequence: { type: 'range', label: 'Fréquence', min: 0.5, max: 12, step: 0.1, value: 3.2 },
+          direction: { type: 'range', label: 'Direction de l’onde (°)', min: 0, max: 180, step: 1, value: 25 },
+          pli: { type: 'range', label: 'Pli', min: 0, max: 1, step: 0.01, value: 0.35 },
+          axe: { type: 'range', label: 'Axe du pli (°)', min: -90, max: 90, step: 1, value: -38 },
+          position: { type: 'range', label: 'Position du pli', min: -0.9, max: 0.9, step: 0.01, value: 0.35 },
+          torsion: { type: 'range', label: 'Torsion', min: -2, max: 2, step: 0.01, value: 0.25 },
+          froisse: { type: 'range', label: 'Froissé', min: 0, max: 1, step: 0.01, value: 0.15 },
+          vitesse: { type: 'range', label: 'Vitesse', min: 0, max: 2, step: 0.01, value: 0.5 },
+        },
+        'Vue': {
+          inclinaison: { type: 'range', label: 'Inclinaison (°)', min: -70, max: 70, step: 1, value: 18 },
+          orientation: { type: 'range', label: 'Orientation (°)', min: -70, max: 70, step: 1, value: -14 },
+          taille: { type: 'range', label: 'Taille de la page', min: 0.3, max: 1.4, step: 0.01, value: 0.86 },
+        },
+        'Couleur': {
+          fond: { type: 'color', label: 'Fond', value: PG[2] },
+          papier: { type: 'color', label: 'Papier', value: PAPIER[0] },
+          encre: { type: 'color', label: 'Encre', value: PAPIER[1] },
+          verso: { type: 'color', label: 'Verso', value: PG[0] },
+          lumiere: { type: 'range', label: 'Ombrage', min: 0, max: 1, step: 0.01, value: 0.7 },
+          transparence: { type: 'range', label: 'Transparence du papier', min: 0, max: 0.6, step: 0.01, value: 0.18 },
+        },
+      },
+      presets: {
+        'Page': {},
+        'Pliée en deux': { pli: 0.62, axe: 0, position: 0, ondulation: 0.1, torsion: 0, froisse: 0.05, inclinaison: 30, orientation: -20, taille: 0.7 },
+        'Froissée': { froisse: 0.9, ondulation: 0.15, pli: 0, torsion: 0.1, lumiere: 0.95, lignes: 60, colonnes: 3, fond: PHOTO[2], papier: PHOTO[0], encre: PHOTO[1], verso: '#cfd0d2' },
+        'Vague': { ondulation: 1, frequence: 5.5, direction: 90, pli: 0, torsion: 0, froisse: 0, vitesse: 0.9, inclinaison: 42, orientation: 0, page: 'cadre', taille: 1, lignes: 34, colonnes: 1, police: 'grotesque', graisse: '700', majuscules: true },
+        'Torsion': { torsion: 1.6, ondulation: 0.2, pli: 0, froisse: 0, inclinaison: 8, orientation: 0, taille: 0.8, lignes: 70, colonnes: 4, police: 'mono', fond: '#151515', papier: '#f2f2f0', encre: '#151515', verso: ACIDE[2] },
+        'Journal': { page: 'cadre', colonnes: 5, lignes: 96, interlignage: 1.08, police: 'serif', ondulation: 0.25, frequence: 2, pli: 0.22, axe: 90, position: 0.1, torsion: 0.1, froisse: 0.3, taille: 1, inclinaison: 26, orientation: 8, fond: '#2a2927', papier: '#ecebe8', encre: '#2a2927', verso: '#d8d6d0' },
+        'Affiche': { texte: 'PAPIER PLIÉ ', majuscules: true, police: 'grotesque', graisse: '900', lignes: 9, interlignage: 0.92, colonnes: 1, marge: 0.04, fond: BIEN[0], papier: BIEN[2], encre: BIEN[1], verso: BIEN[3], pli: 0.55, axe: 30, position: 0.25, ondulation: 0.25, torsion: 0.3, transparence: 0.3 },
+        'Nuit': { fond: '#0b0b0d', papier: '#141414', encre: '#e9e6df', verso: '#2b2b2e', lumiere: 0.85, froisse: 0.35, transparence: 0.1 },
+        'Origami': { pli: 0.7, axe: 45, position: -0.15, torsion: -0.35, ondulation: 0.05, froisse: 0, page: 'carre', taille: 0.75, colonnes: 1, lignes: 30, fond: KB[0], papier: KB[3], encre: KB[0], verso: KB[1], inclinaison: 35, orientation: 25 },
+        'Menthe': { police: 'arrondie', fond: MENTHE[0], papier: '#f6faf8', encre: MENTHE[1], verso: MENTHE[2], ondulation: 0.6, frequence: 2.2, pli: 0.2, froisse: 0, lignes: 38, colonnes: 2 },
+      },
+      brand(colors) {
+        return { fond: colors[0], papier: colors[colors.length > 2 ? 2 : 0] === colors[0] ? '#ffffff' : (colors[2] || '#ffffff'), encre: colors[1] || '#111111', verso: colors[3] || colors[0] };
+      },
+      pointer: {
+        move: (q) => { ptr = { x: q.x, y: q.y }; },
+        down: (q) => { ptr = { x: q.x, y: q.y }; grab = { x: q.x, y: q.y, moved: false }; },
+        drag: (q) => { ptr = { x: q.x, y: q.y }; if (grab && Math.hypot(q.x - grab.x, q.y - grab.y) > 6) grab.moved = true; },
+        up: () => { if (grab && !grab.moved) crumple = Math.min(1.2, crumple + 0.9); grab = null; },
+        wheel: (q, dy) => app.set('pli', Math.max(0, Math.min(1, Math.round((p.pli - dy * 0.001) * 100) / 100))),
+      },
+      onChange(k) {
+        if (k === '*' || k === '_logo' || ['texte', 'police', 'graisse', 'majuscules', 'lignes', 'interlignage', 'colonnes', 'marge', 'page'].includes(k)) texDirty = true;
+      },
+      onSeed() { texDirty = true; },
+      export: { name: 'page-pliee', svg: () => toSVG() },
+    });
+    const p = app.params;
+    canvas.addEventListener('pointerleave', () => { if (!grab) ptr = null; });
+    if (document.fonts) document.fonts.addEventListener('loadingdone', () => { texDirty = true; });
+
+    function family() { return p.police === 'AtelierBrand' ? "'AtelierBrand', sans-serif" : (FONTS[p.police] || FONTS.serif); }
+    function pageAspect() {
+      const { w, h } = app.size;
+      return p.page === 'carre' ? 1 : p.page === 'portrait' ? 0.72 : (w / h) * 0.94;
+    }
+
+    // ——— Mise en page du texte (justifié, en colonnes) ———
+    const tcv = document.createElement('canvas');
+    const tx = tcv.getContext('2d');
+    function layout() {
+      const A = pageAspect(), TH = 2048, TW = Math.min(4096, Math.round(TH * A));
+      const m = p.marge * TH, cols = p.colonnes, gut = TH * 0.03;
+      const lh = (TH - 2 * m) / p.lignes, fs = lh / p.interlignage;
+      const colW = (TW - 2 * m - gut * (cols - 1)) / cols;
+      tx.font = `${p.graisse} ${fs}px ${family()}`;
+      let src = String(p.texte || '').replace(/\s+/g, ' ').trim();
+      if (p.majuscules) src = src.toUpperCase();
+      if (!src) src = '—';
+      const words = src.split(' ');
+      const wW = new Map();
+      const wid = (s) => { let v = wW.get(s); if (v == null) { v = tx.measureText(s).width; wW.set(s, v); } return v; };
+      const space = wid(' ');
+      const glyphs = [];
+      let wi = 0;
+      for (let c = 0; c < cols; c++) {
+        const x0 = m + c * (colW + gut);
+        for (let l = 0; l < p.lignes; l++) {
+          const base = m + lh * (l + 0.5);
+          // Remplir la ligne de mots (le texte se répète).
+          const line = [];
+          let width = 0, guard = 0;
+          while (guard++ < 400) {
+            const wd = words[wi % words.length], ww = wid(wd);
+            const need = line.length ? width + space + ww : ww;
+            if (need > colW && line.length) break;
+            line.push(wd); width = need; wi++;
+            if (ww > colW) break;
+          }
+          const gaps = line.length - 1, natural = line.reduce((s, wd) => s + wid(wd), 0);
+          const sp = gaps > 0 ? Math.min(space * 3, (colW - natural) / gaps) : space;
+          let x = x0;
+          for (const wd of line) {
+            // Positions des lettres dans le mot, recalées sur la largeur du mot (approche).
+            const chars = Array.from(wd), cws = chars.map(wid), sum = cws.reduce((a, b) => a + b, 0) || 1, kx = wid(wd) / sum;
+            let px = 0;
+            chars.forEach((ch, ci) => { glyphs.push({ ch, x: x + (px + cws[ci] / 2) * kx, y: base, w: cws[ci] }); px += cws[ci]; });
+            x += wid(wd) + sp;
+          }
+        }
+      }
+      return { A, TW, TH, fs, glyphs, lh };
+    }
+    function buildTexture() {
+      const L = layout();
+      layoutCache = L;
+      tcv.width = L.TW; tcv.height = L.TH;
+      tx.clearRect(0, 0, L.TW, L.TH);
+      tx.fillStyle = '#fff';
+      tx.font = `${p.graisse} ${L.fs}px ${family()}`;
+      tx.textAlign = 'center'; tx.textBaseline = 'middle';
+      for (const g of L.glyphs) tx.fillText(g.ch, g.x, g.y);
+      gl.bindTexture(gl.TEXTURE_2D, tex);
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, tcv);
+      gl.generateMipmap(gl.TEXTURE_2D);
+      if (aniso) gl.texParameterf(gl.TEXTURE_2D, aniso.TEXTURE_MAX_ANISOTROPY_EXT, 8);
+      texDirty = false;
+    }
+
+    // ——— Déformation : uniformes partagés JS / GLSL ———
+    const U = { ond: 0, freq: 3, dir: [1, 0], ph: 0, fro: 0, fph: 0, lift: 0, pu: 0, pv: 0, pr: 0.35, tor: 0, ax: 0, off: 0, phi: 0, A: 0.72 };
+    function deformJS(x0, y0) {
+      const x = x0 * U.A, y = y0;
+      let z = U.ond * 0.16 * Math.sin(U.freq * (x * U.dir[0] + y * U.dir[1]) - U.ph);
+      let n = (0.5 - Math.abs(Math.sin(2.3 * x + 1.7 * y + U.fph))) * 0.5;
+      n += (0.5 - Math.abs(Math.sin(-3.7 * x + 2.9 * y + 1.3 + U.fph * 0.7))) * 0.33;
+      n += (0.5 - Math.abs(Math.sin(5.1 * x - 4.3 * y + 2.1 - U.fph * 0.5))) * 0.2;
+      n += (0.5 - Math.abs(Math.sin(7.9 * x + 6.1 * y + 0.4 + U.fph * 0.3))) * 0.12;
+      z += U.fro * 0.22 * n;
+      const dx = x - U.pu, dy = y - U.pv;
+      z += U.lift * Math.exp(-(dx * dx + dy * dy) / (U.pr * U.pr));
+      const a = U.tor * y, c = Math.cos(a), s = Math.sin(a);
+      let px = x * c - z * s, py = y, pz = x * s + z * c;
+      const nx = -Math.sin(U.ax), ny = Math.cos(U.ax);
+      const dd = px * nx + py * ny - U.off;
+      let part = 0;
+      if (dd > 0) {
+        // Pli arrondi : l'angle monte sur une petite bande, la surface reste continue même ondulée.
+        const sm = Math.min(1, dd / 0.08), ph = U.phi * sm * sm * (3 - 2 * sm);
+        const cf = Math.cos(ph), sf = Math.sin(ph);
+        const d2 = dd * cf - pz * sf, z2 = dd * sf + pz * cf;
+        px += nx * (d2 - dd); py += ny * (d2 - dd); pz = z2; part = 1;
+      }
+      return [px, py, pz, part];
+    }
+    const GLSL_DEFORM = `
+      uniform float uA, uOnd, uFreq, uPh, uFro, uFph, uLift, uPr, uTor, uAx, uOff, uPhi;
+      uniform vec2 uDir, uP;
+      vec3 deform(vec2 q, out float part) {
+        float x = q.x * uA, y = q.y;
+        float z = uOnd * 0.16 * sin(uFreq * (x * uDir.x + y * uDir.y) - uPh);
+        float n = (0.5 - abs(sin(2.3 * x + 1.7 * y + uFph))) * 0.5;
+        n += (0.5 - abs(sin(-3.7 * x + 2.9 * y + 1.3 + uFph * 0.7))) * 0.33;
+        n += (0.5 - abs(sin(5.1 * x - 4.3 * y + 2.1 - uFph * 0.5))) * 0.2;
+        n += (0.5 - abs(sin(7.9 * x + 6.1 * y + 0.4 + uFph * 0.3))) * 0.12;
+        z += uFro * 0.22 * n;
+        vec2 d = vec2(x, y) - uP;
+        z += uLift * exp(-dot(d, d) / (uPr * uPr));
+        float a = uTor * y, c = cos(a), s = sin(a);
+        vec3 p = vec3(x * c - z * s, y, x * s + z * c);
+        vec2 nn = vec2(-sin(uAx), cos(uAx));
+        float dd = dot(p.xy, nn) - uOff;
+        part = 0.;
+        if (dd > 0.) {
+          float ph = uPhi * smoothstep(0., 0.08, dd);
+          float cf = cos(ph), sf = sin(ph);
+          float d2 = dd * cf - p.z * sf, z2 = dd * sf + p.z * cf;
+          p.xy += nn * (d2 - dd); p.z = z2; part = 1.;
+        }
+        return p;
+      }`;
+
+    // ——— Caméra ———
+    const FOV = 34 * DEG, F = 1 / Math.tan(FOV / 2), DIST = 4;
+    const V = { rx: 0, ry: 0, S: 1 };
+    function view(P) {
+      // Échelle, rotation Y (orientation) puis X (inclinaison), recul de la caméra.
+      let x = P[0] * V.S, y = P[1] * V.S, z = P[2] * V.S;
+      const cy = Math.cos(V.ry), sy = Math.sin(V.ry);
+      [x, z] = [x * cy + z * sy, -x * sy + z * cy];
+      const cx = Math.cos(V.rx), sx = Math.sin(V.rx);
+      [y, z] = [y * cx - z * sx, y * sx + z * cx];
+      return [x, y, z - DIST];
+    }
+    function toScreen(Q) {
+      const { w, h } = app.size, k = F / -Q[2];
+      return [w / 2 + Q[0] * k * h / 2, h / 2 - Q[1] * k * h / 2, -Q[2]];
+    }
+    // Rayon du pointeur → point de la page à plat (coordonnées de page normalisées).
+    function unproject(sx, sy) {
+      const { w, h } = app.size;
+      const dx = (sx - w / 2) / (h / 2) / F, dy = -(sy - h / 2) / (h / 2) / F;
+      // Direction du rayon en repère vue : (dx, dy, -1) depuis (0,0,DIST) en repère monde tourné.
+      const inv = (v) => {
+        let [x, y, z] = v;
+        const cx = Math.cos(-V.rx), sx = Math.sin(-V.rx);
+        [y, z] = [y * cx - z * sx, y * sx + z * cx];
+        const cy = Math.cos(-V.ry), sy = Math.sin(-V.ry);
+        [x, z] = [x * cy + z * sy, -x * sy + z * cy];
+        return [x, y, z];
+      };
+      const o = inv([0, 0, DIST]), d = inv([dx, dy, -1]);
+      if (Math.abs(d[2]) < 1e-6) return null;
+      const t = -o[2] / d[2];
+      return [(o[0] + d[0] * t) / V.S, (o[1] + d[1] * t) / V.S];
+    }
+
+    // ——— WebGL ———
+    const VS = `#version 300 es
+      precision highp float;
+      layout(location = 0) in vec2 aQ;
+      ${GLSL_DEFORM}
+      uniform float uS, uRx, uRy, uF, uAsp, uDist;
+      out vec2 vUV; out vec3 vN; out float vPart;
+      vec3 view(vec3 p) {
+        p *= uS;
+        float cy = cos(uRy), sy = sin(uRy);
+        p = vec3(p.x * cy + p.z * sy, p.y, -p.x * sy + p.z * cy);
+        float cx = cos(uRx), sx = sin(uRx);
+        p = vec3(p.x, p.y * cx - p.z * sx, p.y * sx + p.z * cx);
+        return p - vec3(0., 0., uDist);
+      }
+      void main() {
+        float pa, pb, pc;
+        vec3 P = deform(aQ, pa);
+        float e = 0.003;
+        vec3 Pu = deform(aQ + vec2(e, 0.), pb), Pv = deform(aQ + vec2(0., e), pc);
+        vec3 Q = view(P);
+        vN = normalize(view(P + normalize(cross(Pu - P, Pv - P)) * 0.01) - Q);
+        vUV = vec2(aQ.x * 0.5 + 0.5, 0.5 - aQ.y * 0.5);
+        vPart = pa;
+        float n = 0.1, f = 30.;
+        gl_Position = vec4(Q.x * uF / uAsp, Q.y * uF, (-(f + n) / (f - n)) * Q.z - 2. * f * n / (f - n), -Q.z);
+      }`;
+    const FS = `#version 300 es
+      precision highp float;
+      in vec2 vUV; in vec3 vN; in float vPart;
+      uniform sampler2D uTex;
+      uniform vec3 uPaper, uInk, uVerso;
+      uniform float uLum, uTrans;
+      out vec4 o;
+      void main() {
+        vec3 N = normalize(vN);
+        // Vue rasante : les lettres très écrasées s'estompent au lieu de créneler.
+        float ink = texture(uTex, vUV).a * smoothstep(0.06, 0.3, abs(N.z));
+        vec3 col;
+        if (gl_FrontFacing) col = mix(uPaper, uInk, ink);
+        else { col = mix(uVerso, uInk, ink * uTrans); N = -N; }
+        vec3 L = normalize(vec3(-0.45, 0.6, 0.75));
+        float dif = max(dot(N, L), 0.), rim = pow(1. - abs(N.z), 3.);
+        float sh = 0.42 + 0.58 * dif;
+        col *= mix(1., sh, uLum);
+        col += uLum * 0.06 * pow(max(dot(reflect(-L, N), vec3(0., 0., 1.)), 0.), 24.);
+        col *= 1. - 0.15 * rim * uLum;
+        o = vec4(col, 1.);
+      }`;
+    function sh(type, src) { const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s); if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s)); return s; }
+    const prog = gl.createProgram();
+    gl.attachShader(prog, sh(gl.VERTEX_SHADER, VS)); gl.attachShader(prog, sh(gl.FRAGMENT_SHADER, FS));
+    gl.linkProgram(prog);
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
+    const loc = {};
+    const u = (n) => (loc[n] ??= gl.getUniformLocation(prog, n));
+
+    // Maillage : grille fine en coordonnées de page [-1, 1]².
+    const GX = 180, GY = 180;
+    const verts = new Float32Array((GX + 1) * (GY + 1) * 2);
+    for (let j = 0, k = 0; j <= GY; j++) for (let i = 0; i <= GX; i++) { verts[k++] = -1 + 2 * i / GX; verts[k++] = 1 - 2 * j / GY; }
+    const idx = new Uint32Array(GX * GY * 6);
+    for (let j = 0, k = 0; j < GY; j++) for (let i = 0; i < GX; i++) {
+      const a = j * (GX + 1) + i, b = a + 1, c = a + GX + 1, d = c + 1;
+      idx[k++] = a; idx[k++] = c; idx[k++] = b; idx[k++] = b; idx[k++] = c; idx[k++] = d;
+    }
+    const vao = gl.createVertexArray(); gl.bindVertexArray(vao);
+    const vb = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, vb); gl.bufferData(gl.ARRAY_BUFFER, verts, gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+    const ib = gl.createBuffer(); gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ib); gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, idx, gl.STATIC_DRAW);
+    const tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    const aniso = gl.getExtension('EXT_texture_filter_anisotropic');
+
+    const rgbf = (hx) => { const n = parseInt(String(hx).slice(1, 7), 16) || 0; return [(n >> 16 & 255) / 255, (n >> 8 & 255) / 255, (n & 255) / 255]; };
+
+    // ——— Mise à jour des uniformes (temps, pointeur) ———
+    let clock = 0;
+    function update(t, dt) {
+      const { w, h } = app.size;
+      clock = t;
+      const A = pageAspect();
+      U.A = A;
+      const sp = p.vitesse;
+      U.ond = p.ondulation; U.freq = p.frequence;
+      const da = p.direction * DEG; U.dir = [Math.cos(da), Math.sin(da)];
+      U.ph = t * sp * 2.2;
+      U.fro = Math.min(1.4, p.froisse + crumple); U.fph = t * sp * 0.35 + crumple * 2;
+      U.tor = p.torsion * (1 + 0.25 * Math.sin(t * sp * 0.6));
+      U.ax = (p.axe + 6 * Math.sin(t * sp * 0.21)) * DEG;
+      U.off = p.position;
+      // Le pli respire : il s'ouvre et se referme doucement autour de sa valeur.
+      U.phi = p.pli * Math.PI * 0.94 * (0.82 + 0.18 * Math.sin(t * sp * 0.7));
+      V.rx = -p.inclinaison * DEG; V.ry = p.orientation * DEG;
+      // La page tient dans le cadre (selon la hauteur, ou la largeur si elle est plus étroite).
+      V.S = p.taille * (DIST / F) * Math.min(1, (w / h) / Math.max(A, 0.01)) * 0.92;
+      // Pointeur : soulèvement doux au survol, franc quand on tire.
+      const tgt = grab ? 0.55 : ptr ? 0.14 : 0;
+      if (ptr) { const q = unproject(ptr.x, ptr.y); if (q) ptrUV = q; }
+      const k = 60, c = grab ? 9 : 5;
+      dt = Math.min(0.05, dt || 0);
+      liftV += ((tgt - lift) * k - liftV * c) * dt; lift += liftV * dt;
+      crumple *= Math.exp(-dt * 0.9);
+      U.lift = lift; U.pu = ptrUV[0]; U.pv = ptrUV[1]; U.pr = grab ? 0.42 : 0.3;
+    }
+
+    function render(t, dt) {
+      if (texDirty) buildTexture();
+      update(t, dt);
+      const W = canvas.width, H = canvas.height;
+      gl.viewport(0, 0, W, H);
+      const bg = rgbf(p.fond);
+      gl.clearColor(bg[0], bg[1], bg[2], 1);
+      gl.enable(gl.DEPTH_TEST);
+      gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+      gl.useProgram(prog); gl.bindVertexArray(vao);
+      gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, tex); gl.uniform1i(u('uTex'), 0);
+      gl.uniform1f(u('uA'), U.A); gl.uniform1f(u('uOnd'), U.ond); gl.uniform1f(u('uFreq'), U.freq); gl.uniform1f(u('uPh'), U.ph);
+      gl.uniform1f(u('uFro'), U.fro); gl.uniform1f(u('uFph'), U.fph); gl.uniform1f(u('uLift'), U.lift); gl.uniform1f(u('uPr'), U.pr);
+      gl.uniform1f(u('uTor'), U.tor); gl.uniform1f(u('uAx'), U.ax); gl.uniform1f(u('uOff'), U.off); gl.uniform1f(u('uPhi'), U.phi);
+      gl.uniform2f(u('uDir'), U.dir[0], U.dir[1]); gl.uniform2f(u('uP'), U.pu, U.pv);
+      gl.uniform1f(u('uS'), V.S); gl.uniform1f(u('uRx'), V.rx); gl.uniform1f(u('uRy'), V.ry);
+      gl.uniform1f(u('uF'), F); gl.uniform1f(u('uAsp'), W / H); gl.uniform1f(u('uDist'), DIST);
+      gl.uniform3fv(u('uPaper'), rgbf(p.papier)); gl.uniform3fv(u('uInk'), rgbf(p.encre)); gl.uniform3fv(u('uVerso'), rgbf(p.verso));
+      gl.uniform1f(u('uLum'), p.lumiere); gl.uniform1f(u('uTrans'), p.transparence);
+      gl.drawElements(gl.TRIANGLES, idx.length, gl.UNSIGNED_INT, 0);
+    }
+    app.loop((t, dt) => render(t, dt));
+
+    // ——— Export SVG : facettes ombrées et glyphes, par couche (base puis rabat, ou l'inverse) ———
+    function toSVG() {
+      const { w, h } = app.size;
+      if (texDirty) buildTexture();
+      const L = layoutCache, f = (v) => Math.round(v * 100) / 100, r4 = (v) => Math.round(v * 10000) / 10000;
+      const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      const paper = rgbf(p.papier), verso = rgbf(p.verso), ink = rgbf(p.encre);
+      const Ld = (() => { const v = [-0.45, 0.6, 0.75], n = Math.hypot(...v); return v.map((x) => x / n); })();
+      const hexOf = (c) => '#' + c.map((x) => Math.round(Math.max(0, Math.min(1, x)) * 255).toString(16).padStart(2, '0')).join('');
+      const shade = (Nv, front) => {
+        const N = front ? Nv : Nv.map((x) => -x);
+        const dif = Math.max(0, N[0] * Ld[0] + N[1] * Ld[1] + N[2] * Ld[2]);
+        return 1 + (0.42 + 0.58 * dif - 1) * p.lumiere;
+      };
+      const normalAt = (x, y) => {
+        const e = 0.003, P = deformJS(x, y), Pu = deformJS(x + e, y), Pv = deformJS(x, y + e);
+        const a = [Pu[0] - P[0], Pu[1] - P[1], Pu[2] - P[2]], b = [Pv[0] - P[0], Pv[1] - P[1], Pv[2] - P[2]];
+        let n = [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+        const Q0 = view(P), Q1 = view([P[0] + n[0] * 0.01, P[1] + n[1] * 0.01, P[2] + n[2] * 0.01]);
+        n = [Q1[0] - Q0[0], Q1[1] - Q0[1], Q1[2] - Q0[2]];
+        const l = Math.hypot(...n) || 1;
+        return [n[0] / l, n[1] / l, n[2] / l];
+      };
+      const layers = [[], []], depthSum = [0, 0], depthN = [0, 0];
+      // Facettes.
+      const NX = 72, NY = 72;
+      const grid = [];
+      for (let j = 0; j <= NY; j++) for (let i = 0; i <= NX; i++) {
+        const x = -1 + 2 * i / NX, y = 1 - 2 * j / NY;
+        const P = deformJS(x, y), S = toScreen(view(P));
+        grid.push(S);
+      }
+      for (let j = 0; j < NY; j++) for (let i = 0; i < NX; i++) {
+        const a = grid[j * (NX + 1) + i], b = grid[j * (NX + 1) + i + 1], c = grid[(j + 1) * (NX + 1) + i + 1], d = grid[(j + 1) * (NX + 1) + i];
+        const cx = -1 + 2 * (i + 0.5) / NX, cy = 1 - 2 * (j + 0.5) / NY;
+        const part = deformJS(cx, cy)[3];
+        const cross = (b[0] - a[0]) * (d[1] - a[1]) - (b[1] - a[1]) * (d[0] - a[0]);
+        const front = cross > 0;
+        const s = shade(normalAt(cx, cy), front), base = front ? paper : verso;
+        const z = (a[2] + b[2] + c[2] + d[2]) / 4;
+        layers[part].push({ z, svg: `<path d="M${f(a[0])} ${f(a[1])}L${f(b[0])} ${f(b[1])}L${f(c[0])} ${f(c[1])}L${f(d[0])} ${f(d[1])}Z" fill="${hexOf(base.map((v) => v * s))}" stroke="${hexOf(base.map((v) => v * s))}" stroke-width="0.6"/>` });
+        depthSum[part] += z; depthN[part]++;
+      }
+      // Glyphes (recto seulement).
+      const fsP = L.fs / L.TH * 2, k = fsP / 100, e = 0.002;
+      const glyphSvg = [[], []];
+      for (const g of L.glyphs) {
+        const x = (g.x / L.TW) * 2 - 1, y = 1 - (g.y / L.TH) * 2;
+        const P = deformJS(x, y), O = toScreen(view(P));
+        const Pu = deformJS(x + e, y), Pd = deformJS(x, y - e);
+        if (P[3] !== Pu[3] || P[3] !== Pd[3]) continue;
+        const Su = toScreen(view(Pu)), Sd = toScreen(view(Pd));
+        // Dérivées par unité de hauteur de page (x normalisé vaut A unités ; v vers le bas).
+        const ex = [(Su[0] - O[0]) / e / L.A, (Su[1] - O[1]) / e / L.A];
+        const ey = [(Sd[0] - O[0]) / e, (Sd[1] - O[1]) / e];
+        if (ex[0] * ey[1] - ex[1] * ey[0] <= 0) continue;
+        const s = shade(normalAt(x, y), true);
+        glyphSvg[P[3]].push(`<text transform="matrix(${r4(ex[0] * k)} ${r4(ex[1] * k)} ${r4(ey[0] * k)} ${r4(ey[1] * k)} ${f(O[0])} ${f(O[1])})" fill="${hexOf(ink.map((v) => v * s))}">${esc(g.ch)}</text>`);
+      }
+      const order = depthN[1] && depthSum[1] / depthN[1] > (depthN[0] ? depthSum[0] / depthN[0] : 0) ? [1, 0] : [0, 1];
+      let body = '';
+      for (const part of order) {
+        layers[part].sort((A, B) => B.z - A.z);
+        body += layers[part].map((q) => q.svg).join('\n') + '\n';
+        body += `<g font-family="${family().replace(/"/g, "'")}" font-weight="${p.graisse}" font-size="100" text-anchor="middle" dominant-baseline="central">\n${glyphSvg[part].join('\n')}\n</g>\n`;
+      }
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">\n<rect width="100%" height="100%" fill="${p.fond}"/>\n${body}</svg>`;
+    }
+  </script>
+</body>
+</html>
