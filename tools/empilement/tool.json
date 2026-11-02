@@ -1,0 +1,15 @@
+{
+  "slug": "empilement",
+  "title": "Empilement",
+  "type": "pattern",
+  "description": "Des disques naissent et grossissent jusqu’à se toucher dans le cadre, un disque, un anneau ou le logo, respirent puis se dissolvent en vague.",
+  "tags": ["cercles", "empilement", "remplissage", "logo", "motif", "svg"],
+  "inspiration": [
+    "Empilement de cercles par croissance aléatoire (circle packing génératif)",
+    "Rythmes colorés de Sonia Delaunay et les cibles de Jasper Johns pour les motifs de disques",
+    "references/techniques.md ; palettes biennale, salon, kegelbahn, good-room"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}

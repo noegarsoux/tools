@@ -1,0 +1,332 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Empilement</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Empilement : des disques naissent au hasard dans une forme et grossissent jusqu'à toucher
+    // leurs voisins (empilement apollonien approché). Quand la forme est pleine, une vague les
+    // fait respirer, puis ils se dissolvent depuis un point et la place se remplit à nouveau.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const P60 = PAL('papier-60'), BIEN = PAL('biennale'), MENTHE = PAL('menthe'), KB = PAL('kegelbahn'), GR = PAL('good-room'), THER = PAL('thermique');
+    const NUIT = PAL('trame-nuit'), LUZ = PAL('luzern'), SALON = PAL('salon'), BITMAP = PAL('bitmap'), PYR = PAL('pyramides'), ORB = PAL('orbite');
+    const MAXN = 7000;
+
+    let inited = false, bf = 0, quiet = 0, C = [], rnd = Math.random, full = false, fullT = 0, fails = 0, hover = null, drag = null, gen = 0, maskCache = null, maskKey = null, cx0 = 0, cy0 = 0;
+    let head = new Int32Array(1), next = new Int32Array(MAXN), gcols = 1, grows = 1, gcell = 1;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.03, vignette: 0 },
+      hint: 'Survolez pour écarter les disques · glissez pour en éclater · touchez pour faire de la place · molette : taille maximale',
+      notes: 'Chaque disque grandit tant qu’il ne touche ni un voisin ni le bord de la forme. Une fois la forme pleine, une onde fait respirer les disques puis les dissout depuis un point.',
+      params: {
+        'Forme': {
+          enveloppe: { type: 'select', label: 'Enveloppe', options: { cadre: 'Tout le cadre', disque: 'Disque', anneau: 'Anneau', logo: 'Logo', creux: 'Autour du logo' }, value: 'cadre' },
+          image: { type: 'file', label: 'Logo', accept: 'image/*', show: (q) => q.enveloppe === 'logo' || q.enveloppe === 'creux' },
+          rmin: { type: 'range', label: 'Rayon minimal', min: 0.002, max: 0.03, step: 0.001, value: 0.004 },
+          rmax: { type: 'range', label: 'Rayon maximal', min: 0.02, max: 0.3, step: 0.005, value: 0.11 },
+          ecart: { type: 'range', label: 'Écart', min: 0, max: 12, step: 0.5, value: 1.5 },
+          naissances: { type: 'range', label: 'Naissances par image', min: 1, max: 40, step: 1, value: 6 },
+        },
+        'Mouvement': {
+          vitesse: { type: 'range', label: 'Vitesse de croissance', min: 0.2, max: 4, step: 0.1, value: 1 },
+          respiration: { type: 'range', label: 'Respiration', min: 0, max: 0.8, step: 0.01, value: 0.3 },
+          onde: { type: 'range', label: 'Longueur d’onde', min: 0.1, max: 2, step: 0.05, value: 0.6 },
+          rotation: { type: 'range', label: 'Rotation des motifs', min: -1, max: 1, step: 0.05, value: 0.3 },
+          duree: { type: 'range', label: 'Pause avant dissolution (s)', min: 1, max: 30, step: 1, value: 6 },
+          boucle: { type: 'toggle', label: 'Dissoudre et recommencer', value: true },
+        },
+        'Rendu': {
+          style: { type: 'select', label: 'Motif', options: { plein: 'Pleins', demi: 'Demi-lunes', cible: 'Cibles', anneaux: 'Anneaux', contour: 'Contours', mixte: 'Mélange' }, value: 'plein' },
+          trait: { type: 'range', label: 'Trait', min: 0.5, max: 8, step: 0.5, value: 2 },
+        },
+        'Couleur': {
+          fond: { type: 'color', label: 'Fond', value: BIEN[0] },
+          couleurs: { type: 'palette', label: 'Couleurs', value: [BIEN[1], BIEN[2], BIEN[3], BIEN[4]] },
+          repartition: { type: 'select', label: 'Répartition', options: { hasard: 'Au hasard', taille: 'Selon la taille', radial: 'Depuis le centre', vertical: 'De haut en bas' }, value: 'hasard' },
+        },
+      },
+      presets: {
+        'Biennale': {},
+        'Encre': { fond: P60[0], couleurs: [P60[1]], style: 'contour', trait: 1.5, rmax: 0.14, ecart: 3, respiration: 0.15 },
+        'Logo': { enveloppe: 'logo', fond: P60[0], couleurs: [P60[1], '#e5452a'], style: 'plein', rmax: 0.05, rmin: 0.003, ecart: 1.5, repartition: 'taille', naissances: 14 },
+        'Creux': { enveloppe: 'creux', fond: KB[0], couleurs: [KB[1], KB[2], KB[3], KB[5]], style: 'demi', rmax: 0.07, ecart: 2, naissances: 12 },
+        'Cibles': { fond: SALON[0], couleurs: [SALON[1], SALON[2], SALON[3], SALON[4]], style: 'cible', trait: 3, rmax: 0.16, ecart: 4 },
+        'Disque': { enveloppe: 'disque', fond: GR[0], couleurs: [GR[1], GR[2], GR[3], GR[4]], style: 'plein', repartition: 'radial', rmax: 0.08, ecart: 2, respiration: 0.35, onde: 0.35 },
+        'Anneaux': { enveloppe: 'anneau', fond: NUIT[0], couleurs: [NUIT[1], ORB[0], NUIT[2]], style: 'anneaux', trait: 1.5, rmax: 0.07, ecart: 3 },
+        'Menthe': { fond: MENTHE[0], couleurs: [MENTHE[1], MENTHE[3], MENTHE[2]], style: 'mixte', repartition: 'vertical', rmax: 0.13, trait: 2.5 },
+        'Thermique': { fond: THER[0], couleurs: [THER[1], THER[2], THER[3], THER[4], THER[5]], style: 'plein', repartition: 'taille', rmax: 0.2, rmin: 0.006, ecart: 0, respiration: 0.3 },
+        'Luzern': { enveloppe: 'disque', fond: LUZ[0], couleurs: [LUZ[3], LUZ[1], LUZ[4], LUZ[2]], style: 'demi', rmax: 0.12, ecart: 3, rotation: -0.5 },
+        'Bitmap': { fond: BITMAP[0], couleurs: [BITMAP[1], BITMAP[2], BITMAP[3], BITMAP[4]], style: 'mixte', rmax: 0.09, ecart: 2, trait: 2, naissances: 10 },
+        'Orbite': { enveloppe: 'anneau', fond: ORB[2], couleurs: [ORB[1], ORB[0]], style: 'cible', trait: 2, rmax: 0.05, ecart: 2, repartition: 'radial' },
+      },
+      brand(colors) {
+        const c = colors.slice(1).length ? colors.slice(1) : ['#111111'];
+        return { fond: colors[0], couleurs: c.slice(0, 7) };
+      },
+      pointer: {
+        move: (q) => { hover = { x: q.x, y: q.y }; },
+        down: (q) => { drag = { x: q.x, y: q.y, moved: false }; },
+        drag: (q) => {
+          hover = { x: q.x, y: q.y };
+          if (!drag) return;
+          if (Math.hypot(q.x - drag.x, q.y - drag.y) > 6) drag.moved = true;
+          if (!drag.moved) return;
+          // Éclate les disques traversés par le geste : la place se remplit aussitôt.
+          const S = Math.min(app.size.w, app.size.h);
+          for (const c of C) if (!c.pop && Math.hypot(c.x - q.x, c.y - q.y) < c.r + S * 0.015) { c.pop = 1; }
+          full = false; fails = 0; quiet = 1e4;
+        },
+        up: (q) => {
+          if (drag && !drag.moved) {
+            const S = Math.min(app.size.w, app.size.h);
+            for (const c of C) if (Math.hypot(c.x - q.x, c.y - q.y) < c.r + S * 0.09) c.pop = 1;
+            full = false; fails = 0; quiet = 1e4;
+          }
+          drag = null;
+        },
+        wheel: (q, dy) => app.set('rmax', Math.max(0.02, Math.min(0.3, Math.round(p.rmax * (dy > 0 ? 0.85 : 1.15) / 0.005) * 0.005))),
+      },
+      onChange(k) {
+        if (['enveloppe', 'image', '*'].includes(k)) reset();
+        // Tailles et écart changent sans tout effacer : les disques s'ajustent sur place.
+        else if (['rmin', 'rmax', 'ecart'].includes(k)) { for (const c of C) c.wait = 0; full = false; quiet = 1e4; }
+      },
+      onSeed() { gen = 0; reset(); },
+      export: { name: 'empilement', svg: () => toSVG() },
+    });
+    const p = app.params;
+    canvas.addEventListener('pointerleave', () => { hover = null; });
+
+    // ——— Formes ———
+    function logoMask() {
+      const img = p.image || app.logoImg, key = img ? (img.src || 'c') : 'demo';
+      if (key === maskKey) return maskCache;
+      maskKey = key;
+      const M = 256, c = document.createElement('canvas'); c.width = c.height = M; const x = c.getContext('2d', { willReadFrequently: true });
+      if (img) { const iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height, k = M * 0.92 / Math.max(iw, ih); x.drawImage(img, (M - iw * k) / 2, (M - ih * k) / 2, iw * k, ih * k); }
+      else {
+        // Marque de démonstration : un anneau traversé d'une barre.
+        x.fillStyle = '#000'; x.beginPath(); x.arc(128, 128, 108, 0, TAU); x.arc(128, 128, 58, 0, TAU, true); x.fill('evenodd'); x.fillRect(114, 6, 28, 244);
+      }
+      const d = x.getImageData(0, 0, M, M).data, a = new Uint8Array(M * M);
+      let transp = 0; for (let i = 3; i < d.length; i += 16) if (d[i] < 128) transp++;
+      const useA = transp > d.length / 16 * 0.05;
+      for (let i = 0; i < M * M; i++) { const l = (d[i * 4] * 0.2126 + d[i * 4 + 1] * 0.7152 + d[i * 4 + 2] * 0.0722) / 255; a[i] = (useA ? d[i * 4 + 3] > 128 : d[i * 4 + 3] > 128 && l < 0.5) ? 1 : 0; }
+      maskCache = { M, a };
+      return maskCache;
+    }
+    function inLogo(x, y, w, h) {
+      const L = logoMask(), S = Math.min(w, h), Z = S * 0.84, u = (x - (w - Z) / 2) / Z, v = (y - (h - Z) / 2) / Z;
+      if (u < 0 || v < 0 || u >= 1 || v >= 1) return false;
+      return L.a[Math.floor(v * L.M) * L.M + Math.floor(u * L.M)] === 1;
+    }
+    // Le disque (x, y, r) tient-il dans la forme ?
+    function fits(x, y, r, w, h) {
+      const S = Math.min(w, h), m = S * 0.035;
+      switch (p.enveloppe) {
+        case 'disque': return Math.hypot(x - w / 2, y - h / 2) + r < S * 0.46;
+        case 'anneau': { const d = Math.hypot(x - w / 2, y - h / 2); return d + r < S * 0.46 && d - r > S * 0.22; }
+        case 'logo': case 'creux': {
+          const want = p.enveloppe === 'logo';
+          if (p.enveloppe === 'creux' && (x - r < m || y - r < m || x + r > w - m || y + r > h - m)) return false;
+          if (inLogo(x, y, w, h) !== want) return false;
+          const k = r < 3 ? 4 : r < 12 ? 8 : 14;
+          for (let i = 0; i < k; i++) { const a = (i / k) * TAU; if (inLogo(x + Math.cos(a) * r, y + Math.sin(a) * r, w, h) !== want) return false; }
+          return true;
+        }
+        default: return x - r > m && y - r > m && x + r < w - m && y + r < h - m;
+      }
+    }
+
+    // ——— Grille de voisinage (listes chaînées par cellule) ———
+    function buildGrid(w, h) {
+      const S = Math.min(w, h);
+      gcell = Math.max(6, 2 * p.rmax * S + p.ecart + 2);
+      gcols = Math.ceil(w / gcell) + 1; grows = Math.ceil(h / gcell) + 1;
+      if (head.length < gcols * grows) head = new Int32Array(gcols * grows);
+      head.fill(-1, 0, gcols * grows);
+      for (let i = 0; i < C.length; i++) {
+        const c = C[i], gx = Math.min(gcols - 1, Math.max(0, Math.floor(c.x / gcell))), gy = Math.min(grows - 1, Math.max(0, Math.floor(c.y / gcell))), k = gy * gcols + gx;
+        next[i] = head[k]; head[k] = i;
+      }
+    }
+    // Distance libre entre (x, y) et le bord du disque voisin le plus proche (écart compris).
+    function clearance(x, y, skip) {
+      let best = Infinity;
+      const gx = Math.floor(x / gcell), gy = Math.floor(y / gcell);
+      for (let j = gy - 1; j <= gy + 1; j++) {
+        if (j < 0 || j >= grows) continue;
+        for (let i = gx - 1; i <= gx + 1; i++) {
+          if (i < 0 || i >= gcols) continue;
+          for (let n = head[j * gcols + i]; n >= 0; n = next[n]) {
+            if (n === skip) continue;
+            const c = C[n], d = Math.hypot(c.x - x, c.y - y) - c.r - p.ecart;
+            if (d < best) best = d;
+          }
+        }
+      }
+      return best;
+    }
+
+    function reset() {
+      const { w, h } = app.size; if (!w) return;
+      rnd = app.rng(17 + gen * 7919);
+      C = []; full = false; fullT = 0; fails = 0; quiet = 1e4;
+    }
+
+    function step(w, h, dt) {
+      const S = Math.min(w, h), rmin = p.rmin * S, rmax = Math.max(rmin * 1.5, p.rmax * S), gr = p.vitesse * S * 0.09 * dt;
+      // Dissolution et éclatements.
+      for (const c of C) {
+        if (c.pop) c.pop += dt * 6;
+        else if (c.die !== undefined && (c.die -= dt) < 0) { c.r -= gr * 1.6 + c.r * dt * 2.2; }
+      }
+      C = C.filter((c) => (c.pop ? c.pop < 2 : c.r > 0.3));
+      buildGrid(w, h);
+      // Croissance : chaque disque grossit tant qu'il a de la place.
+      let grew = 0;
+      for (let i = 0; i < C.length; i++) {
+        const c = C[i];
+        if (c.pop || c.die !== undefined) continue;
+        if (c.r > rmax) { c.r -= Math.max(0.2, (c.r - rmax) * dt * 4); continue; }
+        if (c.r >= rmax - 0.01) continue;
+        // Un disque bloqué ne revérifie sa place que de temps en temps.
+        if (c.wait > 0) { c.wait -= dt; continue; }
+        const room = clearance(c.x, c.y, i) - c.r, inc = Math.min(gr * (0.6 + c.k * 0.8), room, rmax - c.r);
+        if (inc > 0.02 && fits(c.x, c.y, c.r + inc, w, h)) { c.r += inc; grew += inc; }
+        else c.wait = 0.4 + rnd() * 0.6;
+      }
+      // Naissances.
+      const tries = Math.round(p.naissances) * (full ? 6 : 40);
+      let born = 0;
+      for (let t = 0; t < tries && born < p.naissances && C.length < MAXN; t++) {
+        const x = rnd() * w, y = rnd() * h;
+        const room = clearance(x, y, -1);
+        if (room < rmin || !fits(x, y, rmin, w, h)) { fails++; continue; }
+        C.push({ x, y, r: rmin, k: rnd(), u: rnd(), a: rnd() * TAU, s: 1 }); born++; fails = 0;
+        const n = C.length - 1, gx = Math.min(gcols - 1, Math.max(0, Math.floor(x / gcell))), gy = Math.min(grows - 1, Math.max(0, Math.floor(y / gcell))), k = gy * gcols + gx;
+        next[n] = head[k]; head[k] = n;
+      }
+      // Pleine quand le rythme des naissances s'effondre (les dernières miettes ne comptent pas).
+      quiet += ((dt > 0 ? (born + grew / 8) / dt : 0) - quiet) * Math.min(1, dt * 1.5);
+      if (!full && C.length > 20 && quiet < C.length * 0.02) { full = true; fullT = 0; }
+      if (full) {
+        fullT += dt;
+        if (p.boucle && fullT > p.duree) {
+          // L'onde de dissolution part d'un point au hasard.
+          gen++; const ox = rnd() * w, oy = rnd() * h;
+          for (const c of C) c.die = Math.hypot(c.x - ox, c.y - oy) / S * 1.4 + c.k * 0.25;
+          full = false; fails = 0; quiet = 1e4;
+        }
+      }
+    }
+
+    // ——— Motifs : deux couches, regroupées par couleur ———
+    function colorOf(c, w, h) {
+      const cols = p.couleurs.length ? p.couleurs : ['#111'], n = cols.length, S = Math.min(w, h);
+      let t;
+      switch (p.repartition) {
+        case 'taille': t = Math.min(1, Math.max(0, (c.r - p.rmin * S) / Math.max(1, p.rmax * S - p.rmin * S))); t = Math.sqrt(t); break;
+        case 'radial': t = Math.min(1, Math.hypot(c.x - w / 2, c.y - h / 2) / (Math.hypot(w, h) * 0.45)); break;
+        case 'vertical': t = c.y / h; break;
+        default: t = c.u;
+      }
+      const i = Math.max(0, Math.min(n - 1, Math.floor(t * n + (p.repartition === 'hasard' ? 0 : (c.u - 0.5) * 0.9))));
+      return [cols[i], cols[(i + 1) % n], i];
+    }
+    const STYLES = ['plein', 'demi', 'cible', 'anneaux', 'contour'];
+    function shapes(w, h, t) {
+      const S = Math.min(w, h), fills = [new Map(), new Map()], strokes = new Map(), tw = p.trait;
+      const add = (L, col, op) => (L.get(col) || L.set(col, []).get(col)).push(op);
+      const amp = p.respiration * bf, k = TAU / Math.max(0.05, p.onde * S);
+      for (const c of C) {
+        let R = c.r * c.s * (1 - amp * 0.5 * (1 + Math.sin(t * 2.1 - Math.hypot(c.x - cx0, c.y - cy0) * k)));
+        if (c.pop) R *= Math.max(0, 1 - c.pop * 0.5) * (1 + c.pop * 0.3);
+        if (R < 0.4) continue;
+        const [c1, c2] = colorOf(c, w, h), st = p.style === 'mixte' ? STYLES[Math.floor(c.k * 4.999)] : p.style;
+        const a = c.a + t * p.rotation * (c.k < 0.5 ? 1 : -1) * (0.6 + c.u);
+        switch (st) {
+          case 'demi': add(fills[0], c2 === c1 ? p.fond : c2, ['c', c.x, c.y, R]); add(fills[1], c1, ['h', c.x, c.y, R, a]); break;
+          case 'cible': {
+            add(fills[0], c1, ['c', c.x, c.y, R]);
+            const band = Math.max(tw * 1.6, R / 6);
+            for (let r = R - band; r > band * 0.6; r -= band * 2) add(fills[1], c2 === c1 ? p.fond : c2, ['a', c.x, c.y, r, Math.max(0, r - band)]);
+            break;
+          }
+          case 'anneaux': {
+            const gap = Math.max(tw * 2.4, 3), lw = Math.min(tw, R);
+            for (let r = R - lw / 2; r > lw * 0.5; r -= gap) add(strokes, c1 + '|' + lw, ['c', c.x, c.y, r]);
+            if (R < gap) add(fills[0], c1, ['c', c.x, c.y, R]);
+            break;
+          }
+          case 'contour': {
+            const lw = Math.min(tw, R);
+            add(strokes, c1 + '|' + lw, ['c', c.x, c.y, Math.max(0.2, R - lw / 2)]);
+            add(fills[1], c1, ['c', c.x, c.y, Math.min(R * 0.18, Math.max(1, lw * 0.8))]);
+            break;
+          }
+          default: add(fills[0], c1, ['c', c.x, c.y, R]);
+        }
+      }
+      return { fills, strokes };
+    }
+    function tracePath(g, op) {
+      if (op[0] === 'c') { g.moveTo(op[1] + op[3], op[2]); g.arc(op[1], op[2], op[3], 0, TAU); }
+      else if (op[0] === 'a') { g.moveTo(op[1] + op[3], op[2]); g.arc(op[1], op[2], op[3], 0, TAU); if (op[4] > 0) { g.moveTo(op[1] + op[4], op[2]); g.arc(op[1], op[2], op[4], 0, TAU, true); } }
+      else { const [, x, y, r, a] = op; g.moveTo(x + Math.cos(a) * r, y + Math.sin(a) * r); g.arc(x, y, r, a, a + Math.PI); g.closePath(); }
+    }
+
+    app.loop((t, dt) => {
+      const { w, h, dpr } = app.size;
+      dt = Math.min(0.05, dt || 0);
+      if (!inited) { inited = true; reset(); }
+      cx0 = w / 2; cy0 = h / 2;
+      step(w, h, dt);
+      // La respiration s'installe quand la forme est pleine.
+      bf += ((full ? 1 : 0.12) - bf) * Math.min(1, dt * 1.2);
+      // Le pointeur écarte les disques : ceux qui sont proches rétrécissent.
+      const S = Math.min(w, h), L = S * 0.13;
+      for (const c of C) {
+        let target = 1;
+        if (hover) { const d = Math.hypot(c.x - hover.x, c.y - hover.y) / L; target = 1 - 0.8 * Math.exp(-d * d); }
+        c.s += (target - c.s) * Math.min(1, dt * 8);
+      }
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = p.fond; ctx.fillRect(0, 0, w, h);
+      const G = shapes(w, h, t);
+      for (const [col, ops] of G.fills[0]) { ctx.fillStyle = col; ctx.beginPath(); for (const op of ops) tracePath(ctx, op); ctx.fill(); }
+      for (const [key, ops] of G.strokes) { const [col, lw] = key.split('|'); ctx.strokeStyle = col; ctx.lineWidth = +lw; ctx.beginPath(); for (const op of ops) tracePath(ctx, op); ctx.stroke(); }
+      for (const [col, ops] of G.fills[1]) { ctx.fillStyle = col; ctx.beginPath(); for (const op of ops) tracePath(ctx, op); ctx.fill('evenodd'); }
+      app.finish(ctx);
+    });
+
+    function toSVG() {
+      const { w, h } = app.size, f = (v) => Math.round(v * 10) / 10, G = shapes(w, h, app.time || 0), out = [];
+      const circ = (x, y, r, sweep) => `M${f(x + r)} ${f(y)}A${f(r)} ${f(r)} 0 1 ${sweep} ${f(x - r)} ${f(y)}A${f(r)} ${f(r)} 0 1 ${sweep} ${f(x + r)} ${f(y)}Z`;
+      const d = (op) => {
+        if (op[0] === 'c') return circ(op[1], op[2], op[3], 1);
+        if (op[0] === 'a') return circ(op[1], op[2], op[3], 1) + (op[4] > 0 ? circ(op[1], op[2], op[4], 0) : '');
+        const [, x, y, r, a] = op;
+        return `M${f(x + Math.cos(a) * r)} ${f(y + Math.sin(a) * r)}A${f(r)} ${f(r)} 0 0 1 ${f(x - Math.cos(a) * r)} ${f(y - Math.sin(a) * r)}Z`;
+      };
+      for (const [col, ops] of G.fills[0]) out.push(`<path fill="${col}" d="${ops.map(d).join('')}"/>`);
+      for (const [key, ops] of G.strokes) { const [col, lw] = key.split('|'); out.push(`<path fill="none" stroke="${col}" stroke-width="${f(+lw)}" d="${ops.map(d).join('')}"/>`); }
+      for (const [col, ops] of G.fills[1]) out.push(`<path fill="${col}" fill-rule="evenodd" d="${ops.map(d).join('')}"/>`);
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">\n<rect width="100%" height="100%" fill="${p.fond}"/>\n${out.join('\n')}\n</svg>`;
+    }
+  </script>
+</body>
+</html>
