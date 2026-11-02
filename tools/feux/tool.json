@@ -1,0 +1,15 @@
+{
+  "slug": "feux",
+  "title": "Feux",
+  "type": "motion",
+  "description": "Un feu d'artifice aux couleurs de la marque : pivoines, saules, anneaux, palmiers, étoiles ou logo, freinés par l'air, avec traînes et reflet dans l'eau.",
+  "tags": ["artifice", "particules", "fete", "nuit", "logo", "svg"],
+  "inspiration": [
+    "Feux d'artifice japonais (hanabi) : pivoines, saules, palmiers",
+    "Cai Guo-Qiang, œuvres à la poudre explosive",
+    "references/physique-maths.md ; palettes biennale, kegelbahn, menthe, luzern"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
