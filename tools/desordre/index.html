@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Désordre</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Désordre : une grille de modules où l'ordre se défait peu à peu, d'après « (Dés)ordres » de Vera
+    // Molnár et « Schotter » de Georg Nees. Un champ d'entropie (qui croît de haut en bas, depuis le centre,
+    // vers les bords ou partout) dose pour chaque module la rotation, le déplacement, la déformation des
+    // sommets, l'échelle et la probabilité de disparaître. Chaque module dérive doucement autour de son
+    // tirage ; le pointeur sème du désordre là où il passe.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const P60 = PAL('papier-60'), NUIT = PAL('trame-nuit'), BIEN = PAL('biennale'), KB = PAL('kegelbahn');
+    const PHOTO = PAL('photocopie'), MENTHE = PAL('menthe'), ACIDE = PAL('acide'), SALON = PAL('salon'), ORB = PAL('orbite');
+
+    let drawCache = new Map(), ready = false, heat = null, hover = null, painting = false, lastT = 0, cols = 0, rows = 0;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.04, vignette: 0 },
+      hint: 'Survol : le pointeur sème le désordre · glissez pour le fixer · molette : taille de la grille',
+      notes: 'Un champ d’entropie dose, module par module, la rotation, le déplacement, la déformation et la disparition. Chaque module dérive doucement autour de son tirage.',
+      params: {
+        'Grille': {
+          colonnes: { type: 'range', label: 'Colonnes', min: 3, max: 40, step: 1, value: 12 },
+          module: { type: 'segmented', label: 'Module', options: { carre: 'Carré', concentriques: 'Concentriques', cercle: 'Cercle', croix: 'Croix', lignes: 'Lignes' }, value: 'carre' },
+          remplissage: { type: 'segmented', label: 'Dessin', options: { trait: 'Trait', plein: 'Plein' }, value: 'trait' },
+          concentriques: { type: 'range', label: 'Carrés concentriques', min: 2, max: 10, step: 1, value: 4, show: (q) => q.module === 'concentriques' },
+          taille: { type: 'range', label: 'Taille du module', min: 0.2, max: 1, step: 0.01, value: 0.78 },
+          epaisseur: { type: 'range', label: 'Épaisseur du trait', min: 0.3, max: 6, step: 0.1, value: 1.4 },
+        },
+        'Entropie': {
+          desordre: { type: 'range', label: 'Désordre', min: 0, max: 1, step: 0.01, value: 0.85 },
+          champ: { type: 'segmented', label: 'Champ', options: { descente: 'Descente', centre: 'Centre', bords: 'Bords', partout: 'Partout' }, value: 'descente' },
+          courbe: { type: 'range', label: 'Progressivité', min: 0.3, max: 4, step: 0.01, value: 1.6 },
+          rotation: { type: 'range', label: 'Rotation (°)', min: 0, max: 180, step: 1, value: 80 },
+          deplacement: { type: 'range', label: 'Déplacement', min: 0, max: 1, step: 0.01, value: 0.5 },
+          deformation: { type: 'range', label: 'Déformation des sommets', min: 0, max: 1, step: 0.01, value: 0.25 },
+          echelle: { type: 'range', label: 'Variation d’échelle', min: 0, max: 1, step: 0.01, value: 0.2 },
+          absence: { type: 'range', label: 'Modules absents (%)', min: 0, max: 50, step: 0.5, value: 4 },
+        },
+        'Mouvement': {
+          agitation: { type: 'range', label: 'Agitation', min: 0, max: 1, step: 0.01, value: 0.4 },
+          vitesse: { type: 'range', label: 'Vitesse', min: 0.05, max: 2, step: 0.01, value: 0.4 },
+        },
+        'Couleur': {
+          fond: { type: 'color', label: 'Fond', value: P60[0] },
+          encre: { type: 'color', label: 'Encre', value: P60[1] },
+          accent: { type: 'color', label: 'Accent', value: '#e5452a' },
+          accents: { type: 'range', label: 'Modules en accent (%)', min: 0, max: 50, step: 0.5, value: 1 },
+        },
+      },
+      presets: {
+        'Schotter': {},
+        'Molnár': { module: 'concentriques', concentriques: 5, colonnes: 8, champ: 'partout', desordre: 0.35, rotation: 8, deplacement: 0.05, deformation: 0.6, echelle: 0, absence: 0, accents: 0, epaisseur: 1 },
+        'Centre': { champ: 'centre', colonnes: 16, desordre: 0.8, module: 'carre', remplissage: 'plein', taille: 0.6, fond: BIEN[0], encre: BIEN[1], accent: BIEN[2], accents: 6 },
+        'Bords': { champ: 'bords', colonnes: 14, module: 'cercle', remplissage: 'plein', taille: 0.7, deplacement: 0.8, fond: KB[0], encre: KB[2], accent: KB[3], accents: 8, courbe: 2.5 },
+        'Croix': { module: 'croix', colonnes: 18, rotation: 45, deplacement: 0.15, fond: NUIT[0], encre: NUIT[1], accent: '#e5452a', accents: 2, epaisseur: 2 },
+        'Lignes': { module: 'lignes', colonnes: 24, rotation: 90, champ: 'partout', desordre: 0.5, courbe: 1, fond: ACIDE[2], encre: ACIDE[1], accents: 0, epaisseur: 2.2 },
+        'Photocopie': { colonnes: 30, taille: 0.7, desordre: 0.9, rotation: 120, deplacement: 0.5, absence: 12, fond: PHOTO[0], encre: PHOTO[1], accents: 0, epaisseur: 1 },
+        'Menthe': { module: 'concentriques', concentriques: 3, remplissage: 'trait', colonnes: 10, champ: 'centre', fond: MENTHE[0], encre: MENTHE[1], accent: MENTHE[3], accents: 10 },
+        'Salon': { module: 'carre', remplissage: 'plein', colonnes: 9, taille: 0.9, champ: 'descente', fond: SALON[0], encre: SALON[1], accent: SALON[2], accents: 12, deformation: 0.5 },
+        'Orbite': { module: 'cercle', remplissage: 'trait', colonnes: 20, epaisseur: 2.5, fond: ORB[0], encre: ORB[1], accent: ORB[2], accents: 5, champ: 'centre', deplacement: 0.6 },
+      },
+      brand(colors) {
+        return { fond: colors[0], encre: colors[1] || colors[0], accent: colors[2] || colors[1] || colors[0] };
+      },
+      pointer: {
+        move: (q) => { hover = { x: q.x, y: q.y }; if (painting) paint(q.x, q.y); },
+        down: (q) => { painting = true; paint(q.x, q.y); },
+        drag: (q) => { hover = { x: q.x, y: q.y }; paint(q.x, q.y); },
+        up: () => { painting = false; },
+        wheel: (q, dy) => app.set('colonnes', Math.max(3, Math.min(40, Math.round(p.colonnes + dy * 0.01)))),
+      },
+      onChange(k) { if (k === '*' || k === 'colonnes') heat = null; },
+      onSeed() { heat = null; drawCache.clear(); },
+      export: { name: 'desordre', svg: () => toSVG() },
+    });
+    const p = app.params;
+    canvas.addEventListener('pointerleave', () => { hover = null; });
+
+    // ——— Grille ———
+    function layout() {
+      const { w, h } = app.size, m = Math.min(w, h) * 0.08;
+      cols = p.colonnes;
+      const c = (w - 2 * m) / cols;
+      rows = Math.max(1, Math.floor((h - 2 * m) / c));
+      return { c, x0: (w - cols * c) / 2, y0: (h - rows * c) / 2 };
+    }
+    // Tirages fixes par module : phases du mouvement, signes, sommets, absence, accent.
+    function draws(i) {
+      const r = app.rng(1000 + i);
+      return { ph: [r() * TAU, r() * TAU, r() * TAU, r() * TAU, r() * TAU], dir: [r() * 2 - 1, r() * 2 - 1, r() * 2 - 1, r() * 2 - 1],
+        v: Array.from({ length: 8 }, () => r() * 2 - 1), gone: r(), acc: r(), f: 0.6 + r() * 0.8 };
+    }
+    function get(i) { let d = drawCache.get(i); if (!d) { d = draws(i); drawCache.set(i, d); } return d; }
+
+    // Le désordre semé au pointeur s'ajoute au champ ; il s'efface lentement sauf s'il a été fixé.
+    function paint(x, y) {
+      const g = layout();
+      if (!heat || heat.length !== cols * rows) heat = new Float32Array(cols * rows);
+      const ci = (x - g.x0) / g.c, cj = (y - g.y0) / g.c;
+      for (let j = 0; j < rows; j++) for (let i = 0; i < cols; i++) {
+        const d = Math.hypot(i + 0.5 - ci, j + 0.5 - cj);
+        heat[j * cols + i] = Math.min(1, heat[j * cols + i] + 0.25 * Math.exp(-d * d / 2.5));
+      }
+    }
+    function entropy(i, j) {
+      const u = cols > 1 ? i / (cols - 1) : 0.5, v = rows > 1 ? j / (rows - 1) : 0.5;
+      let e;
+      if (p.champ === 'descente') e = v;
+      else if (p.champ === 'centre') e = 1 - Math.min(1, Math.hypot(u - 0.5, v - 0.5) / 0.7071);
+      else if (p.champ === 'bords') e = Math.min(1, Math.hypot(u - 0.5, v - 0.5) / 0.7071);
+      else e = 1;
+      return Math.pow(e, p.courbe) * p.desordre;
+    }
+
+    // Les modules : chaque élément est { pts (polygones), circle, col, fill }.
+    function build(t) {
+      const g = layout(), out = [], U = g.c;
+      if (heat && heat.length !== cols * rows) heat = null;
+      const hx = hover ? (hover.x - g.x0) / g.c : -99, hy = hover ? (hover.y - g.y0) / g.c : -99;
+      const sp = t * p.vitesse, ag = p.agitation;
+      for (let j = 0; j < rows; j++) for (let i = 0; i < cols; i++) {
+        const n = j * cols + i, d = get(n);
+        let e = entropy(i, j);
+        if (heat) e = Math.min(1, e + heat[n]);
+        if (hover) { const dd = Math.hypot(i + 0.5 - hx, j + 0.5 - hy); e = Math.min(1, e + 0.8 * Math.exp(-dd * dd / 3)); }
+        if (d.gone < p.absence / 100 * (0.3 + 1.4 * e)) continue;
+        // Mouvement : chaque tirage oscille doucement autour de sa valeur.
+        const wob = (k) => d.dir[k % 4] * (1 - ag) + ag * Math.sin(sp * d.f + d.ph[k]);
+        const rot = wob(0) * p.rotation * Math.PI / 180 * e;
+        const dx = wob(1) * p.deplacement * e * U * 0.5, dy = wob(2) * p.deplacement * e * U * 0.5;
+        const sc = p.taille * (1 + wob(3) * p.echelle * e * 0.6);
+        const cx = g.x0 + (i + 0.5) * U + dx, cy = g.y0 + (j + 0.5) * U + dy, s = U * sc / 2;
+        const col = d.acc < p.accents / 100 ? p.accent : p.encre;
+        const jit = (k) => d.v[k] * p.deformation * e * 0.45 * (1 - ag * 0.5 + ag * 0.5 * Math.sin(sp * 1.3 + d.ph[k % 5]));
+        const tr = (x, y) => [cx + x * Math.cos(rot) - y * Math.sin(rot), cy + x * Math.sin(rot) + y * Math.cos(rot)];
+        const square = (k) => [[-1, -1], [1, -1], [1, 1], [-1, 1]].map(([a, b], q) => tr((a + jit(q * 2)) * s * k, (b + jit(q * 2 + 1)) * s * k));
+        const m = { col, polys: [], lines: [], circles: [] };
+        if (p.module === 'carre') m.polys.push(square(1));
+        else if (p.module === 'concentriques') { const N = p.concentriques; for (let k = 0; k < N; k++) m.polys.push(square(1 - k / N)); }
+        else if (p.module === 'cercle') m.circles.push([cx, cy, s * (1 + jit(0) * 0.5)]);
+        else if (p.module === 'croix') { m.lines.push([tr(-s, jit(0) * s), tr(s, jit(1) * s)], [tr(jit(2) * s, -s), tr(jit(3) * s, s)]); }
+        else { for (let k = -1; k <= 1; k++) m.lines.push([tr(-s, k * s * 0.66 + jit(k + 1) * s * 0.3), tr(s, k * s * 0.66 + jit(k + 4) * s * 0.3)]); }
+        out.push(m);
+      }
+      return out;
+    }
+
+    function draw(t) {
+      const { w, h, dpr } = app.size;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = p.fond; ctx.fillRect(0, 0, w, h);
+      ctx.lineJoin = 'miter'; ctx.lineCap = 'butt'; ctx.lineWidth = p.epaisseur;
+      const fill = p.remplissage === 'plein';
+      for (const m of build(t)) {
+        ctx.strokeStyle = m.col; ctx.fillStyle = m.col;
+        m.polys.forEach((poly, k) => {
+          ctx.beginPath(); poly.forEach(([x, y], q) => (q ? ctx.lineTo(x, y) : ctx.moveTo(x, y))); ctx.closePath();
+          // Concentriques pleins : couleurs alternées encre / fond.
+          if (fill) { ctx.fillStyle = k % 2 ? p.fond : m.col; ctx.fill(); } else ctx.stroke();
+        });
+        for (const [x, y, r] of m.circles) { ctx.beginPath(); ctx.arc(x, y, Math.max(0.5, r), 0, TAU); fill ? ctx.fill() : ctx.stroke(); }
+        if (m.lines.length) { ctx.beginPath(); for (const [a, b] of m.lines) { ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); } ctx.stroke(); }
+      }
+      // Le désordre semé s'efface lentement, sauf pendant le geste.
+      if (heat && !painting) for (let i = 0; i < heat.length; i++) heat[i] *= 0.996;
+    }
+
+    function toSVG() {
+      const { w, h } = app.size, f = (v) => v.toFixed(2), fill = p.remplissage === 'plein', out = [];
+      for (const m of build(lastT)) {
+        m.polys.forEach((poly, k) => {
+          const d = 'M' + poly.map(([x, y]) => f(x) + ' ' + f(y)).join('L') + 'Z';
+          out.push(fill ? `<path d="${d}" fill="${k % 2 ? p.fond : m.col}"/>` : `<path d="${d}" fill="none" stroke="${m.col}" stroke-width="${p.epaisseur}"/>`);
+        });
+        for (const [x, y, r] of m.circles) out.push(fill ? `<circle cx="${f(x)}" cy="${f(y)}" r="${f(Math.max(0.5, r))}" fill="${m.col}"/>` : `<circle cx="${f(x)}" cy="${f(y)}" r="${f(Math.max(0.5, r))}" fill="none" stroke="${m.col}" stroke-width="${p.epaisseur}"/>`);
+        if (m.lines.length) out.push(`<path d="${m.lines.map(([a, b]) => `M${f(a[0])} ${f(a[1])}L${f(b[0])} ${f(b[1])}`).join('')}" stroke="${m.col}" stroke-width="${p.epaisseur}" fill="none"/>`);
+      }
+      return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}"><rect width="100%" height="100%" fill="${p.fond}"/>${out.join('')}</svg>`;
+    }
+
+    ready = true;
+    app.loop((t) => { lastT = t; if (drawCache.size > 4000) drawCache.clear(); draw(t); app.finish(ctx); });
+  </script>
+</body>
+</html>
