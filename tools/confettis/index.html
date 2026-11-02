@@ -1,0 +1,231 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Confettis</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Confettis : des confettis aux couleurs de la marque, en pluie, tirés par des canons ou en explosion.
+    // Chaque confetti est un petit carton qui tourne sur lui-même : vu de face il freine, vu par la
+    // tranche il tombe ; il papillonne, dérive au vent et s'empile au sol avant d'être balayé.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const BIEN = PAL('biennale'), KB = PAL('kegelbahn'), SALON = PAL('salon'), BIT = PAL('bitmap'), GLY = PAL('glyphes'), THER = PAL('thermique'), MENTHE = PAL('menthe'), ACIDE = PAL('acide'), LUZ = PAL('luzern');
+
+    const MAX = 4000;
+    let bits = [], acc = 0, time = 0, nextShot = 0, floorCv = null, floorX = null, heights = null, sweep = 0, drag = null, wind = [], sprites = {}, mask = null, maskKey = null, warm = false, floorKey = '';
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.04, vignette: 0.1 },
+      hint: 'Touchez pour une salve de confettis · glissez pour souffler · molette : cadence',
+      notes: 'Un confetti est une plaque qui tourne en tombant : de face, l’air le freine beaucoup ; par la tranche, presque pas. Cette alternance le fait papillonner et dériver de côté. Au sol, chaque confetti se pose sur ceux déjà tombés (une carte des hauteurs par colonne).',
+      params: {
+        'Confettis': {
+          mode: { type: 'select', label: 'Lancer', options: { pluie: 'Pluie', canons: 'Canons', explosion: 'Explosion' }, value: 'pluie' },
+          forme: { type: 'select', label: 'Forme', options: { rectangles: 'Rectangles', ronds: 'Ronds', etoiles: 'Étoiles', melange: 'Mélange', logo: 'Logo' }, value: 'melange' },
+          image: { type: 'file', label: 'Logo', accept: 'image/*', show: (q) => q.forme === 'logo' },
+          cadence: { type: 'range', label: 'Cadence', min: 0, max: 3, step: 0.05, value: 1 },
+          taille: { type: 'range', label: 'Taille', min: 0.004, max: 0.03, step: 0.0005, value: 0.014 },
+          rotation: { type: 'range', label: 'Rotation', min: 0, max: 3, step: 0.05, value: 1 },
+          vent: { type: 'range', label: 'Vent', min: -1, max: 1, step: 0.01, value: 0.1 },
+          sol: { type: 'toggle', label: 'Tas au sol', value: true },
+        },
+        'Couleurs': {
+          couleurs: { type: 'palette', label: 'Confettis', value: ['#e5452a', '#f2b0c8', '#f2e640', '#111111', '#4b6cf0'] },
+          fond: { type: 'color', label: 'Fond', value: '#f4f3f0' },
+          brillant: { type: 'range', label: 'Reflets', min: 0, max: 1, step: 0.01, value: 0.5 },
+        },
+      },
+      presets: {
+        'Fête': {},
+        'Canons': { mode: 'canons', cadence: 1.2, forme: 'rectangles' },
+        'Explosion': { mode: 'explosion', cadence: 0.8, forme: 'melange', couleurs: [KB[1], KB[2], KB[3], KB[4], KB[5]], fond: KB[0] },
+        'Logo': { forme: 'logo', taille: 0.022, cadence: 0.6, couleurs: [BIEN[2], BIEN[1], BIEN[3]] },
+        'Salon': { couleurs: [SALON[2], SALON[3], SALON[4], SALON[1]], fond: SALON[0], forme: 'ronds' },
+        'Or': { couleurs: ['#d9a93a', '#f2d27a', '#b8862a', '#fff1c4'], fond: '#14110c', brillant: 1, forme: 'rectangles', taille: 0.008, cadence: 2 },
+        'Bitmap': { couleurs: [BIT[2], BIT[3], BIT[4], BIT[1]], fond: BIT[0], forme: 'etoiles', mode: 'canons' },
+        'Glyphes': { couleurs: [GLY[2], GLY[3], GLY[4], GLY[5], GLY[6]], fond: GLY[1], mode: 'explosion' },
+        'Menthe': { couleurs: [MENTHE[2], MENTHE[3], MENTHE[1]], fond: MENTHE[0], vent: 0.5 },
+        'Tempête': { cadence: 3, vent: -0.8, rotation: 2.4, taille: 0.007 },
+        'Neige': { couleurs: ['#ffffff', '#e9eef5'], fond: '#2a3240', forme: 'ronds', rotation: 0.4, vent: 0.2, brillant: 0.2 },
+        'Acide': { couleurs: [ACIDE[2], ACIDE[3]], fond: ACIDE[1], forme: 'logo', mode: 'canons' },
+        'Luzern': { couleurs: [LUZ[0], LUZ[1], LUZ[2], LUZ[4]], fond: LUZ[3], forme: 'melange', mode: 'explosion' },
+      },
+      brand(colors) { const c = colors.slice(1); return { fond: colors[0], couleurs: c.length ? c : ['#111111'] }; },
+      pointer: {
+        down: (q) => { drag = { x: q.x, y: q.y, x0: q.x, y0: q.y, moved: false }; },
+        drag: (q) => {
+          if (!drag) return;
+          if (Math.hypot(q.x - drag.x0, q.y - drag.y0) > 8) drag.moved = true;
+          wind.push({ x: q.x, y: q.y, vx: (q.x - drag.x) * 14, vy: (q.y - drag.y) * 14, t: 0 }); if (wind.length > 60) wind.shift();
+          drag.x = q.x; drag.y = q.y;
+        },
+        up: (q) => { if (drag && !drag.moved) burst(q.x, q.y, 160, -Math.PI / 2, TAU); drag = null; },
+        wheel: (q, dy) => app.set('cadence', Math.max(0, Math.min(3, +(p.cadence + (dy > 0 ? -0.1 : 0.1)).toFixed(2)))),
+      },
+      onChange(k) { if (k === 'image') { maskKey = null; sprites = {}; } if (k === 'couleurs') sprites = {}; if (k === 'fond' || k === 'sol') floorKey = ''; },
+      onSeed() { bits = []; floorKey = ''; },
+      export: { name: 'confettis', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    const hex = (h) => { const n = parseInt(h.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; };
+    const shade = (h, k) => { const [r, g, b] = hex(h); return `rgb(${Math.min(255, Math.round(r * k))},${Math.min(255, Math.round(g * k))},${Math.min(255, Math.round(b * k))})`; };
+    const S = () => Math.min(app.size.w, app.size.h);
+
+    // ——— Formes ———
+    const SHAPES = ['rect', 'rond', 'etoile'];
+    function pickShape() { return p.forme === 'rectangles' ? 'rect' : p.forme === 'ronds' ? 'rond' : p.forme === 'etoiles' ? 'etoile' : p.forme === 'logo' ? 'logo' : SHAPES[Math.floor(app.random() * 3)]; }
+    function logoMask() {
+      const img = p.image || app.logoImg, key = img ? (img.src || 'c') : 'demo';
+      if (key === maskKey && mask) return mask;
+      maskKey = key; sprites = {};
+      const M = 64, c = document.createElement('canvas'); c.width = c.height = M; const x = c.getContext('2d', { willReadFrequently: true });
+      if (img) { const iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height, k = M / Math.max(iw, ih); x.drawImage(img, (M - iw * k) / 2, (M - ih * k) / 2, iw * k, ih * k); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(32, 32, 30, 0, TAU); x.arc(32, 32, 17, 0, TAU, true); x.fill('evenodd'); x.fillRect(28, 1, 8, 62); }
+      const d = x.getImageData(0, 0, M, M), dd = d.data;
+      let transp = 0; for (let i = 3; i < dd.length; i += 16) if (dd[i] < 128) transp++;
+      const useA = transp > dd.length / 16 * 0.05;
+      for (let i = 0; i < dd.length; i += 4) { const l = (dd[i] * 0.2126 + dd[i + 1] * 0.7152 + dd[i + 2] * 0.0722) / 255, on = useA ? dd[i + 3] > 128 : dd[i + 3] > 128 && l < 0.5; dd[i] = dd[i + 1] = dd[i + 2] = 255; dd[i + 3] = on ? 255 : 0; }
+      x.putImageData(d, 0, 0); mask = c; return mask;
+    }
+    function logoSprite(col) {
+      if (sprites[col]) return sprites[col];
+      const m = logoMask(), c = document.createElement('canvas'); c.width = m.width; c.height = m.height; const x = c.getContext('2d');
+      x.drawImage(m, 0, 0); x.globalCompositeOperation = 'source-in'; x.fillStyle = col; x.fillRect(0, 0, c.width, c.height);
+      return (sprites[col] = c);
+    }
+    function starPath(x, r) { x.beginPath(); for (let i = 0; i < 10; i++) { const a = i / 10 * TAU - Math.PI / 2, rr = i % 2 ? r * 0.45 : r; i ? x.lineTo(Math.cos(a) * rr, Math.sin(a) * rr) : x.moveTo(Math.cos(a) * rr, Math.sin(a) * rr); } x.closePath(); }
+
+    // ——— Lancers ———
+    function add(x, y, vx, vy) {
+      if (bits.length >= MAX) bits.shift();
+      const r = app.random, cols = p.couleurs.length ? p.couleurs : ['#111111'], s = S() * p.taille * (0.7 + r() * 0.6);
+      bits.push({ x, y, vx, vy, a: r() * TAU, va: (r() - 0.5) * 6 * p.rotation, f: r() * TAU, vf: (4 + r() * 8) * p.rotation * (r() < 0.5 ? -1 : 1), s, ar: 0.45 + r() * 0.35, col: cols[Math.floor(r() * cols.length)], shape: pickShape(), ph: r() * TAU });
+    }
+    function burst(x, y, n, dir, spread, force = 1) {
+      const v = S() * 3.2 * force;
+      for (let i = 0; i < n; i++) { const a = dir + (app.random() - 0.5) * spread, sp = v * (0.3 + app.random() * 0.7); add(x, y, Math.cos(a) * sp, Math.sin(a) * sp); }
+    }
+    function launch(dt) {
+      const { w, h } = app.size;
+      if (p.mode === 'pluie') {
+        acc += dt * p.cadence * 90;
+        while (acc >= 1) { acc -= 1; add(-w * 0.1 + app.random() * w * 1.2, -20, (app.random() - 0.5) * 30, 20 + app.random() * 40); }
+      } else if (time >= nextShot && p.cadence > 0) {
+        if (p.mode === 'canons') { burst(w * 0.04, h * 0.98, 130, -Math.PI / 2 + 0.4, 0.3, 1.9); burst(w * 0.96, h * 0.98, 130, -Math.PI / 2 - 0.4, 0.3, 1.9); }
+        else burst(w * (0.3 + app.random() * 0.4), h * (0.3 + app.random() * 0.25), 220, -Math.PI / 2, TAU);
+        nextShot = time + 2.4 / p.cadence;
+      }
+    }
+
+    // ——— Sol : carte des hauteurs et calque où les confettis posés sont peints une fois ———
+    function ensureFloor() {
+      const { w, h, dpr } = app.size, key = [w, h, dpr, p.fond, p.sol].join();
+      if (key === floorKey) return; floorKey = key;
+      floorCv = document.createElement('canvas'); floorCv.width = Math.ceil(w * dpr); floorCv.height = Math.ceil(h * dpr); floorX = floorCv.getContext('2d'); floorX.scale(dpr, dpr);
+      heights = new Float32Array(Math.ceil(w / 3) + 2); sweep = 0;
+    }
+    function land(b) {
+      const { w, h } = app.size, i0 = Math.max(0, Math.floor((b.x - b.s) / 3)), i1 = Math.min(heights.length - 1, Math.floor((b.x + b.s) / 3));
+      let top = 0; for (let i = i0; i <= i1; i++) top = Math.max(top, heights[i]);
+      const y = h - top - b.s * 0.15;
+      // posé à plat : on le voit presque de face, un peu écrasé
+      drawBit(floorX, { ...b, y, f: 0.35 + (b.ph % 1) * 0.6 }, 1);
+      for (let i = i0; i <= i1; i++) heights[i] = Math.max(heights[i], top + b.s * 0.12 + (app.random() * b.s * 0.08));
+    }
+
+    // ——— Physique ———
+    function windAt(x, y) {
+      let vx = 0, vy = 0; const R = S() * 0.15;
+      for (const f of wind) { const d2 = (x - f.x) ** 2 + (y - f.y) ** 2, k = Math.exp(-d2 / (R * R)) * Math.exp(-f.t * 1.2); vx += f.vx * k; vy += f.vy * k; }
+      return [vx, vy];
+    }
+    function step(dt) {
+      const { w, h } = app.size, g = S() * 1.1, W = S() * 0.25 * p.vent;
+      const out = [];
+      for (const b of bits) {
+        b.f += b.vf * dt; b.a += b.va * dt;
+        const face = Math.abs(Math.cos(b.f)), sp = Math.hypot(b.vx, b.vy) / S();
+        // frein de l'air : fort de face, faible par la tranche, et quadratique quand le confetti file vite
+        const k = (0.5 + 2.6 * face) * (1 + sp * 0.6);
+        const [wx, wy] = wind.length ? windAt(b.x, b.y) : [0, 0];
+        // papillonnement : la plaque inclinée glisse de côté
+        const glide = Math.sin(b.f * 2) * S() * 0.35 * face;
+        b.vx += ((W + wx + glide * Math.cos(b.a) * 0.4) - b.vx) * k * dt;
+        b.vy += g * dt - b.vy * k * dt * 0.9 + wy * k * dt;
+        b.x += b.vx * dt; b.y += b.vy * dt;
+        if (b.x < -60) b.x += w + 120; if (b.x > w + 60) b.x -= w + 120;
+        if (p.sol && b.y > h - 2 - (heights[Math.max(0, Math.min(heights.length - 1, Math.floor(b.x / 3)))] || 0) && b.vy > 0) { land(b); continue; }
+        if (b.y > h + 40) continue;
+        out.push(b);
+      }
+      bits = out;
+      for (const f of wind) f.t += dt; wind = wind.filter((f) => f.t < 3);
+      // le tas devient trop haut : on balaie (le calque glisse vers le bas et s'efface)
+      if (p.sol) { let mx = 0; for (const v of heights) mx = Math.max(mx, v); if (mx > h * 0.22 && !sweep) sweep = 0.001; }
+      if (sweep) { sweep += dt; if (sweep > 1.4) { floorX.setTransform(1, 0, 0, 1, 0, 0); floorX.clearRect(0, 0, floorCv.width, floorCv.height); floorX.setTransform(app.size.dpr, 0, 0, app.size.dpr, 0, 0); heights.fill(0); sweep = 0; } }
+    }
+
+    // ——— Dessin ———
+    function drawBit(x, b, fixed) {
+      const c = Math.cos(b.f), sy = Math.max(0.08, Math.abs(c));
+      const light = 0.72 + 0.28 * sy + p.brillant * 0.35 * Math.pow(Math.max(0, Math.sin(b.f * 2 + b.a)), 12);
+      const col = c < 0 ? shade(b.col, 0.82 * light) : shade(b.col, light);
+      x.save(); x.translate(b.x, b.y); x.rotate(b.a); x.scale(1, sy);
+      x.fillStyle = col;
+      if (b.shape === 'rect') x.fillRect(-b.s / 2, -b.s * b.ar / 2, b.s, b.s * b.ar);
+      else if (b.shape === 'rond') { x.beginPath(); x.arc(0, 0, b.s * 0.42, 0, TAU); x.fill(); }
+      else if (b.shape === 'etoile') { starPath(x, b.s * 0.55); x.fill(); }
+      else { x.globalAlpha = Math.min(1, 0.55 + 0.45 * light * (c < 0 ? 0.8 : 1)); x.drawImage(logoSprite(b.col), -b.s * 0.6, -b.s * 0.6, b.s * 1.2, b.s * 1.2); }
+      x.restore();
+    }
+
+    app.loop((tt, dt) => {
+      const { w, h, dpr } = app.size;
+      dt = Math.min(1 / 30, dt || 0);
+      ensureFloor();
+      if (app.thumbnail && !warm) { warm = true; for (let k = 0; k < 420; k++) { time += 1 / 60; launch(1 / 60); if (k === 380) burst(w * 0.5, h * 0.45, 260, -Math.PI / 2, TAU); step(1 / 60); } }
+      if (!app.thumbnail) { time += dt; launch(dt); step(dt); }
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = p.fond; ctx.fillRect(0, 0, w, h);
+      if (p.sol) {
+        const k = sweep ? Math.min(1, sweep / 1.4) : 0;
+        ctx.globalAlpha = 1 - k; ctx.drawImage(floorCv, 0, k * k * h * 0.5, w, h); ctx.globalAlpha = 1;
+      }
+      for (const b of bits) drawBit(ctx, b);
+      app.finish(ctx);
+    });
+
+    function toSVG() {
+      const { w, h } = app.size, f = (v) => v.toFixed(1), out = [`<rect width="100%" height="100%" fill="${p.fond}"/>`];
+      const defs = [];
+      if (p.forme === 'logo' || bits.some((b) => b.shape === 'logo')) defs.push(`<mask id="lg" maskContentUnits="objectBoundingBox"><image href="${logoMask().toDataURL()}" x="0" y="0" width="1" height="1"/></mask>`);
+      if (p.sol) out.push(`<image href="${floorCv.toDataURL()}" x="0" y="0" width="${w}" height="${h}"/>`);
+      for (const b of bits) {
+        const c = Math.cos(b.f), sy = Math.max(0.08, Math.abs(c));
+        const light = 0.72 + 0.28 * sy + p.brillant * 0.35 * Math.pow(Math.max(0, Math.sin(b.f * 2 + b.a)), 12);
+        const col = c < 0 ? shade(b.col, 0.82 * light) : shade(b.col, light);
+        const tr = `translate(${f(b.x)} ${f(b.y)}) rotate(${(b.a * 180 / Math.PI).toFixed(1)}) scale(1 ${sy.toFixed(3)})`;
+        let shp;
+        if (b.shape === 'rect') shp = `<rect x="${f(-b.s / 2)}" y="${f(-b.s * b.ar / 2)}" width="${f(b.s)}" height="${f(b.s * b.ar)}"/>`;
+        else if (b.shape === 'rond') shp = `<circle r="${f(b.s * 0.42)}"/>`;
+        else if (b.shape === 'etoile') { const r = b.s * 0.55; shp = `<path d="${Array.from({ length: 10 }, (_, i) => { const a = i / 10 * TAU - Math.PI / 2, rr = i % 2 ? r * 0.45 : r; return (i ? 'L' : 'M') + f(Math.cos(a) * rr) + ' ' + f(Math.sin(a) * rr); }).join('')}Z"/>`; }
+        else shp = `<rect x="${f(-b.s * 0.6)}" y="${f(-b.s * 0.6)}" width="${f(b.s * 1.2)}" height="${f(b.s * 1.2)}" mask="url(#lg)"/>`;
+        out.push(`<g transform="${tr}" fill="${col}">${shp}</g>`);
+      }
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">\n<defs>${defs.join('')}</defs>\n${out.join('\n')}\n</svg>`;
+    }
+  </script>
+</body>
+</html>
