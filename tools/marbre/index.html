@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Marbre</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Marbre : du domain warping à deux niveaux (Inigo Quilez). Un bruit fractal déforme les coordonnées
+    // d'un second, qui déforme celles d'un troisième : f(p + k·r(p + k·q(p))). La valeur finale et les deux
+    // champs intermédiaires q et r colorent l'image à travers un dégradé de marque : lavis, veines de marbre
+    // ou aplats. Le temps fait couler la matière ; le pointeur y laisse des remous qui s'apaisent.
+    const canvas = document.querySelector('canvas');
+    const gl = canvas.getContext('webgl2', { alpha: false, antialias: false, depth: false, stencil: false, preserveDrawingBuffer: false });
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const LU = PAL('luzern'), KB = PAL('kegelbahn'), MENTHE = PAL('menthe'), NUIT = PAL('trame-nuit'), BIEN = PAL('biennale');
+    const ACIDE = PAL('acide'), P60 = PAL('papier-60'), TH = PAL('thermique'), EV = PAL('eventail');
+    const MAXC = 6, MAXW = 10;
+
+    let ready = false, swirls = [], hover = null, last = null, frame = 0, logoDirty = true, logoOk = false;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.05, vignette: 0 },
+      hint: 'Survol : la matière tourne autour du pointeur · glissez pour remuer · molette : échelle',
+      notes: 'Un bruit fractal déforme les coordonnées d’un second, qui déforme celles d’un troisième. La valeur finale et les deux champs intermédiaires colorent l’image à travers le dégradé de marque.',
+      params: {
+        'Matière': {
+          echelle: { type: 'range', label: 'Échelle', min: 0.4, max: 6, step: 0.01, value: 1.8 },
+          octaves: { type: 'range', label: 'Octaves', min: 1, max: 7, step: 1, value: 4 },
+          rugosite: { type: 'range', label: 'Rugosité', min: 0.3, max: 0.7, step: 0.01, value: 0.5 },
+          warp1: { type: 'range', label: 'Déformation (1er niveau)', min: 0, max: 8, step: 0.01, value: 4 },
+          warp2: { type: 'range', label: 'Déformation (2e niveau)', min: 0, max: 8, step: 0.01, value: 4 },
+          etirement: { type: 'range', label: 'Étirement', min: -0.9, max: 0.9, step: 0.01, value: 0 },
+        },
+        'Rendu': {
+          rendu: { type: 'segmented', label: 'Rendu', options: { lavis: 'Lavis', veines: 'Veines', aplats: 'Aplats' }, value: 'lavis' },
+          veines: { type: 'range', label: 'Nombre de veines', min: 1, max: 30, step: 0.5, value: 9 },
+          finesse: { type: 'range', label: 'Finesse des veines', min: 0, max: 1, step: 0.01, value: 0.6 },
+          bandes: { type: 'range', label: 'Nombre d’aplats', min: 2, max: 12, step: 1, value: 5 },
+          contraste: { type: 'range', label: 'Contraste', min: 0.3, max: 3, step: 0.01, value: 1.2 },
+          melange: { type: 'range', label: 'Influence de q et r', min: 0, max: 1, step: 0.01, value: 0.5 },
+          relief: { type: 'range', label: 'Relief', min: 0, max: 1, step: 0.01, value: 0.2 },
+        },
+        'Mouvement': {
+          vitesse: { type: 'range', label: 'Vitesse d’écoulement', min: 0, max: 1, step: 0.01, value: 0.25 },
+          derive: { type: 'range', label: 'Dérive (°)', min: -180, max: 180, step: 1, value: 30 },
+        },
+        'Marque': {
+          logo: { type: 'range', label: 'Logo dans la matière', min: 0, max: 1, step: 0.01, value: 0 },
+          tailleLogo: { type: 'range', label: 'Taille du logo', min: 0.2, max: 0.95, step: 0.01, value: 0.6 },
+        },
+        'Couleur': {
+          couleurs: { type: 'palette', label: 'Dégradé (sombre → clair)', value: [LU[3], LU[1], LU[0], LU[2], LU[4]] },
+        },
+      },
+      presets: {
+        'Luzern': {},
+        'Marbre': { rendu: 'veines', couleurs: ['#1d1c1a', '#6f6c66', '#d9d6cf', '#f4f2ee'], veines: 5, finesse: 0.85, warp1: 3.2, warp2: 2.4, echelle: 1.2, relief: 0.3, melange: 0.1, octaves: 3 },
+        'Nuit': { couleurs: ['#000000', '#1e1e1e', NUIT[2], NUIT[1]], contraste: 1.8, relief: 0.5, warp2: 5.5, vitesse: 0.15 },
+        'Menthe': { couleurs: [MENTHE[1], MENTHE[3], MENTHE[2], MENTHE[0]], rendu: 'veines', veines: 10, finesse: 0.55, echelle: 1.8, octaves: 3 },
+        'Kegelbahn': { couleurs: [KB[0], KB[2], KB[1], KB[3], KB[5]], rendu: 'aplats', bandes: 7, warp1: 5, warp2: 3, echelle: 1.2, relief: 0 },
+        'Biennale': { couleurs: [BIEN[1], BIEN[2], BIEN[3], BIEN[4], BIEN[0]], rendu: 'aplats', bandes: 5, echelle: 0.9, etirement: 0.6, relief: 0 },
+        'Acide': { couleurs: [ACIDE[1], '#55554a', ACIDE[0], ACIDE[2]], rendu: 'veines', veines: 22, finesse: 0.9, warp1: 6, warp2: 1.5, etirement: -0.5 },
+        'Thermique': { couleurs: [TH[1], TH[4], TH[2], TH[3], TH[5]], contraste: 0.9, melange: 0.8, echelle: 2.6, octaves: 6, relief: 0 },
+        'Éventail': { couleurs: [EV[0], EV[1], EV[4], EV[2], EV[3]], rendu: 'veines', veines: 4, finesse: 0.2, echelle: 1, relief: 0.5 },
+        'Logo': { logo: 0.85, tailleLogo: 0.62, couleurs: ['#16120e', '#4a3f35', '#c9bfb2', '#f4f1ea'], rendu: 'veines', veines: 10, finesse: 0.7, warp1: 2.4, warp2: 2, relief: 0.4 },
+      },
+      brand(colors) {
+        // Dégradé ordonné du plus sombre au plus clair.
+        const lum = (h) => { const n = parseInt(String(h).slice(1, 7), 16) || 0; return (n >> 16 & 255) * 0.2126 + (n >> 8 & 255) * 0.7152 + (n & 255) * 0.0722; };
+        const c = [...colors].sort((a, b) => lum(a) - lum(b)).slice(0, MAXC);
+        return { couleurs: c.length > 1 ? c : [c[0] || '#000000', '#ffffff'] };
+      },
+      pointer: {
+        move: (q) => { hover = { x: q.x, y: q.y }; },
+        down: (q) => { last = { x: q.x, y: q.y }; },
+        drag: (q) => {
+          if (!last) return;
+          const dx = q.x - last.x, dy = q.y - last.y, d = Math.hypot(dx, dy), U = Math.min(app.size.w, app.size.h);
+          if (d < U * 0.03) return;
+          // Un remous par pas de geste ; son sens suit la courbure du geste.
+          const prev = swirls[swirls.length - 1];
+          const turn = prev && prev.dx !== undefined ? Math.sign(prev.dx * dy - prev.dy * dx) || 1 : 1;
+          swirls.push({ x: q.x, y: q.y, s: 2.4 * turn, r: U * 0.16, age: 0, dx, dy });
+          if (swirls.length > MAXW) swirls.shift();
+          last = { x: q.x, y: q.y }; hover = { x: q.x, y: q.y };
+        },
+        up: () => { last = null; },
+        wheel: (q, dy) => app.set('echelle', Math.max(0.4, Math.min(6, +(p.echelle * Math.exp(dy * 0.001)).toFixed(2)))),
+      },
+      onChange(k) { if (k === '_logo' || k === '*' || k === 'tailleLogo') logoDirty = true; if (k === '*') swirls = []; },
+      onSeed() { swirls = []; },
+      export: { name: 'marbre' },
+    });
+    const p = app.params;
+    canvas.addEventListener('pointerleave', () => { hover = null; });
+
+    const VS = `#version 300 es
+    layout(location = 0) in vec2 aP;
+    void main() { gl_Position = vec4(aP, 0., 1.); }`;
+    const FS = `#version 300 es
+    precision highp float;
+    uniform vec2 uSize;
+    uniform float uDpr, uT, uScale, uRough, uW1, uW2, uStretch, uVeins, uFine, uBands, uCon, uMix, uRelief, uDrift, uLogoK, uGrain, uVig, uFrame, uSeed;
+    uniform int uOct, uMode, uNC, uNW;
+    uniform vec3 uC[${MAXC}];
+    uniform vec4 uW[${MAXW}];
+    uniform vec3 uHover;
+    uniform sampler2D uLogo;
+    uniform vec4 uLogoR;
+    out vec4 o;
+    float hash(vec2 p) { uvec2 q = uvec2(ivec2(p)) * uvec2(1597334673u, 3812015801u); uint n = (q.x ^ q.y) * 1597334673u; n ^= n >> 16; n *= 2246822519u; n ^= n >> 13; return float(n) / 4294967295.; }
+    vec2 h2(vec2 p) { p = vec2(dot(p, vec2(127.1, 311.7)), dot(p, vec2(269.5, 183.3))); return -1. + 2. * fract(sin(p) * 43758.5453123); }
+    float noise(vec2 p) {
+      vec2 i = floor(p), f = fract(p), u = f * f * (3. - 2. * f);
+      return mix(mix(dot(h2(i), f), dot(h2(i + vec2(1, 0)), f - vec2(1, 0)), u.x),
+                 mix(dot(h2(i + vec2(0, 1)), f - vec2(0, 1)), dot(h2(i + vec2(1, 1)), f - vec2(1, 1)), u.x), u.y);
+    }
+    const mat2 R = mat2(0.8, 0.6, -0.6, 0.8);
+    float fbm(vec2 p) {
+      float s = 0., a = 0.5, n = 0.;
+      for (int i = 0; i < 7; i++) {
+        if (i >= uOct) break;
+        // (la rugosité règle la décroissance des octaves)
+        s += a * noise(p); n += a; p = R * p * 2.02; a *= uRough;
+      }
+      return s / n;
+    }
+    vec3 ramp(float x) {
+      float n = float(uNC - 1), f = clamp(x, 0., 1.) * n;
+      int i = int(min(floor(f), n - 1.));
+      return mix(uC[i], uC[i + 1], smoothstep(0., 1., f - float(i)));
+    }
+    float logoAt(vec2 px) {
+      vec2 uv = (px - uLogoR.xy) / uLogoR.z + 0.5;
+      if (uLogoR.w < 0.5 || uv.x < 0. || uv.y < 0. || uv.x > 1. || uv.y > 1.) return 0.;
+      return texture(uLogo, uv).r;
+    }
+    // Le champ complet en un point de l'écran (pixels) : f, puis q et r pour la couleur.
+    float field(vec2 px, out vec2 q, out vec2 r) {
+      // Remous : rotation des coordonnées autour de chaque point, atténuée avec la distance.
+      for (int i = 0; i < ${MAXW}; i++) {
+        if (i >= uNW) break;
+        vec2 d = px - uW[i].xy; float k = uW[i].z * exp(-dot(d, d) / (uW[i].w * uW[i].w));
+        float c = cos(k), s = sin(k); px = uW[i].xy + mat2(c, s, -s, c) * d;
+      }
+      if (uHover.z > 0.) { vec2 d = px - uHover.xy; float k = 1.2 * exp(-dot(d, d) / (uHover.z * uHover.z)); float c = cos(k), s = sin(k); px = uHover.xy + mat2(c, s, -s, c) * d; }
+      float U = min(uSize.x, uSize.y);
+      vec2 p = (px - uSize * 0.5) / U * uScale;
+      p.x *= 1. + uStretch; p.y *= 1. - uStretch * 0.7;
+      p += uSeed;
+      vec2 dr = vec2(cos(uDrift), sin(uDrift)) * uT;
+      float L = logoAt(px) * uLogoK;
+      q = vec2(fbm(p + dr * 0.3), fbm(p + vec2(5.2, 1.3) - dr * 0.2));
+      q += L * vec2(0.9, -0.6);
+      r = vec2(fbm(p + uW1 * q + vec2(1.7, 9.2) + dr * 0.55), fbm(p + uW1 * q + vec2(8.3, 2.8) - dr * 0.4));
+      float f = fbm(p + uW2 * r + dr * 0.15);
+      return 0.5 + 0.5 * f * 1.6 + L * 0.35;
+    }
+    float tone(float f, vec2 q, vec2 r) {
+      float t = clamp(0.5 + (f - 0.5) * uCon, 0., 1.);
+      t = mix(t, clamp(t + (length(q) - 0.35) * 0.9 - (abs(r.x) - 0.2) * 0.6, 0., 1.), uMix);
+      if (uMode == 1) {
+        // Veines : les zéros d'une onde sur la valeur deviennent des filets sombres sur un fond clair.
+        float s = abs(sin(t * uVeins * 3.14159265 + length(r) * 3.));
+        float wv = mix(0.6, 0.035, uFine);
+        float v = 1. - smoothstep(0., wv, s);
+        // Les veines se ramifient : une seconde onde plus fine, plus pâle.
+        float s2 = abs(sin(t * uVeins * 7.3 + q.x * 5.));
+        v = max(v, 0.45 * (1. - smoothstep(0., wv * 0.6, s2)));
+        t = mix(0.55 + 0.45 * t, 0.04 + 0.3 * t, v);
+      } else if (uMode == 2) {
+        t = (floor(t * uBands) + 0.5) / uBands;
+      }
+      return t;
+    }
+    void main() {
+      vec2 px = vec2(gl_FragCoord.x, uSize.y * uDpr - gl_FragCoord.y) / uDpr;
+      vec2 q, r;
+      float f = field(px, q, r);
+      float t = tone(f, q, r);
+      vec3 col = ramp(t);
+      if (uRelief > 0.) {
+        // Relief : la pente du champ éclaire la matière par le haut à gauche.
+        vec2 q2, r2; float e = 3.;
+        float fx = field(px + vec2(e, 0.), q2, r2), fy = field(px + vec2(0., e), q2, r2);
+        vec3 n = normalize(vec3(-(fx - f) * 45., -(fy - f) * 45., 1.));
+        float l = dot(n, normalize(vec3(-0.5, -0.6, 0.65)));
+        col *= mix(1., 0.55 + 0.6 * l, uRelief);
+        col += uRelief * 0.25 * pow(max(l, 0.), 24.);
+      }
+      vec2 uv = (px - uSize * 0.5) / (uSize * 0.5);
+      col *= 1. - uVig * 0.85 * smoothstep(0.35, 1.25, length(uv));
+      col += (hash(gl_FragCoord.xy + uFrame * 17.31) - 0.5) * uGrain * 0.22;
+      o = vec4(col, 1.);
+    }`;
+
+    function sh(type, src) { const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s); if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s)); return s; }
+    const prog = gl.createProgram();
+    gl.attachShader(prog, sh(gl.VERTEX_SHADER, VS)); gl.attachShader(prog, sh(gl.FRAGMENT_SHADER, FS));
+    gl.linkProgram(prog);
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
+    const UL = {}, u = (n) => (n in UL ? UL[n] : (UL[n] = gl.getUniformLocation(prog, n)));
+    const vao = gl.createVertexArray(); gl.bindVertexArray(vao);
+    const buf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+    const tLogo = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, tLogo);
+    for (const k of [gl.TEXTURE_MIN_FILTER, gl.TEXTURE_MAG_FILTER]) gl.texParameteri(gl.TEXTURE_2D, k, gl.LINEAR);
+    for (const k of [gl.TEXTURE_WRAP_S, gl.TEXTURE_WRAP_T]) gl.texParameteri(gl.TEXTURE_2D, k, gl.CLAMP_TO_EDGE);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, 1, 1, 0, gl.RED, gl.UNSIGNED_BYTE, new Uint8Array([0]));
+
+    // Logo : un masque adouci (1 = encre), pour que la matière s'y infléchisse sans arête.
+    function buildLogo() {
+      const N = 256, cv = document.createElement('canvas'); cv.width = cv.height = N;
+      const x = cv.getContext('2d', { willReadFrequently: true });
+      const img = app.logoImg, tmp = document.createElement('canvas'); tmp.width = tmp.height = N;
+      const t = tmp.getContext('2d', { willReadFrequently: true });
+      if (img) {
+        const iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height, k = N * 0.9 / Math.max(iw, ih);
+        t.drawImage(img, (N - iw * k) / 2, (N - ih * k) / 2, iw * k, ih * k);
+        const d = t.getImageData(0, 0, N, N);
+        let clear = 0;
+        for (let i = 3; i < d.data.length; i += 4) if (d.data[i] < 128) clear++;
+        const useAlpha = clear > N * N * 0.1;
+        for (let i = 0; i < d.data.length; i += 4) {
+          const lum = (d.data[i] * 0.2126 + d.data[i + 1] * 0.7152 + d.data[i + 2] * 0.0722) / 255;
+          const v = useAlpha ? d.data[i + 3] / 255 : (1 - lum) * d.data[i + 3] / 255;
+          d.data[i] = d.data[i + 1] = d.data[i + 2] = 255; d.data[i + 3] = Math.round(v * 255);
+        }
+        t.putImageData(d, 0, 0);
+      } else {
+        // Sans logo : un disque percé d'un anneau, la marque par défaut de l'atelier.
+        t.fillStyle = '#fff';
+        t.beginPath(); t.arc(N / 2, N / 2, N * 0.45, 0, Math.PI * 2); t.arc(N / 2, N / 2, N * 0.33, 0, Math.PI * 2, true); t.fill();
+        t.beginPath(); t.arc(N / 2, N / 2, N * 0.2, 0, Math.PI * 2); t.fill();
+      }
+      x.fillStyle = '#000'; x.fillRect(0, 0, N, N);
+      x.filter = 'blur(3px)'; x.drawImage(tmp, 0, 0); x.filter = 'none';
+      const d = x.getImageData(0, 0, N, N).data, out = new Uint8Array(N * N);
+      for (let i = 0; i < out.length; i++) out[i] = d[i * 4];
+      gl.bindTexture(gl.TEXTURE_2D, tLogo); gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, N, N, 0, gl.RED, gl.UNSIGNED_BYTE, out);
+      logoOk = true; logoDirty = false;
+    }
+
+    const rgbf = (hx) => { const n = parseInt(String(hx).slice(1, 7), 16) || 0; return [(n >> 16 & 255) / 255, (n >> 8 & 255) / 255, (n & 255) / 255]; };
+    function render(t, dt) {
+      const { w, h } = app.size, U = Math.min(w, h);
+      // Les remous s'apaisent en une dizaine de secondes.
+      for (const s of swirls) { s.age += dt; s.s *= Math.pow(0.86, dt); }
+      swirls = swirls.filter((s) => Math.abs(s.s) > 0.02);
+      if (p.logo > 0 && logoDirty) buildLogo();
+      gl.viewport(0, 0, canvas.width, canvas.height);
+      gl.useProgram(prog);
+      gl.uniform2f(u('uSize'), w, h); gl.uniform1f(u('uDpr'), canvas.width / w);
+      gl.uniform1f(u('uT'), t * p.vitesse * 0.6);
+      gl.uniform1f(u('uScale'), p.echelle); gl.uniform1i(u('uOct'), p.octaves); gl.uniform1f(u('uRough'), p.rugosite);
+      gl.uniform1f(u('uW1'), p.warp1); gl.uniform1f(u('uW2'), p.warp2); gl.uniform1f(u('uStretch'), p.etirement);
+      gl.uniform1i(u('uMode'), p.rendu === 'lavis' ? 0 : p.rendu === 'veines' ? 1 : 2);
+      gl.uniform1f(u('uVeins'), p.veines); gl.uniform1f(u('uFine'), p.finesse); gl.uniform1f(u('uBands'), p.bandes);
+      gl.uniform1f(u('uCon'), p.contraste); gl.uniform1f(u('uMix'), p.melange); gl.uniform1f(u('uRelief'), p.relief);
+      gl.uniform1f(u('uDrift'), p.derive * Math.PI / 180);
+      const sd = app.rng(3); gl.uniform1f(u('uSeed'), sd() * 40);
+      const pal = (p.couleurs && p.couleurs.length ? p.couleurs : ['#000000', '#ffffff']).slice(0, MAXC), flat = [];
+      for (let i = 0; i < MAXC; i++) flat.push(...rgbf(pal[Math.min(i, pal.length - 1)]));
+      gl.uniform3fv(u('uC[0]'), flat); gl.uniform1i(u('uNC'), Math.max(2, pal.length));
+      const W4 = new Float32Array(MAXW * 4);
+      swirls.forEach((s, i) => W4.set([s.x, s.y, s.s, s.r], i * 4));
+      gl.uniform4fv(u('uW[0]'), W4); gl.uniform1i(u('uNW'), swirls.length);
+      gl.uniform3f(u('uHover'), hover ? hover.x : 0, hover ? hover.y : 0, hover && !last ? U * 0.12 : 0);
+      gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, tLogo); gl.uniform1i(u('uLogo'), 0);
+      gl.uniform4f(u('uLogoR'), w / 2, h / 2, U * p.tailleLogo, logoOk && p.logo > 0 ? 1 : 0);
+      gl.uniform1f(u('uLogoK'), p.logo);
+      gl.uniform1f(u('uGrain'), p.grain ?? 0); gl.uniform1f(u('uVig'), p.vignette ?? 0); gl.uniform1f(u('uFrame'), (frame++) % 997);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+    }
+
+    ready = true;
+    app.loop((t, dt) => render(t, dt));
+  </script>
+</body>
+</html>
