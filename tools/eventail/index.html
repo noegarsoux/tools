@@ -1,0 +1,216 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Éventail</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Éventail : une forme (arc, feuille, bande, vague en S ou logo) répétée autour d'un pivot,
+    // chaque copie tournée d'un pas, mise à l'échelle et recolorée. L'ordre de dessin crée les
+    // recouvrements en bandes ; le pas d'angle se balance en boucle.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2, RAD = Math.PI / 180;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const EV = PAL('eventail'), ORB = PAL('orbite'), KB = PAL('kegelbahn'), P60 = PAL('papier-60'), BIEN = PAL('biennale');
+    const LUZ = PAL('luzern'), ACIDE = PAL('acide'), GOOD = PAL('good-room'), PY = PAL('pyramides');
+
+    let dragPivot = null;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: false,
+      finish: true,
+      hint: 'Glissez pour déplacer le pivot · molette : pas de rotation',
+      notes: 'Chaque copie i est tournée de i × pas autour du pivot et mise à l’échelle par facteur^i. Avec un facteur proche de 1 et un pas petit, les bords des copies dessinent des bandes ; avec un facteur plus petit, l’éventail s’enroule en spirale logarithmique.',
+      params: {
+        'Forme': {
+          source: { type: 'segmented', label: 'Forme', options: { arc: 'Arc', feuille: 'Feuille', bande: 'Bande', vague: 'Vague', logo: 'Logo' }, value: 'arc' },
+          image: { type: 'file', label: 'Logo ou image', accept: 'image/*', show: (q) => q.source === 'logo' },
+          epaisseur: { type: 'range', label: 'Épaisseur', min: 0.04, max: 0.9, step: 0.01, value: 0.3, show: (q) => q.source !== 'logo' },
+          ouverture: { type: 'range', label: 'Ouverture de l’arc (°)', min: 20, max: 340, step: 1, value: 200, show: (q) => q.source === 'arc' },
+        },
+        'Répétition': {
+          copies: { type: 'range', label: 'Copies', min: 2, max: 240, step: 1, value: 64 },
+          pas: { type: 'range', label: 'Pas de rotation (°)', min: -60, max: 60, step: 0.1, value: 6 },
+          facteur: { type: 'range', label: 'Échelle par copie', min: 0.9, max: 1.03, step: 0.001, value: 0.992 },
+          taille: { type: 'range', label: 'Taille', min: 0.05, max: 1.2, step: 0.005, value: 0.42 },
+          bras: { type: 'range', label: 'Distance au pivot', min: -1, max: 1, step: 0.01, value: 0.24 },
+          angle: { type: 'range', label: 'Angle de départ (°)', min: -180, max: 180, step: 1, value: -90 },
+        },
+        'Pivot': {
+          px: { type: 'range', label: 'Pivot horizontal', min: -0.8, max: 0.8, step: 0.005, value: 0 },
+          py: { type: 'range', label: 'Pivot vertical', min: -0.5, max: 0.5, step: 0.005, value: 0 },
+        },
+        'Mouvement': {
+          boucle: { type: 'range', label: 'Boucle (s)', min: 3, max: 60, step: 0.5, value: 12 },
+          balancement: { type: 'range', label: 'Balancement du pas (°)', min: 0, max: 30, step: 0.1, value: 3 },
+          tours: { type: 'range', label: 'Tours par boucle', min: -2, max: 2, step: 1, value: 0 },
+        },
+        'Rendu': {
+          ordre: { type: 'segmented', label: 'Ordre de dessin', options: { avant: 'Dernière dessus', arriere: 'Première dessus' }, value: 'avant' },
+          contour: { type: 'range', label: 'Contour', min: 0, max: 6, step: 0.1, value: 0 },
+          bande: { type: 'range', label: 'Copies par couleur', min: 1, max: 20, step: 1, value: 3 },
+        },
+        'Couleur': {
+          fond: { type: 'color', label: 'Fond', value: EV[0] },
+          palette: { type: 'palette', label: 'Copies', value: EV.slice(1) },
+          trait: { type: 'color', label: 'Contour', value: EV[0] },
+        },
+      },
+      presets: {
+        'Éventail': {},
+        'Vague': { source: 'vague', epaisseur: 0.2, copies: 28, pas: 8, facteur: 0.99, taille: 0.62, bras: 0.18, angle: -60, contour: 0, bande: 2 },
+        'Spirale': { source: 'feuille', epaisseur: 0.34, copies: 140, pas: 13.7, facteur: 0.975, taille: 0.9, bras: 0.45, contour: 1.2, bande: 1, balancement: 1.5, fond: ORB[0], palette: [ORB[1], ORB[2]], trait: ORB[0] },
+        'Kegelbahn': { source: 'bande', epaisseur: 0.12, copies: 60, pas: 3, facteur: 1, taille: 0.8, bras: 0.42, angle: 0, px: -0.18, py: 0.2, taille: 0.6, bande: 1, balancement: 6, fond: KB[0], palette: KB.slice(1), contour: 0 },
+        'Rosace': { source: 'arc', epaisseur: 0.16, ouverture: 300, copies: 24, pas: 15, facteur: 1, taille: 0.55, bras: 0.22, bande: 1, tours: 1, balancement: 0, contour: 2, fond: P60[0], palette: [P60[1], P60[0]], trait: P60[1] },
+        'Biennale': { source: 'vague', epaisseur: 0.24, copies: 16, pas: -11, facteur: 0.965, taille: 0.85, bras: 0.05, angle: -20, px: 0.12, py: 0.08, bande: 1, contour: 0, fond: BIEN[0], palette: BIEN.slice(1), balancement: 4 },
+        'Luzern': { source: 'feuille', epaisseur: 0.5, copies: 48, pas: 7.5, facteur: 0.992, taille: 0.7, bras: 0.36, angle: -150, px: -0.05, py: 0.08, taille: 0.58, bande: 2, fond: LUZ[3], palette: [LUZ[0], LUZ[1], LUZ[2], LUZ[4]], contour: 0.8, trait: LUZ[3] },
+        'Acide': { source: 'arc', epaisseur: 0.5, ouverture: 120, copies: 90, pas: 4, facteur: 0.99, taille: 0.9, bras: 0.1, bande: 5, fond: ACIDE[0], palette: [ACIDE[1], ACIDE[2], ACIDE[3]], contour: 0, balancement: 2 },
+        'Pyramides': { source: 'bande', epaisseur: 0.45, copies: 30, pas: 12, facteur: 0.93, taille: 1.1, bras: 0, angle: 0, bande: 1, fond: PY[0], palette: PY.slice(1), contour: 0, tours: -1, balancement: 0 },
+      },
+      brand(colors) {
+        return { fond: colors[0], palette: colors.length > 1 ? colors.slice(1) : colors, trait: colors[0] };
+      },
+      pointer: {
+        down: (q) => { dragPivot = { x: q.x, y: q.y, px: p.px, py: p.py }; },
+        drag: (q) => {
+          if (!dragPivot) return;
+          const u = Math.min(app.size.w, app.size.h);
+          app.set('px', Math.max(-0.6, Math.min(0.6, dragPivot.px + (q.x - dragPivot.x) / u * 0.6)));
+          app.set('py', Math.max(-0.4, Math.min(0.4, dragPivot.py + (q.y - dragPivot.y) / u * 0.6)));
+        },
+        up: () => { dragPivot = null; },
+        wheel: (q, dy) => app.set('pas', Math.max(-60, Math.min(60, Math.round((p.pas - dy * 0.01) * 10) / 10))),
+      },
+      onChange: (key) => { if (key === 'image' || key === '*') logoSrc = null; },
+      export: { name: 'eventail', svg: () => exportSVG() },
+    });
+    const p = app.params;
+
+    // ——— Formes, en unités locales (hauteur ≈ 1, centrées) ———
+    function shapeD() {
+      const e = p.epaisseur;
+      if (p.source === 'vague') {
+        // Vague en S : deux demi-cercles enchaînés, épaissis de part et d'autre de la ligne médiane.
+        const C = [], hw = Math.min(0.24, e / 2);
+        for (let i = 0; i <= 40; i++) { const t = (-30 - 240 * i / 40) * RAD; C.push([0.25 * Math.cos(t), -0.25 + 0.25 * Math.sin(t)]); }
+        for (let i = 1; i <= 40; i++) { const t = (-90 + 240 * i / 40) * RAD; C.push([0.25 * Math.cos(t), 0.25 + 0.25 * Math.sin(t)]); }
+        const L = [], R = [];
+        for (let i = 0; i < C.length; i++) {
+          const a = C[Math.max(0, i - 1)], b = C[Math.min(C.length - 1, i + 1)], dx = b[0] - a[0], dy = b[1] - a[1], n = Math.hypot(dx, dy) || 1;
+          L.push([C[i][0] - dy / n * hw, C[i][1] + dx / n * hw]); R.push([C[i][0] + dy / n * hw, C[i][1] - dx / n * hw]);
+        }
+        const pts = L.concat(R.reverse());
+        return 'M' + pts.map((q) => `${q[0].toFixed(4)} ${q[1].toFixed(4)}`).join('L') + 'Z';
+      }
+      if (p.source === 'bande') return `M-0.5 ${-e / 2}H0.5V${e / 2}H-0.5Z`;
+      if (p.source === 'feuille') {
+        // Lentille : deux arcs de cercle de corde 1 et de flèche e/2.
+        const f = Math.max(0.01, e / 2), R = (0.25 + f * f) / (2 * f);
+        return `M-0.5 0A${R} ${R} 0 0 1 0.5 0A${R} ${R} 0 0 1 -0.5 0Z`;
+      }
+      // Arc : secteur d'anneau de rayon moyen 0.5 - e/4.
+      const ro = 0.5, ri = Math.max(0.01, 0.5 - e * 0.5), a = p.ouverture * RAD, a0 = -Math.PI / 2 - a / 2, a1 = a0 + a, big = a > Math.PI ? 1 : 0;
+      const P = (r, t) => `${(r * Math.cos(t)).toFixed(4)} ${(r * Math.sin(t)).toFixed(4)}`;
+      return `M${P(ro, a0)}A${ro} ${ro} 0 ${big} 1 ${P(ro, a1)}L${P(ri, a1)}A${ri} ${ri} 0 ${big} 0 ${P(ri, a0)}Z`;
+    }
+    let pathKey = '', path2d = null;
+    function getPath() { const k = [p.source, p.epaisseur, p.ouverture].join('|'); if (k !== pathKey) { pathKey = k; path2d = new Path2D(shapeD()); } return path2d; }
+
+    // Logo : silhouette teintée en cache par couleur.
+    let logoSrc = null, logoMask = null, logoWhite = null;
+    const tintCache = new Map();
+    function logoImg() { return p.image || app.logoImg; }
+    function logoTinted(col) {
+      const img = logoImg();
+      if (!img) return null;
+      if (img !== logoSrc) {
+        logoSrc = img; tintCache.clear(); logoWhite = null;
+        const iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height, k = 512 / Math.max(iw, ih);
+        logoMask = document.createElement('canvas'); logoMask.width = Math.max(1, Math.round(iw * k)); logoMask.height = Math.max(1, Math.round(ih * k));
+        const x = logoMask.getContext('2d', { willReadFrequently: true }); x.drawImage(img, 0, 0, logoMask.width, logoMask.height);
+        const d = x.getImageData(0, 0, logoMask.width, logoMask.height);
+        for (let i = 0; i < d.data.length; i += 4) { const l = (d.data[i] * 0.2126 + d.data[i + 1] * 0.7152 + d.data[i + 2] * 0.0722) / 255; d.data[i + 3] = Math.round(d.data[i + 3] * (1 - l)); d.data[i] = d.data[i + 1] = d.data[i + 2] = 0; }
+        x.putImageData(d, 0, 0);
+      }
+      if (!tintCache.has(col)) {
+        const cv = document.createElement('canvas'); cv.width = logoMask.width; cv.height = logoMask.height;
+        const x = cv.getContext('2d'); x.drawImage(logoMask, 0, 0); x.globalCompositeOperation = 'source-in'; x.fillStyle = col; x.fillRect(0, 0, cv.width, cv.height);
+        tintCache.set(col, cv);
+      }
+      return tintCache.get(col);
+    }
+
+    // ——— Copies ———
+    function copies(t) {
+      const { w, h } = app.size, u = Math.min(w, h), L = p.boucle;
+      const step = p.pas + p.balancement * Math.sin(TAU * t / L), spin = 360 * p.tours * t / L;
+      const ox = w / 2 + p.px * u, oy = h / 2 + p.py * u, out = [], pal = p.palette;
+      for (let i = 0; i < p.copies; i++) {
+        const a = (p.angle + spin + i * step) * RAD, s = Math.pow(p.facteur, i) * p.taille * u;
+        // La forme est posée à « bras » du pivot, puis le tout tourne autour du pivot.
+        const ca = Math.cos(a), sa = Math.sin(a), bx = p.bras * s / Math.max(0.05, p.taille);
+        out.push({ i, a, s, x: ox + ca * bx, y: oy + sa * bx, col: pal[Math.floor(i / p.bande) % pal.length] });
+      }
+      if (p.ordre === 'arriere') out.reverse();
+      return { list: out, ox, oy };
+    }
+
+    function drawCanvas(t) {
+      const { list } = copies(t), dpr = app.size.dpr;
+      const src = p.source === 'logo' && !logoImg() ? 'arc' : p.source;
+      for (const c of list) {
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.translate(c.x, c.y); ctx.rotate(c.a + Math.PI / 2);
+        if (src === 'logo') {
+          const cv = logoTinted(c.col), k = c.s / Math.max(cv.width, cv.height);
+          ctx.drawImage(cv, -cv.width * k / 2, -cv.height * k / 2, cv.width * k, cv.height * k);
+        } else {
+          ctx.scale(c.s, c.s); ctx.fillStyle = c.col; const P = getPath(); ctx.fill(P);
+          if (p.contour > 0) { ctx.lineWidth = p.contour / c.s; ctx.strokeStyle = p.trait; ctx.lineJoin = 'round'; ctx.stroke(P); }
+        }
+      }
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+
+    app.loop((t) => {
+      const { w, h, dpr } = app.size;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = p.fond; ctx.fillRect(0, 0, w, h);
+      drawCanvas(t);
+      app.finish(ctx);
+    });
+
+    // ——— Export SVG ———
+    function exportSVG() {
+      const { w, h } = app.size, f = (v) => Math.round(v * 1000) / 1000, { list } = copies(app.time);
+      const src = p.source === 'logo' && !logoImg() ? 'arc' : p.source;
+      const out = [`<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}">`];
+      const tr = (c) => `translate(${f(c.x)} ${f(c.y)}) rotate(${f((c.a + Math.PI / 2) / RAD)})`;
+      if (src === 'logo') {
+        // Silhouette blanche sur noir servant de masque, puis un aplat de couleur par copie.
+        logoTinted('#ffffff'); const m = logoMask, white = document.createElement('canvas'); white.width = m.width; white.height = m.height;
+        const x = white.getContext('2d'); x.fillStyle = '#000'; x.fillRect(0, 0, m.width, m.height); x.drawImage(logoTinted('#ffffff'), 0, 0);
+        out.push(`<defs><mask id="logo" maskUnits="userSpaceOnUse" x="${-m.width / 2}" y="${-m.height / 2}" width="${m.width}" height="${m.height}"><image x="${-m.width / 2}" y="${-m.height / 2}" width="${m.width}" height="${m.height}" xlink:href="${white.toDataURL('image/png')}"/></mask></defs>`);
+      }
+      out.push(`<rect width="${w}" height="${h}" fill="${p.fond}"/>`);
+      const st = (k) => (p.contour > 0 ? ` stroke="${p.trait}" stroke-width="${f(p.contour / k)}" stroke-linejoin="round"` : '');
+      const d = shapeD();
+      for (const c of list) {
+        if (src === 'logo') {
+          const m = logoMask, k = c.s / Math.max(m.width, m.height);
+          out.push(`<rect transform="${tr(c)} scale(${f(k)})" x="${-m.width / 2}" y="${-m.height / 2}" width="${m.width}" height="${m.height}" fill="${c.col}" mask="url(#logo)"/>`);
+        } else out.push(`<path transform="${tr(c)} scale(${f(c.s)})" d="${d}" fill="${c.col}"${st(c.s)}/>`);
+      }
+      out.push('</svg>');
+      return out.join('\n');
+    }
+  </script>
+</body>
+</html>
