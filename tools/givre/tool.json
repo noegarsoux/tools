@@ -1,0 +1,15 @@
+{
+  "slug": "givre",
+  "title": "Givre",
+  "type": "generative",
+  "description": "Agrégation limitée par diffusion sur réseau hexagonal : flocons à six branches, givre qui pousse depuis le logo, coraux et lichens.",
+  "tags": ["dla", "givre", "cristal", "croissance", "flocon", "logo"],
+  "inspiration": [
+    "Witten et Sander (1981), Diffusion-limited aggregation",
+    "references/physique-maths.md : matière, DLA et réduction du bruit",
+    "Palettes trame-nuit, menthe, kegelbahn, luzern, biennale, orbite, thermique, acide"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
