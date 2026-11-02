@@ -1,0 +1,15 @@
+{
+  "slug": "orbites",
+  "title": "Orbites",
+  "type": "motion",
+  "description": "Un système de corps en orbites de Kepler résonantes, inclinées en perspective, avec traînées et rayons ; on attrape et on lance une planète pour lui donner une nouvelle orbite.",
+  "tags": ["orbite", "kepler", "resonance", "gravite", "boucle", "svg"],
+  "inspiration": [
+    "Moodboard de Noé, fiche 18 — anneaux et orbites concentriques",
+    "Lois de Kepler : période et demi-grand axe, équation de Kepler résolue par Newton",
+    "Palettes orbite, trame-nuit, kegelbahn, acide, good-room, biennale"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
