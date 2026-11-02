@@ -1,0 +1,343 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Couches minces</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Couches minces : iridescence d'une bulle de savon ou d'une nappe d'huile.
+    // La lumière réfléchie par les deux faces d'un film d'épaisseur d interfère : pour chaque longueur
+    // d'onde λ, R(λ) = sin²(2π n d cos θt / λ) (la réflexion sur la face avant ajoute une demi-onde,
+    // d'où le noir quand d → 0). Le spectre réfléchi est intégré avec les fonctions colorimétriques CIE
+    // (approximation de Wyman, Sloan et Shirley) puis converti en sRGB. L'épaisseur coule lentement :
+    // bruit déformé par lui-même, drainage vers le bas, tourbillons soufflés au pointeur.
+    const canvas = document.querySelector('canvas');
+    const gl = canvas.getContext('webgl2', { alpha: false, antialias: false, depth: false, stencil: false, preserveDrawingBuffer: false });
+    const TAU = Math.PI * 2, NL = 16, MAXC = 8, NV = 10;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const NUIT = PAL('trame-nuit'), PHOTO = PAL('photocopie'), LUZ = PAL('luzern'), ORB = PAL('orbite'), P60 = PAL('papier-60');
+    const KB = PAL('kegelbahn'), MENTHE = PAL('menthe'), ACIDE = PAL('acide'), GOOD = PAL('good-room');
+
+    let prevPtr = null, frame = 0;
+    const vort = []; // { x, y, s, r } en unités du petit côté, centrés
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.06, vignette: 0.18 },
+      hint: 'Glissez pour souffler sur le film : il tourbillonne et s’amincit · molette : épaisseur',
+      notes: 'Les couleurs sont calculées, pas choisies : seize longueurs d’onde de 400 à 700 nm, chacune réfléchie selon l’épaisseur locale, recomposées en couleur. Vers 100 nm le film devient noir (comme le haut d’une bulle qui va éclater), puis viennent l’or, le magenta, le bleu, le vert ; au-delà de 1 µm les teintes se délavent en blanc.',
+      params: {
+        'Film': {
+          matiere: { type: 'segmented', label: 'Matière', options: { savon: 'Eau savonneuse', huile: 'Huile sur l’eau' }, value: 'savon' },
+          epaisseur: { type: 'range', label: 'Épaisseur moyenne (nm)', min: 0, max: 1600, step: 5, value: 420 },
+          variation: { type: 'range', label: 'Variation (nm)', min: 0, max: 900, step: 5, value: 230 },
+          drainage: { type: 'range', label: 'Drainage vers le bas', min: 0, max: 1, step: 0.01, value: 0.6 },
+          echelle: { type: 'range', label: 'Échelle des remous', min: 0.4, max: 6, step: 0.05, value: 1.6 },
+          tourbillons: { type: 'range', label: 'Tourbillons', min: 0, max: 2.5, step: 0.01, value: 1 },
+          etirement: { type: 'range', label: 'Étirement horizontal', min: 0.3, max: 3, step: 0.01, value: 1.5 },
+        },
+        'Vue': {
+          forme: { type: 'segmented', label: 'Forme', options: { film: 'Film plein cadre', bulle: 'Bulle' }, value: 'film' },
+          rayon: { type: 'range', label: 'Rayon de la bulle', min: 0.12, max: 0.62, step: 0.005, value: 0.36, show: (q) => q.forme === 'bulle' },
+          boucle: { type: 'range', label: 'Boucle (s)', min: 6, max: 90, step: 1, value: 24 },
+          souffle: { type: 'range', label: 'Souffle au pointeur', min: 0, max: 2, step: 0.01, value: 1 },
+        },
+        'Rendu': {
+          coloration: { type: 'segmented', label: 'Couleurs', options: { physique: 'Physiques', palette: 'Palette' }, value: 'physique' },
+          fusion: { type: 'segmented', label: 'Sur le fond', options: { ecran: 'Lumière', produit: 'Teinte' }, value: 'ecran' },
+          exposition: { type: 'range', label: 'Exposition', min: 0.2, max: 3, step: 0.01, value: 1.3 },
+          saturation: { type: 'range', label: 'Saturation', min: 0, max: 2.5, step: 0.01, value: 1.1 },
+        },
+        'Empreinte': {
+          image: { type: 'file', label: 'Logo ou image', accept: 'image/*' },
+          relief: { type: 'range', label: 'Surépaisseur du logo (nm)', min: -600, max: 600, step: 5, value: 0 },
+          tailleLogo: { type: 'range', label: 'Taille du logo', min: 0.1, max: 1.2, step: 0.01, value: 0.55 },
+        },
+        'Couleur': {
+          fond: { type: 'color', label: 'Fond', value: '#0b0b0d' },
+          palette: { type: 'palette', label: 'Palette (mode palette)', value: [LUZ[1], LUZ[2], LUZ[0], ACIDE[2]] },
+        },
+      },
+      presets: {
+        'Savon': {},
+        'Bulle': { forme: 'bulle', rayon: 0.38, epaisseur: 560, variation: 420, drainage: 0.55, echelle: 1.4, tourbillons: 1.2, etirement: 1.6, fond: NUIT[0], exposition: 1.5 },
+        'Strates': { epaisseur: 600, variation: 120, drainage: 0.9, tourbillons: 0.3, echelle: 1.4, etirement: 1.8 },
+        'Noir de savon': { epaisseur: 180, variation: 260, drainage: 0.85, echelle: 1.1, tourbillons: 0.8, etirement: 2.2, exposition: 1.6, saturation: 1.3 },
+        'Huile': { matiere: 'huile', fusion: 'produit', epaisseur: 700, variation: 520, drainage: 0, echelle: 1.1, tourbillons: 1.2, etirement: 1, fond: PHOTO[2], exposition: 2, saturation: 1.5 },
+        'Nacre': { fusion: 'produit', epaisseur: 760, variation: 320, drainage: 0.3, echelle: 1, tourbillons: 0.9, fond: P60[0], exposition: 1.8, saturation: 1.7 },
+        'Luzern': { coloration: 'palette', epaisseur: 600, variation: 500, tourbillons: 1.3, fond: LUZ[3], palette: [LUZ[1], LUZ[2], LUZ[4], LUZ[0]], exposition: 1, saturation: 1 },
+        'Kegelbahn': { coloration: 'palette', forme: 'bulle', rayon: 0.42, epaisseur: 800, variation: 600, tourbillons: 1.2, echelle: 1.2, fond: KB[0], palette: KB.slice(1), exposition: 1, saturation: 1 },
+        'Menthe': { fusion: 'produit', coloration: 'palette', epaisseur: 500, variation: 300, drainage: 0.4, echelle: 1.2, fond: MENTHE[0], palette: [MENTHE[3], MENTHE[2], MENTHE[0], MENTHE[1]], exposition: 1, saturation: 1 },
+        'Logo': { relief: 260, tailleLogo: 0.6, epaisseur: 380, variation: 200, tourbillons: 0.7, drainage: 0.2 },
+      },
+      brand(colors) {
+        return { fond: colors[0], palette: colors.length > 1 ? colors.slice(1) : colors, coloration: colors.length > 2 ? 'palette' : 'physique' };
+      },
+      pointer: {
+        down: (q) => { prevPtr = { x: q.x, y: q.y }; },
+        drag: (q) => blow(q),
+        up: () => { prevPtr = null; },
+        wheel: (q, dy) => app.set('epaisseur', Math.max(0, Math.min(1600, Math.round((p.epaisseur - dy * 0.4) / 5) * 5))),
+      },
+      export: { name: 'couches-minces', extra: { 'Nuancier d’interférence (SVG)': () => exportRamp() } },
+    });
+    const p = app.params;
+
+    // Souffle : chaque geste dépose un tourbillon (sens donné par le virage du geste) qui s'éteint.
+    function blow(q) {
+      const { w, h } = app.size, u = Math.min(w, h);
+      if (!prevPtr) { prevPtr = { x: q.x, y: q.y }; return; }
+      const dx = (q.x - prevPtr.x) / u, dy = (q.y - prevPtr.y) / u, d = Math.hypot(dx, dy);
+      if (d < 0.004) return;
+      const x = (q.x - w / 2) / u, y = (q.y - h / 2) / u;
+      // Sens : côté du centre du cadre par rapport au geste (rotation cohérente avec le mouvement).
+      const side = Math.sign(dx * (0 - y) - dy * (0 - x)) || 1;
+      vort.push({ x, y, s: side * Math.min(1.6, d * 14) * p.souffle, r: 0.16 + Math.min(0.14, d * 3) });
+      while (vort.length > NV) vort.shift();
+      prevPtr = { x: q.x, y: q.y };
+    }
+
+    // ——— Spectre : fonctions colorimétriques CIE 1931 (ajustement multi-lobes), en sRGB linéaire ———
+    function cie(l) {
+      const g = (x, m, s1, s2) => { const t = (x - m) / (x < m ? s1 : s2); return Math.exp(-0.5 * t * t); };
+      return [
+        1.056 * g(l, 599.8, 37.9, 31.0) + 0.362 * g(l, 442.0, 16.0, 26.7) - 0.065 * g(l, 501.1, 20.4, 26.2),
+        0.821 * g(l, 568.8, 46.9, 40.5) + 0.286 * g(l, 530.9, 16.3, 31.1),
+        1.217 * g(l, 437.0, 11.8, 36.0) + 0.681 * g(l, 459.0, 26.0, 13.8),
+      ];
+    }
+    const LAMBDA = [], WRGB = [], LUT_N = 2048, OPD_MAX = 6000, GAIN = 0.55;
+    // GAIN : la réflectance moyenne tombe à mi-ton, les pics d'interférence montent au blanc sans saturer.
+    (() => {
+      let sw = [0, 0, 0];
+      const rows = [];
+      for (let i = 0; i < NL; i++) {
+        const l = 400 + 300 * (i + 0.5) / NL, [X, Y, Z] = cie(l);
+        const r = 3.2406 * X - 1.5372 * Y - 0.4986 * Z, g = -0.9689 * X + 1.8758 * Y + 0.0415 * Z, b = 0.0557 * X - 0.2040 * Y + 1.0570 * Z;
+        LAMBDA.push(l); rows.push([r, g, b]); sw = [sw[0] + r, sw[1] + g, sw[2] + b];
+      }
+      // Normalisation : un spectre plat (R = 1) donne le blanc.
+      for (const q of rows) WRGB.push(q[0] / sw[0], q[1] / sw[1], q[2] / sw[2]);
+    })();
+    const N_IDX = () => (p.matiere === 'huile' ? 1.47 : 1.33);
+    // Couleur d'un film d'épaisseur d (nm), incidence normale : le même calcul que le shader.
+    function filmRGB(d) {
+      const n = N_IDX(); let r = 0, g = 0, b = 0;
+      for (let i = 0; i < NL; i++) { const R = Math.sin(TAU * n * d / LAMBDA[i]) ** 2 * 2 * GAIN; r += R * WRGB[3 * i]; g += R * WRGB[3 * i + 1]; b += R * WRGB[3 * i + 2]; }
+      const L = 0.2126 * r + 0.7152 * g + 0.0722 * b, s = p.saturation, e = p.exposition;
+      const c = [r, g, b].map((v) => Math.max(0, (L + (v - L) * s) * e)).map((v) => (v < 0.75 ? v : 0.75 + 0.25 * (1 - Math.exp(-(v - 0.75) * 4))));
+      return c.map((v) => Math.round(255 * Math.min(1, v <= 0.0031308 ? 12.92 * v : 1.055 * v ** (1 / 2.4) - 0.055)));
+    }
+
+    // ——— Logo → carte de densité ———
+    let logoImg = null, logoData = null, logoW = 1, logoH = 1, logoDirty = true;
+    function logoMap() {
+      const img = p.image || app.logoImg;
+      if (!img) return null;
+      if (img !== logoImg) {
+        logoImg = img;
+        const M = 512, iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height, k = M / Math.max(iw, ih);
+        logoW = Math.max(1, Math.round(iw * k)); logoH = Math.max(1, Math.round(ih * k));
+        const cv = document.createElement('canvas'); cv.width = logoW; cv.height = logoH;
+        const x = cv.getContext('2d', { willReadFrequently: true });
+        x.fillStyle = '#fff'; x.fillRect(0, 0, logoW, logoH); x.filter = 'blur(8px)'; x.drawImage(img, 0, 0, logoW, logoH);
+        const d = x.getImageData(0, 0, logoW, logoH).data;
+        logoData = new Uint8Array(logoW * logoH);
+        for (let i = 0; i < logoData.length; i++) logoData[i] = 255 - Math.round(d[i * 4] * 0.2126 + d[i * 4 + 1] * 0.7152 + d[i * 4 + 2] * 0.0722);
+        logoDirty = true;
+      }
+      return logoData;
+    }
+
+    // ——— GPU ———
+    const VS = `#version 300 es
+    in vec2 a; void main() { gl_Position = vec4(a, 0., 1.); }`;
+    const FS = `#version 300 es
+    precision highp float;
+    uniform vec2 uSize; uniform float uDpr, uT, uSeed;
+    uniform float uD0, uDV, uDrain, uScale, uWarp, uStretch, uN;
+    uniform int uBubble, uPalMode, uBlend, uNC;
+    uniform float uR, uExpo, uSat;
+    uniform sampler2D uLut;
+    uniform vec3 uBg, uPal[${MAXC}];
+    uniform vec4 uV[${NV}];
+    uniform sampler2D uLogo; uniform vec2 uLogoS; uniform float uHasLogo, uRelief;
+    uniform float uGrain, uVig, uFrame;
+    out vec4 o;
+
+    float hash(vec2 q) { return fract(sin(dot(q, vec2(12.9898, 78.233))) * 43758.5453); }
+    vec2 h2(vec2 q) { q = vec2(dot(q, vec2(127.1, 311.7)), dot(q, vec2(269.5, 183.3))); return -1. + 2. * fract(sin(q + uSeed) * 43758.5453); }
+    float noise(vec2 q) {
+      vec2 i = floor(q), f = fract(q), w = f * f * f * (f * (f * 6. - 15.) + 10.);
+      return mix(mix(dot(h2(i), f), dot(h2(i + vec2(1, 0)), f - vec2(1, 0)), w.x),
+                 mix(dot(h2(i + vec2(0, 1)), f - vec2(0, 1)), dot(h2(i + vec2(1, 1)), f - vec2(1, 1)), w.x), w.y);
+    }
+    float fbm(vec2 q) { float s = 0., a = 0.5; mat2 m = mat2(1.6, 1.2, -1.2, 1.6); for (int i = 0; i < 4; i++) { s += a * noise(q); q = m * q; a *= 0.5; } return s; }
+    float fbm3(vec2 q) { float s = 0., a = 0.5; mat2 m = mat2(1.6, 1.2, -1.2, 1.6); for (int i = 0; i < 3; i++) { s += a * noise(q); q = m * q; a *= 0.5; } return s; }
+    // Décalages qui tournent un nombre entier de fois par boucle : le mouvement boucle sans raccord.
+    vec2 orb(float k, float r, float ph) { float a = uT * k + ph; return r * vec2(cos(a), sin(a)); }
+
+    float thickness(vec2 q) {
+      // Tourbillons soufflés : rotation locale autour de chaque centre, et amincissement.
+      float thin = 0.;
+      for (int i = 0; i < ${NV}; i++) {
+        vec4 v = uV[i]; if (v.z == 0.) continue;
+        vec2 d = q - v.xy; float g = exp(-dot(d, d) / (v.w * v.w));
+        float a = v.z * g * 3.2, c = cos(a), s = sin(a);
+        q = v.xy + mat2(c, s, -s, c) * d;
+        thin += abs(v.z) * g;
+      }
+      vec2 s = q * uScale * vec2(1. / uStretch, 1.);
+      vec2 w1 = vec2(fbm3(s * 0.8 + orb(1., 0.9, 0.) + 3.1), fbm3(s * 0.8 + orb(1., 0.9, 2.1) - 1.7));
+      vec2 w2 = vec2(fbm3(s + uWarp * 1.6 * w1 + orb(2., 0.45, 1.) + 7.3), fbm3(s + uWarp * 1.6 * w1 + orb(-1., 0.6, 4.) - 4.4));
+      float f = fbm(s + uWarp * 2.2 * w2 + orb(1., 0.35, 3.));
+      float d = uD0 + uDV * f * 2.2;
+      // Drainage : le film s'amincit en haut (y négatif) et s'épaissit en bas.
+      d *= clamp(1. + uDrain * q.y * 2.2, 0.02, 3.);
+      d *= 1. / (1. + thin * 0.6);
+      if (uHasLogo > 0.) {
+        vec2 t = q / uLogoS + 0.5;
+        if (t.x > 0. && t.y > 0. && t.x < 1. && t.y < 1.) d += uRelief * texture(uLogo, t).r;
+      }
+      return max(d, 0.);
+    }
+    // Couleur précalculée (16 longueurs d'onde) en fonction du chemin optique n·d·cosθ.
+    vec3 film(float d, float cosT) { return texture(uLut, vec2(uN * d * cosT / ${OPD_MAX}., 0.5)).rgb; }
+    vec3 palAt(float x) {
+      x = fract(x) * float(uNC); int i = int(floor(x)); float f = fract(x);
+      vec3 a = uPal[0], b = uPal[0];
+      for (int k = 0; k < ${MAXC}; k++) { if (k == i) a = uPal[k]; if (k == (i + 1) % uNC) b = uPal[k]; }
+      return mix(a, b, smoothstep(0., 1., f));
+    }
+    vec3 toLin(vec3 c) { return pow(c, vec3(2.2)); }
+
+    void main() {
+      vec2 px = gl_FragCoord.xy / uDpr; px.y = uSize.y - px.y;
+      float U = min(uSize.x, uSize.y);
+      vec2 q = (px - uSize * 0.5) / U;
+      vec3 bg = toLin(uBg), col;
+      float cosI = 1., cover = 1., rim = 0.;
+      vec2 fq = q;
+      if (uBubble == 1) {
+        float r = length(q) / uR;
+        if (r >= 1.) cover = 0.;
+        else {
+          float z = sqrt(1. - r * r); cosI = z;
+          // Coordonnées sur la sphère : le film « s'enroule » vers le bord.
+          fq = q / uR * (asin(min(r, 0.999)) / max(r, 1e-4)) * 0.64;
+          rim = pow(1. - z, 3.);
+        }
+      }
+      float d = thickness(fq);
+      float sinT = sqrt(max(0., 1. - cosI * cosI)) / uN, cosT = sqrt(max(0., 1. - sinT * sinT));
+      vec3 c = film(d, cosT);
+      if (uPalMode == 1) {
+        // Palette de marque : l'ordre d'interférence (phase à 550 nm) parcourt la palette.
+        float ph = 2. * uN * d * cosT / 550.;
+        float env = 1. - exp(-d / 90.);
+        c = toLin(palAt(ph)) * env * 1.6;
+      }
+      float L = dot(c, vec3(0.2126, 0.7152, 0.0722));
+      c = max(vec3(0.), mix(vec3(L), c, uSat)) * uExpo;
+      // Genou doux : les hautes lumières se compriment au lieu de saturer en couleurs criardes.
+      c = mix(c, 0.75 + 0.25 * (1. - exp(-(c - 0.75) * 4.)), step(0.75, c));
+      if (uBlend == 0) col = 1. - (1. - bg) * (1. - clamp(c * (0.85 + rim), 0., 1.));
+      else col = bg * mix(vec3(1.), c * 1.15, 0.85) + c * 0.06;
+      if (uBubble == 1) {
+        // Liseré clair au bord de la bulle (Fresnel) et fond hors de la bulle.
+        col += vec3(0.9) * rim * 0.35 * (1. - L * 0.5);
+        float edge = smoothstep(0., 1.5 / (uR * U), 1. - length(q) / uR);
+        col = mix(bg, col, edge * cover);
+      }
+      col = pow(clamp(col, 0., 1.), vec3(1. / 2.2));
+      vec2 uv = (px - uSize * 0.5) / (uSize * 0.5);
+      col *= 1. - uVig * 0.85 * smoothstep(0.35, 1.25, length(uv));
+      col += (hash(gl_FragCoord.xy + uFrame * 17.31) - 0.5) * uGrain * 0.22;
+      o = vec4(col, 1.);
+    }`;
+    function sh(type, src) { const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s); if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s)); return s; }
+    const prog = gl.createProgram();
+    gl.attachShader(prog, sh(gl.VERTEX_SHADER, VS)); gl.attachShader(prog, sh(gl.FRAGMENT_SHADER, FS));
+    gl.bindAttribLocation(prog, 0, 'a');
+    gl.linkProgram(prog);
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
+    const UL = {}, u = (n) => (UL[n] ??= gl.getUniformLocation(prog, n));
+    const vao = gl.createVertexArray(); gl.bindVertexArray(vao);
+    const buf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+    const tLogo = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, tLogo);
+    for (const k of [gl.TEXTURE_MIN_FILTER, gl.TEXTURE_MAG_FILTER]) gl.texParameteri(gl.TEXTURE_2D, k, gl.LINEAR);
+    for (const k of [gl.TEXTURE_WRAP_S, gl.TEXTURE_WRAP_T]) gl.texParameteri(gl.TEXTURE_2D, k, gl.CLAMP_TO_EDGE);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, 1, 1, 0, gl.RED, gl.UNSIGNED_BYTE, new Uint8Array([0]));
+    // Table spectrale : réflectance du film intégrée sur 16 longueurs d'onde, pour chaque chemin optique.
+    const tLut = gl.createTexture();
+    (() => {
+      const lut = new Float32Array(LUT_N * 4);
+      for (let j = 0; j < LUT_N; j++) {
+        const opd = OPD_MAX * j / (LUT_N - 1);
+        let r = 0, g = 0, b = 0;
+        for (let i = 0; i < NL; i++) { const R = Math.sin(TAU * opd / LAMBDA[i]) ** 2 * 2 * GAIN; r += R * WRGB[3 * i]; g += R * WRGB[3 * i + 1]; b += R * WRGB[3 * i + 2]; }
+        // Au-delà de quelques microns les ordres se brouillent : le film tend vers le blanc.
+        const fade = Math.min(1, Math.max(0, (opd - OPD_MAX * 0.8) / (OPD_MAX * 0.2)));
+        lut.set([r + (GAIN - r) * fade, g + (GAIN - g) * fade, b + (GAIN - b) * fade, 1], j * 4);
+      }
+      gl.bindTexture(gl.TEXTURE_2D, tLut);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, LUT_N, 1, 0, gl.RGBA, gl.FLOAT, lut);
+      for (const k of [gl.TEXTURE_MIN_FILTER, gl.TEXTURE_MAG_FILTER]) gl.texParameteri(gl.TEXTURE_2D, k, gl.LINEAR);
+      for (const k of [gl.TEXTURE_WRAP_S, gl.TEXTURE_WRAP_T]) gl.texParameteri(gl.TEXTURE_2D, k, gl.CLAMP_TO_EDGE);
+    })();
+    const rgbf = (hx) => { const n = parseInt(String(hx).slice(1, 7), 16); return [(n >> 16 & 255) / 255, (n >> 8 & 255) / 255, (n & 255) / 255]; };
+
+    function render(t, dt) {
+      const { w, h } = app.size;
+      // Les tourbillons s'éteignent en quelques secondes.
+      const k = Math.exp(-(dt || 0) * 0.3);
+      for (const v of vort) v.s *= k;
+      while (vort.length && Math.abs(vort[0].s) < 0.01) vort.shift();
+      gl.viewport(0, 0, canvas.width, canvas.height);
+      gl.useProgram(prog);
+      gl.uniform2f(u('uSize'), w, h); gl.uniform1f(u('uDpr'), canvas.width / w);
+      gl.uniform1f(u('uT'), TAU * t / p.boucle); gl.uniform1f(u('uSeed'), (app.seed % 1000) * 0.137);
+      gl.uniform1f(u('uD0'), p.epaisseur); gl.uniform1f(u('uDV'), p.variation); gl.uniform1f(u('uDrain'), p.drainage);
+      gl.uniform1f(u('uScale'), p.echelle); gl.uniform1f(u('uWarp'), p.tourbillons); gl.uniform1f(u('uStretch'), p.etirement);
+      gl.uniform1f(u('uN'), N_IDX());
+      gl.uniform1i(u('uBubble'), p.forme === 'bulle' ? 1 : 0); gl.uniform1f(u('uR'), p.rayon);
+      gl.uniform1i(u('uPalMode'), p.coloration === 'palette' ? 1 : 0); gl.uniform1i(u('uBlend'), p.fusion === 'produit' ? 1 : 0);
+      gl.uniform1f(u('uExpo'), p.exposition); gl.uniform1f(u('uSat'), p.saturation);
+      gl.uniform3fv(u('uBg'), rgbf(p.fond));
+      const pal = p.palette.slice(0, MAXC), flat = []; for (let i = 0; i < MAXC; i++) flat.push(...rgbf(pal[i % pal.length]));
+      gl.uniform3fv(u('uPal[0]'), flat); gl.uniform1i(u('uNC'), pal.length);
+      const V = new Float32Array(NV * 4); vort.forEach((v, i) => V.set([v.x, v.y, v.s, v.r], i * 4));
+      gl.uniform4fv(u('uV[0]'), V);
+      const data = logoMap();
+      gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, tLogo);
+      if (data && logoDirty) { gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1); gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, logoW, logoH, 0, gl.RED, gl.UNSIGNED_BYTE, data); logoDirty = false; }
+      gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, tLut); gl.uniform1i(u('uLut'), 1);
+      gl.uniform1i(u('uLogo'), 0); gl.uniform1f(u('uHasLogo'), data && p.relief !== 0 ? 1 : 0); gl.uniform1f(u('uRelief'), p.relief);
+      const kL = p.tailleLogo / Math.max(logoW, logoH); gl.uniform2f(u('uLogoS'), logoW * kL, logoH * kL);
+      gl.uniform1f(u('uGrain'), p.grain ?? 0); gl.uniform1f(u('uVig'), p.vignette ?? 0); gl.uniform1f(u('uFrame'), (frame++) % 997);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+    }
+    app.loop((t, dt) => render(t, dt));
+
+    // Nuancier : les teintes d'interférence de 0 à 1600 nm, en dégradé SVG (la charte de Michel-Lévy du film).
+    function exportRamp() {
+      const W = 1600, H = 240, stops = [];
+      for (let d = 0; d <= 1600; d += 10) { const c = filmRGB(d); stops.push(`<stop offset="${(d / 1600).toFixed(4)}" stop-color="rgb(${c.join(',')})"/>`); }
+      const ticks = [];
+      for (let d = 0; d <= 1600; d += 100) ticks.push(`<line x1="${d}" y1="${H - 24}" x2="${d}" y2="${H}" stroke="${p.fond}" stroke-width="2"/>`);
+      const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}"><defs><linearGradient id="g">${stops.join('')}</linearGradient></defs><rect width="${W}" height="${H}" fill="url(#g)"/>${ticks.join('')}</svg>`;
+      app.download('couches-minces-nuancier.svg', new Blob([svg], { type: 'image/svg+xml' }));
+    }
+  </script>
+</body>
+</html>

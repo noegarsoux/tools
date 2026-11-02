@@ -1,0 +1,15 @@
+{
+  "slug": "couches-minces",
+  "title": "Couches minces",
+  "type": "webgl",
+  "description": "L'iridescence d'une bulle de savon ou d'une nappe d'huile, calculée par interférence sur seize longueurs d'onde ; le film coule, draine et tourbillonne quand on souffle.",
+  "tags": ["iridescence", "interference", "bulle", "spectre", "webgl", "boucle"],
+  "inspiration": [
+    "Couches minces : interférence entre les deux faces d'un film, iridescence (références physique-maths, lumière)",
+    "Fonctions colorimétriques CIE 1931, ajustement de Wyman, Sloan et Shirley",
+    "Palettes trame-nuit, photocopie, papier-60, luzern, kegelbahn, menthe"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
