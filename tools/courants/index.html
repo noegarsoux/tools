@@ -1,0 +1,241 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Courants</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Courants : une famille de lignes parallèles (droites, colonnes, cercles ou rayons) déplacées
+    // par un champ (vagues, bruit, logo) et par une loupe. L'épaisseur de chaque ligne suit
+    // l'écart à ses voisines : là où les lignes se serrent, elles s'affinent — le relief apparaît.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const P60 = PAL('papier-60'), BIEN = PAL('biennale'), KB = PAL('kegelbahn'), NUIT = PAL('trame-nuit'), MENTHE = PAL('menthe'), LUZ = PAL('luzern');
+    const ACIDE = PAL('acide'), SALON = PAL('salon'), ORB = PAL('orbite'), GR = PAL('good-room'), PHOTO = PAL('photocopie');
+
+    let hover = null, lens = null, drag = null, ripples = [], logoF = null, logoKey = null;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.03, vignette: 0 },
+      hint: 'Survolez : la loupe suit le pointeur · glissez pour tordre les lignes · touchez pour une onde · molette : nombre de lignes',
+      notes: 'Chaque ligne est un ruban dont l’épaisseur vaut une fraction de l’écart à ses voisines : la compression du champ se lit comme un volume, à la manière des peintures optiques.',
+      params: {
+        'Lignes': {
+          famille: { type: 'select', label: 'Famille', options: { horizontales: 'Horizontales', verticales: 'Verticales', cercles: 'Cercles', rayons: 'Rayons' }, value: 'horizontales' },
+          nombre: { type: 'range', label: 'Nombre de lignes', min: 8, max: 220, step: 1, value: 70 },
+          remplissage: { type: 'range', label: 'Remplissage', min: 0.05, max: 0.95, step: 0.01, value: 0.5 },
+          contraste: { type: 'range', label: 'Épaisseur selon l’écart', min: 0, max: 2, step: 0.01, value: 1 },
+        },
+        'Champ': {
+          champ: { type: 'select', label: 'Champ', options: { vagues: 'Vagues', bruit: 'Bruit', logo: 'Logo', calme: 'Calme' }, value: 'vagues' },
+          image: { type: 'file', label: 'Logo', accept: 'image/*', show: (q) => q.champ === 'logo' },
+          amplitude: { type: 'range', label: 'Amplitude', min: 0, max: 1, step: 0.01, value: 0.4 },
+          frequence: { type: 'range', label: 'Fréquence', min: 0.2, max: 4, step: 0.01, value: 1.2 },
+          vitesse: { type: 'range', label: 'Vitesse', min: 0, max: 2, step: 0.01, value: 0.5 },
+        },
+        'Loupe': {
+          loupe: { type: 'range', label: 'Force (− pince, + gonfle)', min: -1, max: 1, step: 0.01, value: 0.6 },
+          rayonLoupe: { type: 'range', label: 'Rayon', min: 0.05, max: 0.6, step: 0.01, value: 0.25 },
+          errance: { type: 'toggle', label: 'Loupe errante sans pointeur', value: true },
+        },
+        'Couleur': {
+          fond: { type: 'color', label: 'Fond', value: P60[0] },
+          couleurs: { type: 'palette', label: 'Lignes (en alternance)', value: [P60[1]] },
+        },
+      },
+      presets: {
+        'Papier': {},
+        'Courant': { famille: 'horizontales', nombre: 120, remplissage: 0.55, champ: 'vagues', amplitude: 0.6, frequence: 2, loupe: 0, fond: PHOTO[0], couleurs: [PHOTO[1]] },
+        'Cercles': { famille: 'cercles', nombre: 60, remplissage: 0.5, champ: 'vagues', amplitude: 0.35, frequence: 1.6, loupe: 0.7, fond: BIEN[0], couleurs: [BIEN[1], BIEN[2]] },
+        'Rayons': { famille: 'rayons', nombre: 120, remplissage: 0.5, champ: 'bruit', amplitude: 0.5, frequence: 1, loupe: -0.6, fond: NUIT[0], couleurs: [NUIT[1]] },
+        'Kegelbahn': { famille: 'verticales', nombre: 48, remplissage: 0.6, champ: 'vagues', amplitude: 0.5, frequence: 0.9, loupe: 0.8, fond: KB[0], couleurs: [KB[1], KB[2], KB[3], KB[5]] },
+        'Logo': { famille: 'horizontales', nombre: 90, remplissage: 0.5, champ: 'logo', amplitude: 0.7, loupe: 0.3, fond: P60[0], couleurs: [P60[1]], vitesse: 0.3 },
+        'Menthe': { famille: 'cercles', nombre: 36, remplissage: 0.7, champ: 'bruit', amplitude: 0.7, frequence: 0.7, loupe: 0.5, rayonLoupe: 0.35, fond: MENTHE[0], couleurs: [MENTHE[3], MENTHE[1]] },
+        'Luzern': { famille: 'horizontales', nombre: 30, remplissage: 0.62, champ: 'vagues', amplitude: 0.8, frequence: 0.6, loupe: 0.9, rayonLoupe: 0.4, fond: LUZ[2], couleurs: [LUZ[1], LUZ[0], LUZ[3]] },
+        'Acide': { famille: 'verticales', nombre: 160, remplissage: 0.4, champ: 'bruit', amplitude: 0.55, frequence: 1.5, loupe: -0.8, fond: ACIDE[1], couleurs: [ACIDE[2]], vitesse: 0.8 },
+        'Salon': { famille: 'rayons', nombre: 48, remplissage: 0.5, champ: 'vagues', amplitude: 0.4, frequence: 1.4, loupe: 0.6, fond: SALON[0], couleurs: [SALON[2], SALON[3], SALON[4], SALON[1]] },
+        'Good Room': { famille: 'verticales', nombre: 110, remplissage: 0.35, champ: 'logo', amplitude: 0.5, loupe: 0, errance: false, fond: GR[0], couleurs: [GR[1], GR[2], GR[3], GR[4]] },
+      },
+      brand(colors) {
+        const c = colors.slice(1).length ? colors.slice(1) : ['#111111'];
+        return { fond: colors[0], couleurs: c.slice(0, 7) };
+      },
+      pointer: {
+        move: (q) => { hover = { x: q.x, y: q.y }; },
+        down: (q) => { drag = { x: q.x, y: q.y, moved: false, sx: q.x, sy: q.y, twist: 0 }; },
+        drag: (q) => {
+          hover = { x: q.x, y: q.y };
+          if (!drag) return;
+          if (Math.hypot(q.x - drag.x, q.y - drag.y) > 6) drag.moved = true;
+        },
+        up: (q) => { if (drag && !drag.moved) ripples.push({ x: q.x, y: q.y, t: 0 }); if (ripples.length > 5) ripples.shift(); drag = null; },
+        wheel: (q, dy) => app.set('nombre', Math.max(8, Math.min(220, p.nombre + (dy > 0 ? -2 : 2)))),
+      },
+      onChange(k) { if (k === 'image' || k === '*') logoKey = null; if (k === '*') ripples = []; },
+      export: { name: 'courants', svg: () => toSVG() },
+    });
+    const p = app.params;
+    canvas.addEventListener('pointerleave', () => { hover = null; });
+
+    // ——— Bruit de valeur 3D ———
+    const hh = (x, y, z) => { let n = Math.imul(x, 374761393) + Math.imul(y, 668265263) + Math.imul(z, 2147483647) + app.seed * 131 | 0; n = Math.imul(n ^ (n >>> 13), 1274126177); return (((n ^ (n >>> 16)) >>> 0) / 4294967296) * 2 - 1; };
+    function vn(x, y, z) {
+      const X = Math.floor(x), Y = Math.floor(y), Z = Math.floor(z), fx = x - X, fy = y - Y, fz = z - Z;
+      const s = (t) => t * t * (3 - 2 * t), u = s(fx), v = s(fy), w = s(fz), l = (a, b, t) => a + (b - a) * t;
+      return l(l(l(hh(X, Y, Z), hh(X + 1, Y, Z), u), l(hh(X, Y + 1, Z), hh(X + 1, Y + 1, Z), u), v), l(l(hh(X, Y, Z + 1), hh(X + 1, Y, Z + 1), u), l(hh(X, Y + 1, Z + 1), hh(X + 1, Y + 1, Z + 1), u), v), w);
+    }
+
+    // ——— Logo : champ flou (ou marque de repli géométrique) ———
+    function logoField(w, h) {
+      const img = p.image || app.logoImg, key = w + 'x' + h + (img ? (img.src || 'c') : 'demo');
+      if (key === logoKey) return logoF;
+      logoKey = key;
+      const G = 160, c = document.createElement('canvas'); c.width = c.height = G; const x = c.getContext('2d', { willReadFrequently: true });
+      x.filter = 'blur(3px)';
+      if (img) { const iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height, k = G * 0.8 / Math.max(iw, ih); x.drawImage(img, (G - iw * k) / 2, (G - ih * k) / 2, iw * k, ih * k); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(80, 80, 62, 0, TAU); x.arc(80, 80, 34, 0, TAU, true); x.fill('evenodd'); x.fillRect(72, 12, 16, 136); }
+      const d = x.getImageData(0, 0, G, G).data, a = new Float32Array(G * G);
+      let transp = 0; for (let i = 3; i < d.length; i += 16) if (d[i] < 128) transp++;
+      const useA = transp > d.length / 16 * 0.05;
+      for (let i = 0; i < G * G; i++) { const l = (d[i * 4] * 0.2126 + d[i * 4 + 1] * 0.7152 + d[i * 4 + 2] * 0.0722) / 255; a[i] = useA ? d[i * 4 + 3] / 255 : (d[i * 4 + 3] / 255) * (1 - l); }
+      logoF = { G, a };
+      return logoF;
+    }
+    function logoAt(x, y, w, h) {
+      const L = logoField(w, h), S = Math.min(w, h) * 0.85, u = (x - (w - S) / 2) / S * (L.G - 1), v = (y - (h - S) / 2) / S * (L.G - 1);
+      if (u < 0 || v < 0 || u >= L.G - 1 || v >= L.G - 1) return 0;
+      const i = Math.floor(u), j = Math.floor(v), fx = u - i, fy = v - j, a = L.a, G = L.G;
+      return (a[j * G + i] * (1 - fx) + a[j * G + i + 1] * fx) * (1 - fy) + (a[(j + 1) * G + i] * (1 - fx) + a[(j + 1) * G + i + 1] * fx) * fy;
+    }
+
+    // ——— Géométrie de la famille : (u le long de la ligne, v à travers) → point et normale ———
+    function geom(w, h) {
+      const cx = w / 2, cy = h / 2, R = Math.hypot(w, h) / 2 * 1.05, m = Math.min(w, h) * 0.08;
+      switch (p.famille) {
+        case 'verticales': return { at: (u, v) => [-m + v * (w + 2 * m), -m + u * (h + 2 * m)], n: () => [1, 0], closed: false };
+        case 'cercles': return { at: (u, v) => [cx + Math.cos(u * TAU) * v * R, cy + Math.sin(u * TAU) * v * R], n: (x, y) => { const d = Math.hypot(x - cx, y - cy) || 1; return [(x - cx) / d, (y - cy) / d]; }, closed: true };
+        case 'rayons': return { at: (u, v) => [cx + Math.cos(v * TAU) * u * R, cy + Math.sin(v * TAU) * u * R], n: (x, y) => { const d = Math.hypot(x - cx, y - cy) || 1; return [-(y - cy) / d, (x - cx) / d]; }, closed: false, wrap: true };
+        default: return { at: (u, v) => [-m + u * (w + 2 * m), -m + v * (h + 2 * m)], n: () => [0, 1], closed: false };
+      }
+    }
+
+    // Déplacement 2D en un point.
+    function disp(x, y, w, h, t, G) {
+      const S = Math.min(w, h), A = p.amplitude * S * 0.12, f = p.frequence / S, z = t * p.vitesse;
+      let s = 0;
+      switch (p.champ) {
+        case 'vagues': s = Math.sin((x * 0.8 + y * 0.35) * f * 6 - z * 2) * 0.7 + Math.sin((x * -0.3 + y * 0.9) * f * 4.3 + z * 1.3) * 0.5; break;
+        case 'bruit': s = vn(x * f * 3, y * f * 3, z * 0.4) * 1.4 + vn(x * f * 7, y * f * 7, z * 0.6 + 9) * 0.5; break;
+        case 'logo': s = logoAt(x, y, w, h) * 0.5 + Math.sin(x * f * 4 + z) * 0.15; break;
+      }
+      const n = G.n(x, y);
+      let dx = n[0] * s * A, dy = n[1] * s * A;
+      // Loupe : gonfle (ou pince) radialement autour de son centre.
+      if (lens && p.loupe !== 0) {
+        const Rl = p.rayonLoupe * S, ex = x - lens.x, ey = y - lens.y, d2 = (ex * ex + ey * ey) / (Rl * Rl);
+        if (d2 < 9) { const g = Math.exp(-d2) * p.loupe * 0.9 * lens.a; dx += ex * g; dy += ey * g; }
+      }
+      for (const r of ripples) {
+        const ex = x - r.x, ey = y - r.y, d = Math.hypot(ex, ey) || 1, k = d - r.t * S * 0.8, wd = S * 0.06;
+        if (Math.abs(k) < wd * 3) { const g = Math.exp(-(k * k) / (wd * wd)) * S * 0.04 * (1 - r.t / 1.5); dx += (ex / d) * g; dy += (ey / d) * g; }
+      }
+      return [dx, dy];
+    }
+
+    // ——— Rubans : lignes déplacées, épaisseur = fraction de l'écart aux voisines ———
+    function ribbons(w, h, t) {
+      const G = geom(w, h), N = Math.round(p.nombre), S = Math.min(w, h);
+      const M = G.closed ? 200 : Math.max(70, Math.round((p.famille === 'rayons' ? 1 : (p.famille === 'verticales' ? h : w)) / 6));
+      const rows = N + 2, P = new Float32Array(rows * (M + 1) * 2);
+      for (let i = 0; i < rows; i++) {
+        let v = (i - 0.5) / N;
+        if (G.wrap) v = ((v % 1) + 1) % 1;
+        if (p.famille === 'cercles') v = Math.max(0, (i - 0.5) / N);
+        for (let j = 0; j <= M; j++) {
+          const u = j / M, [x, y] = G.at(p.famille === 'rayons' ? 0.02 + u : u, v), [dx, dy] = disp(x, y, w, h, t, G), k = (i * (M + 1) + j) * 2;
+          P[k] = x + dx; P[k + 1] = y + dy;
+        }
+      }
+      const out = [], cols = p.couleurs && p.couleurs.length ? p.couleurs : ['#111111'];
+      for (let i = 1; i <= N; i++) {
+        const L = [], R = [];
+        for (let j = 0; j <= M; j++) {
+          const k = (i * (M + 1) + j) * 2, ka = ((i - 1) * (M + 1) + j) * 2, kb = ((i + 1) * (M + 1) + j) * 2;
+          const x = P[k], y = P[k + 1];
+          // Tangente et écart aux voisines.
+          const j0 = Math.max(0, j - 1), j1 = Math.min(M, j + 1), t0 = (i * (M + 1) + j0) * 2, t1 = (i * (M + 1) + j1) * 2;
+          let tx = P[t1] - P[t0], ty = P[t1 + 1] - P[t0 + 1]; const tl = Math.hypot(tx, ty) || 1; tx /= tl; ty /= tl;
+          const nx = -ty, ny = tx;
+          const gapA = Math.abs((P[ka] - x) * nx + (P[ka + 1] - y) * ny), gapB = Math.abs((P[kb] - x) * nx + (P[kb + 1] - y) * ny);
+          let gap = (gapA + gapB) / 2;
+          // Épaisseur : mélange entre constante (écart moyen) et proportionnelle à l'écart local.
+          const mean = p.famille === 'cercles' ? (Math.hypot(w, h) / 2 * 1.05) / N : p.famille === 'rayons' ? gap : (p.famille === 'verticales' ? (w + S * 0.16) : (h + S * 0.16)) / N;
+          gap = mean + (gap - mean) * p.contraste;
+          // Mode logo : les rubans s'épaississent dans le logo, qui se lit en aplat.
+          const boost = p.champ === 'logo' ? 1 + logoAt(x, y, w, h) * (1 / Math.max(0.1, p.remplissage) - 1) * 0.92 : 1;
+          const th = Math.max(0, gap * p.remplissage * boost) / 2;
+          L.push(x - nx * th, y - ny * th); R.push(x + nx * th, y + ny * th);
+        }
+        out.push({ L, R, col: cols[(i - 1) % cols.length], closed: G.closed });
+      }
+      return out;
+    }
+
+    app.loop((t, dt) => {
+      const { w, h, dpr } = app.size;
+      dt = Math.min(0.05, dt || 0);
+      // Loupe : suit le pointeur, ou erre lentement.
+      const S = Math.min(w, h);
+      let target = hover;
+      if (!target && p.errance) target = { x: w / 2 + Math.sin(t * 0.31) * w * 0.28, y: h / 2 + Math.sin(t * 0.47 + 1) * h * 0.22 };
+      if (target) { lens = lens ? { x: lens.x + (target.x - lens.x) * Math.min(1, dt * 6), y: lens.y + (target.y - lens.y) * Math.min(1, dt * 6), a: Math.min(1, lens.a + dt * 2) } : { ...target, a: hover ? 0 : 1 }; }
+      else if (lens) { lens.a -= dt * 2; if (lens.a <= 0) lens = null; }
+      if (lens && drag && drag.moved) lens.a = Math.min(2.2, lens.a + dt * 2); // glisser : la loupe s'intensifie
+      else if (lens && lens.a > 1) lens.a = Math.max(1, lens.a - dt * 2);
+      for (const r of ripples) r.t += dt;
+      ripples = ripples.filter((r) => r.t < 1.5);
+      const rb = ribbons(w, h, t);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = p.fond; ctx.fillRect(0, 0, w, h);
+      for (const r of rb) {
+        ctx.beginPath();
+        if (r.closed) {
+          ctx.moveTo(r.R[0], r.R[1]); for (let k = 2; k < r.R.length; k += 2) ctx.lineTo(r.R[k], r.R[k + 1]); ctx.closePath();
+          ctx.moveTo(r.L[0], r.L[1]); for (let k = r.L.length - 2; k >= 0; k -= 2) ctx.lineTo(r.L[k], r.L[k + 1]); ctx.closePath();
+        } else {
+          ctx.moveTo(r.L[0], r.L[1]); for (let k = 2; k < r.L.length; k += 2) ctx.lineTo(r.L[k], r.L[k + 1]);
+          for (let k = r.R.length - 2; k >= 0; k -= 2) ctx.lineTo(r.R[k], r.R[k + 1]); ctx.closePath();
+        }
+        ctx.fillStyle = r.col; ctx.fill('nonzero');
+      }
+      app.finish(ctx);
+    });
+
+    function toSVG() {
+      const { w, h } = app.size, f = (v) => Math.round(v * 10) / 10, rb = ribbons(w, h, app.time || 0), out = [];
+      for (const r of rb) {
+        let d;
+        if (r.closed) {
+          d = 'M' + f(r.R[0]) + ' ' + f(r.R[1]); for (let k = 2; k < r.R.length; k += 2) d += 'L' + f(r.R[k]) + ' ' + f(r.R[k + 1]); d += 'Z';
+          d += 'M' + f(r.L[r.L.length - 2]) + ' ' + f(r.L[r.L.length - 1]); for (let k = r.L.length - 4; k >= 0; k -= 2) d += 'L' + f(r.L[k]) + ' ' + f(r.L[k + 1]); d += 'Z';
+        } else {
+          d = 'M' + f(r.L[0]) + ' ' + f(r.L[1]); for (let k = 2; k < r.L.length; k += 2) d += 'L' + f(r.L[k]) + ' ' + f(r.L[k + 1]);
+          for (let k = r.R.length - 2; k >= 0; k -= 2) d += 'L' + f(r.R[k]) + ' ' + f(r.R[k + 1]); d += 'Z';
+        }
+        out.push(`<path d="${d}" fill="${r.col}"/>`);
+      }
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">\n<rect width="100%" height="100%" fill="${p.fond}"/>\n${out.join('\n')}\n</svg>`;
+    }
+  </script>
+</body>
+</html>

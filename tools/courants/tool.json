@@ -1,0 +1,15 @@
+{
+  "slug": "courants",
+  "title": "Courants",
+  "type": "pattern",
+  "description": "Lignes parallèles, cercles ou rayons déplacés par des vagues, du bruit ou le logo, et par une loupe ; l’épaisseur suit l’écart entre lignes et fait naître le relief.",
+  "tags": ["op-art", "lignes", "loupe", "relief", "logo", "svg"],
+  "inspiration": [
+    "Peintures optiques de Bridget Riley (Current, 1964) et de Victor Vasarely",
+    "Gravure en taille-douce : tailles parallèles qui s’épaississent pour modeler les volumes",
+    "references/techniques.md ; palettes papier-60, photocopie, biennale, kegelbahn, luzern"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
