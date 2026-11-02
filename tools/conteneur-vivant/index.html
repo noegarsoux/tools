@@ -1,0 +1,417 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Conteneur vivant</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Conteneur vivant : une forme fixe (ou le logo) sert de cadre ; ce qui l'habite change.
+    // Sept motifs génératifs animés se relaient avec une transition (volet, cercle, fondu).
+    // Le dessin passe par un « stylo » commun au canvas et au SVG (rect, disque, polygone, trait).
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2, DEG = Math.PI / 180;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const KB = PAL('kegelbahn'), BIEN = PAL('biennale'), SALON = PAL('salon'), GR = PAL('good-room'), LUZ = PAL('luzern');
+    const ACIDE = PAL('acide'), MENTHE = PAL('menthe'), BIT = PAL('bitmap'), GLY = PAL('glyphes'), P60 = PAL('papier-60'), ORB = PAL('orbite');
+    const MOTIFS = ['rayures', 'points', 'ondes', 'truchet', 'damier', 'rayons', 'vagues'];
+
+    let cur = 0, prev = -1, trans = 1, transFrom = null, lastSwitch = 0, spin = 0, drag = null, hover = null, clock = 0, rngT = [];
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.05, vignette: 0 },
+      hint: 'Touchez pour changer de motif · glissez pour tourner le motif · molette : densité',
+      notes: 'La forme reste, le contenu change : chaque motif dure un cycle puis cède la place au suivant. Choisissez « Logo » pour remplir votre logo (celui de la charte ou une image).',
+      params: {
+        'Conteneur': {
+          forme: { type: 'select', label: 'Forme', options: { cercle: 'Cercle', arche: 'Arche', goutte: 'Goutte', fleur: 'Fleur', etoile: 'Étoile', capsule: 'Capsule', losange: 'Losange', logo: 'Logo' }, value: 'arche' },
+          image: { type: 'file', label: 'Logo ou image', accept: 'image/*', show: (q) => q.forme === 'logo' },
+          disposition: { type: 'segmented', label: 'Disposition', options: { seul: 'Seul', duo: 'Duo', grille: 'Grille' }, value: 'seul' },
+          taille: { type: 'range', label: 'Taille', min: 0.3, max: 0.98, step: 0.01, value: 0.78 },
+          respiration: { type: 'range', label: 'Respiration', min: 0, max: 1, step: 0.01, value: 0.3 },
+          contour: { type: 'range', label: 'Contour', min: 0, max: 12, step: 0.25, value: 0 },
+        },
+        'Motif': {
+          motif: { type: 'select', label: 'Motif', options: { cycle: 'Tous, en cycle', rayures: 'Rayures', points: 'Points', ondes: 'Ondes', truchet: 'Truchet', damier: 'Damier', rayons: 'Rayons', vagues: 'Vagues' }, value: 'cycle' },
+          duree: { type: 'range', label: 'Durée d’un motif (s)', min: 1.5, max: 20, step: 0.5, value: 4, show: (q) => q.motif === 'cycle' },
+          transition: { type: 'segmented', label: 'Transition', options: { volet: 'Volet', cercle: 'Cercle', fondu: 'Fondu', coupe: 'Coupe' }, value: 'cercle' },
+          densite: { type: 'range', label: 'Densité', min: 3, max: 40, step: 1, value: 12 },
+          plein: { type: 'range', label: 'Plein / vide', min: 0.1, max: 0.95, step: 0.01, value: 0.5 },
+          vitesse: { type: 'range', label: 'Vitesse', min: 0, max: 3, step: 0.01, value: 1 },
+          angle: { type: 'range', label: 'Angle (°)', min: -90, max: 90, step: 1, value: 20 },
+        },
+        'Couleur': {
+          fond: { type: 'color', label: 'Fond', value: BIEN[0] },
+          couleurs: { type: 'palette', label: 'Couleurs du motif', value: [BIEN[2], BIEN[3], BIEN[4], BIEN[1]] },
+          couleurContour: { type: 'color', label: 'Contour', value: BIEN[1], show: (q) => q.contour > 0 },
+          debord: { type: 'range', label: 'Motif hors de la forme', min: 0, max: 0.4, step: 0.01, value: 0 },
+        },
+      },
+      presets: {
+        'Biennale': {},
+        'Kegelbahn': { forme: 'cercle', fond: KB[0], couleurs: [KB[1], KB[2], KB[3], KB[5]], transition: 'volet', densite: 10, duree: 3 },
+        'Duo': { disposition: 'duo', forme: 'goutte', fond: SALON[0], couleurs: [SALON[2], SALON[3], SALON[4], SALON[1]], transition: 'fondu', taille: 0.82 },
+        'Grille': { disposition: 'grille', forme: 'capsule', fond: '#141414', couleurs: [GR[1], GR[2], GR[3], GR[4]], densite: 8, taille: 0.86, duree: 2.5 },
+        'Fleur': { forme: 'fleur', fond: MENTHE[0], couleurs: [MENTHE[1], MENTHE[3], MENTHE[2]], motif: 'ondes', respiration: 0.6, densite: 14 },
+        'Étoile': { forme: 'etoile', fond: LUZ[2], couleurs: [LUZ[0], LUZ[1], LUZ[4], LUZ[3]], motif: 'rayons', densite: 18, vitesse: 1.6, contour: 4, couleurContour: LUZ[3] },
+        'Truchet': { forme: 'losange', fond: BIT[0], couleurs: [BIT[1], BIT[2], BIT[3], BIT[4]], motif: 'truchet', densite: 9, plein: 0.35 },
+        'Acide': { forme: 'arche', fond: ACIDE[1], couleurs: [ACIDE[2], ACIDE[3], ACIDE[0]], motif: 'vagues', densite: 16, vitesse: 2, debord: 0.12 },
+        'Glyphes': { disposition: 'grille', forme: 'arche', fond: GLY[1], couleurs: [GLY[0], GLY[2], GLY[3], GLY[4], GLY[5], GLY[6]], densite: 7, transition: 'coupe', duree: 1.5, taille: 0.8 },
+        'Papier': { forme: 'cercle', fond: P60[0], couleurs: [P60[1]], motif: 'points', densite: 22, plein: 0.6, contour: 2, couleurContour: P60[1] },
+        'Orbite': { forme: 'goutte', fond: ORB[1], couleurs: [ORB[0], ORB[2]], motif: 'cycle', transition: 'volet', densite: 20, plein: 0.42, respiration: 0.5 },
+      },
+      brand(colors) {
+        return { fond: colors[0], couleurs: (colors.slice(1).length ? colors.slice(1) : ['#111111']).slice(0, 6), couleurContour: colors[1] || '#111111' };
+      },
+      pointer: {
+        move: (q) => { hover = { x: q.x, y: q.y }; },
+        down: (q) => { drag = { x: q.x, y: q.y, s0: spin, moved: false }; },
+        drag: (q) => {
+          if (!drag) return;
+          if (Math.hypot(q.x - drag.x, q.y - drag.y) > 6) drag.moved = true;
+          if (drag.moved) spin = drag.s0 + (q.x - drag.x) * 0.006;
+        },
+        up: (q) => {
+          if (drag && !drag.moved) next(drag.x, drag.y);
+          drag = null;
+        },
+        wheel: (q, dy) => app.set('densite', Math.max(3, Math.min(40, Math.round(p.densite + dy * 0.01)))),
+      },
+      onChange(k) { if (k === 'motif' || k === '*') { prev = -1; trans = 1; lastSwitch = clock; } },
+      onSeed() { reseed(); },
+      export: { name: 'conteneur-vivant', svg: () => toSVG() },
+    });
+    const p = app.params;
+    canvas.addEventListener('pointerleave', () => { if (!drag) hover = null; });
+    function reseed() { const r = app.rng(21); rngT = Array.from({ length: 4096 }, () => r()); cur = Math.floor(r() * MOTIFS.length); }
+    reseed();
+
+    function next(x, y) {
+      prev = cur; cur = (cur + 1) % MOTIFS.length; trans = 0; lastSwitch = clock;
+      transFrom = x != null ? { x, y } : null;
+    }
+
+    // ——— Formes (polygone échantillonné, commun au canvas et au SVG) ———
+    function shapePts(cx, cy, R, t, kind) {
+      const N = 180, pts = [], br = p.respiration;
+      const wob = (a) => 1 + br * 0.035 * Math.sin(t * 1.3 + a * 3) + br * 0.02 * Math.sin(t * 0.9 - a * 5);
+      for (let i = 0; i < N; i++) {
+        const a = (i / N) * TAU - Math.PI / 2;
+        let x, y;
+        switch (kind) {
+          case 'arche': {
+            // Arche : demi-cercle en haut, rectangle en bas (paramétré par le périmètre).
+            const u = i / N, w = R * 0.72, top = cy - R + w, bottom = cy + R;
+            const L1 = Math.PI * w, L2 = 2 * (bottom - top), L3 = 2 * w, L = L1 + L2 + L3;
+            let s = u * L;
+            if (s < L1) { const b = Math.PI + s / w; x = cx + Math.cos(b) * w; y = top + Math.sin(b) * w; }
+            else if ((s -= L1) < L2 / 2) { x = cx + w; y = top + s; }
+            else if ((s -= L2 / 2) < L3) { x = cx + w - s; y = bottom; }
+            else { s -= L3; x = cx - w; y = bottom - s; }
+            const k = wob(a); x = cx + (x - cx) * k; y = cy + (y - cy) * k;
+            break;
+          }
+          case 'goutte': { const r = R * 0.78 * wob(a); const s = Math.sin(a), c = Math.cos(a); const pinch = Math.pow((1 - s) / 2, 2.2); x = cx + c * r * (1 - pinch * 0.92); y = cy + 0.15 * R + s * r * 1.12; break; }
+          case 'fleur': { const r = R * (0.82 + 0.13 * Math.cos(a * 8 + t * 0.4 * br)) * wob(a); x = cx + Math.cos(a) * r; y = cy + Math.sin(a) * r; break; }
+          case 'etoile': { const r = R * (0.62 + 0.36 * Math.pow(Math.abs(Math.cos(a * 2.5)), 1.6)) * wob(a); x = cx + Math.cos(a) * r; y = cy + Math.sin(a) * r; break; }
+          case 'capsule': {
+            const w = R * 0.55, hh = R - w, u = i / N, L1 = Math.PI * w, L2 = 2 * hh, L = 2 * L1 + 2 * L2;
+            let s = u * L;
+            if (s < L1) { const b = Math.PI + s / w; x = cx + Math.cos(b) * w; y = cy - hh + Math.sin(b) * w; }
+            else if ((s -= L1) < L2) { x = cx + w; y = cy - hh + s; }
+            else if ((s -= L2) < L1) { const b = s / w; x = cx + Math.cos(b) * w; y = cy + hh + Math.sin(b) * w; }
+            else { s -= L1; x = cx - w; y = cy + hh - s; }
+            const k = wob(a); x = cx + (x - cx) * k; y = cy + (y - cy) * k;
+            break;
+          }
+          case 'losange': { const c = Math.cos(a), s = Math.sin(a), r = R * wob(a) / (Math.abs(c) * 1.25 + Math.abs(s)); x = cx + c * r * 1.0; y = cy + s * r; break; }
+          default: { const r = R * 0.92 * wob(a); x = cx + Math.cos(a) * r; y = cy + Math.sin(a) * r; }
+        }
+        pts.push(x, y);
+      }
+      return pts;
+    }
+
+    // ——— Logo en masque ———
+    let logoSrc = null, logoMask = null, logoURL = null;
+    function logoMaskCanvas() {
+      const img = p.image || app.logoImg;
+      if (!img) return null;
+      if (img !== logoSrc) {
+        logoSrc = img;
+        const iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height, k = 1024 / Math.max(iw, ih);
+        logoMask = document.createElement('canvas'); logoMask.width = Math.max(1, Math.round(iw * k)); logoMask.height = Math.max(1, Math.round(ih * k));
+        const x = logoMask.getContext('2d', { willReadFrequently: true }); x.drawImage(img, 0, 0, logoMask.width, logoMask.height);
+        const d = x.getImageData(0, 0, logoMask.width, logoMask.height);
+        for (let i = 0; i < d.data.length; i += 4) { const l = (d.data[i] * 0.2126 + d.data[i + 1] * 0.7152 + d.data[i + 2] * 0.0722) / 255; d.data[i + 3] = Math.round(d.data[i + 3] * (1 - l)); d.data[i] = d.data[i + 1] = d.data[i + 2] = 0; }
+        x.putImageData(d, 0, 0);
+        logoURL = null;
+      }
+      return logoMask;
+    }
+
+    // ——— Motifs : dessinés dans la boîte (x0, y0, w, h), centre (cx, cy), avec le stylo ———
+    function drawMotif(pen, kind, box, t, salt) {
+      const { x0, y0, w, h, cx, cy } = box, S = Math.max(w, h);
+      // Une seule couleur : elle alterne avec le fond.
+      const P0 = p.couleurs && p.couleurs.length ? p.couleurs : ['#111'], P = P0.length === 1 ? [P0[0], p.fond] : P0;
+      const col = (i) => P[((Math.floor(i) % P.length) + P.length) % P.length];
+      const n = p.densite, cell = S / n, fill = p.plein, v = p.vitesse;
+      const ang = p.angle * DEG + spin;
+      const R = Math.hypot(w, h) / 2 + cell;
+      const rot = (x, y, a) => { const c = Math.cos(a), s = Math.sin(a); return [cx + x * c - y * s, cy + x * s + y * c]; };
+      pen.rect(x0 - cell, y0 - cell, w + cell * 2, h + cell * 2, P0.length === 1 ? p.fond : col(salt + 3));
+      switch (kind) {
+        case 'rayures': {
+          const a = ang + t * v * 0.15, off = (t * v * cell * 0.6) % (cell * 2);
+          // Une rayure toutes les deux cellules ; « plein » règle sa largeur.
+          for (let k = -Math.ceil(R / cell) - 2; k * cell < R + cell * 2; k += 2) {
+            const y = k * cell + off - cell, hgt = cell * fill * 2 * 0.98;
+            pen.poly([rot(-R, y, a), rot(R, y, a), rot(R, y + hgt, a), rot(-R, y + hgt, a)].flat(), col(Math.floor(k / 2) + salt));
+          }
+          break;
+        }
+        case 'points': {
+          const a = ang * 0.5;
+          for (let j = -Math.ceil(R / cell); j <= Math.ceil(R / cell); j++) for (let i = -Math.ceil(R / cell); i <= Math.ceil(R / cell); i++) {
+            const [x, y] = rot(i * cell, j * cell, a);
+            if (x < x0 - cell || x > x0 + w + cell || y < y0 - cell || y > y0 + h + cell) continue;
+            const d = Math.hypot(x - cx, y - cy) / S;
+            const r = cell * 0.5 * fill * (0.55 + 0.45 * Math.sin(d * 14 - t * v * 2.4));
+            if (r > 0.4) pen.circle(x, y, r * 1.25, col(((i + j) % 2 ? 0 : 1) + salt));
+          }
+          break;
+        }
+        case 'ondes': {
+          const ph = (t * v * 0.5) % 1;
+          const ox = cx + Math.cos(ang) * S * 0.12, oy = cy + Math.sin(ang) * S * 0.12;
+          const kmax = Math.ceil((R * 1.3) / cell) + 1;
+          for (let k = kmax; k >= 0; k--) {
+            const r = (k + 1 - ph) * cell;
+            if (r <= 0) continue;
+            pen.circle(ox, oy, r, col(k + Math.floor(t * v * 0.5) + salt));
+          }
+          break;
+        }
+        case 'truchet': {
+          const cols = Math.ceil(w / cell) + 2, rows = Math.ceil(h / cell) + 2, lw = cell * fill * 0.5;
+          for (let j = 0; j < rows; j++) for (let i = 0; i < cols; i++) {
+            const x = x0 - cell + i * cell, y = y0 - cell + j * cell;
+            const hsh = rngT[(i * 31 + j * 57 + salt * 13) & 4095];
+            // Chaque tuile bascule à son heure (rotation douce d'un quart de tour).
+            const cyc = Math.max(0, Math.min(1, ((t * v * 0.35 + hsh * 3) % 3) * 2 - 4.5));
+            const base = (hsh > 0.5 ? 1 : 0) + Math.floor((t * v * 0.35 + hsh * 3) / 3);
+            const a = (base + cyc) * Math.PI / 2;
+            const c = col((i + j) % 2 + salt);
+            const mx = x + cell / 2, my = y + cell / 2;
+            // Deux quarts de cercle, centrés sur deux coins opposés de la tuile.
+            for (const [ox, oy, a0] of [[-cell / 2, -cell / 2, 0], [cell / 2, cell / 2, Math.PI]]) {
+              const pts = [];
+              for (let q = 0; q <= 10; q++) {
+                const th = a0 + (q / 10) * Math.PI / 2;
+                const [X, Y] = rot2(ox + Math.cos(th) * cell / 2, oy + Math.sin(th) * cell / 2, a);
+                pts.push(mx + X, my + Y);
+              }
+              pen.stroke(pts, c, lw);
+            }
+          }
+          break;
+        }
+        case 'damier': {
+          const a = ang * 0.3;
+          const k = Math.ceil(R / cell) + 1;
+          for (let j = -k; j < k; j++) for (let i = -k; i < k; i++) {
+            if ((i + j) % 2 === 0) continue;
+            const sh = Math.sin(j * 0.6 + t * v * 1.4) * cell * 0.45;
+            const q = cell * (0.5 + fill * 0.5);
+            const xa = i * cell + sh, ya = j * cell;
+            pen.poly([rot(xa, ya, a), rot(xa + q, ya, a), rot(xa + q, ya + q, a), rot(xa, ya + q, a)].flat(), col(((j % 3) + 3) % 3 + salt));
+          }
+          break;
+        }
+        case 'rayons': {
+          const m = Math.max(6, n * 2), a0 = ang + t * v * 0.25;
+          for (let k = 0; k < m; k += 1) {
+            const a = a0 + (k / m) * TAU, da = (TAU / m) * fill;
+            pen.poly([cx, cy, cx + Math.cos(a) * R * 1.2, cy + Math.sin(a) * R * 1.2, cx + Math.cos(a + da) * R * 1.2, cy + Math.sin(a + da) * R * 1.2], col(k + salt));
+          }
+          pen.circle(cx, cy, S * 0.04 * (1 + fill), col(salt + 1));
+          break;
+        }
+        default: { // vagues
+          const amp = cell * 0.6, a = ang * 0.4;
+          const bands = Math.ceil((R * 2) / cell) + 2;
+          for (let k = 0; k < bands; k++) {
+            const yb = -R + k * cell, pts = [];
+            for (let s = 0; s <= 40; s++) {
+              const xx = -R + (s / 40) * R * 2;
+              pts.push(...rot(xx, yb + Math.sin(xx / cell * 0.9 + t * v * 2 + k * 0.5) * amp, a));
+            }
+            for (let s = 40; s >= 0; s--) {
+              const xx = -R + (s / 40) * R * 2;
+              pts.push(...rot(xx, yb + cell * fill * 1.6 + Math.sin(xx / cell * 0.9 + t * v * 2 + k * 0.5 + 0.6) * amp, a));
+            }
+            pen.poly(pts, col(k + salt));
+          }
+        }
+      }
+    }
+    function rot2(x, y, a) { const c = Math.cos(a), s = Math.sin(a); return [x * c - y * s, x * s + y * c]; }
+
+    // ——— Mise en page : une, deux ou six formes ———
+    function slots(w, h) {
+      const out = [];
+      if (p.disposition === 'seul') out.push({ cx: w / 2, cy: h / 2, R: Math.min(w, h) * 0.5 * p.taille, salt: 0 });
+      else if (p.disposition === 'duo') {
+        const horiz = w >= h, R = Math.min(horiz ? w / 2 : w, horiz ? h : h / 2) * 0.5 * p.taille;
+        out.push({ cx: horiz ? w * 0.27 : w / 2, cy: horiz ? h / 2 : h * 0.27, R, salt: 0 }, { cx: horiz ? w * 0.73 : w / 2, cy: horiz ? h / 2 : h * 0.73, R, salt: 1 });
+      } else {
+        const C = w >= h ? 3 : 2, Rw = w >= h ? 2 : 3, cw = w / C, ch = h / Rw, R = Math.min(cw, ch) * 0.5 * p.taille;
+        for (let j = 0; j < Rw; j++) for (let i = 0; i < C; i++) out.push({ cx: cw * (i + 0.5), cy: ch * (j + 0.5), R, salt: j * C + i });
+      }
+      return out;
+    }
+
+    // ——— Scène : appelle le stylo du fond vers l'avant ———
+    function scene(pen, w, h, t) {
+      const isLogo = p.forme === 'logo' && logoMaskCanvas();
+      for (const s of slots(w, h)) {
+        const pts = isLogo ? null : shapePts(s.cx, s.cy, s.R, t + s.salt * 1.7, p.forme === 'logo' ? 'cercle' : p.forme);
+        let box;
+        if (isLogo) {
+          const m = logoMask, k = (2 * s.R) / Math.max(m.width, m.height);
+          box = { x0: s.cx - m.width * k / 2, y0: s.cy - m.height * k / 2, w: m.width * k, h: m.height * k, cx: s.cx, cy: s.cy };
+        } else {
+          let a = Infinity, b = Infinity, c = -Infinity, d = -Infinity;
+          for (let i = 0; i < pts.length; i += 2) { a = Math.min(a, pts[i]); c = Math.max(c, pts[i]); b = Math.min(b, pts[i + 1]); d = Math.max(d, pts[i + 1]); }
+          box = { x0: a, y0: b, w: c - a, h: d - b, cx: s.cx, cy: s.cy };
+        }
+        // Motifs de cette forme : en grille, chaque forme a son décalage dans le cycle.
+        const pick = (i) => p.motif === 'cycle' ? MOTIFS[(i + s.salt) % MOTIFS.length] : p.motif;
+        const A = pick(prev >= 0 ? prev : cur), B = pick(cur);
+        const e = trans < 1 ? 1 - Math.pow(1 - trans, 3) : 1;
+        // Débord : le motif se devine hors de la forme.
+        if (p.debord > 0) {
+          pen.push({ alpha: p.debord, box: { x0: s.cx - s.R * 1.6, y0: s.cy - s.R * 1.6, w: s.R * 3.2, h: s.R * 3.2 } });
+          drawMotif(pen, B, { x0: s.cx - s.R * 1.6, y0: s.cy - s.R * 1.6, w: s.R * 3.2, h: s.R * 3.2, cx: s.cx, cy: s.cy }, t, s.salt);
+          pen.pop();
+        }
+        pen.push({ shape: pts, logo: isLogo ? box : null });
+        if (e >= 1 || prev < 0 || A === B) drawMotif(pen, B, box, t, s.salt);
+        else {
+          drawMotif(pen, A, box, t, s.salt);
+          const mode = p.transition;
+          if (mode === 'fondu') pen.push({ alpha: e });
+          else if (mode === 'coupe') pen.push({ alpha: e > 0.5 ? 1 : 0 });
+          else if (mode === 'volet') {
+            const a = p.angle * DEG, c = Math.cos(a), sn = Math.sin(a), L = s.R * 1.6;
+            const pos = -L + e * 2 * L;
+            const q = (u, v) => [s.cx + u * c - v * sn, s.cy + u * sn + v * c];
+            pen.push({ clip: [...q(-L, -L), ...q(pos, -L), ...q(pos, L), ...q(-L, L)] });
+          } else {
+            const o = transFrom && Math.hypot(transFrom.x - s.cx, transFrom.y - s.cy) < s.R * 1.2 ? transFrom : { x: s.cx, y: s.cy };
+            const rr = e * s.R * 2.6, cp = [];
+            for (let i = 0; i < 64; i++) { const a = (i / 64) * TAU; cp.push(o.x + Math.cos(a) * rr, o.y + Math.sin(a) * rr); }
+            pen.push({ clip: cp });
+          }
+          drawMotif(pen, B, box, t, s.salt);
+          pen.pop();
+        }
+        pen.pop();
+        if (p.contour > 0 && pts) pen.stroke([...pts, pts[0], pts[1]], p.couleurContour, p.contour);
+      }
+    }
+
+    // ——— Stylo canvas ———
+    function canvasPen(c) {
+      const stack = [];
+      return {
+        rect(x, y, w, h, col) { c.fillStyle = col; c.fillRect(x, y, w, h); },
+        circle(x, y, r, col) { c.fillStyle = col; c.beginPath(); c.arc(x, y, Math.max(0, r), 0, TAU); c.fill(); },
+        poly(pts, col) { c.fillStyle = col; c.beginPath(); c.moveTo(pts[0], pts[1]); for (let i = 2; i < pts.length; i += 2) c.lineTo(pts[i], pts[i + 1]); c.closePath(); c.fill(); },
+        stroke(pts, col, lw) { c.strokeStyle = col; c.lineWidth = lw; c.lineCap = 'round'; c.lineJoin = 'round'; c.beginPath(); c.moveTo(pts[0], pts[1]); for (let i = 2; i < pts.length; i += 2) c.lineTo(pts[i], pts[i + 1]); c.stroke(); },
+        push(o) {
+          if (o.logo) {
+            // Le logo masque un calque à part (destination-in), recomposé au pop.
+            const L = document.createElement('canvas'); L.width = c.canvas.width; L.height = c.canvas.height;
+            const lc = L.getContext('2d'); lc.setTransform(c.getTransform());
+            stack.push({ type: 'logo', prev: c, L, box: o.logo });
+            c = lc; return;
+          }
+          c.save(); stack.push({ type: 'save' });
+          if (o.alpha != null) c.globalAlpha *= o.alpha;
+          const path = o.shape || o.clip;
+          if (path) { c.beginPath(); c.moveTo(path[0], path[1]); for (let i = 2; i < path.length; i += 2) c.lineTo(path[i], path[i + 1]); c.closePath(); c.clip(); }
+        },
+        pop() {
+          const s = stack.pop();
+          if (s.type === 'logo') {
+            c.globalCompositeOperation = 'destination-in';
+            c.drawImage(logoMask, s.box.x0, s.box.y0, s.box.w, s.box.h);
+            c = s.prev;
+            c.save(); c.setTransform(1, 0, 0, 1, 0, 0); c.drawImage(s.L, 0, 0); c.restore();
+          } else c.restore();
+        },
+      };
+    }
+
+    app.loop((t, dt) => {
+      const { w, h, dpr } = app.size;
+      dt = Math.min(0.05, dt || 0);
+      clock = t;
+      if (p.motif === 'cycle' && t - lastSwitch > p.duree) next();
+      if (trans < 1) trans = Math.min(1, trans + dt / 0.9);
+      if (trans >= 1) prev = -1;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over';
+      ctx.fillStyle = p.fond; ctx.fillRect(0, 0, w, h);
+      scene(canvasPen(ctx), w, h, t);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      app.finish(ctx);
+    });
+
+    // ——— Export SVG ———
+    function toSVG() {
+      const { w, h } = app.size, t = clock;
+      const f = (v) => Math.round(v * 100) / 100;
+      const ptsAttr = (pts) => { let s = ''; for (let i = 0; i < pts.length; i += 2) s += (i ? ' ' : '') + f(pts[i]) + ',' + f(pts[i + 1]); return s; };
+      let defs = '', body = '', id = 0;
+      const out = [];
+      const emit = (s) => { out[out.length - 1].push(s); };
+      out.push([]);
+      const pen = {
+        rect(x, y, w2, h2, col) { emit(`<rect x="${f(x)}" y="${f(y)}" width="${f(w2)}" height="${f(h2)}" fill="${col}"/>`); },
+        circle(x, y, r, col) { emit(`<circle cx="${f(x)}" cy="${f(y)}" r="${f(Math.max(0, r))}" fill="${col}"/>`); },
+        poly(pts, col) { emit(`<polygon points="${ptsAttr(pts)}" fill="${col}"/>`); },
+        stroke(pts, col, lw) { emit(`<polyline points="${ptsAttr(pts)}" fill="none" stroke="${col}" stroke-width="${f(lw)}" stroke-linecap="round" stroke-linejoin="round"/>`); },
+        push(o) { out.push([]); out[out.length - 1].opts = o; },
+        pop() {
+          const inner = out.pop(), o = inner.opts;
+          let attrs = '';
+          if (o.alpha != null) attrs += ` opacity="${f(o.alpha)}"`;
+          const path = o.shape || o.clip;
+          if (path) { const k = 'c' + (id++); defs += `<clipPath id="${k}"><polygon points="${ptsAttr(path)}"/></clipPath>\n`; attrs += ` clip-path="url(#${k})"`; }
+          if (o.logo) {
+            if (!logoURL) logoURL = logoMask.toDataURL('image/png');
+            const k = 'm' + (id++);
+            defs += `<mask id="${k}" maskUnits="userSpaceOnUse" x="0" y="0" width="${w}" height="${h}" style="mask-type:alpha"><image href="${logoURL}" x="${f(o.logo.x0)}" y="${f(o.logo.y0)}" width="${f(o.logo.w)}" height="${f(o.logo.h)}"/></mask>\n`;
+            attrs += ` mask="url(#${k})"`;
+          }
+          emit(`<g${attrs}>\n${inner.join('\n')}\n</g>`);
+        },
+      };
+      scene(pen, w, h, t);
+      body = out[0].join('\n');
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">\n<defs>\n${defs}</defs>\n<rect width="100%" height="100%" fill="${p.fond}"/>\n${body}\n</svg>`;
+    }
+  </script>
+</body>
+</html>

@@ -1,0 +1,15 @@
+{
+  "slug": "conteneur-vivant",
+  "title": "Conteneur vivant",
+  "type": "system",
+  "description": "Une forme fixe ou le logo comme cadre, habitée par des motifs génératifs animés qui se relaient : rayures, points, ondes, truchet, damier, rayons, vagues.",
+  "tags": ["identite", "conteneur", "logo", "motifs", "svg", "motion"],
+  "inspiration": [
+    "Identité de la Biennale de Venise (2019) : un cadre fixe, un contenu qui change",
+    "Oi (Wolff Olins) et les identités-conteneurs",
+    "references/identites.md ; palettes biennale, kegelbahn, salon, good-room, luzern, bitmap"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
