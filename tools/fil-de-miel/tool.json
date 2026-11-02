@@ -1,0 +1,15 @@
+{
+  "slug": "fil-de-miel",
+  "title": "Fil de miel",
+  "type": "motion",
+  "description": "Un filet visqueux tombe sur un tapis qui avance : selon la vitesse il s'enroule, boucle, dessine des huit ou des méandres, comme une machine à coudre fluide.",
+  "tags": ["fluide", "fil", "motif", "physique", "machine", "svg"],
+  "inspiration": [
+    "Chiu-Webster et Lister, The fall of a viscous thread onto a moving surface: a fluid-mechanical sewing machine (2006)",
+    "Brun, Audoly, Ribe et al., Liquid ropes: a geometrical model for thin viscous jet instabilities (2015)",
+    "Miel versé sur une tartine, glaçage au cornet, palettes biennale et kegelbahn"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
