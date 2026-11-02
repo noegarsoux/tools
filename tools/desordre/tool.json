@@ -1,0 +1,15 @@
+{
+  "slug": "desordre",
+  "title": "Désordre",
+  "type": "system",
+  "description": "Une grille de modules où l'ordre se défait selon un champ d'entropie : rotation, déplacement, sommets déformés et absences, en SVG.",
+  "tags": ["grille", "entropie", "molnar", "nees", "svg", "modules"],
+  "inspiration": [
+    "Vera Molnár, (Dés)ordres et 1 % de désordre",
+    "Georg Nees, Schotter (1968)",
+    "references/artistes.md ; palettes papier-60, biennale, kegelbahn, photocopie, menthe, salon, orbite"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
