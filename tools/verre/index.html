@@ -1,0 +1,370 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Verre et réfraction</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Verre et réfraction : une scène de marque (formes, bandes, dégradé, grille ou logo) dessinée en 2D,
+    // vue à travers une plaque de verre calculée en WebGL. Le verre est un champ de hauteur (cannelures,
+    // ondulations, galets, prismes ou verre lisse) ; sa pente dévie chaque rayon (réfraction), un peu
+    // différemment pour le rouge, le vert et le bleu (dispersion). Le dépoli lit la scène dans un niveau
+    // de mipmap plus flou ; un reflet suit le pointeur. La plaque couvre tout le cadre, ou un bloc, ou un disque.
+    const canvas = document.querySelector('canvas');
+    const gl = canvas.getContext('webgl2', { alpha: false, antialias: false, depth: false, stencil: false, preserveDrawingBuffer: false });
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const KB = PAL('kegelbahn'), LU = PAL('luzern'), MENTHE = PAL('menthe'), TH = PAL('thermique'), ACIDE = PAL('acide');
+    const BIEN = PAL('biennale'), P60 = PAL('papier-60'), GR = PAL('good-room'), SALON = PAL('salon'), PYR = PAL('pyramides');
+
+    let ready = false, ptr = null, drag = null, light = null, center = { x: 0.5, y: 0.5 }, phase = 0, phaseDrag = 0;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.03, vignette: 0.15 },
+      hint: 'Survol : le reflet suit le pointeur · glissez pour déplacer le verre · molette : largeur des cannelures',
+      notes: 'La pente du verre dévie chaque rayon : les cannelures découpent la scène en tranches, les galets la morcellent, le prisme la dédouble. La dispersion sépare les couleurs, le dépoli adoucit l’image derrière.',
+      params: {
+        'Verre': {
+          texture: { type: 'segmented', label: 'Texture', options: { cannele: 'Cannelé', ondule: 'Ondulé', galets: 'Galets', prisme: 'Prisme', lisse: 'Lisse' }, value: 'cannele' },
+          region: { type: 'segmented', label: 'Plaque', options: { plein: 'Tout le cadre', bloc: 'Bloc', disque: 'Disque' }, value: 'plein' },
+          largeur: { type: 'range', label: 'Largeur des cannelures', min: 0.01, max: 0.25, step: 0.001, value: 0.06 },
+          angle: { type: 'range', label: 'Angle (°)', min: -90, max: 90, step: 1, value: 0 },
+          relief: { type: 'range', label: 'Réfraction', min: 0, max: 3, step: 0.01, value: 1.2 },
+          dispersion: { type: 'range', label: 'Dispersion', min: 0, max: 1, step: 0.01, value: 0.35 },
+          depoli: { type: 'range', label: 'Dépoli', min: 0, max: 1, step: 0.01, value: 0.15 },
+          reflet: { type: 'range', label: 'Reflet', min: 0, max: 1, step: 0.01, value: 0.45 },
+          taillePlaque: { type: 'range', label: 'Taille du bloc ou du disque', min: 0.15, max: 0.95, step: 0.01, value: 0.55 },
+          teinte: { type: 'range', label: 'Teinte du verre', min: 0, max: 1, step: 0.01, value: 0.1 },
+          couleurVerre: { type: 'color', label: 'Couleur du verre', value: '#bfe3dc' },
+        },
+        'Scène': {
+          scene: { type: 'segmented', label: 'Scène', options: { formes: 'Formes', bandes: 'Bandes', degrade: 'Dégradé', grille: 'Grille', logo: 'Logo' }, value: 'formes' },
+          nombre: { type: 'range', label: 'Nombre de formes', min: 2, max: 16, step: 1, value: 8 },
+          taille: { type: 'range', label: 'Taille des formes', min: 0.08, max: 0.7, step: 0.01, value: 0.36 },
+          fond: { type: 'color', label: 'Fond', value: KB[0] },
+          couleurs: { type: 'palette', label: 'Couleurs', value: [KB[1], KB[2], KB[3], KB[5]] },
+        },
+        'Mouvement': {
+          vitesse: { type: 'range', label: 'Vitesse de la scène', min: 0, max: 2, step: 0.01, value: 0.5 },
+          defilement: { type: 'range', label: 'Défilement des cannelures', min: -1, max: 1, step: 0.01, value: 0.08 },
+          errance: { type: 'range', label: 'Errance du bloc', min: 0, max: 1, step: 0.01, value: 0.5 },
+        },
+      },
+      presets: {
+        'Cannelé': {},
+        'Douche': { texture: 'galets', largeur: 0.085, reflet: 0.3, relief: 1.4, depoli: 0.35, dispersion: 0.2, scene: 'degrade', nombre: 5, taille: 0.45, fond: MENTHE[0], couleurs: [MENTHE[2], MENTHE[3], MENTHE[1]], teinte: 0.15, couleurVerre: '#dff2ec' },
+        'Prisme': { texture: 'prisme', largeur: 0.09, angle: 0, relief: 1, dispersion: 0.9, depoli: 0, scene: 'bandes', nombre: 7, fond: ACIDE[0], couleurs: [ACIDE[1], ACIDE[2], ACIDE[3]], reflet: 0.3 },
+        'Bloc': { texture: 'cannele', region: 'bloc', largeur: 0.035, relief: 1.6, taillePlaque: 0.5, scene: 'formes', nombre: 5, taille: 0.34, fond: BIEN[0], couleurs: [BIEN[1], BIEN[2], BIEN[3], BIEN[4]], vignette: 0 },
+        'Ondes': { texture: 'ondule', largeur: 0.08, angle: 90, relief: 1.6, dispersion: 0.5, depoli: 0.1, scene: 'degrade', nombre: 6, taille: 0.5, fond: TH[1], couleurs: [TH[2], TH[3], TH[4], TH[5]] },
+        'Loupe': { texture: 'lisse', region: 'disque', relief: 2, dispersion: 0.4, depoli: 0, taillePlaque: 0.42, scene: 'grille', nombre: 12, fond: P60[0], couleurs: [P60[1], '#e5452a'], reflet: 0.6, vignette: 0 },
+        'Vitrine': { texture: 'cannele', region: 'bloc', largeur: 0.02, angle: 90, relief: 2.2, taillePlaque: 0.62, depoli: 0.25, scene: 'formes', nombre: 9, taille: 0.22, fond: GR[0], couleurs: [GR[1], GR[2], GR[3], GR[4]], teinte: 0.05 },
+        'Nuit': { texture: 'cannele', largeur: 0.022, relief: 1.8, dispersion: 0.6, depoli: 0.05, scene: 'degrade', nombre: 4, taille: 0.4, fond: '#050505', couleurs: [LU[0], LU[1], '#3b2bff'], reflet: 0.7, vignette: 0.3 },
+        'Logo': { texture: 'cannele', largeur: 0.045, angle: 12, relief: 1.4, dispersion: 0.4, scene: 'logo', taille: 0.6, fond: SALON[0], couleurs: [SALON[1], SALON[2]], vignette: 0 },
+        'Pyramides': { texture: 'prisme', largeur: 0.14, angle: 45, relief: 0.8, dispersion: 0.3, depoli: 0.08, scene: 'formes', nombre: 7, taille: 0.3, fond: PYR[0], couleurs: [PYR[1], PYR[2], PYR[3], PYR[4], PYR[5]] },
+      },
+      brand(colors) {
+        const rest = colors.slice(1);
+        return { fond: colors[0], couleurs: (rest.length ? rest : ['#ffffff']).slice(0, 6) };
+      },
+      pointer: {
+        move: (q) => { ptr = { x: q.x / app.size.w, y: q.y / app.size.h }; },
+        down: (q) => { drag = { x: q.x / app.size.w, y: q.y / app.size.h, cx: center.x, cy: center.y, ph: phaseDrag }; },
+        drag: (q) => {
+          ptr = { x: q.x / app.size.w, y: q.y / app.size.h };
+          if (!drag) return;
+          if (p.region === 'plein') {
+            // Tout le cadre : on fait glisser les cannelures sous le doigt.
+            const a = p.angle * Math.PI / 180, U = Math.min(app.size.w, app.size.h);
+            const dx = (ptr.x - drag.x) * app.size.w, dy = (ptr.y - drag.y) * app.size.h;
+            phaseDrag = drag.ph + (Math.cos(a) * dx - Math.sin(a) * dy) / (p.largeur * U);
+          } else {
+            center = { x: Math.min(1, Math.max(0, drag.cx + ptr.x - drag.x)), y: Math.min(1, Math.max(0, drag.cy + ptr.y - drag.y)) };
+          }
+        },
+        up: () => { drag = null; },
+        wheel: (q, dy) => app.set('largeur', Math.max(0.01, Math.min(0.25, Math.round((p.largeur * Math.exp(dy * 0.002)) * 1000) / 1000))),
+      },
+      onChange(k) { if (k === '*') { center = { x: 0.5, y: 0.5 }; phaseDrag = 0; } },
+      export: { name: 'verre' },
+    });
+    const p = app.params;
+    canvas.addEventListener('pointerleave', () => { ptr = null; });
+
+    // ——— La scène, dessinée en 2D à la taille du canevas ———
+    const sceneCv = document.createElement('canvas');
+    const sx = sceneCv.getContext('2d');
+    let shapes = null, shapesKey = '', logoCache = null;
+    function layout() {
+      const key = [app.seed, p.nombre, p.scene].join('|');
+      if (shapes && shapesKey === key) return;
+      const r = app.rng(11);
+      shapes = [];
+      // Placement par meilleur candidat : les formes se répartissent sans s'agglutiner.
+      const pts = [];
+      for (let i = 0; i < 16; i++) {
+        let best = null, bd = -1;
+        for (let k = 0; k < 10; k++) {
+          const c = [0.08 + r() * 0.84, 0.08 + r() * 0.84];
+          let d = 9;
+          for (let j = 0; j < Math.min(pts.length, p.nombre); j++) d = Math.min(d, Math.hypot(c[0] - pts[j][0], c[1] - pts[j][1]));
+          if (d > bd) { bd = d; best = c; }
+        }
+        pts.push(best);
+      }
+      for (let i = 0; i < 16; i++) {
+        shapes.push({
+          x: pts[i][0], y: pts[i][1], s: 0.45 + r() * 0.75, k: r() < 0.3 ? 1 : 0, rot: r() * TAU,
+          fx: 0.05 + r() * 0.12, fy: 0.05 + r() * 0.12, px: r() * TAU, py: r() * TAU, ax: 0.06 + r() * 0.16, ay: 0.06 + r() * 0.16,
+        });
+      }
+      shapesKey = key;
+    }
+    function logoTinted(color) {
+      const img = app.logoImg;
+      if (!img) return null;
+      if (logoCache && logoCache.img === img && logoCache.color === color) return logoCache.cv;
+      const N = 1024, iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height, k = N / Math.max(iw, ih);
+      const cv = document.createElement('canvas'); cv.width = Math.max(1, Math.round(iw * k)); cv.height = Math.max(1, Math.round(ih * k));
+      const x = cv.getContext('2d', { willReadFrequently: true });
+      x.drawImage(img, 0, 0, cv.width, cv.height);
+      const im = x.getImageData(0, 0, cv.width, cv.height), d = im.data;
+      let clear = 0;
+      for (let i = 3; i < d.length; i += 4) if (d[i] < 128) clear++;
+      const useAlpha = clear > d.length / 4 * 0.1;
+      const n = parseInt(color.slice(1, 7), 16);
+      for (let i = 0; i < d.length; i += 4) {
+        const lum = (d[i] * 0.2126 + d[i + 1] * 0.7152 + d[i + 2] * 0.0722) / 255;
+        const v = useAlpha ? d[i + 3] / 255 : (1 - lum) * d[i + 3] / 255;
+        d[i] = n >> 16 & 255; d[i + 1] = n >> 8 & 255; d[i + 2] = n & 255; d[i + 3] = Math.round(v * 255);
+      }
+      x.putImageData(im, 0, 0);
+      logoCache = { img, color, cv };
+      return cv;
+    }
+    function drawScene(t, W, H) {
+      if (sceneCv.width !== W || sceneCv.height !== H) { sceneCv.width = W; sceneCv.height = H; }
+      layout();
+      const c = sx, U = Math.min(W, H), pal = p.couleurs && p.couleurs.length ? p.couleurs : ['#ffffff'], v = t * p.vitesse;
+      c.setTransform(1, 0, 0, 1, 0, 0);
+      c.globalAlpha = 1; c.filter = 'none';
+      c.fillStyle = p.fond; c.fillRect(0, 0, W, H);
+      const pos = (s) => [W * (s.x + s.ax * Math.sin(v * s.fx * TAU + s.px)), H * (s.y + s.ay * Math.sin(v * s.fy * TAU + s.py))];
+      if (p.scene === 'formes') {
+        // Disques et gélules aux couleurs de la charte, aux bords nets : la réfraction les découpe.
+        for (let i = 0; i < p.nombre; i++) {
+          const s = shapes[i], [x, y] = pos(s), R = U * p.taille * 0.5 * s.s;
+          c.fillStyle = pal[i % pal.length];
+          c.save(); c.translate(x, y); c.rotate(s.rot + v * 0.1 * (i % 2 ? 1 : -1));
+          c.beginPath();
+          if (s.k) c.roundRect(-R * 1.4, -R * 0.5, R * 2.8, R, R * 0.5); else c.arc(0, 0, R, 0, TAU);
+          c.fill(); c.restore();
+        }
+      } else if (p.scene === 'degrade') {
+        // Halos qui se superposent : un dégradé maillé doux.
+        for (let i = 0; i < p.nombre; i++) {
+          const s = shapes[i], [x, y] = pos(s), R = U * p.taille * 1.1 * s.s, col = pal[i % pal.length];
+          const g = c.createRadialGradient(x, y, 0, x, y, R);
+          g.addColorStop(0, col); g.addColorStop(0.45, col + 'cc'); g.addColorStop(1, col + '00');
+          c.fillStyle = g; c.fillRect(0, 0, W, H);
+        }
+      } else if (p.scene === 'bandes') {
+        // Bandes diagonales qui défilent, largeurs inégales.
+        const n = p.nombre, period = Math.hypot(W, H) / n * 2, off = (v * 0.06 * period) % period;
+        c.save(); c.translate(W / 2, H / 2); c.rotate(-0.35);
+        const L = Math.hypot(W, H);
+        for (let i = -n * 2; i < n * 2; i++) {
+          const s = shapes[((i % 16) + 16) % 16];
+          c.fillStyle = pal[((i % pal.length) + pal.length) % pal.length];
+          c.fillRect(i * period / 2 + off - L, -L, period * (0.18 + 0.3 * s.s), 2 * L);
+        }
+        c.restore();
+      } else if (p.scene === 'grille') {
+        // Grille de points et de lignes : la meilleure scène pour lire la déformation.
+        const n = p.nombre, step = U / n, ox = (v * 0.08 * step) % step;
+        c.strokeStyle = pal[0]; c.lineWidth = Math.max(1, U * 0.003);
+        c.beginPath();
+        for (let x = (W / 2) % step - step + ox; x < W + step; x += step) { c.moveTo(x, 0); c.lineTo(x, H); }
+        for (let y = (H / 2) % step - step; y < H + step; y += step) { c.moveTo(0, y); c.lineTo(W, y); }
+        c.stroke();
+        let k = 0;
+        for (let y = (H / 2) % step - step; y < H + step; y += step) for (let x = (W / 2) % step - step + ox; x < W + step; x += step) {
+          k++;
+          c.fillStyle = pal[(k % 7 === 0 && pal.length > 1) ? 1 : 0];
+          c.beginPath(); c.arc(x, y, step * (k % 7 === 0 ? 0.22 : 0.09) * (p.taille / 0.3), 0, TAU); c.fill();
+        }
+      } else {
+        // Logo de la charte, grand et lentement flottant ; sans logo, l'anneau et le point de l'atelier.
+        const col = pal[0], L = logoTinted(col), dx = Math.sin(v * 0.4) * U * 0.03, dy = Math.cos(v * 0.33) * U * 0.02;
+        if (L) {
+          const k = Math.min(W * 0.9, U * p.taille * 1.6) / Math.max(L.width, L.height);
+          c.drawImage(L, W / 2 - L.width * k / 2 + dx, H / 2 - L.height * k / 2 + dy, L.width * k, L.height * k);
+        } else {
+          const R = U * p.taille * 0.7;
+          c.strokeStyle = col; c.fillStyle = pal[1 % pal.length];
+          c.lineWidth = R * 0.24; c.beginPath(); c.arc(W / 2 + dx, H / 2 + dy, R * 0.8, 0, TAU); c.stroke();
+          c.beginPath(); c.arc(W / 2 + dx, H / 2 + dy, R * 0.28, 0, TAU); c.fill();
+        }
+      }
+    }
+
+    // ——— Le verre ———
+    const VS = `#version 300 es
+    layout(location = 0) in vec2 aP;
+    void main() { gl_Position = vec4(aP, 0., 1.); }`;
+    const FS = `#version 300 es
+    precision highp float;
+    uniform sampler2D uScene;
+    uniform vec2 uRes, uC, uL, uBox;
+    uniform int uTex, uReg;
+    uniform float uU, uW, uAng, uRelief, uDisp, uFrost, uSpec, uTint, uPhase, uT, uGrain, uVig, uFrame;
+    uniform vec3 uTintC;
+    out vec4 o;
+    float hash(vec2 p) { uvec2 q = uvec2(ivec2(p)) * uvec2(1597334673u, 3812015801u); uint n = (q.x ^ q.y) * 1597334673u; n ^= n >> 16; n *= 2246822519u; n ^= n >> 13; return float(n) / 4294967295.; }
+    vec2 h2(vec2 c) { return vec2(hash(c * 1.7 + 3.1), hash(c * 2.3 + 11.7)); }
+    // Pente de la texture du verre, en unités de cannelure, dans le repère tourné.
+    vec2 texSlope(vec2 q) {
+      if (uTex == 0 || uTex == 1) {
+        float w = 0.;
+        if (uTex == 1) { w = 0.32 * sin(q.y * 0.55 + uT * 0.6); q.x += w; }
+        float s = fract(q.x + uPhase) * 2. - 1.;
+        float k = s / sqrt(max(1. - s * s, 0.03));
+        return vec2(k, uTex == 1 ? k * 0.32 * 0.55 * cos(q.y * 0.55 + uT * 0.6) : 0.);
+      }
+      if (uTex == 3) {
+        float s = fract(q.x + uPhase);
+        return vec2(s < 0.5 ? 1.1 : -1.1, 0.);
+      }
+      if (uTex == 2) {
+        // Galets : cellules de Voronoï bombées sur une grille décalée.
+        vec2 g = floor(q), f = fract(q), best = vec2(0.), bc = vec2(0.);
+        float bd = 9.;
+        for (int j = -1; j <= 1; j++) for (int i = -1; i <= 1; i++) {
+          vec2 c = g + vec2(i, j);
+          vec2 pt = vec2(i, j) + 0.2 + 0.6 * h2(c);
+          vec2 d = pt - f;
+          float dd = dot(d, d);
+          if (dd < bd) { bd = dd; best = -d; bc = c; }
+        }
+        vec2 d = best / 0.62;
+        float r2 = dot(d, d);
+        return d / sqrt(max(1. - r2, 0.06));
+      }
+      return vec2(0.);
+    }
+    float sdBox(vec2 p, vec2 b, float r) { vec2 d = abs(p) - b + r; return length(max(d, 0.)) + min(max(d.x, d.y), 0.) - r; }
+    float regionSd(vec2 p) {
+      if (uReg == 1) return sdBox(p - uC, uBox, uU * 0.04);
+      return length(p - uC) - uBox.x;
+    }
+    void main() {
+      vec2 p = gl_FragCoord.xy;
+      float ca = cos(uAng), sa = sin(uAng);
+      vec2 q = vec2(ca * p.x + sa * p.y, -sa * p.x + ca * p.y) / uW;
+      vec2 sl = texSlope(q);
+      sl = vec2(ca * sl.x - sa * sl.y, sa * sl.x + ca * sl.y);
+      float inside = 1.;
+      vec2 shape = vec2(0.);
+      float rim = 0.;
+      if (uReg > 0) {
+        float d = regionSd(p);
+        inside = 1. - smoothstep(-1., 1., d);
+        float e = 1.5;
+        vec2 gr = vec2(regionSd(p + vec2(e, 0.)) - regionSd(p - vec2(e, 0.)), regionSd(p + vec2(0., e)) - regionSd(p - vec2(0., e))) / (2. * e);
+        // Biseau : le bord du verre se bombe et repousse l'image vers l'extérieur.
+        float bw = uU * 0.05, tb = clamp(-d / bw, 0., 1.);
+        shape = gr * 2.2 * (1. - tb) * (1. - tb);
+        if (uReg == 2) { vec2 dd = (p - uC) / uBox.x; shape += dd / sqrt(max(1. - dot(dd, dd), 0.12)) * 0.35; }
+        rim = exp(-abs(d) / (uU * 0.003));
+      }
+      vec2 S = (sl + shape) * inside;
+      vec2 off = -(sl * uW * 0.42 + shape * uU * 0.06) * uRelief * inside;
+      float lod = uFrost * 5.5 * inside;
+      vec2 k = 1. / uRes;
+      float dr = 1. + uDisp * 0.45, db = 1. - uDisp * 0.45;
+      vec3 col = vec3(
+        textureLod(uScene, (p + off * dr) * k, lod).r,
+        textureLod(uScene, (p + off) * k, lod).g,
+        textureLod(uScene, (p + off * db) * k, lod).b);
+      // Teinte et absorption : un peu plus sombre là où le verre est épais (pentes fortes).
+      float slope = length(S);
+      col = mix(col, col * uTintC * 1.15 + uTintC * 0.06, uTint * inside);
+      col *= 1. - 0.12 * uSpec * smoothstep(1., 4., slope) * inside;
+      // Reflet : une lumière ponctuelle qui suit le pointeur.
+      vec3 n = normalize(vec3(-S * 0.55, 1.));
+      vec3 L = normalize(vec3((uL - p) / uU, 0.7));
+      vec3 H = normalize(L + vec3(0., 0., 1.));
+      float spec = pow(max(dot(n, H), 0.), 70.) * 1.2 + pow(max(dot(n, H), 0.), 8.) * 0.12;
+      col += spec * uSpec * inside;
+      col += rim * uSpec * 0.5;
+      vec2 c2 = gl_FragCoord.xy / uRes * 2. - 1.;
+      col *= 1. - uVig * 0.85 * smoothstep(0.35, 1.25, length(c2));
+      col += (hash(gl_FragCoord.xy + uFrame * 17.31) - 0.5) * uGrain * 0.22;
+      o = vec4(col, 1.);
+    }`;
+    function sh(type, src) { const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s); if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s)); return s; }
+    const prog = gl.createProgram();
+    gl.attachShader(prog, sh(gl.VERTEX_SHADER, VS)); gl.attachShader(prog, sh(gl.FRAGMENT_SHADER, FS));
+    gl.linkProgram(prog);
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
+    const Lc = {}; const u = (n) => (n in Lc ? Lc[n] : (Lc[n] = gl.getUniformLocation(prog, n)));
+    const vao = gl.createVertexArray(); gl.bindVertexArray(vao);
+    const buf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+    const sceneTex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, sceneTex);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.MIRRORED_REPEAT);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.MIRRORED_REPEAT);
+
+    const rgbf = (hx) => { const n = parseInt(String(hx).slice(1, 7), 16) || 0; return [(n >> 16 & 255) / 255, (n >> 8 & 255) / 255, (n & 255) / 255]; };
+    let frame = 0, lastT = 0;
+    function render(t, dt) {
+      const W = canvas.width, H = canvas.height, U = Math.min(W, H);
+      if (dt > 0) phase += dt * p.defilement * 0.25;
+      drawScene(t, W, H);
+      gl.bindTexture(gl.TEXTURE_2D, sceneTex);
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, sceneCv);
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+      gl.generateMipmap(gl.TEXTURE_2D);
+      gl.viewport(0, 0, W, H);
+      gl.useProgram(prog); gl.bindVertexArray(vao);
+      gl.uniform1i(u('uScene'), 0);
+      gl.uniform2f(u('uRes'), W, H);
+      gl.uniform1f(u('uU'), U);
+      gl.uniform1f(u('uW'), p.largeur * U);
+      gl.uniform1f(u('uAng'), p.angle * Math.PI / 180);
+      gl.uniform1i(u('uTex'), ['cannele', 'ondule', 'galets', 'prisme', 'lisse'].indexOf(p.texture));
+      const reg = ['plein', 'bloc', 'disque'].indexOf(p.region);
+      gl.uniform1i(u('uReg'), Math.max(0, reg));
+      // Le bloc erre doucement autour de sa place (et suit le doigt quand on le déplace).
+      const e = drag ? 0 : p.errance;
+      const cx = (center.x + e * 0.08 * Math.sin(t * 0.23)) * W, cy = (1 - (center.y + e * 0.06 * Math.sin(t * 0.17 + 1.3))) * H;
+      gl.uniform2f(u('uC'), cx, cy);
+      if (reg === 1) gl.uniform2f(u('uBox'), Math.min(W * 0.48, U * p.taillePlaque * 0.62), U * p.taillePlaque * 0.5);
+      else gl.uniform2f(u('uBox'), U * p.taillePlaque * 0.5, 0);
+      const Lp = ptr ? [ptr.x * W, (1 - ptr.y) * H] : [W * (0.5 + 0.35 * Math.cos(t * 0.21)), H * (0.62 + 0.25 * Math.sin(t * 0.17))];
+      gl.uniform2f(u('uL'), Lp[0], Lp[1]);
+      gl.uniform1f(u('uRelief'), p.relief); gl.uniform1f(u('uDisp'), p.dispersion);
+      gl.uniform1f(u('uFrost'), p.depoli); gl.uniform1f(u('uSpec'), p.reflet);
+      gl.uniform1f(u('uTint'), p.teinte); gl.uniform3fv(u('uTintC'), rgbf(p.couleurVerre));
+      gl.uniform1f(u('uPhase'), phase + phaseDrag); gl.uniform1f(u('uT'), t);
+      gl.uniform1f(u('uGrain'), p.grain ?? 0); gl.uniform1f(u('uVig'), p.vignette ?? 0); gl.uniform1f(u('uFrame'), frame % 997);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+      if (dt > 0) frame++;
+    }
+    ready = true;
+    app.loop((t, dt) => render(t, dt));
+  </script>
+</body>
+</html>
