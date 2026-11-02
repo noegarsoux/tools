@@ -1,0 +1,15 @@
+{
+  "slug": "bougies",
+  "title": "Bougies",
+  "type": "motion",
+  "description": "Des bougies aux couleurs de la marque, en rangée, cercle, grille ou logo : flammes qui vacillent, se couchent au vent et s'éteignent en fumée.",
+  "tags": ["bougies", "flamme", "lumiere", "nuit", "logo", "svg"],
+  "inspiration": [
+    "Georges de La Tour, scènes à la chandelle",
+    "Veillées et vigiles aux bougies",
+    "references/physique-maths.md ; palettes biennale, kegelbahn, salon, luzern"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
