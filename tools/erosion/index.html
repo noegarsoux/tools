@@ -1,0 +1,313 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Érosion</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Érosion : des gouttes tombent au hasard sur un relief et roulent selon la pente, avec un peu d'inertie.
+    // Rapides et chargées de peu de sédiment, elles arrachent le sol ; ralenties, elles le déposent.
+    // Des millions de gouttes plus tard, le relief est ciselé de ravines et de vallées, et le passage de l'eau
+    // dessine un réseau de rivières. Un lent soulèvement entretient les montagnes.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const PYR = PAL('pyramides'), EVT = PAL('eventail'), MENTHE = PAL('menthe'), THERM = PAL('thermique'), KB = PAL('kegelbahn');
+
+    let W = 0, H = 0, hgt = null, base = null, flow = null, simKey = '', frozen = false, rng = Math.random, maskKey = null, mask = null;
+    let seaH = 0, hLo = 0, hHi = 1, riverQ = [1, 1], img = null, buf = null, frameN = 0, storm = null, held = null, contourC = null, contourN = 0, drops = 0;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.05, vignette: 0.15 },
+      hint: 'Glissez pour soulever le terrain · touchez pour un orage · molette : pluie',
+      notes: 'Chaque goutte tombe au hasard, roule vers le bas avec un peu d’élan et emporte du sol tant qu’elle va vite et n’est pas trop chargée. Quand la pente faiblit, elle ralentit et dépose ce qu’elle porte. Les creux où passent beaucoup de gouttes se creusent et en attirent davantage : ainsi naissent les ravines, puis les vallées, puis tout un réseau de rivières. Un soulèvement lent, comme celui des plaques, entretient les montagnes face à la pluie.',
+      params: {
+        'Terrain': {
+          relief: { type: 'select', label: 'Relief de départ', options: { montagnes: 'Montagnes', plateau: 'Plateau', volcan: 'Volcan', logo: 'Logo' }, value: 'montagnes' },
+          image: { type: 'file', label: 'Logo', accept: 'image/*', show: (q) => q.relief === 'logo' },
+          finesse: { type: 'range', label: 'Finesse', min: 140, max: 420, step: 4, value: 300 },
+          exageration: { type: 'range', label: 'Exagération du relief', min: 0.3, max: 4, step: 0.05, value: 1.6 },
+          mer: { type: 'range', label: 'Niveau de la mer', min: 0, max: 0.6, step: 0.01, value: 0 },
+          soulevement: { type: 'range', label: 'Soulèvement', min: 0, max: 1, step: 0.01, value: 0.3 },
+        },
+        'Érosion': {
+          pluie: { type: 'range', label: 'Pluie', min: 0, max: 1, step: 0.01, value: 0.5 },
+          arrachement: { type: 'range', label: 'Arrachement', min: 0.05, max: 0.9, step: 0.01, value: 0.3 },
+          depot: { type: 'range', label: 'Dépôt', min: 0.05, max: 0.9, step: 0.01, value: 0.3 },
+          capacite: { type: 'range', label: 'Charge portée', min: 1, max: 12, step: 0.1, value: 5 },
+          inertie: { type: 'range', label: 'Élan des gouttes', min: 0, max: 0.6, step: 0.01, value: 0.08 },
+          evaporation: { type: 'range', label: 'Évaporation', min: 0.003, max: 0.06, step: 0.001, value: 0.015 },
+        },
+        'Rendu': {
+          style: { type: 'segmented', label: 'Style', options: { carte: 'Carte', gris: 'Gris', courbes: 'Courbes' }, value: 'carte' },
+          lumiere: { type: 'range', label: 'Direction de la lumière', min: 0, max: 360, step: 1, value: 315 },
+          rivieres: { type: 'range', label: 'Rivières', min: 0, max: 1, step: 0.01, value: 0.7 },
+          teintes: { type: 'palette', label: 'Teintes d’altitude', value: ['#5f7d4e', '#9aa86a', '#d8cf9b', '#c79a6b', '#8f6a55', '#f2eee6'] },
+          eau: { type: 'color', label: 'Eau', value: '#4f7fa8' },
+          papier: { type: 'color', label: 'Papier (courbes)', value: '#f4f0e6' },
+        },
+      },
+      presets: {
+        'Alpes': {},
+        'Relief gris': { style: 'gris', rivieres: 0.35, mer: 0 },
+        'Courbes': { style: 'courbes', mer: 0 },
+        'Plateau': { relief: 'plateau', capacite: 7, arrachement: 0.4, teintes: ['#a8643c', '#c98b54', '#e2b77d', '#f0d9a8'] },
+        'Volcan': { relief: 'volcan', mer: 0.5, teintes: ['#3c3a35', '#5b4f45', '#7a6a5c', '#a38f7c', '#e9e2d6'] },
+        'Logo': { relief: 'logo', mer: 0 },
+        'Archipel': { mer: 0.3, soulevement: 0.5, eau: '#2f6f9e' },
+        'Désert': { pluie: 0.25, teintes: [PYR[0], '#c9a978', '#e6cc9a', '#f2e3c4'], eau: PYR[5], mer: 0 },
+        'Menthe': { teintes: [MENTHE[3], MENTHE[2], MENTHE[0], '#ffffff'], eau: MENTHE[1], mer: 0 },
+        'Thermique': { teintes: [THERM[1], THERM[4], THERM[2], THERM[3], THERM[5]], eau: '#16163a', mer: 0 },
+        'Kegelbahn': { style: 'courbes', papier: KB[0], teintes: [KB[2], KB[1], KB[3]], eau: KB[2] },
+      },
+      brand(colors) {
+        const lum = (x) => { const c = hex(x); return c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114; };
+        const all = colors.slice().sort((a, b) => lum(a) - lum(b));
+        return { teintes: all.length > 2 ? all.slice(1) : all, eau: all[0], papier: all[all.length - 1] };
+      },
+      pointer: {
+        down: (q) => { held = { x: q.x, y: q.y, x0: q.x, y0: q.y, moved: false }; },
+        drag: (q) => { if (!held) return; if (Math.hypot(q.x - held.x0, q.y - held.y0) > 5) held.moved = true; held.x = q.x; held.y = q.y; },
+        up: (q) => { if (held && !held.moved) storm = { x: held.x0, y: held.y0, t: 1.4 }; held = null; },
+        wheel: (q, dy) => app.set('pluie', Math.max(0, Math.min(1, +(p.pluie + (dy > 0 ? -0.05 : 0.05)).toFixed(2)))),
+      },
+      onChange(k) { if (k === 'image') maskKey = null; if (k === '*' || ['relief', 'finesse', 'image'].includes(k)) simKey = ''; contourN = 0; frozen = false; },
+      onSeed() { simKey = ''; frozen = false; },
+      export: { name: 'erosion', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    const hex = (x) => { const n = parseInt(x.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; };
+    const mix = (a, b, t) => { const A = hex(a), B = hex(b); return '#' + A.map((v, i) => Math.round(v + (B[i] - v) * t).toString(16).padStart(2, '0')).join(''); };
+    function mulberry(a) { return () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+
+    // ——— Bruit de gradient (Perlin) ———
+    let perm = new Uint8Array(512);
+    function seedNoise() { const q = new Uint8Array(256); for (let i = 0; i < 256; i++) q[i] = i; for (let i = 255; i > 0; i--) { const j = Math.floor(rng() * (i + 1)); [q[i], q[j]] = [q[j], q[i]]; } for (let i = 0; i < 512; i++) perm[i] = q[i & 255]; }
+    const fade = (t) => t * t * t * (t * (t * 6 - 15) + 10);
+    function grad(hh, x, y) { const g = hh & 7; const u = g < 4 ? x : y, v = g < 4 ? y : x; return ((g & 1) ? -u : u) + ((g & 2) ? -2 * v : 2 * v); }
+    function noise(x, y) {
+      const X = Math.floor(x) & 255, Y = Math.floor(y) & 255; x -= Math.floor(x); y -= Math.floor(y); const u = fade(x), v = fade(y);
+      const a = perm[X] + Y, b = perm[X + 1] + Y;
+      const l1 = grad(perm[a], x, y) + u * (grad(perm[b], x - 1, y) - grad(perm[a], x, y));
+      const l2 = grad(perm[a + 1], x, y - 1) + u * (grad(perm[b + 1], x - 1, y - 1) - grad(perm[a + 1], x, y - 1));
+      return (l1 + v * (l2 - l1)) * 0.35;
+    }
+    function fbm(x, y, oct, ridged) { let s = 0, a = 1, f = 1, n = 0; for (let o = 0; o < oct; o++) { let v = noise(x * f, y * f); if (ridged) { v = 1 - Math.abs(v * 2.8); v *= v; } s += v * a; n += a; a *= 0.5; f *= 2.03; } return s / n; }
+
+    // ——— Logo ———
+    function logoMask() {
+      const img0 = p.image || app.logoImg, key = (img0 ? (img0.src || 'c') : 'demo') + W + 'x' + H;
+      if (key === maskKey && mask) return mask; maskKey = key;
+      const c = document.createElement('canvas'); c.width = W; c.height = H; const x = c.getContext('2d', { willReadFrequently: true });
+      const L = Math.min(W, H) * 0.7, cx = W / 2, cy = H / 2;
+      x.filter = `blur(${Math.max(1, L * 0.015)}px)`;
+      if (img0) { const iw = img0.naturalWidth || img0.width, ih = img0.naturalHeight || img0.height, k = L / Math.max(iw, ih); x.drawImage(img0, cx - iw * k / 2, cy - ih * k / 2, iw * k, ih * k); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(cx, cy, L * 0.48, 0, TAU); x.arc(cx, cy, L * 0.26, 0, TAU, true); x.fill('evenodd'); x.fillRect(cx - L * 0.06, cy - L * 0.5, L * 0.12, L); }
+      const d = x.getImageData(0, 0, W, H).data, a = new Float32Array(W * H); let transp = 0; for (let i = 3; i < d.length; i += 4) if (d[i] < 128) transp++;
+      const useA = transp > W * H * 0.05;
+      for (let i = 0; i < W * H; i++) { const l = (d[i * 4] * 0.2126 + d[i * 4 + 1] * 0.7152 + d[i * 4 + 2] * 0.0722) / 255; a[i] = useA ? d[i * 4 + 3] / 255 : (d[i * 4 + 3] / 255) * (1 - l); }
+      mask = a; return a;
+    }
+
+    // ——— Terrain de départ ———
+    function resetSim() {
+      const { w, h } = app.size; W = Math.round(app.thumbnail ? Math.max(p.finesse, 420) : p.finesse); H = Math.max(24, Math.round(W * h / w));
+      rng = mulberry(app.seed * 92821 + 7); seedNoise();
+      hgt = new Float32Array(W * H); base = new Float32Array(W * H); flow = new Float32Array(W * H); drops = 0;
+      const sc = 4 / Math.max(W, H), ox = rng() * 100, oy = rng() * 100, mk = p.relief === 'logo' ? logoMask() : null;
+      let mn = 1e9, mx = -1e9;
+      for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+        const u = x / W - 0.5, v = (y / H - 0.5) * H / W, r = Math.hypot(u, v * 1.0) / 0.5;
+        let e;
+        if (p.relief === 'montagnes') { const wx = fbm(x * sc * 0.6 + 3, y * sc * 0.6, 3, false) * 1.2, wy = fbm(x * sc * 0.6, y * sc * 0.6 + 7, 3, false) * 1.2; e = fbm(x * sc + ox + wx, y * sc + oy + wy, 6, false) + 0.3 * fbm(x * sc * 1.3 + ox, y * sc * 1.3 + oy, 5, true); }
+        else if (p.relief === 'plateau') { const n = fbm(x * sc * 0.7 + ox, y * sc * 0.7 + oy, 5, false) + 0.25; e = 1 / (1 + Math.exp(-(n - 0.22) * 22)) * 0.75 + fbm(x * sc * 2 + 5, y * sc * 2, 4, false) * 0.12; }
+        else if (p.relief === 'volcan') { const cone = Math.max(0, 1 - r * 1.15), crater = Math.exp(-Math.pow(r / 0.11, 2)); e = Math.pow(cone, 1.4) * 0.9 - crater * 0.35 + fbm(x * sc + ox, y * sc + oy, 5, true) * 0.18; }
+        else { e = mk[y * W + x] * 0.75 + fbm(x * sc * 1.5 + ox, y * sc * 1.5 + oy, 5, false) * 0.1 + 0.08; }
+        hgt[y * W + x] = e; if (e < mn) mn = e; if (e > mx) mx = e;
+      }
+      const pw = p.relief === 'montagnes' ? 1.6 : 1;
+      for (let i = 0; i < W * H; i++) { hgt[i] = Math.pow(Math.max(0, (hgt[i] - mn) / (mx - mn || 1)), pw); base[i] = hgt[i]; }
+      contourN = 0;
+    }
+
+    // ——— Une goutte (d'après Beyer) ———
+    const BR = [];
+    function brush(r) { BR.length = 0; let s = 0; for (let dy = -r; dy <= r; dy++) for (let dx = -r; dx <= r; dx++) { const d = Math.hypot(dx, dy); if (d < r) { BR.push([dx, dy, 1 - d / r]); s += 1 - d / r; } } for (const b of BR) b[2] /= s; }
+    function heightGrad(x, y, out) {
+      const ix = x | 0, iy = y | 0, fx = x - ix, fy = y - iy, i = iy * W + ix;
+      const a = hgt[i], b = hgt[i + 1], c = hgt[i + W], d = hgt[i + W + 1];
+      out[0] = (b - a) * (1 - fy) + (d - c) * fy; out[1] = (c - a) * (1 - fx) + (d - b) * fx; out[2] = a * (1 - fx) * (1 - fy) + b * fx * (1 - fy) + c * (1 - fx) * fy + d * fx * fy;
+    }
+    const HG = new Float32Array(3);
+    function droplet(px, py) {
+      const inertia = p.inertie, capF = p.capacite, erodeS = p.arrachement, depS = p.depot, evap = p.evaporation, grav = 4, sea = p.mer > 0 ? seaH : -1;
+      let dx = 0, dy = 0, speed = 1, water = 1, sed = 0;
+      for (let life = 0; life < 48; life++) {
+        const nx = px | 0, ny = py | 0, ci = ny * W + nx, fx = px - nx, fy = py - ny;
+        heightGrad(px, py, HG); const h0 = HG[2];
+        dx = dx * inertia - HG[0] * (1 - inertia); dy = dy * inertia - HG[1] * (1 - inertia);
+        const len = Math.hypot(dx, dy); if (len < 1e-9) break; dx /= len; dy /= len;
+        px += dx; py += dy;
+        if (px < 1 || py < 1 || px >= W - 2 || py >= H - 2) break;
+        heightGrad(px, py, HG); const dh = HG[2] - h0;
+        const cap = Math.max(-dh * speed * water * capF, 0.0005);
+        if (sed > cap || dh > 0) {
+          const amt = dh > 0 ? Math.min(dh, sed) : (sed - cap) * depS; sed -= amt;
+          hgt[ci] += amt * (1 - fx) * (1 - fy); hgt[ci + 1] += amt * fx * (1 - fy); hgt[ci + W] += amt * (1 - fx) * fy; hgt[ci + W + 1] += amt * fx * fy;
+        } else {
+          const amt = Math.min((cap - sed) * erodeS, -dh);
+          for (let k = 0; k < BR.length; k++) {
+            const bx = nx + BR[k][0], by = ny + BR[k][1]; if (bx < 0 || by < 0 || bx >= W || by >= H) continue;
+            const j = by * W + bx, e = Math.min(hgt[j], amt * BR[k][2]); hgt[j] -= e; sed += e;
+          }
+        }
+        speed = Math.sqrt(Math.max(0, speed * speed - dh * grav)); water *= 1 - evap;
+        flow[ci] += water;
+        if (HG[2] < sea) break; // arrivée à la mer
+      }
+    }
+    function levels() { const hs = new Float32Array(3000); for (let k = 0; k < hs.length; k++) hs[k] = hgt[(rng() * W * H) | 0]; hs.sort(); hLo = hs[30]; hHi = hs[2990]; seaH = p.mer > 0 ? hs[Math.min(2999, Math.floor(p.mer * 3000))] : -1; }
+    function rain(n) {
+      levels();
+      brush(Math.max(2, Math.round(W / 100)));
+      for (let k = 0; k < n; k++) {
+        let x, y;
+        if (storm && rng() < 0.75) { const [sx, sy] = toGrid(storm.x, storm.y), r = W * 0.08 * Math.sqrt(rng()), a = rng() * TAU; x = sx + Math.cos(a) * r; y = sy + Math.sin(a) * r; if (x < 1 || y < 1 || x >= W - 2 || y >= H - 2) continue; }
+        else { x = 1 + rng() * (W - 3); y = 1 + rng() * (H - 3); }
+        droplet(x, y);
+      }
+      drops += n;
+    }
+    const toGrid = (x, y) => [x / app.size.w * W, y / app.size.h * H];
+    function uplift(dt) {
+      // soulèvement : la forme de départ remonte lentement, la pluie la ronge ; un équilibre s'installe
+      const k = p.soulevement * 0.012 * dt;
+      if (k > 0) for (let i = 0; i < W * H; i++) hgt[i] += (base[i] - hgt[i]) * k * (0.3 + base[i]);
+    }
+    // érosion thermique : une pente trop raide s'éboule (efface le grésillement laissé par les gouttes)
+    function talus() {
+      const T = 5 / W, k = 0.15;
+      for (let y = 1; y < H - 1; y++) for (let x = 1; x < W - 1; x++) {
+        const i = y * W + x, hc = hgt[i]; let mi = i, md = 0;
+        const n1 = i - 1, n2 = i + 1, n3 = i - W, n4 = i + W;
+        let d = hc - hgt[n1]; if (d > md) { md = d; mi = n1; } d = hc - hgt[n2]; if (d > md) { md = d; mi = n2; } d = hc - hgt[n3]; if (d > md) { md = d; mi = n3; } d = hc - hgt[n4]; if (d > md) { md = d; mi = n4; }
+        if (md > T) { const m = (md - T) * k; hgt[i] -= m; hgt[mi] += m; }
+      }
+    }
+    function raise(x, y) {
+      const [gx, gy] = toGrid(x, y), r = W * 0.06;
+      for (let yy = Math.max(0, Math.floor(gy - r)); yy < Math.min(H, Math.ceil(gy + r)); yy++) for (let xx = Math.max(0, Math.floor(gx - r)); xx < Math.min(W, Math.ceil(gx + r)); xx++) {
+        const d = Math.hypot(xx - gx, yy - gy) / r; if (d < 1) { const f = Math.pow(1 - d * d, 2) * 0.012; hgt[yy * W + xx] += f; base[yy * W + xx] = Math.min(1.5, base[yy * W + xx] + f); }
+      }
+    }
+
+    // ——— Rendu ———
+    function ramp(cols, t) { const n = cols.length; if (n === 1) return hex(cols[0]); const x = Math.max(0, Math.min(0.9999, t)) * (n - 1), i = Math.floor(x), f = x - i, A = hex(cols[i]), B = hex(cols[i + 1]); return [A[0] + (B[0] - A[0]) * f, A[1] + (B[1] - A[1]) * f, A[2] + (B[2] - A[2]) * f]; }
+    function render() {
+      if (!buf || buf.width !== W || buf.height !== H) { buf = document.createElement('canvas'); buf.width = W; buf.height = H; img = buf.getContext('2d').createImageData(W, H); }
+      const d = img.data, la = p.lumiere * Math.PI / 180, lx = Math.cos(la) * 0.7, ly = Math.sin(la) * 0.7, lz = 0.7, ex = p.exageration * W * 0.2;
+      // niveaux relatifs : la mer couvre la part demandée des terres, les teintes couvrent toute l'altitude
+      levels();
+      const sea = seaH, E = hex(p.eau), Pp = hex(p.papier), style = p.style;
+      const LUT = []; for (let i = 0; i < 64; i++) LUT.push(ramp(p.teintes, i / 63));
+      // les rivières : le débit moyen, sur une échelle logarithmique
+      // seuils adaptatifs : seules les cellules au débit le plus fort (quelques pour cent) deviennent rivières
+      const smp = new Float32Array(3000); for (let k = 0; k < smp.length; k++) smp[k] = flow[(rng() * W * H) | 0]; smp.sort();
+      const q0 = Math.log(1 + smp[Math.floor(smp.length * 0.955)]), q1 = Math.log(1 + smp[Math.floor(smp.length * 0.997)]), qd = Math.max(1e-3, q1 - q0), rv = p.rivieres; riverQ = [q0, qd];
+      for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+        const i = y * W + x, xm = x > 0 ? i - 1 : i, xp = x < W - 1 ? i + 1 : i, ym = y > 0 ? i - W : i, yp = y < H - 1 ? i + W : i;
+        const nx = (hgt[xm] - hgt[xp]) * ex, ny = (hgt[ym] - hgt[yp]) * ex, nl = Math.hypot(nx, ny, 1);
+        let sh = (nx * lx + ny * ly + lz) / nl; sh = Math.max(0, sh);
+        const e = hgt[i]; let r, g, b;
+        if (style === 'gris') { const v = 30 + sh * 215; r = g = b = v; }
+        else if (style === 'courbes') { const v = 0.82 + sh * 0.22; r = Pp[0] * v; g = Pp[1] * v; b = Pp[2] * v; }
+        else { const lo = Math.max(hLo, sea), c = LUT[Math.max(0, Math.min(63, Math.round((e - lo) / Math.max(1e-3, hHi - lo) * 63)))]; const v = 0.38 + sh * 0.78; r = c[0] * v; g = c[1] * v; b = c[2] * v; }
+        if (e < sea) { const dpt = Math.min(1, (sea - e) / Math.max(1e-3, (hHi - hLo) * 0.25)), k = style === 'courbes' ? 0.35 : 0.85; r = r * (1 - k) + E[0] * (1 - dpt * 0.35) * k; g = g * (1 - k) + E[1] * (1 - dpt * 0.35) * k; b = b * (1 - k) + E[2] * (1 - dpt * 0.35) * k; }
+        else if (rv > 0) {
+          const f = (Math.log(1 + flow[i]) - q0) / qd, a = Math.max(0, Math.min(1, f)) * rv;
+          if (a > 0) { const C = style === 'gris' ? [20, 24, 30] : E; r += (C[0] - r) * a; g += (C[1] - g) * a; b += (C[2] - b) * a; }
+        }
+        const o = i * 4; d[o] = r; d[o + 1] = g; d[o + 2] = b; d[o + 3] = 255;
+      }
+      buf.getContext('2d').putImageData(img, 0, 0);
+    }
+    // courbes de niveau : carrés marchants sur la hauteur
+    function iso(field, lv, scx, scy, seg) {
+      for (let y = 0; y < H - 1; y++) for (let x = 0; x < W - 1; x++) {
+        const i = y * W + x, a = field[i], b = field[i + 1], c = field[i + W + 1], d = field[i + W];
+        const k = (a > lv ? 8 : 0) | (b > lv ? 4 : 0) | (c > lv ? 2 : 0) | (d > lv ? 1 : 0); if (k === 0 || k === 15) continue;
+        const T = [x + (lv - a) / (b - a), y], R = [x + 1, y + (lv - b) / (c - b)], B = [x + (lv - d) / (c - d), y + 1], L = [x, y + (lv - a) / (d - a)];
+        const add = (P, Q) => seg.push(P[0] * scx, P[1] * scy, Q[0] * scx, Q[1] * scy);
+        switch (k) { case 1: case 14: add(L, B); break; case 2: case 13: add(B, R); break; case 3: case 12: add(L, R); break; case 4: case 11: add(T, R); break; case 5: add(L, T); add(B, R); break; case 6: case 9: add(T, B); break; case 7: case 8: add(L, T); break; case 10: add(T, R); add(L, B); break; }
+      }
+    }
+    function drawContours(c, w, h) {
+      c.save(); c.translate(-2 * w / (W - 4), -2 * h / (H - 4)); c.scale(W / (W - 4), H / (H - 4));
+      const n = 14, scx = w / W, scy = h / H, ink = mix(p.papier, p.teintes[p.teintes.length > 2 ? p.teintes.length - 2 : 0], 0.85);
+      for (let k = 1; k < n; k++) {
+        const lo = Math.max(hLo, seaH), lv = lo + (hHi - lo) * k / n, seg = []; iso(hgt, lv, scx, scy, seg);
+        c.beginPath(); for (let s = 0; s < seg.length; s += 4) { c.moveTo(seg[s], seg[s + 1]); c.lineTo(seg[s + 2], seg[s + 3]); }
+        c.strokeStyle = k % 5 === 0 ? ink : mix(p.papier, ink, 0.6); c.lineWidth = k % 5 === 0 ? 1.3 : 0.7; c.stroke();
+      }
+      if (p.mer > 0) { const seg = []; iso(hgt, seaH, scx, scy, seg); c.beginPath(); for (let s = 0; s < seg.length; s += 4) { c.moveTo(seg[s], seg[s + 1]); c.lineTo(seg[s + 2], seg[s + 3]); } c.strokeStyle = p.eau; c.lineWidth = 1.4; c.stroke(); }
+      c.restore();
+    }
+
+    app.loop((tt, dt) => {
+      dt = Math.min(0.05, dt || 0);
+      const { w, h, dpr } = app.size;
+      const key = [p.relief, p.finesse, w, h, app.seed, maskKey].join();
+      if (key !== simKey) {
+        resetSim(); simKey = [p.relief, p.finesse, w, h, app.seed, maskKey].join();
+        // une première averse : les ravines sont déjà là au premier regard
+        const n0 = Math.round(W * H * (app.thumbnail ? 2.2 : 1.2));
+        for (let k = 0; k < n0; k += 4000) { rain(4000); talus(); for (let i = 0; i < W * H; i++) flow[i] *= 0.97; }
+      }
+      if (!app.thumbnail) {
+        if (held && held.moved) raise(held.x, held.y);
+        const n = Math.round((p.pluie * p.pluie * 0.06 * W * H + (storm ? 2500 : 0)) * dt * 60 / 4);
+        rain(n);
+        for (let i = 0; i < W * H; i++) flow[i] *= 0.985;
+        uplift(dt); talus();
+        if (storm) { storm.t -= dt; if (storm.t <= 0) storm = null; }
+      }
+      frameN++;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      if (!img || app.thumbnail || (frameN & 1) === 0) render();
+      ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high'; ctx.drawImage(buf, 2, 2, W - 4, H - 4, 0, 0, w, h); // les bords, où les gouttes s'arrêtent, restent hors cadre
+      if (p.style === 'courbes') {
+        // les courbes changent lentement : recalculées toutes les quelques images
+        if (!contourC || contourC.width !== Math.round(w * dpr) || contourC.height !== Math.round(h * dpr) || contourN-- <= 0 || app.thumbnail) {
+          contourC = contourC && contourC.width === Math.round(w * dpr) && contourC.height === Math.round(h * dpr) ? contourC : document.createElement('canvas'); contourC.width = Math.round(w * dpr); contourC.height = Math.round(h * dpr);
+          const c = contourC.getContext('2d'); c.setTransform(dpr, 0, 0, dpr, 0, 0); c.clearRect(0, 0, w, h); c.lineJoin = 'round'; drawContours(c, w, h); contourN = 12;
+        }
+        ctx.drawImage(contourC, 0, 0, w, h);
+      }
+      app.finish(ctx);
+    });
+
+    // ——— Export SVG : courbes de niveau, rivage et rivières ———
+    function toSVG() {
+      const { w, h } = app.size, scx = w / W, scy = h / H, out = [`<rect width="100%" height="100%" fill="${p.style === 'courbes' ? p.papier : mix(p.teintes[0], '#ffffff', 0.5)}"/>`];
+      const path = (seg) => { let s = ''; for (let k = 0; k < seg.length; k += 4) s += `M${seg[k].toFixed(1)} ${seg[k + 1].toFixed(1)}L${seg[k + 2].toFixed(1)} ${seg[k + 3].toFixed(1)}`; return s; };
+      const n = 14;
+      for (let k = 1; k < n; k++) { const lo = Math.max(hLo, seaH), lv = lo + (hHi - lo) * k / n, seg = []; iso(hgt, lv, scx, scy, seg); const col = p.style === 'courbes' ? mix(p.papier, p.teintes[p.teintes.length > 2 ? p.teintes.length - 2 : 0], k % 5 === 0 ? 0.85 : 0.5) : mix('#' + ramp(p.teintes, k / n).map((v) => Math.round(v).toString(16).padStart(2, '0')).join(''), '#000000', k % 5 === 0 ? 0.5 : 0.3); out.push(`<path d="${path(seg)}" fill="none" stroke="${col}" stroke-width="${k % 5 === 0 ? 1.3 : 0.7}"/>`); }
+      if (p.mer > 0) { const seg = []; iso(hgt, seaH, scx, scy, seg); out.push(`<path d="${path(seg)}" fill="none" stroke="${p.eau}" stroke-width="1.4"/>`); }
+      // rivières : contour du débit
+      const lf = new Float32Array(W * H); for (let i = 0; i < W * H; i++) lf[i] = hgt[i] < seaH ? 0 : Math.log(1 + flow[i]);
+      const seg = []; iso(lf, riverQ[0] + riverQ[1] * 0.5, scx, scy, seg); out.push(`<path d="${path(seg)}" fill="none" stroke="${p.eau}" stroke-width="1"/>`);
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">${out.join('')}</svg>`;
+    }
+  </script>
+</body>
+</html>

@@ -1,0 +1,15 @@
+{
+  "slug": "erosion",
+  "title": "Érosion",
+  "type": "motion",
+  "description": "Des milliers de gouttes de pluie creusent un relief : ravines, vallées et réseaux de rivières naissent sous vos yeux, en carte ombrée, en gris ou en courbes.",
+  "tags": ["erosion", "relief", "carte", "rivieres", "logo", "svg"],
+  "inspiration": [
+    "Hans Theobald Beyer, Implementation of a method for hydraulic erosion (2015)",
+    "Eduard Imhof et l'école suisse du relief ombré",
+    "Cartes hypsométriques et réseaux de drainage dendritiques"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
