@@ -1,0 +1,384 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Quasi-cristaux</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Somme de N ondes planes de même nombre d'onde k, orientées à angles réguliers :
+    //   f(x) = Σᵢ cos(k·(x·eᵢ) + φᵢ),   eᵢ = (cos θᵢ, sin θᵢ)
+    // N = 2, 3, 4, 6 donne un cristal périodique ; N = 5, 7, 8, 9… un quasi-cristal (ordre sans période,
+    // symétrie interdite aux cristaux, comme les pavages de Penrose). C'est aussi le modèle simple des
+    // ondes de Faraday à la surface d'un liquide vibré. Rendu entièrement sur le GPU.
+    const canvas = document.querySelector('canvas');
+    const gl = canvas.getContext('webgl2', { alpha: false, antialias: false, depth: false, stencil: false, preserveDrawingBuffer: false });
+    const TAU = Math.PI * 2, MAXC = 8;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const NUIT = PAL('trame-nuit'), KB = PAL('kegelbahn'), ACIDE = PAL('acide'), CHL = PAL('chladni'), P60 = PAL('papier-60');
+    const TH = PAL('thermique'), GOOD = PAL('good-room'), PHOTO = PAL('photocopie'), MENTHE = PAL('menthe'), SALON = PAL('salon');
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: false,
+      finish: { grain: 0.08, vignette: 0.14 },
+      hint: 'Glissez pour déplacer le centre · survolez pour la loupe · molette : longueur d’onde',
+      notes: 'Somme de N ondes planes à angles réguliers. Avec N = 3, 4 ou 6 le motif est un cristal périodique ; avec N = 5, 7, 8 ou plus il devient un quasi-cristal : ordonné, avec une symétrie d’ordre N, mais qui ne se répète jamais. La longueur d’onde λ est en fraction du petit côté. Les phases φ qui avancent font respirer le motif, la dérive le fait glisser en boucle parfaite.',
+      params: {
+        'Ondes': {
+          n: { type: 'range', label: 'Nombre d’ondes N', min: 2, max: 19, step: 1, value: 7 },
+          repartition: { type: 'segmented', label: 'Angles', options: { demi: 'Sur 180°', plein: 'Sur 360°' }, value: 'demi' },
+          lambda: { type: 'range', label: 'Longueur d’onde λ', min: 0.008, max: 0.3, step: 0.001, value: 0.085 },
+          rotation: { type: 'range', label: 'Rotation (°)', min: -180, max: 180, step: 0.5, value: 0 },
+          contraste: { type: 'range', label: 'Contraste', min: 0.3, max: 4, step: 0.01, value: 1.2 },
+          deformation: { type: 'range', label: 'Déformation radiale', min: -1, max: 1, step: 0.01, value: 0 },
+          ondulation: { type: 'range', label: 'Ondulation du domaine', min: 0, max: 1, step: 0.01, value: 0 },
+        },
+        'Mouvement': {
+          animation: { type: 'segmented', label: 'Animation', options: { pulsation: 'Pulsation', alternee: 'Alternée', derive: 'Dérive', tourne: 'Rotation' }, value: 'alternee' },
+          boucle: { type: 'range', label: 'Boucle (s)', min: 2, max: 40, step: 0.5, value: 12 },
+          tours: { type: 'range', label: 'Tours', min: -4, max: 4, step: 1, value: 1 },
+          derive: { type: 'range', label: 'Rayon de dérive (λ)', min: 0, max: 20, step: 0.1, value: 3, show: (q) => q.animation === 'derive' },
+        },
+        'Rendu': {
+          rendu: { type: 'select', label: 'Rendu', options: { bandes: 'Bandes', seuil: 'Seuil', lignes: 'Lignes de niveau', points: 'Trame de points', continu: 'Dégradé continu' }, value: 'bandes' },
+          bandes: { type: 'range', label: 'Nombre de niveaux', min: 2, max: 24, step: 1, value: 6, show: (q) => q.rendu === 'bandes' || q.rendu === 'lignes' },
+          seuil: { type: 'range', label: 'Seuil', min: 0.05, max: 0.95, step: 0.005, value: 0.5, show: (q) => q.rendu === 'seuil' },
+          trait: { type: 'range', label: 'Épaisseur des lignes', min: 0.3, max: 8, step: 0.1, value: 1.4, show: (q) => q.rendu === 'lignes' },
+          trame: { type: 'range', label: 'Pas de la trame', min: 0.004, max: 0.05, step: 0.0005, value: 0.012, show: (q) => q.rendu === 'points' },
+          cyclique: { type: 'toggle', label: 'Palette en boucle', value: false, show: (q) => q.rendu === 'bandes' },
+        },
+        'Loupe': {
+          loupe: { type: 'range', label: 'Grossissement', min: 0, max: 0.95, step: 0.01, value: 0.55 },
+          rayonLoupe: { type: 'range', label: 'Rayon', min: 0.05, max: 0.6, step: 0.005, value: 0.18, show: (q) => q.loupe > 0 },
+        },
+        'Logo': {
+          masque: { type: 'segmented', label: 'Logo dans le motif', options: { aucun: 'Aucun', inverser: 'Inverser', densite: 'Densité' }, value: 'aucun' },
+          image: { type: 'file', label: 'Logo ou image', accept: 'image/*', show: (q) => q.masque !== 'aucun' },
+          tailleLogo: { type: 'range', label: 'Taille du logo', min: 0.1, max: 1, step: 0.01, value: 0.55, show: (q) => q.masque !== 'aucun' },
+        },
+        'Couleur': {
+          fond: { type: 'color', label: 'Fond', value: NUIT[0] },
+          encre: { type: 'color', label: 'Encre', value: NUIT[1], show: (q) => q.rendu === 'seuil' || q.rendu === 'lignes' || q.rendu === 'points' },
+          coloration: { type: 'segmented', label: 'Coloration', options: { une: 'Une', palette: 'Palette' }, value: 'palette', show: (q) => q.rendu === 'lignes' || q.rendu === 'points' },
+          palette: { type: 'palette', label: 'Palette', value: [NUIT[0], NUIT[0], NUIT[0], NUIT[2], NUIT[0], ACIDE[2]], show: (q) => q.rendu === 'bandes' || q.rendu === 'continu' || q.coloration === 'palette' },
+        },
+      },
+      presets: {
+        'Nuit heptagonale': {},
+        'Penrose': { n: 5, repartition: 'demi', lambda: 0.07, rendu: 'seuil', seuil: 0.5, contraste: 1.6, animation: 'alternee', tours: 1, fond: P60[0], encre: P60[1], loupe: 0.4 },
+        'Faraday': { n: 8, lambda: 0.08, rendu: 'lignes', bandes: 3, trait: 1.5, contraste: 1.2, animation: 'pulsation', coloration: 'une', fond: CHL[0], encre: CHL[2], loupe: 0.6, rayonLoupe: 0.22 },
+        'Kegelbahn': { n: 6, lambda: 0.09, rendu: 'bandes', bandes: 6, cyclique: true, contraste: 1.2, animation: 'derive', derive: 4, fond: KB[0], palette: KB, loupe: 0 },
+        'Trame acide': { n: 7, lambda: 0.16, rendu: 'points', trame: 0.022, contraste: 1.5, coloration: 'une', fond: ACIDE[0], encre: ACIDE[1], animation: 'alternee', loupe: 0.5 },
+        'Thermique': { n: 9, lambda: 0.075, rendu: 'continu', contraste: 1.8, animation: 'tourne', tours: 1, fond: TH[0], palette: [TH[1], TH[4], TH[2], TH[3], TH[5]], loupe: 0.3 },
+        'Rosace': { n: 12, lambda: 0.07, rendu: 'bandes', bandes: 3, contraste: 2.4, deformation: 0.35, animation: 'pulsation', fond: GOOD[0], palette: [GOOD[0], GOOD[3], GOOD[1]], loupe: 0 },
+        'Photocopie': { n: 4, lambda: 0.1, rendu: 'lignes', bandes: 3, trait: 3, ondulation: 0.45, contraste: 1, animation: 'derive', derive: 2, coloration: 'une', fond: PHOTO[0], encre: PHOTO[1], loupe: 0.7, rayonLoupe: 0.25 },
+      },
+      brand(colors) {
+        return { fond: colors[0], encre: colors[1] || colors[0], palette: colors.slice(0, MAXC) };
+      },
+      pointer: {
+        move: (q) => { lens = { x: q.x, y: q.y }; },
+        down: (q) => { lens = { x: q.x, y: q.y }; drag = { x: q.x, y: q.y, ox: offset[0], oy: offset[1] }; },
+        drag: (q) => { lens = { x: q.x, y: q.y }; if (drag) { const u = Math.min(app.size.w, app.size.h); offset = [drag.ox - (q.x - drag.x) / u, drag.oy - (q.y - drag.y) / u]; } },
+        up: () => { drag = null; },
+        wheel: (q, dy) => app.set('lambda', Math.min(0.3, Math.max(0.008, p.lambda * Math.exp(dy * 0.0012)))),
+      },
+      export: { name: 'quasi-cristaux', svg: () => exportSVG() },
+    });
+    const p = app.params;
+    let lens = null, drag = null, offset = [0, 0], lensK = 0, lensPos = [0, 0], frame = 0;
+
+    // ——— Champ, partagé entre le shader et l'export SVG ———
+    // État d'animation pour un temps t : phases φᵢ, décalage de dérive, angle.
+    function anim(t) {
+      const uu = TAU * p.tours * t / p.boucle, N = p.n, ph = [];
+      for (let i = 0; i < N; i++) {
+        if (p.animation === 'pulsation') ph.push(uu);
+        else if (p.animation === 'alternee') ph.push(i % 2 ? -uu : uu);
+        else ph.push(0);
+      }
+      let dx = 0, dy = 0, rot = p.rotation * Math.PI / 180;
+      if (p.animation === 'derive') { dx = Math.cos(uu) * p.derive * p.lambda; dy = Math.sin(uu) * p.derive * p.lambda; }
+      if (p.animation === 'tourne') rot += uu / N;   // un cran de symétrie par tour : la boucle reste parfaite pour les rendus symétriques
+      return { ph, dx, dy, rot };
+    }
+
+    // Logo → petite carte de densité (sombre = 1), cadrée « contain ».
+    let logoImg = null, logoCv = null, logoData = null, logoW = 1, logoH = 1;
+    function logoMap() {
+      const img = p.image || app.logoImg;
+      if (!img) return null;
+      if (img !== logoImg) {
+        logoImg = img;
+        const M = 512, iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height, k = M / Math.max(iw, ih);
+        logoW = Math.max(1, Math.round(iw * k)); logoH = Math.max(1, Math.round(ih * k));
+        logoCv = logoCv || document.createElement('canvas'); logoCv.width = logoW; logoCv.height = logoH;
+        const x = logoCv.getContext('2d', { willReadFrequently: true });
+        x.fillStyle = '#fff'; x.fillRect(0, 0, logoW, logoH); x.drawImage(img, 0, 0, logoW, logoH);
+        const d = x.getImageData(0, 0, logoW, logoH).data;
+        logoData = new Uint8Array(logoW * logoH);
+        for (let i = 0; i < logoData.length; i++) logoData[i] = 255 - Math.round(d[i * 4] * 0.2126 + d[i * 4 + 1] * 0.7152 + d[i * 4 + 2] * 0.0722);
+        logoDirty = true;
+      }
+      return logoData;
+    }
+    let logoDirty = true;
+
+    // ——— GPU ———
+    const VS = `#version 300 es
+    in vec2 a; void main() { gl_Position = vec4(a, 0., 1.); }`;
+    const FS = `#version 300 es
+    precision highp float;
+    uniform vec2 uSize; uniform float uDpr, uU;
+    uniform int uN, uMode, uNC, uColor, uMask, uCyc;
+    uniform float uK, uRot, uContrast, uRadial, uWarp, uLevels, uSeuil, uLine, uCell;
+    uniform float uPh[20]; uniform vec2 uDrift, uOff;
+    uniform vec3 uLens; uniform float uLensK;
+    uniform vec3 uBg, uInk, uPal[${MAXC}];
+    uniform sampler2D uLogo; uniform vec2 uLogoS; uniform float uHasLogo;
+    uniform float uGrain, uVig, uFrame, uHalfTurn;
+    out vec4 o;
+    float hash(vec2 q) { return fract(sin(dot(q, vec2(12.9898, 78.233))) * 43758.5453); }
+    float logoAt(vec2 q) {
+      if (uHasLogo < 0.5) return 0.;
+      vec2 t = q / uLogoS + 0.5;
+      if (t.x < 0. || t.y < 0. || t.x > 1. || t.y > 1.) return 0.;
+      return texture(uLogo, t).r;
+    }
+    // Valeur du champ en un point du repère (unité = petit côté, origine au centre).
+    float field(vec2 q) {
+      float L = (uMask == 2) ? logoAt(q) : 0.;
+      if (uLensK > 0.) {
+        vec2 d = q - uLens.xy; float r2 = dot(d, d) / (uLens.z * uLens.z);
+        q = uLens.xy + d * (1. - uLensK * exp(-r2 * 1.5));
+      }
+      float r = length(q);
+      q *= 1. + uRadial * r * 1.2;
+      q += uOff + uDrift;
+      if (uWarp > 0.) q += uWarp * 0.6 / uK * vec2(sin(q.y * uK * 0.37 + 1.3), sin(q.x * uK * 0.41 + 0.7));
+      float k = uK * (1. + 0.6 * L), s = 0.;
+      for (int i = 0; i < 20; i++) {
+        if (i >= uN) break;
+        float th = uRot + float(i) * uHalfTurn / float(uN);
+        s += cos(k * dot(q, vec2(cos(th), sin(th))) + uPh[i]);
+      }
+      float v = 0.5 + 0.5 * tanh(s / sqrt(float(uN)) * uContrast);
+      return v;
+    }
+    vec3 palAt(int i) { vec3 c = uPal[0]; for (int q = 0; q < ${MAXC}; q++) if (q == i) c = uPal[q]; return c; }
+    vec3 ramp(float x) {
+      float f = clamp(x, 0., 1.) * float(uNC - 1); int i = int(floor(f)); i = min(i, uNC - 2);
+      if (uNC < 2) return uPal[0];
+      return mix(palAt(i), palAt(i + 1), f - float(i));
+    }
+    vec3 band(int i, int n) {
+      if (uCyc == 1) return palAt(int(mod(float(i), float(uNC))));
+      return ramp(n <= 1 ? 0. : float(i) / float(n - 1));
+    }
+    void main() {
+      vec2 px = vec2(gl_FragCoord.x, uSize.y * uDpr - gl_FragCoord.y) / uDpr - uSize * 0.5;
+      vec2 q = px / uU;
+      float v = field(q);
+      if (uMask == 1) { float L = logoAt(q); v = mix(v, 1. - v, L); }
+      vec3 col;
+      if (uMode == 0) {
+        float n = uLevels, x = v * n, w = max(fwidth(x), 1e-4);
+        float i = clamp(floor(x), 0., n - 1.), fr = x - floor(x);
+        int ii = int(i);
+        vec3 a = band(ii, int(n)), b = band(min(ii + 1, int(n) - 1), int(n));
+        col = mix(a, b, smoothstep(1. - w, 1., fr) * step(i, n - 2.));
+      } else if (uMode == 1) {
+        float w = max(fwidth(v), 1e-4);
+        col = mix(uBg, uInk, smoothstep(uSeuil - w, uSeuil + w, v));
+      } else if (uMode == 2) {
+        float x = v * uLevels, w = max(fwidth(x), 1e-4);
+        float d = abs(fract(x) - 0.5) / w, line = 1. - smoothstep(uLine * 0.5 - 0.5, uLine * 0.5 + 0.5, d);
+        vec3 ink = uColor == 1 ? ramp(floor(x) / max(1., uLevels - 1.)) : uInk;
+        col = mix(uBg, ink, line);
+      } else if (uMode == 3) {
+        vec2 cell = floor(px / uCell + 0.5);
+        vec2 c = cell * uCell, d = px - c;
+        float vc = field(c / uU);
+        if (uMask == 1) { float L = logoAt(c / uU); vc = mix(vc, 1. - vc, L); }
+        float r = sqrt(vc) * uCell * 0.62;
+        float m = 1. - smoothstep(r - 0.6 / uDpr * 1.2, r + 0.6 / uDpr * 1.2, length(d));
+        vec3 ink = uColor == 1 ? ramp(vc) : uInk;
+        col = mix(uBg, ink, m);
+      } else {
+        col = ramp(v);
+      }
+      vec2 uv = px / max(uSize.x, uSize.y) * 2.;
+      col *= 1. - uVig * 0.85 * smoothstep(0.35, 1.25, length(uv));
+      col += (hash(gl_FragCoord.xy + uFrame * 17.31) - 0.5) * uGrain * 0.22;
+      o = vec4(col, 1.);
+    }`;
+    function sh(type, src) { const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s); if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s)); return s; }
+    const prog = gl.createProgram();
+    gl.attachShader(prog, sh(gl.VERTEX_SHADER, VS)); gl.attachShader(prog, sh(gl.FRAGMENT_SHADER, FS));
+    gl.bindAttribLocation(prog, 0, 'a');
+    gl.linkProgram(prog);
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
+    const U = {}, u = (n) => (U[n] ??= gl.getUniformLocation(prog, n));
+    const vao = gl.createVertexArray(); gl.bindVertexArray(vao);
+    const buf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+    const tLogo = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, tLogo);
+    for (const k of [gl.TEXTURE_MIN_FILTER, gl.TEXTURE_MAG_FILTER]) gl.texParameteri(gl.TEXTURE_2D, k, gl.LINEAR);
+    for (const k of [gl.TEXTURE_WRAP_S, gl.TEXTURE_WRAP_T]) gl.texParameteri(gl.TEXTURE_2D, k, gl.CLAMP_TO_EDGE);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, 1, 1, 0, gl.RED, gl.UNSIGNED_BYTE, new Uint8Array([0]));
+    const rgbf = (hx) => { const n = parseInt(hx.slice(1), 16); return [(n >> 16 & 255) / 255, (n >> 8 & 255) / 255, (n & 255) / 255]; };
+    const MODES = { bandes: 0, seuil: 1, lignes: 2, points: 3, continu: 4 };
+    const kOf = () => TAU / p.lambda;
+    function logoSize() { const k = p.tailleLogo / Math.max(logoW, logoH); return [logoW * k, logoH * k]; }
+
+    function render(t, dt) {
+      const { w, h } = app.size, U0 = Math.min(w, h), A = anim(t);
+      // La loupe suit le pointeur avec un peu d'inertie et s'efface quand il quitte la scène.
+      const target = lens ? 1 : 0;
+      lensK += (target - lensK) * (1 - Math.exp(-(dt || 0.016) * 8));
+      if (lens) lensPos = [(lens.x - w / 2) / U0, (lens.y - h / 2) / U0];
+      gl.viewport(0, 0, canvas.width, canvas.height);
+      gl.useProgram(prog);
+      gl.uniform2f(u('uSize'), w, h); gl.uniform1f(u('uDpr'), canvas.width / w); gl.uniform1f(u('uU'), U0);
+      gl.uniform1i(u('uN'), p.n); gl.uniform1f(u('uHalfTurn'), p.repartition === 'plein' ? TAU : Math.PI);
+      gl.uniform1i(u('uMode'), MODES[p.rendu] ?? 0);
+      gl.uniform1f(u('uK'), kOf()); gl.uniform1f(u('uRot'), A.rot); gl.uniform1f(u('uContrast'), p.contraste);
+      gl.uniform1f(u('uRadial'), p.deformation); gl.uniform1f(u('uWarp'), p.ondulation);
+      gl.uniform1f(u('uLevels'), p.bandes); gl.uniform1f(u('uSeuil'), p.seuil); gl.uniform1f(u('uLine'), p.trait * canvas.width / w * U0 / 700);
+      gl.uniform1f(u('uCell'), p.trame * U0); gl.uniform1i(u('uCyc'), p.cyclique ? 1 : 0);
+      const ph = new Float32Array(20); A.ph.forEach((v, i) => { if (i < 20) ph[i] = v; });
+      gl.uniform1fv(u('uPh[0]'), ph);
+      gl.uniform2f(u('uDrift'), A.dx, A.dy); gl.uniform2f(u('uOff'), offset[0], offset[1]);
+      gl.uniform3f(u('uLens'), lensPos[0], lensPos[1], p.rayonLoupe); gl.uniform1f(u('uLensK'), app.thumbnail ? 0 : p.loupe * lensK);
+      const pal = (p.palette && p.palette.length ? p.palette : [p.encre]).slice(0, MAXC);
+      const flat = new Float32Array(MAXC * 3); pal.forEach((c, i) => flat.set(rgbf(c), i * 3));
+      gl.uniform3fv(u('uPal[0]'), flat); gl.uniform1i(u('uNC'), pal.length);
+      gl.uniform1i(u('uColor'), p.coloration === 'palette' ? 1 : 0);
+      gl.uniform3fv(u('uBg'), rgbf(p.fond)); gl.uniform3fv(u('uInk'), rgbf(p.encre));
+      const masks = { aucun: 0, inverser: 1, densite: 2 };
+      const data = p.masque !== 'aucun' ? logoMap() : null;
+      gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, tLogo);
+      if (data && logoDirty) { gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1); gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, logoW, logoH, 0, gl.RED, gl.UNSIGNED_BYTE, data); logoDirty = false; }
+      gl.uniform1i(u('uLogo'), 0); gl.uniform1f(u('uHasLogo'), data ? 1 : 0);
+      gl.uniform1i(u('uMask'), data ? masks[p.masque] : 0);
+      const ls = logoSize(); gl.uniform2f(u('uLogoS'), ls[0], ls[1]);
+      gl.uniform1f(u('uGrain'), p.grain ?? 0); gl.uniform1f(u('uVig'), p.vignette ?? 0); gl.uniform1f(u('uFrame'), (frame++) % 997);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+    }
+    app.loop((t, dt) => render(t, dt));
+
+    // ——— Export SVG : le même champ évalué sur le CPU, contours par marching squares ———
+    function fieldJS(A, x, y) {
+      const K = kOf(), N = p.n, half = p.repartition === 'plein' ? TAU : Math.PI;
+      let L = 0;
+      const data = p.masque !== 'aucun' ? logoMap() : null, ls = logoSize();
+      const logo = (qx, qy) => {
+        if (!data) return 0;
+        const tx = qx / ls[0] + 0.5, ty = qy / ls[1] + 0.5;
+        if (tx < 0 || ty < 0 || tx >= 1 || ty >= 1) return 0;
+        return data[Math.floor(ty * logoH) * logoW + Math.floor(tx * logoW)] / 255;
+      };
+      const L0 = logo(x, y);
+      if (p.masque === 'densite') L = L0;
+      let qx = x, qy = y;
+      const r = Math.hypot(qx, qy), sc = 1 + p.deformation * r * 1.2;
+      qx *= sc; qy *= sc; qx += offset[0] + A.dx; qy += offset[1] + A.dy;
+      if (p.ondulation > 0) { const ox = p.ondulation * 0.6 / K * Math.sin(qy * K * 0.37 + 1.3), oy = p.ondulation * 0.6 / K * Math.sin(qx * K * 0.41 + 0.7); qx += ox; qy += oy; }
+      const k = K * (1 + 0.6 * L);
+      let s = 0;
+      for (let i = 0; i < N; i++) { const th = A.rot + i * half / N; s += Math.cos(k * (qx * Math.cos(th) + qy * Math.sin(th)) + A.ph[i]); }
+      let v = 0.5 + 0.5 * Math.tanh(s / Math.sqrt(N) * p.contraste);
+      if (p.masque === 'inverser') v = v + (1 - 2 * v) * L0;
+      return v;
+    }
+    function contours(fn, w, h, step, iso, closed) {
+      const nx = Math.ceil(w / step) + 1, ny = Math.ceil(h / step) + 1, v = new Float32Array(nx * ny);
+      for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+        const x = Math.min(i * step, w), y = Math.min(j * step, h);
+        let val = fn(x, y) - iso;
+        if (closed && (i === 0 || j === 0 || i === nx - 1 || j === ny - 1)) val = -1;
+        v[j * nx + i] = val;
+      }
+      const segs = [], lerp = (a, b) => a / (a - b);
+      for (let j = 0; j < ny - 1; j++) for (let i = 0; i < nx - 1; i++) {
+        const a = v[j * nx + i], b = v[j * nx + i + 1], c = v[(j + 1) * nx + i + 1], d = v[(j + 1) * nx + i];
+        const x = i * step, y = j * step, P = [];
+        if ((a < 0) !== (b < 0)) P.push([x + lerp(a, b) * step, y]);
+        if ((b < 0) !== (c < 0)) P.push([x + step, y + lerp(b, c) * step]);
+        if ((c < 0) !== (d < 0)) P.push([x + (1 - lerp(c, d)) * step, y + step]);
+        if ((d < 0) !== (a < 0)) P.push([x, y + (1 - lerp(d, a)) * step]);
+        if (P.length === 2) segs.push(P); else if (P.length === 4) { segs.push([P[0], P[1]]); segs.push([P[2], P[3]]); }
+      }
+      const key = (q) => `${Math.round(q[0] * 8)},${Math.round(q[1] * 8)}`, ends = new Map();
+      segs.forEach((s, k) => { for (const e of [0, 1]) { const kk = key(s[e]); (ends.get(kk) || ends.set(kk, []).get(kk)).push(k); } });
+      const used = new Uint8Array(segs.length);
+      let out = '';
+      for (let s0 = 0; s0 < segs.length; s0++) {
+        if (used[s0]) continue;
+        used[s0] = 1;
+        const pts = [segs[s0][0], segs[s0][1]];
+        for (let grow = 0; grow < 2; grow++) {
+          for (;;) {
+            const list = ends.get(key(pts.at(-1))) || [], nk = list.find((k) => !used[k]);
+            if (nk === undefined) break;
+            used[nk] = 1;
+            const s = segs[nk];
+            pts.push(key(s[0]) === key(pts.at(-1)) ? s[1] : s[0]);
+          }
+          pts.reverse();
+        }
+        out += 'M' + pts.map((q) => `${q[0].toFixed(1)} ${q[1].toFixed(1)}`).join('L') + (closed ? 'Z' : '');
+      }
+      return out;
+    }
+    function exportSVG() {
+      const { w, h } = app.size, U0 = Math.min(w, h), A = anim(app.time);
+      const fn = (x, y) => fieldJS(A, (x - w / 2) / U0, (y - h / 2) / U0);
+      const step = Math.max(1, Math.min(U0 / 450, p.lambda * U0 / 14));
+      const pal = (p.palette && p.palette.length ? p.palette : [p.encre]).slice(0, MAXC);
+      const hx = (c) => c, out = [`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}">`];
+      const rampHex = (x) => {
+        if (pal.length === 1) return pal[0];
+        const f = Math.min(1, Math.max(0, x)) * (pal.length - 1), i = Math.min(pal.length - 2, Math.floor(f)), k = f - i;
+        const a = rgbf(pal[i]), b = rgbf(pal[i + 1]);
+        return '#' + [0, 1, 2].map((j) => Math.round((a[j] + (b[j] - a[j]) * k) * 255).toString(16).padStart(2, '0')).join('');
+      };
+      if (p.rendu === 'bandes' || p.rendu === 'continu') {
+        const n = p.rendu === 'bandes' ? p.bandes : 16;
+        const band = (i) => (p.rendu === 'bandes' && p.cyclique ? pal[i % pal.length] : rampHex(n <= 1 ? 0 : i / (n - 1)));
+        out.push(`<rect width="${w}" height="${h}" fill="${band(0)}"/>`);
+        for (let i = 1; i < n; i++) out.push(`<path fill-rule="evenodd" fill="${band(i)}" d="${contours(fn, w, h, step, i / n, true)}"/>`);
+      } else if (p.rendu === 'seuil') {
+        out.push(`<rect width="${w}" height="${h}" fill="${p.fond}"/>`, `<path fill-rule="evenodd" fill="${p.encre}" d="${contours(fn, w, h, step, p.seuil, true)}"/>`);
+      } else if (p.rendu === 'lignes') {
+        out.push(`<rect width="${w}" height="${h}" fill="${p.fond}"/>`);
+        const lw = p.trait * U0 / 700;
+        for (let i = 0; i < p.bandes; i++) {
+          const iso = (i + 0.5) / p.bandes, col = p.coloration === 'palette' ? rampHex(i / Math.max(1, p.bandes - 1)) : p.encre;
+          out.push(`<path fill="none" stroke="${col}" stroke-width="${lw.toFixed(2)}" stroke-linecap="round" stroke-linejoin="round" d="${contours(fn, w, h, step, iso, false)}"/>`);
+        }
+      } else {
+        out.push(`<rect width="${w}" height="${h}" fill="${p.fond}"/>`);
+        const c = p.trame * U0, groups = new Map();
+        for (let y = h / 2 - Math.ceil(h / 2 / c) * c; y <= h + c; y += c) for (let x = w / 2 - Math.ceil(w / 2 / c) * c; x <= w + c; x += c) {
+          const v = fn(x, y), r = Math.sqrt(v) * c * 0.62;
+          if (r < 0.2) continue;
+          const col = p.coloration === 'palette' ? rampHex(Math.round(v * 12) / 12) : p.encre;
+          (groups.get(col) || groups.set(col, []).get(col)).push(`<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${r.toFixed(2)}"/>`);
+        }
+        for (const [col, list] of groups) out.push(`<g fill="${col}">${list.join('')}</g>`);
+      }
+      out.push('</svg>');
+      return out.join('\n');
+    }
+  </script>
+</body>
+</html>
