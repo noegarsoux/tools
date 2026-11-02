@@ -1,0 +1,432 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Collage de motifs</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Collage de motifs : des couches de motifs générés (rayures, damier, trame, marbrure, zigzag,
+    // vagues), chacune découpée par une forme, empilées comme des papiers collés avec leur ombre.
+    // La marbrure est une onde dont la phase est déformée par un bruit (warp). On déplace les papiers
+    // au pointeur, on en découpe de nouveaux au lasso, et le logo peut servir d'emporte-pièce.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const GR = PAL('good-room'), KB = PAL('kegelbahn'), GL = PAL('glyphes'), P60 = PAL('papier-60');
+    const BIT = PAL('bitmap'), MENTHE = PAL('menthe'), BIEN = PAL('biennale'), NUIT = PAL('trame-nuit');
+
+    // ——— Formes de découpe : chemins SVG dans un repère unité (rayon ≈ 1) ———
+    const f3 = (n) => +n.toFixed(3);
+    const poly = (pts) => 'M' + pts.map((q) => `${f3(q[0])} ${f3(q[1])}`).join('L') + 'Z';
+    const wavy = () => { const pts = [[0.9, 0.9], [-0.9, 0.9]]; for (let i = 0; i <= 24; i++) { const x = -0.9 + 1.8 * i / 24; pts.push([x, -0.55 + Math.sin(i / 24 * TAU * 2) * 0.22]); } return poly(pts); };
+    const SHAPES = {
+      rond: 'M-1 0A1 1 0 1 1 1 0A1 1 0 1 1 -1 0Z',
+      carre: poly([[-0.82, -0.82], [0.82, -0.82], [0.82, 0.82], [-0.82, 0.82]]),
+      arche: 'M-0.75 1L-0.75 -0.2A0.75 0.75 0 0 1 0.75 -0.2L0.75 1Z',
+      losange: poly([[0, -1.05], [0.85, 0], [0, 1.05], [-0.85, 0]]),
+      demi: 'M-1 0.45A1 1 0 0 1 1 0.45Z',
+      triangle: poly([[-0.95, 0.75], [0.95, 0.75], [0, -0.95]]),
+      plus: poly([[-0.32, -0.95], [0.32, -0.95], [0.32, -0.32], [0.95, -0.32], [0.95, 0.32], [0.32, 0.32], [0.32, 0.95], [-0.32, 0.95], [-0.32, 0.32], [-0.95, 0.32], [-0.95, -0.32], [-0.32, -0.32]]),
+      vague: wavy(),
+      goutte: 'M0 -1C0.5 -0.4 0.8 0 0.8 0.35A0.8 0.8 0 0 1 -0.8 0.35C-0.8 0 -0.5 -0.4 0 -1Z',
+    };
+    const FORMES = {
+      mixtes: ['rond', 'carre', 'arche', 'losange', 'demi', 'triangle', 'plus', 'vague', 'goutte', 'blob', 'blob'],
+      geometriques: ['rond', 'carre', 'arche', 'losange', 'demi', 'triangle', 'plus'],
+      organiques: ['blob', 'blob', 'blob', 'goutte', 'vague', 'rond', 'arche'],
+    };
+    const MOTIFS = ['rayures', 'damier', 'trame', 'marbrure', 'zigzag', 'vagues'];
+    // Forme organique : rayons bruités lissés par des courbes passant par les milieux.
+    function blobPath(r) {
+      const n = 9, pts = [];
+      const amp = [r(), r(), r()].map((v) => v * 0.25), ph = [r() * TAU, r() * TAU, r() * TAU];
+      for (let i = 0; i < n; i++) {
+        const a = i / n * TAU, rr = 0.82 + amp[0] * Math.sin(a * 2 + ph[0]) + amp[1] * Math.sin(a * 3 + ph[1]) + amp[2] * Math.cos(a * 5 + ph[2]);
+        pts.push([Math.cos(a) * rr, Math.sin(a) * rr]);
+      }
+      return smoothClosed(pts);
+    }
+    function smoothClosed(pts) {
+      const n = pts.length, mid = (a, b) => [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+      let d = `M${f3(mid(pts[n - 1], pts[0])[0])} ${f3(mid(pts[n - 1], pts[0])[1])}`;
+      for (let i = 0; i < n; i++) { const m = mid(pts[i], pts[(i + 1) % n]); d += `Q${f3(pts[i][0])} ${f3(pts[i][1])} ${f3(m[0])} ${f3(m[1])}`; }
+      return d + 'Z';
+    }
+
+    let ready = false, layers = [], drawnCount = 0, lastT = 0;
+    let grab = null, lasso = null, hoverLayer = -1;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.06, vignette: 0 },
+      hint: 'Glissez un papier pour le déplacer · glissez dans le vide pour découper une forme · molette sur un papier : taille',
+      notes: 'Chaque papier est un motif découpé par une forme. La marbrure est une onde déformée par un bruit. Tirez une nouvelle graine pour une autre composition ; les formes découpées au lasso restent.',
+      params: {
+        'Composition': {
+          couches: { type: 'range', label: 'Nombre de papiers', min: 2, max: 9, step: 1, value: 6 },
+          formes: { type: 'segmented', label: 'Formes', options: { mixtes: 'Mixtes', geometriques: 'Géométriques', organiques: 'Organiques' }, value: 'mixtes' },
+          echelle: { type: 'range', label: 'Taille des papiers', min: 0.4, max: 1.8, step: 0.01, value: 1 },
+          logo: { type: 'toggle', label: 'Le logo découpe le papier du dessus', value: false },
+          ombre: { type: 'range', label: 'Ombre portée (px)', min: 0, max: 24, step: 1, value: 6 },
+          bordure: { type: 'range', label: 'Damier en bordure', min: 0, max: 0.08, step: 0.002, value: 0.03 },
+        },
+        'Motifs': {
+          densite: { type: 'range', label: 'Pas des motifs (px)', min: 5, max: 60, step: 1, value: 22 },
+          marbrure: { type: 'range', label: 'Marbrure (déformation)', min: 0, max: 1, step: 0.01, value: 0.55 },
+          sousmotif: { type: 'toggle', label: 'Papiers opaques', value: true },
+          melange: { type: 'segmented', label: 'Motifs', options: { tous: 'Tous', droits: 'Droits', souples: 'Souples' }, value: 'tous' },
+        },
+        'Mouvement': {
+          boucle: { type: 'range', label: 'Boucle (s)', min: 4, max: 40, step: 1, value: 12 },
+          derive: { type: 'range', label: 'Dérive des papiers', min: 0, max: 1, step: 0.01, value: 0.35 },
+          defilement: { type: 'range', label: 'Défilement des motifs', min: -3, max: 3, step: 1, value: 1 },
+          ondulation: { type: 'range', label: 'Ondulation de la marbrure', min: 0, max: 1, step: 0.01, value: 0.5 },
+        },
+        'Couleur': {
+          fond: { type: 'color', label: 'Fond', value: GR[0] },
+          palette: { type: 'palette', label: 'Couleurs des papiers', value: GR.slice(1).concat(['#f1ece1']) },
+          ombreCouleur: { type: 'color', label: 'Couleur de l’ombre', value: '#000000' },
+        },
+      },
+      presets: {
+        'Good Room': {},
+        'Affiche claire': { fond: '#f1ece1', palette: GR.slice(1).concat([GR[0]]), ombreCouleur: '#111111', ombre: 4, bordure: 0.024 },
+        'Kegelbahn': { fond: KB[0], palette: KB.slice(1), formes: 'geometriques', couches: 7, densite: 12, bordure: 0, ombre: 0 },
+        'Glyphes': { fond: GL[1], palette: [GL[0], GL[2], GL[3], GL[4], GL[5], GL[6]], formes: 'organiques', couches: 6, densite: 14, ombre: 3, ombreCouleur: GL[0] },
+        'Papier': { fond: P60[0], palette: [P60[1], '#c9c6bd', P60[0]], formes: 'geometriques', couches: 5, densite: 9, ombre: 2, ombreCouleur: P60[1], bordure: 0.02, marbrure: 0.8 },
+        'Marbre': { melange: 'souples', marbrure: 1, ondulation: 0.9, couches: 4, echelle: 1.4, densite: 22, fond: MENTHE[0], palette: MENTHE.slice(1).concat([MENTHE[0]]), ombreCouleur: MENTHE[1], bordure: 0 },
+        'Bitmap': { fond: BIT[0], palette: BIT.slice(1), formes: 'mixtes', melange: 'droits', densite: 10, couches: 8, echelle: 1.1, ombre: 0, bordure: 0.04 },
+        'Transparent': { sousmotif: false, couches: 7, densite: 11, fond: '#f1ece1', palette: [GR[0], GR[2], GR[4], GR[3]], ombre: 0, bordure: 0 },
+        'Biennale': { fond: BIEN[0], palette: BIEN.slice(1).concat([BIEN[0]]), formes: 'geometriques', melange: 'droits', couches: 5, echelle: 1.3, densite: 20, ombre: 10, ombreCouleur: '#000000' },
+        'Logo': { logo: true, couches: 5, echelle: 1.15, ombre: 8 },
+      },
+      brand(colors) {
+        return { fond: colors[0], palette: colors.length > 1 ? colors.slice(1).concat([colors[0]]) : [colors[0]] };
+      },
+      pointer: {
+        move: (q) => { hoverLayer = hit(q.x, q.y); canvas.style.cursor = hoverLayer >= 0 ? 'grab' : 'crosshair'; },
+        down: (q) => {
+          const i = hit(q.x, q.y);
+          if (i >= 0) { const L = layers[i]; grab = { L, dx: L.cx - q.x / app.size.w, dy: L.cy - q.y / app.size.h }; }
+          else lasso = [{ x: q.x, y: q.y }];
+        },
+        drag: (q) => {
+          if (grab) { grab.L.cx = q.x / app.size.w + grab.dx; grab.L.cy = q.y / app.size.h + grab.dy; }
+          else if (lasso) { const l = lasso[lasso.length - 1]; if (Math.hypot(q.x - l.x, q.y - l.y) > 6) lasso.push({ x: q.x, y: q.y }); }
+        },
+        up: () => { grab = null; if (lasso) { closeLasso(lasso); lasso = null; } },
+        wheel: (q, dy) => {
+          const i = hit(q.x, q.y);
+          if (i >= 0) layers[i].r = Math.max(0.05, Math.min(1.2, layers[i].r * (1 - dy * 0.001)));
+          else app.set('densite', Math.max(5, Math.min(60, Math.round(p.densite + dy * 0.02))));
+        },
+      },
+      onChange(k) {
+        if (!ready) return;
+        if (k === '*' || k === 'couches' || k === 'formes' || k === 'melange' || k === 'palette' || k === 'fond' || k === 'logo') compose(true);
+        if (k === '_logo' || k === 'logo' || k === '*') buildLogo();
+      },
+      onSeed() { if (ready) compose(false); },
+      export: { name: 'collage-de-motifs', svg: () => toSVG() },
+    });
+    const p = app.params;
+    canvas.addEventListener('pointerleave', () => { canvas.style.cursor = ''; });
+
+    // ——— Composition : chaque papier = forme + motif + deux couleurs + petite dérive ———
+    function pickColors(r, i) {
+      const pal = p.palette.length ? p.palette : ['#000'];
+      const usable = pal.filter((c) => c.toLowerCase() !== String(p.fond).toLowerCase());
+      const src = usable.length ? usable : pal;
+      const a = src[(i + Math.floor(r() * src.length)) % src.length];
+      let b = src[Math.floor(r() * src.length)];
+      if (b === a) b = src.length > 1 ? src[(src.indexOf(a) + 1) % src.length] : p.fond;
+      return [a, b];
+    }
+    function motifSet() { return p.melange === 'droits' ? ['rayures', 'damier', 'trame', 'zigzag'] : p.melange === 'souples' ? ['marbrure', 'vagues', 'trame', 'marbrure'] : MOTIFS; }
+    function makeLayer(r, i, n, shape) {
+      const set = FORMES[p.formes] || FORMES.mixtes, ms = motifSet();
+      const sh = shape || set[Math.floor(r() * set.length)];
+      // Placement en grille lâche : chaque papier vise une case, puis on secoue.
+      const cols = Math.ceil(Math.sqrt(n * 1.5)), rows = Math.ceil(n / cols), ci = i % cols, ri = Math.floor(i / cols) % rows;
+      const [ca, cb] = pickColors(r, i);
+      return {
+        shape: sh, path: sh === 'blob' ? blobPath(r) : SHAPES[sh] || SHAPES.rond,
+        cx: (ci + 0.5) / cols + (r() - 0.5) * 0.6 / cols, cy: (ri + 0.5) / rows + (r() - 0.5) * 0.6 / rows,
+        r: (0.2 + r() * 0.17) * (n <= 3 ? 1.4 : n >= 7 ? 0.85 : 1), sx: 0.75 + r() * 0.5, rot: Math.round((r() - 0.5) * 8) * 15 * Math.PI / 180,
+        motif: ms[Math.floor(r() * ms.length)], ang: Math.round(r() * 12) * 15 * Math.PI / 180, per: 0.7 + r() * 0.8,
+        ca, cb, ph: r() * TAU, nseed: r() * 100, drawn: false,
+      };
+    }
+    function compose(keepDrawn) {
+      const r = app.rng(23), n = p.couches;
+      const drawn = keepDrawn ? layers.filter((L) => L.drawn) : layers.filter((L) => L.drawn);
+      layers = [];
+      for (let i = 0; i < n; i++) layers.push(makeLayer(r, i, n));
+      // On mélange l'ordre d'empilement, puis on remet les découpes au lasso par-dessus.
+      for (let i = layers.length - 1; i > 0; i--) { const j = Math.floor(r() * (i + 1)); [layers[i], layers[j]] = [layers[j], layers[i]]; }
+      // Le papier du fond est grand et déborde : il donne une assise à l'affiche.
+      if (n >= 4) { const B = layers[0]; B.r *= 2.1; B.cx = r() < 0.5 ? 0.22 : 0.78; B.cy = r() < 0.5 ? 0.3 : 0.7; }
+      // Avec le logo, le papier du dessus devient l'emporte-pièce : grand, près du centre, presque droit.
+      if (p.logo) { const T = layers[layers.length - 1]; T.cx = 0.5 + (r() - 0.5) * 0.2; T.cy = 0.5 + (r() - 0.5) * 0.2; T.r = Math.max(T.r, 0.38); T.rot = 0; T.sx = 1; }
+      for (const L of drawn) { const [a, b] = pickColors(r, layers.length); L.ca = a; L.cb = b; layers.push(L); }
+      for (const L of layers) L._p = null;
+    }
+    function closeLasso(pts) {
+      if (pts.length < 8) return;
+      const { w, h } = app.size, U = Math.min(w, h);
+      let cx = 0, cy = 0; for (const q of pts) { cx += q.x; cy += q.y; } cx /= pts.length; cy /= pts.length;
+      let R = 0; for (const q of pts) R = Math.max(R, Math.hypot(q.x - cx, q.y - cy));
+      if (R < 18) return;
+      // On simplifie le tracé (un point sur deux) et on le lisse : un bord de papier découpé aux ciseaux.
+      const unit = pts.filter((_, k) => k % 2 === 0).map((q) => [(q.x - cx) / R, (q.y - cy) / R]);
+      const r = app.rng(100 + drawnCount);
+      const L = makeLayer(r, drawnCount, 4, 'trace');
+      Object.assign(L, { shape: 'trace', path: smoothClosed(unit), cx: cx / w, cy: cy / h, r: (R / U) * (1 / p.echelle), sx: 1, rot: 0, drawn: true });
+      L._p = null; layers.push(L); drawnCount++;
+      // Quatre découpes au plus : la plus ancienne s'en va.
+      const d = layers.filter((x) => x.drawn); if (d.length > 4) layers.splice(layers.indexOf(d[0]), 1);
+    }
+
+    // ——— Logo : masque alpha (blanc, opacité = encre du logo) ———
+    let logoMask = null;
+    function buildLogo() {
+      logoMask = null;
+      const img = app.logoImg;
+      if (!p.logo || !img) return;
+      const M = 512, iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height, k = M / Math.max(iw, ih);
+      const w = Math.max(2, Math.round(iw * k)), h = Math.max(2, Math.round(ih * k));
+      const cv = document.createElement('canvas'); cv.width = w; cv.height = h;
+      const x = cv.getContext('2d', { willReadFrequently: true });
+      x.fillStyle = '#fff'; x.fillRect(0, 0, w, h); x.drawImage(img, 0, 0, w, h);
+      const id = x.getImageData(0, 0, w, h), d = id.data;
+      for (let i = 0; i < d.length; i += 4) {
+        const a = 255 - (d[i] * 0.2126 + d[i + 1] * 0.7152 + d[i + 2] * 0.0722);
+        d[i] = d[i + 1] = d[i + 2] = 255; d[i + 3] = a > 40 ? Math.min(255, a * 1.4) : 0;
+      }
+      x.putImageData(id, 0, 0);
+      logoMask = { cv, w, h, url: null };
+    }
+    const isLogo = (L) => p.logo && logoMask && L === topGenerated();
+    function topGenerated() { for (let i = layers.length - 1; i >= 0; i--) if (!layers[i].drawn) return layers[i]; return null; }
+
+    // ——— Placement d'un papier à l'instant t (dérive en boucle) ———
+    function place(L, t) {
+      const { w, h } = app.size, U = Math.min(w, h), ph = TAU * t / p.boucle;
+      const dr = p.derive * U * 0.06;
+      const X = L.cx * w + Math.cos(ph + L.ph) * dr, Y = L.cy * h + Math.sin(ph * 1 + L.ph * 1.3) * dr;
+      const rot = L.rot + Math.sin(ph + L.ph) * p.derive * 0.12;
+      const R = L.r * U * (L.drawn ? p.echelle : p.echelle);
+      return { X, Y, R, rot, sx: L.sx };
+    }
+    function matrixOf(g) {
+      const c = Math.cos(g.rot), s = Math.sin(g.rot);
+      return new DOMMatrix([c * g.R * g.sx, s * g.R * g.sx, -s * g.R, c * g.R, g.X, g.Y]);
+    }
+    function pathOf(L) { if (!L._p) L._p = new Path2D(L.path); return L._p; }
+    function logoRect(g) {
+      const asp = logoMask.w / logoMask.h, W = asp >= 1 ? g.R * 2.2 : g.R * 2.2 * asp, H = asp >= 1 ? g.R * 2.2 / asp : g.R * 2.2;
+      return { x: -W / 2, y: -H / 2, w: W, h: H };
+    }
+    function hit(x, y) {
+      const { dpr } = app.size;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      for (let i = layers.length - 1; i >= 0; i--) {
+        const L = layers[i], g = place(L, lastT);
+        if (isLogo(L)) {
+          const lr = logoRect(g), c = Math.cos(-g.rot), s = Math.sin(-g.rot), lx = (x - g.X) * c - (y - g.Y) * s, ly = (x - g.X) * s + (y - g.Y) * c;
+          if (lx > lr.x && lx < lr.x + lr.w && ly > lr.y && ly < lr.y + lr.h) return i;
+          continue;
+        }
+        const P = new Path2D(); P.addPath(pathOf(L), matrixOf(g));
+        if (ctx.isPointInPath(P, x * dpr, y * dpr)) return i;
+      }
+      return -1;
+    }
+
+    // ——— Bruit (pour la marbrure) ———
+    function hash2(x, y, s) {
+      let h = (Math.imul(x | 0, 374761393) + Math.imul(y | 0, 668265263) + Math.imul(s | 0, 2246822519)) | 0;
+      h = Math.imul(h ^ (h >>> 13), 1274126177); h ^= h >>> 16;
+      return (h >>> 0) / 4294967296;
+    }
+    function vnoise(x, y, s) {
+      const xi = Math.floor(x), yi = Math.floor(y), fx = x - xi, fy = y - yi, ux = fx * fx * (3 - 2 * fx), uy = fy * fy * (3 - 2 * fy);
+      const a = hash2(xi, yi, s), b = hash2(xi + 1, yi, s), c = hash2(xi, yi + 1, s), d = hash2(xi + 1, yi + 1, s);
+      return (a + (b - a) * ux) * (1 - uy) + (c + (d - c) * ux) * uy;
+    }
+    const hexRGB = (hex) => { const n = parseInt(String(hex).slice(1, 7), 16) || 0; return [n >> 16, (n >> 8) & 255, n & 255]; };
+
+    // ——— Géométrie d'un motif dans le repère écran : polygones, ronds ou image (marbrure) ———
+    function motif(L, g, t) {
+      const per = Math.max(4, p.densite * L.per), T = t / p.boucle, ph = TAU * T;
+      const R = g.R * 1.55 * Math.max(1, g.sx), out = { polys: [], circles: [], raster: null };
+      const a = L.ang + (L.motif === 'trame' ? Math.PI / 4 : 0), ca = Math.cos(a), sa = Math.sin(a);
+      const tf = (x, y) => [g.X + x * ca - y * sa, g.Y + x * sa + y * ca];
+      const scroll = p.defilement * T * per * 2; // un nombre entier de périodes par boucle
+      const off = ((scroll % per) + per) % per;
+      if (L.motif === 'rayures') {
+        for (let y = -R - per + off; y < R; y += per) out.polys.push([tf(-R, y), tf(R, y), tf(R, y + per * 0.5), tf(-R, y + per * 0.5)]);
+      } else if (L.motif === 'damier') {
+        const o2 = ((scroll % (per * 2)) + per * 2) % (per * 2);
+        for (let j = Math.floor(-R / per) - 2; j * per < R; j++) for (let i = Math.floor(-R / per) - 2; i * per < R; i++) {
+          if ((i + j) & 1) continue;
+          const x = i * per + o2, y = j * per;
+          if (x > R || x + per < -R) continue;
+          out.polys.push([tf(x, y), tf(x + per, y), tf(x + per, y + per), tf(x, y + per)]);
+        }
+      } else if (L.motif === 'zigzag' || L.motif === 'vagues') {
+        const step = L.motif === 'zigzag' ? per / 2 : per / 6, amp = per * 0.35;
+        const edge = (x, y0) => L.motif === 'zigzag' ? y0 + (Math.round(x / step) & 1 ? amp : -amp) : y0 + Math.sin(x / per * TAU) * amp;
+        for (let y = -R - per * 2 + off; y < R + per; y += per * 1.1) {
+          const top = [], bot = [];
+          for (let x = Math.floor(-R / step) * step; x <= R + step; x += step) { top.push(tf(x + off, edge(x, y))); bot.push(tf(x + off, edge(x, y) + per * 0.45)); }
+          out.polys.push(top.concat(bot.reverse()));
+        }
+      } else if (L.motif === 'trame') {
+        // Trame de points en dégradé à travers le papier ; le dégradé glisse et revient.
+        for (let j = Math.floor(-R / per) - 1; j * per < R + per; j++) for (let i = Math.floor(-R / per) - 1; i * per < R + per; i++) {
+          const x = i * per + (j & 1 ? per / 2 : 0), y = j * per * 0.866;
+          const gr = 0.5 + 0.5 * Math.sin((x * 0.7 + y) / (R * 1.2) * Math.PI + ph * (p.defilement || 0) + L.ph);
+          const rr = per * 0.47 * (0.15 + 0.85 * gr);
+          if (rr < 0.4) continue;
+          const [X, Y] = tf(x, y); out.circles.push([X, Y, rr]);
+        }
+      } else if (L.motif === 'marbrure') {
+        // Marbrure : sin(y + warp) seuillé, warp = bruit à deux octaves qui tourne sur un cercle (boucle exacte).
+        const q = 3, S = Math.ceil(R * 2 / q), cv = L._cv && L._cv.width === S ? L._cv : (L._cv = Object.assign(document.createElement('canvas'), { width: S, height: S }));
+        const x = cv.getContext('2d'), id = x.createImageData(S, S), d = id.data;
+        const A = hexRGB(L.ca), B = p.sousmotif ? hexRGB(L.cb) : null;
+        const wa = p.marbrure * per * 2.2, ns = 1 / (per * 2.5), cr = p.ondulation * 0.8;
+        const ox = Math.cos(ph) * cr + L.nseed, oy = Math.sin(ph) * cr;
+        for (let j = 0; j < S; j++) for (let i = 0; i < S; i++) {
+          const lx = i * q - R, ly = j * q - R;
+          const n = vnoise(lx * ns + ox, ly * ns + oy, 3) + 0.5 * vnoise(lx * ns * 2.3 - oy, ly * ns * 2.3 + ox, 5);
+          const v = Math.sin((ly + (n - 0.75) * wa * 2) / per * TAU + ph * p.defilement);
+          const e = Math.max(0, Math.min(1, v * 2.2 + 0.5)), k = (j * S + i) * 4;
+          if (B) { d[k] = A[0] * e + B[0] * (1 - e); d[k + 1] = A[1] * e + B[1] * (1 - e); d[k + 2] = A[2] * e + B[2] * (1 - e); d[k + 3] = 255; }
+          else { d[k] = A[0]; d[k + 1] = A[1]; d[k + 2] = A[2]; d[k + 3] = e * 255; }
+        }
+        x.putImageData(id, 0, 0);
+        out.raster = { cv, x: -R, y: -R, s: R * 2, ang: a };
+      }
+      return out;
+    }
+
+    // ——— Dessin ———
+    let layerCv = null;
+    function drawLayerContent(c, L, g, t) {
+      const m = motif(L, g, t);
+      if (p.sousmotif && !m.raster) { c.fillStyle = L.cb; c.fillRect(g.X - g.R * 2, g.Y - g.R * 2, g.R * 4, g.R * 4); }
+      c.fillStyle = L.ca;
+      if (m.polys.length) { c.beginPath(); for (const pl of m.polys) { c.moveTo(pl[0][0], pl[0][1]); for (let k = 1; k < pl.length; k++) c.lineTo(pl[k][0], pl[k][1]); c.closePath(); } c.fill(); }
+      if (m.circles.length) { c.beginPath(); for (const [x, y, r] of m.circles) { c.moveTo(x + r, y); c.arc(x, y, r, 0, TAU); } c.fill(); }
+      if (m.raster) {
+        c.save(); c.translate(g.X, g.Y); c.rotate(m.raster.ang); c.imageSmoothingEnabled = true;
+        c.drawImage(m.raster.cv, m.raster.x, m.raster.y, m.raster.s, m.raster.s); c.restore();
+      }
+    }
+    function draw(t) {
+      const { w, h, dpr } = app.size, U = Math.min(w, h);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = p.fond; ctx.fillRect(0, 0, w, h);
+      for (const L of layers) {
+        const g = place(L, t);
+        if (isLogo(L)) { drawLogoLayer(L, g, t); continue; }
+        const P = new Path2D(); P.addPath(pathOf(L), matrixOf(g));
+        if (p.ombre > 0) { ctx.save(); ctx.translate(p.ombre * 0.7, p.ombre); ctx.fillStyle = p.ombreCouleur; ctx.fill(P); ctx.restore(); }
+        ctx.save(); ctx.clip(P); drawLayerContent(ctx, L, g, t); ctx.restore();
+      }
+      drawBorder(ctx, w, h, U);
+      if (lasso && lasso.length > 1) {
+        ctx.save(); ctx.setLineDash([6, 6]); ctx.lineWidth = 1.5; ctx.strokeStyle = (p.palette[0] || '#fff');
+        ctx.beginPath(); ctx.moveTo(lasso[0].x, lasso[0].y); for (const q of lasso) ctx.lineTo(q.x, q.y); ctx.closePath(); ctx.stroke(); ctx.restore();
+      }
+      app.finish(ctx);
+    }
+    function drawLogoLayer(L, g, t) {
+      // Le logo sert d'emporte-pièce : on peint le motif sur un calque, puis on ne garde que l'encre du logo.
+      const { w, h, dpr } = app.size, lr = logoRect(g);
+      if (!layerCv || layerCv.width !== canvas.width || layerCv.height !== canvas.height) { layerCv = document.createElement('canvas'); layerCv.width = canvas.width; layerCv.height = canvas.height; }
+      const c = layerCv.getContext('2d');
+      c.setTransform(1, 0, 0, 1, 0, 0); c.clearRect(0, 0, layerCv.width, layerCv.height);
+      c.setTransform(dpr, 0, 0, dpr, 0, 0);
+      drawLayerContent(c, L, g, t);
+      c.globalCompositeOperation = 'destination-in';
+      c.translate(g.X, g.Y); c.rotate(g.rot); c.drawImage(logoMask.cv, lr.x, lr.y, lr.w, lr.h);
+      c.globalCompositeOperation = 'source-over';
+      if (p.ombre > 0) {
+        ctx.save(); ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.translate(g.X + p.ombre * 0.7, g.Y + p.ombre); ctx.rotate(g.rot);
+        ctx.filter = 'brightness(0)'; ctx.globalAlpha = 0.9; ctx.drawImage(logoMask.cv, lr.x, lr.y, lr.w, lr.h); ctx.restore();
+      }
+      ctx.save(); ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.drawImage(layerCv, 0, 0); ctx.restore();
+    }
+    function borderCells(w, h, U) {
+      const b = p.bordure * U; if (b < 2) return [];
+      const cells = [], nx = Math.max(2, Math.round(w / b)), ny = Math.max(2, Math.round(h / b)), cw = w / nx, ch = h / ny;
+      for (let i = 0; i < nx; i++) for (const j of [0, 1]) {
+        const y = j ? h - ch : 0; if ((i + j * (ny - 1)) % 2 === 0) cells.push([i * cw, y, cw, ch]);
+      }
+      for (let j = 1; j < ny - 1; j++) for (const i of [0, 1]) {
+        const x = i ? w - cw : 0; if ((j + i * (nx - 1)) % 2 === 0) cells.push([x, j * ch, cw, ch]);
+      }
+      return { cells, cw, ch, nx, ny };
+    }
+    const borderColor = () => (p.palette.find((c) => c.toLowerCase() !== String(p.fond).toLowerCase()) || '#fff');
+    const borderBack = () => p.fond;
+    function drawBorder(c, w, h, U) {
+      const B = borderCells(w, h, U); if (!B.cells) return;
+      // Fond de la bordure, puis cases alternées.
+      c.fillStyle = borderBack();
+      c.fillRect(0, 0, w, B.ch); c.fillRect(0, h - B.ch, w, B.ch); c.fillRect(0, 0, B.cw, h); c.fillRect(w - B.cw, 0, B.cw, h);
+      c.fillStyle = borderColor(); c.beginPath(); for (const [x, y, cw, ch] of B.cells) c.rect(x, y, cw + 0.3, ch + 0.3); c.fill();
+    }
+
+    // ——— Export SVG : chaque papier = clipPath (ou masque du logo) + ses polygones, ronds ou image ———
+    function toSVG() {
+      const { w, h } = app.size, U = Math.min(w, h), t = lastT, f = (n) => +n.toFixed(2);
+      const defs = [], body = [];
+      const polyD = (pl) => 'M' + pl.map((q) => `${f(q[0])} ${f(q[1])}`).join('L') + 'Z';
+      layers.forEach((L, i) => {
+        const g = place(L, t), m = motif(L, g, t), M = matrixOf(g);
+        const mat = `matrix(${[M.a, M.b, M.c, M.d, M.e, M.f].map((v) => +v.toFixed(4)).join(' ')})`;
+        let clip;
+        if (isLogo(L)) {
+          if (!logoMask.url) logoMask.url = logoMask.cv.toDataURL('image/png');
+          const lr = logoRect(g), deg = f(g.rot * 180 / Math.PI);
+          const tr = `translate(${f(g.X)} ${f(g.Y)}) rotate(${deg})`;
+          defs.push(`<mask id="m${i}" maskUnits="userSpaceOnUse" x="0" y="0" width="${w}" height="${h}"><image href="${logoMask.url}" x="${f(lr.x)}" y="${f(lr.y)}" width="${f(lr.w)}" height="${f(lr.h)}" transform="${tr}"/></mask>`);
+          clip = `mask="url(#m${i})"`;
+        } else {
+          defs.push(`<clipPath id="c${i}"><path d="${L.path}" transform="${mat}"/></clipPath>`);
+          if (p.ombre > 0) body.push(`<path d="${L.path}" transform="translate(${f(p.ombre * 0.7)} ${p.ombre}) ${mat}" fill="${p.ombreCouleur}"/>`);
+          clip = `clip-path="url(#c${i})"`;
+        }
+        const parts = [];
+        if (p.sousmotif && !m.raster) parts.push(`<rect x="${f(g.X - g.R * 2)}" y="${f(g.Y - g.R * 2)}" width="${f(g.R * 4)}" height="${f(g.R * 4)}" fill="${L.cb}"/>`);
+        if (m.polys.length) parts.push(`<path fill="${L.ca}" d="${m.polys.map(polyD).join('')}"/>`);
+        if (m.circles.length) parts.push(`<g fill="${L.ca}">${m.circles.map(([x, y, r]) => `<circle cx="${f(x)}" cy="${f(y)}" r="${f(r)}"/>`).join('')}</g>`);
+        if (m.raster) parts.push(`<image href="${m.raster.cv.toDataURL('image/png')}" x="${f(m.raster.x)}" y="${f(m.raster.y)}" width="${f(m.raster.s)}" height="${f(m.raster.s)}" transform="translate(${f(g.X)} ${f(g.Y)}) rotate(${f(m.raster.ang * 180 / Math.PI)})"/>`);
+        body.push(`<g ${clip}>${parts.join('')}</g>`);
+      });
+      const B = borderCells(w, h, U);
+      if (B.cells) {
+        body.push(`<path fill="${borderBack()}" d="M0 0H${w}V${f(B.ch)}H0ZM0 ${f(h - B.ch)}H${w}V${h}H0ZM0 0H${f(B.cw)}V${h}H0ZM${f(w - B.cw)} 0H${w}V${h}H${f(w - B.cw)}Z"/>`);
+        body.push(`<path fill="${borderColor()}" d="${B.cells.map(([x, y, cw, ch]) => `M${f(x)} ${f(y)}h${f(cw)}v${f(ch)}h${f(-cw)}Z`).join('')}"/>`);
+      }
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><defs>${defs.join('')}</defs><rect width="100%" height="100%" fill="${p.fond}"/>${body.join('')}</svg>`;
+    }
+
+    ready = true;
+    compose(false); buildLogo();
+    app.loop((t) => { lastT = t; draw(t); });
+  </script>
+</body>
+</html>
