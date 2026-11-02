@@ -1,0 +1,15 @@
+{
+  "slug": "echo-plaques",
+  "title": "Écho de plaques",
+  "type": "typography",
+  "description": "Un bloc de texte sur plaque répété en cascade le long du tracé du pointeur, avec couleurs en alternance, rotation et échelle qui progressent.",
+  "tags": ["echo", "cascade", "plaques", "typographie", "svg", "motion"],
+  "inspiration": [
+    "Biennale de l’affiche : écho typographique sur plaques rose, jaune et rouge (moodboard 22)",
+    "Traînées et répétitions décalées de l’affiche suisse contemporaine",
+    "references/moodboard.md ; palettes biennale, kegelbahn, salon, acide, luzern, good-room"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
