@@ -1,0 +1,15 @@
+{
+  "slug": "lave",
+  "title": "Lave",
+  "type": "motion",
+  "description": "Des gouttes chauffées par le bas montent, fusionnent, refroidissent et retombent dans une lampe, une capsule, le cadre ou autour du logo en fusion.",
+  "tags": ["metaballes", "lampe", "convection", "fusion", "logo", "svg"],
+  "inspiration": [
+    "Lampes à lave des années 1960 et 1970",
+    "Métaballes à noyau compact (Wyvill) et marching squares",
+    "references/techniques.md ; palettes papier-60, good-room, menthe, kegelbahn"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
