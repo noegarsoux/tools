@@ -1,0 +1,15 @@
+{
+  "slug": "collage-motifs",
+  "title": "Collage de motifs",
+  "type": "pattern",
+  "description": "Des papiers de motifs (rayures, damier, trame, marbrure, zigzag) découpés par des formes et collés avec leur ombre ; on les déplace et on en découpe au lasso.",
+  "tags": ["collage", "motif", "marbrure", "affiche", "svg", "logo"],
+  "inspiration": [
+    "Moodboard de Noé, fiche 20 : Good Room, collage d'aplats",
+    "Papiers découpés de Matisse, affiches suisses en collage, marbrure à la cuve",
+    "Palettes good-room, kegelbahn, glyphes, papier-60, menthe, bitmap, biennale"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
