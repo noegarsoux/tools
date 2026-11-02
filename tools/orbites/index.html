@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Orbites</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Corps sur de vraies orbites képlériennes autour d'un astre placé au foyer.
+    //   Anomalie moyenne M = M₀ + n·t,  équation de Kepler M = E − e·sin E (résolue par Newton),
+    //   position r = a(cos E − e, √(1−e²)·sin E), tournée de l'argument du périastre ω.
+    // Troisième loi : T² ∝ a³. Les périodes sont des fractions entières de la boucle (Tₖ = Γ / mₖ),
+    // donc les demi-grands axes suivent aₖ ∝ mₖ^(−2/3) et l'animation boucle exactement (résonances).
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const ORB = PAL('orbite'), NUIT = PAL('trame-nuit'), KB = PAL('kegelbahn'), P60 = PAL('papier-60'), ACIDE = PAL('acide');
+    const LUZ = PAL('luzern'), GOOD = PAL('good-room'), BIEN = PAL('biennale'), PHOTO = PAL('photocopie');
+
+    const LAYOUT = new Set(['corps', 'harmonique', 'suite', 'excentricite', 'orientation', 'taille', 'variation', 'rayons']);
+    let ready = false, B = [];
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: 8,
+      finish: { grain: 0.1, vignette: 0.12 },
+      hint: 'Attrapez un corps et lancez-le : sa nouvelle orbite suit la loi de Kepler · Maj + clic : ajouter un corps · molette : zoom',
+      notes: 'Chaque corps suit une ellipse dont l’astre central occupe un foyer, plus vite au périastre (deuxième loi). Les périodes sont des fractions entières de la boucle : la troisième loi (T² ∝ a³) fixe alors la taille des orbites, et les rapports de périodes deviennent des résonances (1:2:4 comme Io, Europe et Ganymède). Un corps lancé à la main reçoit l’orbite que donne sa vitesse, arrondie à la résonance la plus proche pour garder la boucle.',
+      params: {
+        'Système': {
+          corps: { type: 'range', label: 'Corps', min: 1, max: 32, step: 1, value: 9 },
+          harmonique: { type: 'range', label: 'Harmonique la plus lente', min: 1, max: 6, step: 1, value: 2 },
+          suite: { type: 'segmented', label: 'Périodes', options: { suite: '1, 2, 3…', doubles: '1, 2, 4…', hasard: 'Au hasard' }, value: 'suite' },
+          excentricite: { type: 'range', label: 'Excentricité max', min: 0, max: 0.95, step: 0.01, value: 0.35 },
+          orientation: { type: 'range', label: 'Dispersion des périastres (°)', min: 0, max: 360, step: 1, value: 360 },
+          taille: { type: 'range', label: 'Taille du système', min: 0.1, max: 0.7, step: 0.005, value: 0.4 },
+          boucle: { type: 'range', label: 'Boucle Γ (s)', min: 4, max: 60, step: 0.5, value: 20 },
+        },
+        'Vue': {
+          inclinaison: { type: 'range', label: 'Inclinaison (°)', min: 0, max: 85, step: 0.5, value: 58 },
+          rotation: { type: 'range', label: 'Rotation (°)', min: -180, max: 180, step: 1, value: -14 },
+          zoom: { type: 'range', label: 'Zoom', min: 0.3, max: 3, step: 0.01, value: 1 },
+          tours: { type: 'range', label: 'Tours de caméra par boucle', min: -2, max: 2, step: 1, value: 0 },
+        },
+        'Rendu': {
+          forme: { type: 'segmented', label: 'Corps', options: { disque: 'Disque', anneau: 'Anneau', carre: 'Carré', logo: 'Logo' }, value: 'disque' },
+          image: { type: 'file', label: 'Logo ou image', accept: 'image/*', show: (q) => q.forme === 'logo' },
+          rayon: { type: 'range', label: 'Taille des corps', min: 0.003, max: 0.08, step: 0.0005, value: 0.016 },
+          variation: { type: 'range', label: 'Variation de taille', min: 0, max: 1, step: 0.01, value: 0.6 },
+          centre: { type: 'range', label: 'Taille de l’astre', min: 0, max: 0.2, step: 0.001, value: 0.05 },
+          orbites: { type: 'range', label: 'Opacité des orbites', min: 0, max: 1, step: 0.01, value: 0.9 },
+          tirets: { type: 'range', label: 'Tirets des orbites', min: 0, max: 0.05, step: 0.001, value: 0 },
+          trait: { type: 'range', label: 'Épaisseur des traits', min: 0.2, max: 6, step: 0.05, value: 1.1 },
+          rayons: { type: 'range', label: 'Part des rayons vers le centre', min: 0, max: 1, step: 0.01, value: 0.35 },
+          trainee: { type: 'range', label: 'Traînée (part d’orbite)', min: 0, max: 0.9, step: 0.01, value: 0.12 },
+          profondeur: { type: 'range', label: 'Taille selon la profondeur', min: 0, max: 1, step: 0.01, value: 0.4 },
+        },
+        'Couleur': {
+          fond: { type: 'color', label: 'Fond', value: ORB[0] },
+          encre: { type: 'color', label: 'Traits', value: ORB[1] },
+          astre: { type: 'color', label: 'Astre', value: ORB[1] },
+          palette: { type: 'palette', label: 'Corps', value: [ORB[1], ORB[2]] },
+        },
+      },
+      presets: {
+        'Orbite': {},
+        'Nuit': { corps: 14, harmonique: 3, taille: 0.5, suite: 'suite', excentricite: 0.2, inclinaison: 70, rotation: 8, rayon: 0.01, variation: 0.8, centre: 0.03, orbites: 0.45, trait: 0.7, rayons: 0, trainee: 0.35, fond: NUIT[0], encre: NUIT[2], astre: ACIDE[2], palette: [NUIT[1], NUIT[2], ACIDE[2]] },
+        'Résonance 1:2:4': { corps: 3, harmonique: 1, suite: 'doubles', excentricite: 0.05, inclinaison: 0, rotation: 0, rayon: 0.04, variation: 0, centre: 0.09, orbites: 1, tirets: 0.012, trait: 1.6, rayons: 1, trainee: 0, fond: P60[0], encre: P60[1], astre: P60[1], palette: [P60[1]] },
+        'Comètes': { corps: 9, taille: 0.3, harmonique: 2, suite: 'suite', excentricite: 0.86, orientation: 360, inclinaison: 25, rayon: 0.008, variation: 0.3, centre: 0.025, orbites: 0.25, trait: 0.9, rayons: 0, trainee: 0.6, fond: PHOTO[1], encre: PHOTO[2], astre: PHOTO[0], palette: [PHOTO[0], PHOTO[2]] },
+        'Kegelbahn': { corps: 7, suite: 'suite', excentricite: 0.25, inclinaison: 62, forme: 'carre', rayon: 0.03, variation: 0.4, centre: 0.07, orbites: 1, trait: 2.2, rayons: 0.3, trainee: 0, fond: KB[0], encre: KB[1], astre: KB[3], palette: KB.slice(1) },
+        'Anneaux acides': { corps: 24, suite: 'suite', harmonique: 4, taille: 0.42, excentricite: 0, inclinaison: 76, rotation: -20, forme: 'anneau', rayon: 0.012, variation: 0.2, centre: 0.06, orbites: 0.6, trait: 0.8, rayons: 0, trainee: 0.2, fond: ACIDE[0], encre: ACIDE[1], astre: ACIDE[2], palette: [ACIDE[1], ACIDE[2]] },
+        'Good Room': { corps: 10, harmonique: 2, taille: 0.3, suite: 'hasard', excentricite: 0.5, inclinaison: 0, forme: 'disque', rayon: 0.035, variation: 0.7, centre: 0.12, orbites: 0, rayons: 0, trainee: 0.4, trait: 3, fond: GOOD[0], encre: GOOD[0], astre: GOOD[1], palette: GOOD.slice(2) },
+        'Biennale': { corps: 5, taille: 0.34, suite: 'suite', excentricite: 0.6, orientation: 120, inclinaison: 45, rotation: 30, tours: 1, rayon: 0.05, variation: 0.3, centre: 0.1, orbites: 1, tirets: 0.006, trait: 1.4, rayons: 0.6, trainee: 0, fond: BIEN[0], encre: BIEN[1], astre: BIEN[2], palette: [BIEN[1], BIEN[3], BIEN[4]] },
+      },
+      brand(colors) {
+        return { fond: colors[0], encre: colors[1] || colors[0], astre: colors[2] || colors[1] || colors[0], palette: colors.length > 1 ? colors.slice(1) : colors };
+      },
+      pointer: {
+        down: (q) => pointerDown(q),
+        drag: (q) => pointerDrag(q),
+        up: () => pointerUp(),
+        wheel: (q, dy) => app.set('zoom', Math.min(3, Math.max(0.3, p.zoom * Math.exp(-dy * 0.0012)))),
+      },
+      onChange: (key) => { if (ready && (key === '*' || LAYOUT.has(key))) layout(); },
+      onSeed: () => { if (ready) layout(); },
+      export: { name: 'orbites', svg: () => exportSVG() },
+    });
+    const p = app.params;
+    ready = true;
+
+    // Traînée opaque : la couleur glisse vers le fond, sans surimpression des segments.
+    const rgbOf = (c) => { const h = String(c).replace('#', ''); const v = parseInt(h.length === 3 ? h.replace(/./g, '$&$&') : h.slice(0, 6), 16); return [v >> 16 & 255, v >> 8 & 255, v & 255]; };
+    const mixHex = (a, b, k) => { const A = rgbOf(a), Bc = rgbOf(b); return '#' + A.map((v, i) => Math.round(v + (Bc[i] - v) * k).toString(16).padStart(2, '0')).join(''); };
+    const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
+
+    // ——— Système ———
+    function aOf(m) { return p.taille * Math.pow(p.harmonique / m, 2 / 3); }
+    function layout() {
+      const r = app.rng(23), N = p.corps;
+      B = [];
+      for (let k = 0; k < N; k++) {
+        let m;
+        if (p.suite === 'doubles') m = p.harmonique * Math.pow(2, k);
+        else if (p.suite === 'hasard') m = p.harmonique + Math.floor(r() * (N + 2));
+        else m = p.harmonique + k;
+        B.push({ m, e: p.excentricite * Math.pow(r(), 0.7), w: (r() - 0.5) * p.orientation * Math.PI / 180, M0: r() * TAU, s: 1 - p.variation * r(), c: k, spoke: r() < p.rayons });
+      }
+    }
+    layout();
+
+    function kepler(M, e) {
+      let E = e < 0.8 ? M : Math.PI;
+      for (let i = 0; i < 12; i++) E -= (E - e * Math.sin(E) - M) / (1 - e * Math.cos(E));
+      return E;
+    }
+    // Position dans le plan orbital (unité = petit côté du cadre, astre à l'origine).
+    function planePos(b, t) {
+      const a = aOf(b.m), M = b.M0 + TAU * b.m * t / p.boucle, E = kepler(((M % TAU) + TAU) % TAU, b.e);
+      const x = a * (Math.cos(E) - b.e), y = a * Math.sqrt(1 - b.e * b.e) * Math.sin(E);
+      const c = Math.cos(b.w), s = Math.sin(b.w);
+      return [x * c - y * s, x * s + y * c];
+    }
+    // Échelle : un plan très incliné s'aplatit, il peut alors occuper la largeur d'un cadre paysage.
+    function fitK() { const { w, h } = app.size; return Math.min(w, h / Math.max(0.5, Math.cos(p.inclinaison * Math.PI / 180))); }
+    // Projection : rotation de la vue, puis inclinaison du plan (profondeur = y incliné).
+    function proj(t) {
+      const { w, h } = app.size, u = Math.min(w, h), rot = (p.rotation + 360 * p.tours * t / p.boucle) * Math.PI / 180;
+      const cr = Math.cos(rot), sr = Math.sin(rot), ci = Math.cos(p.inclinaison * Math.PI / 180), si = Math.sin(p.inclinaison * Math.PI / 180);
+      const k = fitK() * p.zoom;
+      return (x, y) => { const X = x * cr - y * sr, Y = x * sr + y * cr; return [w / 2 + X * k, h / 2 + Y * ci * k, Y * si]; };
+    }
+    function unproj(t, sx, sy) {
+      const { w, h } = app.size, u = Math.min(w, h), rot = (p.rotation + 360 * p.tours * t / p.boucle) * Math.PI / 180;
+      const ci = Math.max(0.05, Math.cos(p.inclinaison * Math.PI / 180)), k = fitK() * p.zoom;
+      const X = (sx - w / 2) / k, Y = (sy - h / 2) / k / ci, c = Math.cos(-rot), s = Math.sin(-rot);
+      return [X * c - Y * s, X * s + Y * c];
+    }
+
+    // ——— Dessin ———
+    let logoSrc = null;
+    function draw(t, sink) {
+      const { w, h } = app.size, u = Math.min(w, h), P = proj(t), lw = p.trait * u / 1000;
+      const pal = p.palette.length ? p.palette : [p.encre];
+      // Orbites.
+      if (p.orbites > 0) for (const b of B) {
+        if (b === grabbed?.b) continue;
+        const a = aOf(b.m), pts = [];
+        for (let i = 0; i <= 160; i++) {
+          const E = TAU * i / 160, x = a * (Math.cos(E) - b.e), y = a * Math.sqrt(1 - b.e * b.e) * Math.sin(E);
+          const c = Math.cos(b.w), s = Math.sin(b.w);
+          pts.push(P(x * c - y * s, x * s + y * c));
+        }
+        sink.path(pts, p.encre, lw, p.orbites, p.tirets * u);
+      }
+      const items = [];
+      const scaleZ = (z) => 1 + p.profondeur * z / Math.max(0.1, p.taille) * 0.5;
+      for (const b of B) {
+        const pp = grabbed && grabbed.b === b ? grabbed.pos : planePos(b, t);
+        const q = P(pp[0], pp[1]), col = pal[b.c % pal.length];
+        const r = Math.max(0.6, p.rayon * u * (0.35 + 0.65 * b.s) * scaleZ(q[2]));
+        if (p.trainee > 0 && !(grabbed && grabbed.b === b)) {
+          const T = p.boucle / b.m, n = 40, pts = [];
+          for (let i = 0; i <= n; i++) { const pp2 = planePos(b, t - T * p.trainee * i / n); pts.push(P(pp2[0], pp2[1])); }
+          items.push({ z: q[2] - 1e-4, draw: () => sink.trail(pts, col, r) });
+        }
+        if (b.spoke) items.push({ z: Math.min(q[2], 0) - 2e-4, draw: () => sink.path([P(0, 0), q], p.encre, lw, 1, 0) });
+        items.push({ z: q[2], draw: () => sink.body(q[0], q[1], r, col, lw) });
+      }
+      const C = P(0, 0);
+      if (p.centre > 0) items.push({ z: 0, draw: () => sink.star(C[0], C[1], p.centre * u * 0.5, p.astre) });
+      items.sort((a, b) => a.z - b.z);
+      for (const it of items) it.draw();
+    }
+
+    const canvasSink = {
+      path(pts, col, lw, a, dash) {
+        ctx.globalAlpha = a; ctx.strokeStyle = col; ctx.lineWidth = lw;
+        ctx.setLineDash(dash > 0 ? [dash, dash * 0.8] : []);
+        ctx.beginPath(); ctx.moveTo(pts[0][0], pts[0][1]); for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]); ctx.stroke();
+        ctx.setLineDash([]); ctx.globalAlpha = 1;
+      },
+      trail(pts, col, r) {
+        ctx.strokeStyle = col; ctx.lineCap = 'round';
+        for (let i = pts.length - 1; i >= 1; i--) { const f = 1 - i / pts.length; ctx.strokeStyle = mixHex(col, p.fond, 1 - f * 0.92); ctx.lineWidth = Math.max(0.5, r * 1.4 * f); ctx.beginPath(); ctx.moveTo(pts[i - 1][0], pts[i - 1][1]); ctx.lineTo(pts[i][0], pts[i][1]); ctx.stroke(); }
+        ctx.globalAlpha = 1;
+      },
+      body(x, y, r, col, lw) {
+        const img = p.forme === 'logo' ? (p.image || app.logoImg) : null;
+        if (img) { const iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height, k = 2.4 * r / Math.max(iw, ih); ctx.drawImage(img, x - iw * k / 2, y - ih * k / 2, iw * k, ih * k); return; }
+        ctx.fillStyle = col; ctx.strokeStyle = col;
+        if (p.forme === 'carre') { ctx.fillRect(x - r, y - r, 2 * r, 2 * r); return; }
+        ctx.beginPath(); ctx.arc(x, y, r, 0, TAU);
+        if (p.forme === 'anneau') { ctx.fillStyle = p.fond; ctx.fill(); ctx.lineWidth = Math.max(lw, r * 0.28); ctx.stroke(); } else ctx.fill();
+      },
+      star(x, y, r, col) { ctx.fillStyle = col; ctx.beginPath(); ctx.arc(x, y, r, 0, TAU); ctx.fill(); },
+    };
+
+    app.loop((t) => {
+      const { w, h, dpr } = app.size;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = p.fond; ctx.fillRect(0, 0, w, h);
+      ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+      draw(t, canvasSink);
+      app.finish(ctx);
+    });
+
+    // ——— Pointeur : attraper et lancer un corps ———
+    let grabbed = null;
+    function pointerDown(q) {
+      const t = app.time, P = proj(t), { w, h } = app.size, u = Math.min(w, h);
+      if (q.shift) {
+        // Nouveau corps sur une orbite presque circulaire passant sous le pointeur.
+        const pp = unproj(t, q.x, q.y), rr = Math.hypot(pp[0], pp[1]);
+        const m = Math.max(1, Math.round(Math.pow(p.taille / Math.max(0.02, rr), 1.5) * p.harmonique));
+        const b = { m, e: 0, w: 0, M0: 0, s: 0.5 + Math.random() * 0.5, c: B.length, spoke: false };
+        b.M0 = Math.atan2(pp[1], pp[0]) - TAU * m * t / p.boucle;
+        B.push(b);
+        return;
+      }
+      let best = null, bd = (u * 0.04) ** 2;
+      for (const b of B) { const pp = planePos(b, t), s = P(pp[0], pp[1]); const d = (s[0] - q.x) ** 2 + (s[1] - q.y) ** 2; if (d < bd) { bd = d; best = b; } }
+      if (!best) return;
+      const pos = unproj(t, q.x, q.y);
+      grabbed = { b: best, pos, hist: [{ t: performance.now(), pos }] };
+    }
+    function pointerDrag(q) {
+      if (!grabbed) return;
+      const pos = unproj(app.time, q.x, q.y);
+      grabbed.pos = pos;
+      grabbed.hist.push({ t: performance.now(), pos });
+      while (grabbed.hist.length > 6) grabbed.hist.shift();
+    }
+    function pointerUp() {
+      if (!grabbed) return;
+      const g = grabbed, b = g.b, H = g.hist, a0 = H[0], a1 = H[H.length - 1];
+      const dt = Math.max(0.016, (a1.t - a0.t) / 1000) * (app.params._speed || 1);
+      // Vitesse de lancer (en unités de plan par seconde d'animation).
+      let vx = (a1.pos[0] - a0.pos[0]) / dt, vy = (a1.pos[1] - a0.pos[1]) / dt;
+      const r = g.pos, rn = Math.max(0.01, Math.hypot(r[0], r[1]));
+      // μ tel qu'un corps d'harmonique « harmonique » ait le demi-grand axe « taille » : n²a³ = μ.
+      const n0 = TAU * p.harmonique / p.boucle, mu = n0 * n0 * p.taille ** 3;
+      if (Math.hypot(vx, vy) < 1e-4) { const vc = Math.sqrt(mu / rn); vx = -r[1] / rn * vc; vy = r[0] / rn * vc; }
+      const v2 = vx * vx + vy * vy, rv = r[0] * vx + r[1] * vy;
+      let ex = ((v2 - mu / rn) * r[0] - rv * vx) / mu, ey = ((v2 - mu / rn) * r[1] - rv * vy) / mu;
+      let e = Math.hypot(ex, ey);
+      const energy = v2 / 2 - mu / rn;
+      let a = energy < 0 ? -mu / (2 * energy) : p.taille * 3;
+      // Arrondi à la résonance la plus proche (boucle exacte), excentricité bornée.
+      const m = Math.max(1, Math.round(p.harmonique * Math.pow(p.taille / a, 1.5)));
+      a = aOf(m);
+      // Le corps reste sous le pointeur : à demi-grand axe arrondi, on cherche l'excentricité qui passe par r
+      // avec l'orientation du lancer (a·e² + r·cosν·e + r − a = 0), sinon r devient périastre ou apoastre.
+      let wArg = e > 1e-4 ? Math.atan2(ey, ex) : Math.atan2(r[1], r[0]);
+      let nu = Math.atan2(r[1], r[0]) - wArg;
+      const cn = Math.cos(nu), disc = rn * rn * cn * cn - 4 * a * (rn - a);
+      e = disc >= 0 ? (-rn * cn + Math.sqrt(disc)) / (2 * a) : -1;
+      if (!(e >= 0 && e <= 0.95)) {
+        if (rn < a) { e = Math.min(0.95, 1 - rn / a); wArg = Math.atan2(r[1], r[0]); }
+        else { e = Math.min(0.95, rn / a - 1); wArg = Math.atan2(r[1], r[0]) + Math.PI; }
+        nu = Math.atan2(r[1], r[0]) - wArg;
+      }
+      const E = 2 * Math.atan(Math.sqrt((1 - e) / (1 + e)) * Math.tan(nu / 2)), M = E - e * Math.sin(E);
+      Object.assign(b, { m, e, w: wArg, M0: M - TAU * m * app.time / p.boucle });
+      grabbed = null;
+    }
+
+    // ——— Export SVG ———
+    function exportSVG() {
+      const { w, h } = app.size, f = (v) => Math.round(v * 100) / 100;
+      const out = [`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}">`, `<rect width="${w}" height="${h}" fill="${p.fond}"/>`];
+      draw(app.time, {
+        path(pts, col, lw, a, dash) { out.push(`<path d="M${pts.map((q) => `${f(q[0])} ${f(q[1])}`).join('L')}" fill="none" stroke="${col}" stroke-width="${f(lw)}" stroke-linecap="round"${a < 1 ? ` stroke-opacity="${f(a)}"` : ''}${dash > 0 ? ` stroke-dasharray="${f(dash)} ${f(dash * 0.8)}"` : ''}/>`); },
+        trail(pts, col, r) { for (let i = pts.length - 1; i >= 1; i--) { const fr = 1 - i / pts.length; out.push(`<path d="M${f(pts[i - 1][0])} ${f(pts[i - 1][1])}L${f(pts[i][0])} ${f(pts[i][1])}" stroke="${mixHex(col, p.fond, 1 - fr * 0.92)}" stroke-width="${f(Math.max(0.5, r * 1.4 * fr))}" stroke-linecap="round"/>`); } },
+        body(x, y, r, col, lw) {
+          if (p.forme === 'carre') out.push(`<rect x="${f(x - r)}" y="${f(y - r)}" width="${f(2 * r)}" height="${f(2 * r)}" fill="${col}"/>`);
+          else if (p.forme === 'anneau') out.push(`<circle cx="${f(x)}" cy="${f(y)}" r="${f(r)}" fill="${p.fond}" stroke="${col}" stroke-width="${f(Math.max(lw, r * 0.28))}"/>`);
+          else out.push(`<circle cx="${f(x)}" cy="${f(y)}" r="${f(r)}" fill="${col}"/>`);
+        },
+        star(x, y, r, col) { out.push(`<circle cx="${f(x)}" cy="${f(y)}" r="${f(r)}" fill="${col}"/>`); },
+      });
+      out.push('</svg>');
+      return out.join('\n');
+    }
+  </script>
+</body>
+</html>
