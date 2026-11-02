@@ -1,0 +1,15 @@
+{
+  "slug": "affiches-programmees",
+  "title": "Affiches programmées",
+  "type": "typography",
+  "description": "Une affiche sur grille suisse (titre, infos, formes, image) qui se recompose à chaque cycle : chaque élément glisse vers sa nouvelle place.",
+  "tags": ["affiche", "grille", "mise-en-page", "typographie", "svg", "motion"],
+  "inspiration": [
+    "Josef Müller-Brockmann, affiches Musica Viva et Grid Systems (1981)",
+    "Tim Rodenbröker et CodeCrafted : affiches génératives sur grille",
+    "references/identites.md ; palettes salon, biennale, kegelbahn, luzern, acide, good-room"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
