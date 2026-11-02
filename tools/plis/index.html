@@ -1,0 +1,269 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Plis</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Plis : une feuille pliée en Miura-ori. Les sommets suivent la géométrie exacte du pli
+    // (hauteur, pas et décalage en fonction de l'angle de pliage) ; l'angle varie dans la feuille
+    // (vague, onde, respiration, logo), si bien que la feuille se plie et se déplie par endroits.
+    // Chaque facette est éclairée selon son orientation.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const P60 = PAL('papier-60'), BIEN = PAL('biennale'), MENTHE = PAL('menthe'), KB = PAL('kegelbahn'), GR = PAL('good-room'), NUIT = PAL('trame-nuit');
+    const LUZ = PAL('luzern'), SALON = PAL('salon'), PYR = PAL('pyramides'), ACIDE = PAL('acide'), ORB = PAL('orbite'), THER = PAL('thermique'), CHL = PAL('chladni');
+
+    let light = { x: -0.5, y: -0.6, tx: null, ty: null }, press = null, presses = [], ripples = [], hoverOn = false;
+    let maskCache = null, maskKey = null, time = 0;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.05, vignette: 0.12 },
+      hint: 'Le pointeur déplace la lumière · appuyez pour déplier la feuille · touchez pour lancer une onde · molette : taille des cellules',
+      notes: 'Miura-ori : pour un angle de pliage θ et un angle de secteur γ, la hauteur vaut a·sinθ·sinγ et le pas se resserre en b·cosθ·tanγ/√(1+cos²θ·tan²γ). Les sommets sont placés avec ces formules, l’angle variant d’un sommet à l’autre.',
+      params: {
+        'Pli': {
+          motif: { type: 'select', label: 'Motif', options: { miura: 'Miura', chevrons: 'Chevrons', losanges: 'Losanges' }, value: 'miura' },
+          secteur: { type: 'range', label: 'Angle de secteur', min: 35, max: 80, step: 1, value: 60 },
+          cellule: { type: 'range', label: 'Taille des cellules', min: 14, max: 90, step: 1, value: 38 },
+          proportion: { type: 'range', label: 'Proportion', min: 0.5, max: 2, step: 0.05, value: 1 },
+          pliage: { type: 'range', label: 'Pliage', min: 0, max: 1, step: 0.01, value: 0.55 },
+        },
+        'Mouvement': {
+          sujet: { type: 'select', label: 'Mouvement', options: { vague: 'Vague', onde: 'Onde circulaire', respiration: 'Respiration', logo: 'Logo en relief' }, value: 'vague' },
+          image: { type: 'file', label: 'Logo', accept: 'image/*', show: (q) => q.sujet === 'logo' },
+          amplitude: { type: 'range', label: 'Amplitude', min: 0, max: 1, step: 0.01, value: 0.45 },
+          longueur: { type: 'range', label: "Longueur d'onde", min: 0.2, max: 3, step: 0.05, value: 1 },
+          vitesse: { type: 'range', label: 'Vitesse', min: 0, max: 3, step: 0.05, value: 1 },
+        },
+        'Lumière': {
+          inclinaison: { type: 'range', label: 'Inclinaison de la vue', min: 0, max: 60, step: 1, value: 28 },
+          contraste: { type: 'range', label: 'Contraste', min: 0, max: 1, step: 0.01, value: 0.6 },
+          reflet: { type: 'range', label: 'Reflet', min: 0, max: 1, step: 0.01, value: 0.3 },
+        },
+        'Couleur': {
+          fond: { type: 'color', label: 'Fond', value: '#1a1918' },
+          couleurs: { type: 'palette', label: 'Papier', value: ['#f4f3f0', '#e5452a'] },
+          repartition: { type: 'select', label: 'Répartition', options: { faces: 'Par versant', bandes: 'Par bandes', damier: 'En damier', relief: 'Selon le relief' }, value: 'relief' },
+          ombre: { type: 'color', label: 'Couleur des ombres', value: '#2a2520' },
+        },
+      },
+      presets: {
+        'Papier': {},
+        'Biennale': { couleurs: [BIEN[2], BIEN[3], BIEN[4], BIEN[0]], repartition: 'bandes', fond: BIEN[1], ombre: '#3a1410', cellule: 34, sujet: 'onde' },
+        'Chevrons': { motif: 'chevrons', couleurs: [MENTHE[2], MENTHE[3]], repartition: 'faces', fond: MENTHE[1], ombre: MENTHE[1], secteur: 55, cellule: 32 },
+        'Logo': { sujet: 'logo', couleurs: [P60[0]], repartition: 'faces', fond: P60[1], ombre: '#1c1b1f', cellule: 22, pliage: 0.25, amplitude: 0.7, inclinaison: 20 },
+        'Losanges': { motif: 'losanges', couleurs: [KB[1], KB[2]], repartition: 'damier', fond: KB[0], ombre: '#120818', cellule: 40, secteur: 50 },
+        'Thermique': { couleurs: [THER[1], THER[2], THER[3], THER[4]], repartition: 'relief', fond: THER[0], ombre: '#1d1d5a', sujet: 'onde', amplitude: 0.7 },
+        'Blanc': { couleurs: ['#f4f3f0'], repartition: 'faces' },
+        'Respiration': { sujet: 'respiration', couleurs: [GR[1], GR[2]], repartition: 'faces', fond: GR[0], ombre: '#0d0d0d', cellule: 46, amplitude: 0.8, vitesse: 0.7 },
+        'Luzern': { couleurs: [LUZ[0], LUZ[2], LUZ[1]], repartition: 'bandes', fond: LUZ[3], ombre: '#1a1410', motif: 'chevrons', cellule: 28 },
+        'Salon': { couleurs: [SALON[2], SALON[3], SALON[4], SALON[0]], repartition: 'damier', fond: SALON[1], ombre: '#141414', cellule: 30, motif: 'losanges' },
+        'Acide': { couleurs: [ACIDE[2], ACIDE[3]], repartition: 'relief', fond: ACIDE[1], ombre: ACIDE[1], cellule: 24, sujet: 'vague', amplitude: 0.8, longueur: 0.6 },
+        'Chladni': { couleurs: [CHL[2], CHL[1]], repartition: 'faces', fond: CHL[0], ombre: CHL[0], cellule: 24, secteur: 70, sujet: 'onde', longueur: 0.5, contraste: 0.85 },
+        'Orbite': { couleurs: [ORB[0]], fond: ORB[1], ombre: '#2a0c04', cellule: 52, secteur: 45, sujet: 'respiration', inclinaison: 45, reflet: 0.6 },
+        'Pyramides': { couleurs: [PYR[2], PYR[3], PYR[4], PYR[5]], repartition: 'bandes', fond: PYR[6], ombre: PYR[1], motif: 'chevrons', sujet: 'onde', cellule: 36 },
+      },
+      brand(colors) {
+        const c = colors.slice(1).length ? colors.slice(1) : ['#f4f3f0'];
+        const lum = (h) => { const n = parseInt(h.slice(1), 16); return ((n >> 16) & 255) * 0.299 + ((n >> 8) & 255) * 0.587 + (n & 255) * 0.114; };
+        const sorted = c.slice().sort((a, b) => lum(a) - lum(b));
+        return { fond: colors[0], couleurs: c.length > 1 ? c.filter((x) => x !== sorted[0]).slice(0, 4) : c, ombre: sorted[0] };
+      },
+      pointer: {
+        move: (q) => { hoverOn = true; light.tx = q.x; light.ty = q.y; if (press) { press.x = q.x; press.y = q.y; } },
+        down: (q) => { press = { x: q.x, y: q.y, x0: q.x, y0: q.y, t: 0, moved: false }; },
+        drag: (q) => { hoverOn = true; light.tx = q.x; light.ty = q.y; if (press) { press.x = q.x; press.y = q.y; if (Math.hypot(q.x - press.x0, q.y - press.y0) > 6) press.moved = true; } },
+        up: (q) => { if (press && !press.moved && press.t < 0.35) ripples.push({ x: q.x, y: q.y, t: 0 }); if (press) presses.push({ x: press.x, y: press.y, k: Math.min(1, press.t * 2.5) }); press = null; },
+        wheel: (q, dy) => app.set('cellule', Math.max(14, Math.min(90, p.cellule + (dy > 0 ? -2 : 2)))),
+      },
+      onChange(k) { if (k === 'image' || k === 'sujet') maskKey = null; },
+      export: { name: 'plis', svg: () => toSVG() },
+    });
+    const p = app.params;
+    canvas.addEventListener('pointerleave', () => { hoverOn = false; });
+
+    // ——— Masque du logo ———
+    function logoMask() {
+      const img = p.image || app.logoImg, key = img ? (img.src || 'c') : 'demo';
+      if (key === maskKey && maskCache) return maskCache;
+      maskKey = key;
+      const M = 160, c = document.createElement('canvas'); c.width = c.height = M; const x = c.getContext('2d', { willReadFrequently: true });
+      if (img) { const iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height, k = M * 0.9 / Math.max(iw, ih); x.drawImage(img, (M - iw * k) / 2, (M - ih * k) / 2, iw * k, ih * k); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(80, 80, 72, 0, TAU); x.arc(80, 80, 40, 0, TAU, true); x.fill('evenodd'); x.fillRect(70, 4, 20, 152); }
+      x.filter = 'none';
+      const d = x.getImageData(0, 0, M, M).data, a = new Float32Array(M * M);
+      let transp = 0; for (let i = 3; i < d.length; i += 16) if (d[i] < 128) transp++;
+      const useA = transp > d.length / 16 * 0.05;
+      for (let i = 0; i < M * M; i++) { const l = (d[i * 4] * 0.2126 + d[i * 4 + 1] * 0.7152 + d[i * 4 + 2] * 0.0722) / 255; a[i] = (useA ? d[i * 4 + 3] > 128 : d[i * 4 + 3] > 128 && l < 0.5) ? 1 : 0; }
+      // adoucir les bords : le pli passe progressivement d'un état à l'autre
+      const b = new Float32Array(M * M), R = 3;
+      for (let pass = 0; pass < 2; pass++) {
+        const src = pass ? b.slice() : a;
+        for (let j = 0; j < M; j++) for (let i = 0; i < M; i++) { let s = 0, n = 0; for (let k = -R; k <= R; k++) { const X = pass ? i : i + k, Y = pass ? j + k : j; if (X >= 0 && X < M && Y >= 0 && Y < M) { s += src[Y * M + X]; n++; } } b[j * M + i] = s / n; }
+      }
+      maskCache = { M, a: b };
+      return maskCache;
+    }
+
+    // ——— Angle de pliage en un point de la feuille à plat (coordonnées écran approchées) ———
+    function foldAt(u, v, t) {
+      const { w, h } = app.size, S = Math.min(w, h), base = p.pliage, A = p.amplitude, k = TAU / (S * 0.9 * p.longueur);
+      let f = base;
+      if (p.sujet === 'vague') f += A * 0.5 * Math.sin((u * 0.8 + v * 0.45) * k - t * 1.4);
+      else if (p.sujet === 'onde') { const r = Math.hypot(u - w / 2, v - h / 2); f += A * 0.5 * Math.sin(r * k * 1.2 - t * 1.8); }
+      else if (p.sujet === 'respiration') f += A * 0.5 * Math.sin(t * 1.1) * (0.6 + 0.4 * Math.cos((u - w / 2) * k * 0.3));
+      else {
+        const m = logoMask(), Z = S * 0.78, x = (u - (w - Z) / 2) / Z, y = (v - (h - Z) / 2) / Z;
+        const val = x >= 0 && y >= 0 && x < 1 && y < 1 ? m.a[Math.floor(y * m.M) * m.M + Math.floor(x * m.M)] : 0;
+        f += A * (val - 0.35) * (0.8 + 0.2 * Math.sin(t * 1.2));
+      }
+      // Appui : la feuille se déplie sous le doigt ; une onde lancée par un toucher se propage.
+      const R = S * 0.18;
+      if (press) { const d = Math.hypot(u - press.x, v - press.y); f -= Math.min(1, press.t * 2.5) * 0.9 * Math.exp(-(d * d) / (R * R)); }
+      for (const q of presses) { const d = Math.hypot(u - q.x, v - q.y); f -= q.k * 0.9 * Math.exp(-(d * d) / (R * R)); }
+      for (const r of ripples) { const d = Math.hypot(u - r.x, v - r.y), front = r.t * S * 0.7; f += 0.4 * Math.exp(-((d - front) ** 2) / (S * S * 0.004)) * Math.max(0, 1 - r.t / 1.8); }
+      return Math.min(0.9, Math.max(0.02, f));
+    }
+
+    // ——— Maillage plié ———
+    function mesh(t) {
+      const { w, h } = app.size, c = p.cellule, g = p.secteur * Math.PI / 180, tg = Math.tan(g), sg = Math.sin(g);
+      const a = c * p.proportion, b = c;
+      const geo = (th) => {
+        const ct = Math.cos(th), st = Math.sin(th), q = Math.sqrt(1 + ct * ct * tg * tg);
+        return { H: a * st * sg, S: b * ct * tg / q, L: a * Math.sqrt(Math.max(0, 1 - st * st * sg * sg)), V: b / q };
+      };
+      // Dimensions : assez de cellules pour couvrir le cadre au plus fort du pliage.
+      const thMax = Math.min(0.96, p.pliage + p.amplitude * 0.5 + 0.1) * Math.PI / 2;
+      const gm = geo(thMax);
+      const nx = Math.min(220, Math.ceil(w * 1.7 / Math.max(2, gm.S)) + 2), ny = Math.min(150, Math.ceil(h * 1.8 / Math.max(2, gm.L * Math.cos(p.inclinaison * Math.PI / 180))) + 2);
+      // Coordonnées « à plat » approchées de chaque sommet, pour lire le champ d'angle.
+      const th = new Float32Array(nx * ny), G = [];
+      const flatS = geo(p.pliage * Math.PI / 2);
+      for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+        const u = w / 2 + (i - nx / 2) * flatS.S, v = h / 2 + (j - ny / 2) * flatS.L;
+        th[j * nx + i] = foldAt(u, v, t) * Math.PI / 2;
+      }
+      for (let k = 0; k < nx * ny; k++) G.push(geo(th[k]));
+      const X = new Float32Array(nx * ny), Y = new Float32Array(nx * ny), Zz = new Float32Array(nx * ny);
+      // x : somme des pas le long de la rangée ; y : somme des hauteurs de rangées le long de la colonne.
+      for (let j = 0; j < ny; j++) { let x = 0; for (let i = 0; i < nx; i++) { const k = j * nx + i; X[k] = x; x += (G[k].S + G[Math.min(nx * ny - 1, k + 1)].S) / 2; } }
+      for (let i = 0; i < nx; i++) { let y = 0; for (let j = 0; j < ny; j++) { const k = j * nx + i; Y[k] = y; y += (G[k].L + G[Math.min(nx * ny - 1, k + nx)].L) / 2; } }
+      const motif = p.motif;
+      for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+        const k = j * nx + i, gk = G[k];
+        let odd = i % 2 === 1;
+        if (motif === 'chevrons') { const blk = Math.floor(i / 6) % 2; odd = blk ? !odd : odd; }
+        if (motif === 'losanges') { const blk = (Math.floor(i / 4) + Math.floor(j / 4)) % 2; odd = blk ? !odd : odd; }
+        Y[k] += odd ? gk.V : 0;
+        Zz[k] = j % 2 ? gk.H : 0;
+      }
+      // Centrage sur la rangée du milieu.
+      const jm = Math.floor(ny / 2), im = Math.floor(nx / 2), cx = X[jm * nx + im], cy = Y[jm * nx + im];
+      for (let k = 0; k < nx * ny; k++) { X[k] -= cx; Y[k] -= cy; }
+      return { nx, ny, X, Y, Z: Zz, th, a };
+    }
+
+    // ——— Facettes, éclairage, projection ———
+    const hex = (h) => { const n = parseInt(h.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; };
+    function facets(t) {
+      const { w, h } = app.size, M = mesh(t), { nx, ny, X, Y, Z } = M;
+      const phi = p.inclinaison * Math.PI / 180, cp = Math.cos(phi), sp = Math.sin(phi), f = Math.max(w, h) * 2.2;
+      const SX = new Float32Array(nx * ny), SY = new Float32Array(nx * ny);
+      for (let k = 0; k < nx * ny; k++) {
+        const y = Y[k] * cp - Z[k] * sp, z = Y[k] * sp + Z[k] * cp, s = f / (f - z * 0.6 + y * sp * 0.4);
+        SX[k] = w / 2 + X[k] * s; SY[k] = h / 2 + y * s;
+      }
+      // Lumière : suit le pointeur, sinon tourne lentement.
+      let lx, ly;
+      if (hoverOn && light.tx != null) { lx = (light.tx - w / 2) / (w / 2); ly = (light.ty - h / 2) / (h / 2); }
+      else { lx = Math.cos(t * 0.23) * 0.8; ly = -0.55 + Math.sin(t * 0.31) * 0.35; }
+      light.x += (lx - light.x) * 0.12; light.y += (ly - light.y) * 0.12;
+      let L = [light.x * 1.3, light.y * 1.3, 1]; const ln = Math.hypot(...L); L = L.map((v) => v / ln);
+      const cols = (p.couleurs.length ? p.couleurs : ['#f4f3f0']).map(hex), sh = hex(p.ombre);
+      const con = p.contraste, refl = p.reflet;
+      const rows = [];
+      for (let j = 0; j < ny - 1; j++) {
+        const row = [];
+        for (let i = 0; i < nx - 1; i++) {
+          const k0 = j * nx + i, k1 = k0 + 1, k2 = k0 + nx + 1, k3 = k0 + nx;
+          const xs = [SX[k0], SX[k1], SX[k2], SX[k3]], ys = [SY[k0], SY[k1], SY[k2], SY[k3]];
+          if (Math.max(...xs) < -5 || Math.min(...xs) > w + 5 || Math.max(...ys) < -5 || Math.min(...ys) > h + 5) continue;
+          // normale de la facette (dans le repère de la feuille)
+          const ax = X[k2] - X[k0], ay = Y[k2] - Y[k0], az = Z[k2] - Z[k0], bx = X[k3] - X[k1], by = Y[k3] - Y[k1], bz = Z[k3] - Z[k1];
+          let nxv = ay * bz - az * by, nyv = az * bx - ax * bz, nzv = ax * by - ay * bx; const nl = Math.hypot(nxv, nyv, nzv) || 1;
+          nxv /= nl; nyv /= nl; nzv /= nl; if (nzv < 0) { nxv = -nxv; nyv = -nyv; nzv = -nzv; }
+          const dif = Math.max(0, nxv * L[0] + nyv * L[1] + nzv * L[2]);
+          // reflet : demi-vecteur entre lumière et regard
+          let hx = L[0], hy = L[1] - sp, hz = L[2] + cp; const hl = Math.hypot(hx, hy, hz); hx /= hl; hy /= hl; hz /= hl;
+          const spec = Math.pow(Math.max(0, nxv * hx + nyv * hy + nzv * hz), 24) * refl;
+          let ci;
+          const rep = p.repartition, nC = cols.length;
+          if (rep === 'faces') ci = i % nC;
+          else if (rep === 'bandes') ci = Math.floor(j / 6) % nC;
+          else if (rep === 'damier') ci = (Math.floor(i / 2) + Math.floor(j / 2)) % nC;
+          else ci = Math.min(nC - 1, Math.floor(((M.th[k0] / (Math.PI / 2)) * 1.1) * nC));
+          const base = cols[ci], lit = (1 - con) + con * dif;
+          const col = [0, 1, 2].map((q) => Math.round(Math.min(255, sh[q] + (base[q] - sh[q]) * lit + 255 * spec)));
+          row.push({ xs, ys, col });
+        }
+        rows.push(row);
+      }
+      return rows;
+    }
+
+    // Les rangées sont dessinées de l'arrière vers l'avant ; les couleurs sont arrondies pour grouper les tracés.
+    const q8 = (v) => Math.min(255, Math.round(v / 3) * 3);
+    function groups(rows) {
+      const out = [];
+      for (const row of rows) {
+        const m = new Map();
+        for (const fc of row) { const key = `rgb(${q8(fc.col[0])},${q8(fc.col[1])},${q8(fc.col[2])})`; let g = m.get(key); if (!g) { g = []; m.set(key, g); } g.push(fc); }
+        out.push(m);
+      }
+      return out;
+    }
+
+    app.loop((t, dt) => {
+      const { w, h, dpr } = app.size;
+      dt = Math.min(0.05, dt || 0);
+      time += dt * p.vitesse;
+      if (press) press.t += dt;
+      for (const q of presses) q.k *= Math.pow(0.25, dt);
+      presses = presses.filter((q) => q.k > 0.01);
+      for (const r of ripples) r.t += dt;
+      ripples = ripples.filter((r) => r.t < 1.8);
+      const G = groups(facets(time));
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = p.fond; ctx.fillRect(0, 0, w, h);
+      ctx.lineJoin = 'round'; ctx.lineWidth = 0.6;
+      for (const m of G) for (const [col, list] of m) {
+        ctx.fillStyle = col; ctx.strokeStyle = col; ctx.beginPath();
+        for (const fc of list) { ctx.moveTo(fc.xs[0], fc.ys[0]); ctx.lineTo(fc.xs[1], fc.ys[1]); ctx.lineTo(fc.xs[2], fc.ys[2]); ctx.lineTo(fc.xs[3], fc.ys[3]); ctx.closePath(); }
+        ctx.fill(); ctx.stroke(); // le trait de même couleur ferme les jours entre facettes
+      }
+      app.finish(ctx);
+    });
+
+    function toSVG() {
+      const { w, h } = app.size, G = groups(facets(time)), out = [], f = (v) => v.toFixed(1);
+      for (const m of G) for (const [col, list] of m) {
+        const d = list.map((fc) => `M${f(fc.xs[0])} ${f(fc.ys[0])}L${f(fc.xs[1])} ${f(fc.ys[1])}L${f(fc.xs[2])} ${f(fc.ys[2])}L${f(fc.xs[3])} ${f(fc.ys[3])}Z`).join('');
+        out.push(`<path d="${d}" fill="${col}" stroke="${col}" stroke-width="0.6" stroke-linejoin="round"/>`);
+      }
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">\n<rect width="100%" height="100%" fill="${p.fond}"/>\n${out.join('\n')}\n</svg>`;
+    }
+  </script>
+</body>
+</html>

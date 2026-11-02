@@ -1,0 +1,15 @@
+{
+  "slug": "plis",
+  "title": "Plis",
+  "type": "motion",
+  "description": "Une feuille pliée en Miura-ori qui se plie et se déplie en vagues, en ondes ou selon un logo ; chaque facette capte la lumière que guide le pointeur.",
+  "tags": ["origami", "miura", "pliage", "relief", "logo", "svg"],
+  "inspiration": [
+    "Koryo Miura, pli Miura-ori (1970)",
+    "Schenk et Guest, géométrie des métamatériaux pliés (2013)",
+    "references/physique-maths.md ; palettes biennale, menthe, kegelbahn, thermique"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
