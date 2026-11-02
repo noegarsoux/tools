@@ -1,0 +1,15 @@
+{
+  "slug": "galton",
+  "title": "Galton",
+  "type": "motion",
+  "description": "Une planche de Galton aux couleurs de la marque : des billes rebondissent sur des clous et s'empilent en cloche, planche inclinable, clous en logo.",
+  "tags": ["probabilites", "physique", "billes", "simulation", "logo", "svg"],
+  "inspiration": [
+    "Francis Galton, quinconce (1889)",
+    "Charles et Ray Eames, exposition Mathematica (1961)",
+    "references/physique-maths.md ; palettes biennale, kegelbahn, salon, thermique"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
