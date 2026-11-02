@@ -1,0 +1,15 @@
+{
+  "slug": "attracteurs",
+  "title": "Attracteurs étranges",
+  "type": "generative",
+  "description": "Des millions de points d'un attracteur de Clifford, De Jong, Svensson ou Bedhead, en densité logarithmique et dégradé de marque ; les coefficients errent.",
+  "tags": ["attracteur", "chaos", "densite", "clifford", "de-jong", "logo"],
+  "inspiration": [
+    "Paul Bourke, Clifford, De Jong et Svensson attractors",
+    "Clifford Pickover, Chaos in Wonderland",
+    "references/physique-maths.md ; palettes trame-nuit, kegelbahn, luzern, orbite, acide"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}

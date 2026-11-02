@@ -1,0 +1,322 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Attracteurs étranges</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Attracteurs étranges : une suite de points x → f(x) qui ne se pose jamais et ne s'échappe pas.
+    // On itère des centaines de milliers de fois par image et on compte les passages par pixel ;
+    // la densité, en échelle logarithmique, passe dans un dégradé de la palette. Les quatre coefficients
+    // errent lentement autour de leur valeur : la forme se replie, se dédouble, se recompose. Les
+    // anciennes densités s'estompent (persistance), ce qui donne une traîne au mouvement.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const NUIT = PAL('trame-nuit'), P60 = PAL('papier-60'), KB = PAL('kegelbahn'), LU = PAL('luzern'), ORB = PAL('orbite');
+    const GR = PAL('good-room'), ACIDE = PAL('acide'), TH = PAL('thermique'), BIEN = PAL('biennale'), MENTHE = PAL('menthe');
+
+    // Les familles : chaque fonction renvoie le point suivant dans out[0], out[1].
+    const MAPS = {
+      clifford: (x, y, a, b, c, d, o) => { o[0] = Math.sin(a * y) + c * Math.cos(a * x); o[1] = Math.sin(b * x) + d * Math.cos(b * y); },
+      dejong: (x, y, a, b, c, d, o) => { o[0] = Math.sin(a * y) - Math.cos(b * x); o[1] = Math.sin(c * x) - Math.cos(d * y); },
+      svensson: (x, y, a, b, c, d, o) => { o[0] = d * Math.sin(a * x) - Math.sin(b * y); o[1] = c * Math.cos(a * x) + Math.cos(b * y); },
+      bedhead: (x, y, a, b, c, d, o) => { o[0] = Math.sin(x * y / b) * y + Math.cos(a * x - y); o[1] = x + Math.sin(y) / b; },
+    };
+
+    const AREA = 900000;       // pixels de l'histogramme, indépendant de la taille d'export
+    const WALKERS = 48;
+    let hw = 0, hh = 0, H = null, T = null, img = null, off = null, octx = null, mask = null;
+    let ref = 0, fresh = true, drag = null, lastT = 0;
+    let view = null;           // cadrage lissé : centre et demi-étendues
+    const wx = new Float64Array(WALKERS), wy = new Float64Array(WALKERS), out = [0, 0];
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.03, vignette: 0 },
+      hint: 'Glissez pour déplacer les coefficients a et b · molette : zoom · le dé cherche un nouvel attracteur',
+      notes: 'Chaque pixel compte combien de fois la suite y est passée ; la densité est lue en logarithme puis colorée. La persistance règle combien de temps une forme passée reste visible quand les coefficients errent.',
+      params: {
+        'Attracteur': {
+          famille: { type: 'segmented', label: 'Famille', options: { clifford: 'Clifford', dejong: 'De Jong', svensson: 'Svensson', bedhead: 'Bedhead' }, value: 'clifford' },
+          a: { type: 'range', label: 'a', min: -3, max: 3, step: 0.001, value: -1.4 },
+          b: { type: 'range', label: 'b', min: -3, max: 3, step: 0.001, value: 1.6 },
+          c: { type: 'range', label: 'c', min: -3, max: 3, step: 0.001, value: 1.0 },
+          d: { type: 'range', label: 'd', min: -3, max: 3, step: 0.001, value: 0.7 },
+        },
+        'Mouvement': {
+          errance: { type: 'range', label: 'Errance des coefficients', min: 0, max: 0.4, step: 0.005, value: 0.08 },
+          vitesse: { type: 'range', label: 'Vitesse', min: 0, max: 1, step: 0.01, value: 0.3 },
+          persistance: { type: 'range', label: 'Persistance', min: 0.5, max: 0.99, step: 0.01, value: 0.88 },
+          densite: { type: 'range', label: 'Points par image (×100 000)', min: 0.2, max: 4, step: 0.1, value: 1.2 },
+        },
+        'Rendu': {
+          exposition: { type: 'range', label: 'Exposition', min: 0.4, max: 3, step: 0.01, value: 1.15 },
+          contraste: { type: 'range', label: 'Contraste', min: 0.4, max: 2.5, step: 0.01, value: 1 },
+          zoom: { type: 'range', label: 'Zoom', min: 0.4, max: 3, step: 0.01, value: 1 },
+          rotation: { type: 'range', label: 'Rotation (°)', min: -180, max: 180, step: 1, value: 0 },
+          logo: { type: 'segmented', label: 'Logo', options: { aucun: 'Aucun', dedans: 'Dedans', dehors: 'Dehors' }, value: 'aucun' },
+        },
+        'Couleur': {
+          fond: { type: 'color', label: 'Fond', value: NUIT[0] },
+          couleurs: { type: 'palette', label: 'Dégradé', value: ['#3b3bb3', '#e0622e', '#f2c06a', '#f5f5f5'] },
+          mode: { type: 'segmented', label: 'Coloration', options: { densite: 'Densité', vitesse: 'Vitesse' }, value: 'densite' },
+        },
+      },
+      presets: {
+        'Clifford': {},
+        'Voile': { famille: 'clifford', a: 1.7, b: 1.7, c: 0.06, d: 1.2, fond: P60[0], couleurs: [P60[1]], exposition: 1.3, contraste: 0.8 },
+        'De Jong': { famille: 'dejong', a: 1.4, b: -2.3, c: 2.4, d: -2.1, fond: KB[0], couleurs: [KB[2], KB[1], KB[3]], exposition: 1.2 },
+        'Svensson': { famille: 'svensson', a: 1.4, b: 1.56, c: 1.4, d: -2.187, fond: LU[3], couleurs: [LU[1], LU[0], LU[4]], mode: 'vitesse' },
+        'Bedhead': { famille: 'bedhead', a: -0.81, b: -0.92, c: 0, d: 0, fond: BIEN[0], couleurs: [BIEN[2], BIEN[1]], exposition: 1.4, zoom: 0.95 },
+        'Logo': { famille: 'svensson', a: 1.5, b: -1.8, c: 1.6, d: 0.9, logo: 'dedans', fond: P60[0], couleurs: ['#e5452a', P60[1]], exposition: 1.2, zoom: 1.3 },
+        'Orbite': { famille: 'dejong', a: 2.01, b: -2.53, c: 1.61, d: -0.33, fond: ORB[0], couleurs: [ORB[1], ORB[2]], exposition: 1.3 },
+        'Good Room': { famille: 'clifford', a: -1.8, b: -2.0, c: -0.5, d: -0.9, fond: GR[0], couleurs: [GR[3], GR[1], GR[2]], mode: 'vitesse', exposition: 1.25 },
+        'Acide': { famille: 'dejong', a: -2.7, b: -0.09, c: -0.86, d: -2.2, fond: ACIDE[2], couleurs: [ACIDE[1]], exposition: 1.5, contraste: 1.3 },
+        'Menthe': { famille: 'svensson', a: 1.5, b: -1.8, c: 1.6, d: 0.9, fond: MENTHE[0], couleurs: [MENTHE[3], MENTHE[1]], errance: 0.12 },
+      },
+      brand(colors) {
+        const rest = colors.slice(1);
+        return { fond: colors[0], couleurs: (rest.length ? rest : ['#ffffff']).slice(0, 6) };
+      },
+      pointer: {
+        down: (q) => { drag = { x: q.x, y: q.y, a: p.a, b: p.b }; },
+        drag: (q) => {
+          if (!drag) return;
+          const k = 1.2 / Math.min(app.size.w, app.size.h), cl = (v) => Math.max(-3, Math.min(3, +v.toFixed(3)));
+          app.set('a', cl(drag.a + (q.x - drag.x) * k));
+          app.set('b', cl(drag.b - (q.y - drag.y) * k));
+        },
+        up: () => { drag = null; },
+        wheel: (q, dy) => app.set('zoom', Math.max(0.4, Math.min(3, +(p.zoom * Math.exp(-dy * 0.0015)).toFixed(2)))),
+      },
+      onChange(k) {
+        if (k === '*' || k === 'famille') reset();
+        if (k === '*' || k === '_logo' || k === 'logo') mask = null;
+      },
+      onSeed() { search(app.rng(7)); },
+      onResize() { alloc(); },
+      export: { name: 'attracteur' },
+    });
+    const p = app.params;
+
+    // L'histogramme garde une surface fixe et suit seulement le rapport du cadre : un export en
+    // grand format redessine la même densité sans tout recommencer.
+    function alloc() {
+      const { w, h } = app.size, r = w / h;
+      const nw = Math.max(16, Math.round(Math.sqrt(AREA * r))), nh = Math.max(16, Math.round(nw / r));
+      if (nw === hw && nh === hh && H) return;
+      hw = nw; hh = nh;
+      H = new Float32Array(hw * hh); T = new Float32Array(hw * hh);
+      off = document.createElement('canvas'); off.width = hw; off.height = hh;
+      octx = off.getContext('2d'); img = octx.createImageData(hw, hh);
+      mask = null; reset();
+    }
+
+    function reset() {
+      if (H) { H.fill(0); T.fill(0); }
+      const r = app.rng(3);
+      for (let i = 0; i < WALKERS; i++) { wx[i] = r() * 2 - 1; wy[i] = r() * 2 - 1; }
+      view = null; fresh = true; ref = 0;
+    }
+
+    // Coefficients du moment : chacun oscille à sa propre fréquence autour de sa valeur.
+    function coeffs(t) {
+      const e = p.errance, s = t * p.vitesse;
+      const k = p.famille === 'bedhead' ? 0.4 : 1;
+      let b = p.b + e * k * Math.sin(s * 0.29 + 2.3);
+      if (p.famille === 'bedhead' && Math.abs(b) < 0.15) b = b < 0 ? -0.15 : 0.15;
+      return [p.a + e * k * Math.sin(s * 0.37 + 0.4), b, p.c + e * Math.sin(s * 0.23 + 4.1), p.d + e * Math.sin(s * 0.31 + 1.7)];
+    }
+
+    // Masque du logo (ou, sans logo, un disque percé), à la taille de l'histogramme.
+    function buildMask() {
+      const cv = document.createElement('canvas'); cv.width = hw; cv.height = hh;
+      const x = cv.getContext('2d'), U = Math.min(hw, hh), img2 = app.logoImg;
+      x.fillStyle = '#000';
+      if (img2) {
+        const iw = img2.naturalWidth || img2.width, ih = img2.naturalHeight || img2.height, k = Math.min(hw * 0.8 / iw, hh * 0.8 / ih);
+        x.drawImage(img2, (hw - iw * k) / 2, (hh - ih * k) / 2, iw * k, ih * k);
+      } else {
+        x.beginPath(); x.arc(hw / 2, hh / 2, U * 0.4, 0, TAU); x.arc(hw / 2, hh / 2, U * 0.24, 0, TAU, true); x.fill();
+        x.beginPath(); x.arc(hw / 2, hh / 2, U * 0.12, 0, TAU); x.fill();
+      }
+      const d = x.getImageData(0, 0, hw, hh).data;
+      mask = new Uint8Array(hw * hh);
+      for (let i = 0; i < mask.length; i++) mask[i] = d[i * 4 + 3] > 100 ? 1 : 0;
+    }
+
+    // Itère n points ; met à jour le cadrage à partir de l'étendue mesurée.
+    function iterate(n, t) {
+      const f = MAPS[p.famille] || MAPS.clifford, [a, b, c, d] = coeffs(t);
+      let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+      // Tour de chauffe : les marcheurs rejoignent l'attracteur et donnent son étendue.
+      for (let i = 0; i < WALKERS; i++) {
+        let x = wx[i], y = wy[i];
+        for (let j = 0; j < 24; j++) { f(x, y, a, b, c, d, out); x = out[0]; y = out[1]; }
+        if (!isFinite(x) || !isFinite(y) || Math.abs(x) > 1e3 || Math.abs(y) > 1e3) { x = Math.random() * 2 - 1; y = Math.random() * 2 - 1; }
+        wx[i] = x; wy[i] = y;
+      }
+      const per = Math.ceil(n / WALKERS);
+      const sx = new Float32Array(per * WALKERS), sy = new Float32Array(per * WALKERS), sv = new Float32Array(per * WALKERS);
+      let m = 0;
+      for (let i = 0; i < WALKERS; i++) {
+        let x = wx[i], y = wy[i];
+        for (let j = 0; j < per; j++) {
+          f(x, y, a, b, c, d, out);
+          const nx = out[0], ny = out[1];
+          if (!(Math.abs(nx) < 1e3 && Math.abs(ny) < 1e3)) { x = Math.random() * 2 - 1; y = Math.random() * 2 - 1; continue; }
+          sv[m] = Math.hypot(nx - x, ny - y);
+          x = nx; y = ny; sx[m] = x; sy[m] = y; m++;
+          if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y;
+        }
+        wx[i] = x; wy[i] = y;
+      }
+      if (!m) return;
+      const tgt = { cx: (x0 + x1) / 2, cy: (y0 + y1) / 2, rx: Math.max(1e-3, (x1 - x0) / 2), ry: Math.max(1e-3, (y1 - y0) / 2) };
+      if (!view) view = tgt;
+      else { const k = 0.06; for (const key in tgt) view[key] += (tgt[key] - view[key]) * k; }
+      // Projection : rotation puis mise à l'échelle dans le cadre.
+      const th = p.rotation * Math.PI / 180, co = Math.cos(th), si = Math.sin(th);
+      const ex = Math.abs(co) * view.rx + Math.abs(si) * view.ry, ey = Math.abs(si) * view.rx + Math.abs(co) * view.ry;
+      const sc = Math.min(hw / (2 * ex), hh / (2 * ey)) * 0.86 * p.zoom;
+      const vmax = 0.9 * Math.hypot(view.rx, view.ry);
+      if (p.logo !== 'aucun' && !mask) buildMask();
+      const mk = p.logo === 'aucun' ? null : mask, want = p.logo === 'dedans' ? 1 : 0;
+      for (let i = 0; i < m; i++) {
+        const dx = sx[i] - view.cx, dy = sy[i] - view.cy;
+        const px = (hw / 2 + (dx * co - dy * si) * sc) | 0, py = (hh / 2 - (dx * si + dy * co) * sc) | 0;
+        if (px < 0 || py < 0 || px >= hw || py >= hh) continue;
+        const idx = py * hw + px;
+        const wgt = mk && mk[idx] !== want ? 0.07 : 1;
+        H[idx] += wgt; T[idx] += wgt * Math.min(1, sv[i] / vmax);
+      }
+    }
+
+    // Dégradé : du fond vers les couleurs, en 256 pas.
+    function lut(stops) {
+      const rgb = stops.map((c) => [parseInt(c.slice(1, 3), 16), parseInt(c.slice(3, 5), 16), parseInt(c.slice(5, 7), 16)]);
+      const L = new Uint8ClampedArray(256 * 3);
+      for (let i = 0; i < 256; i++) {
+        const u = i / 255 * (rgb.length - 1), k = Math.min(rgb.length - 2, Math.floor(u)), f = u - k;
+        for (let j = 0; j < 3; j++) L[i * 3 + j] = rgb[k][j] + (rgb[k + 1][j] - rgb[k][j]) * f;
+      }
+      return L;
+    }
+
+    const SAMP = new Float32Array(1 << 15);
+    function densRef() {
+      let n = 0;
+      for (let i = 0, N = H.length; i < N && n < SAMP.length; i += 5) if (H[i] >= 0.02) SAMP[n++] = H[i];
+      if (n < 8) return 1;
+      const s = SAMP.subarray(0, n).sort();
+      return s[Math.floor(n * 0.98)];
+    }
+
+    function render(decay) {
+      const cols = p.couleurs.length ? p.couleurs : ['#ffffff'];
+      const D = lut([p.fond, ...cols]), V = lut(cols.length > 1 ? cols : [cols[0], cols[0]]), F = lut([p.fond, p.fond]);
+      const bg = [F[0], F[1], F[2]], dens = p.mode === 'densite';
+      // Référence d'exposition : un haut centile des pixels touchés, pas le maximum, pour qu'un point
+      // de passage très chargé n'éteigne pas le reste.
+      const r = densRef();
+      ref = ref ? ref + (r - ref) * (decay === 1 ? 1 : 0.2) : r;
+      const lm = Math.log1p(Math.max(1, ref)), ex = p.exposition, ga = 1 / p.contraste, data = img.data;
+      for (let i = 0, n = H.length; i < n; i++) {
+        let h = H[i];
+        if (decay !== 1) { h *= decay; H[i] = h; T[i] *= decay; }
+        const o = i * 4;
+        if (h < 0.02) { data[o] = bg[0]; data[o + 1] = bg[1]; data[o + 2] = bg[2]; data[o + 3] = 255; continue; }
+        let v = Math.min(1, Math.log1p(h) / lm * ex);
+        v = Math.pow(v, ga);
+        if (dens) {
+          const k = (v * 255 | 0) * 3;
+          data[o] = D[k]; data[o + 1] = D[k + 1]; data[o + 2] = D[k + 2];
+        } else {
+          const k = (Math.min(1, T[i] / h) * 255 | 0) * 3;
+          v = Math.min(1, v * 1.5);
+          data[o] = bg[0] + (V[k] - bg[0]) * v; data[o + 1] = bg[1] + (V[k + 1] - bg[1]) * v; data[o + 2] = bg[2] + (V[k + 2] - bg[2]) * v;
+        }
+        data[o + 3] = 255;
+      }
+      octx.putImageData(img, 0, 0);
+    }
+
+    // Cherche des coefficients qui donnent un attracteur étendu (ni point fixe, ni cycle court).
+    function chaotic(f, q, x, y) {
+      const G = 48, N = 9000;
+      // Exposant de Lyapunov : deux points voisins doivent s'écarter (chaos), sinon c'est un cycle.
+      let u = x + 1e-7, v = y, lyap = 0, x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+      const xs = new Float32Array(6000), ys = new Float32Array(6000);
+      let m = 0;
+      for (let i = 0; i < N; i++) {
+        f(x, y, q[0], q[1], q[2], q[3], out); x = out[0]; y = out[1];
+        f(u, v, q[0], q[1], q[2], q[3], out); u = out[0]; v = out[1];
+        if (!(Math.abs(x) < 1e3 && Math.abs(y) < 1e3)) return false;
+        const dd = Math.hypot(u - x, v - y) || 1e-12;
+        if (i > 500) lyap += Math.log(dd / 1e-7);
+        u = x + (u - x) * 1e-7 / dd; v = y + (v - y) * 1e-7 / dd;
+        if (i >= N - 6000) { xs[m] = x; ys[m] = y; m++; x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y); }
+      }
+      if (lyap / (N - 500) < 0.05 || x1 - x0 < 1e-3 || y1 - y0 < 1e-3) return false;
+      // Étendue : assez de cases visitées au moins deux fois (pas une poussière concentrée).
+      const cnt = new Uint16Array(G * G);
+      for (let i = 0; i < m; i++) cnt[((xs[i] - x0) / (x1 - x0) * (G - 1) | 0) * G + ((ys[i] - y0) / (y1 - y0) * (G - 1) | 0)]++;
+      let full = 0;
+      for (let i = 0; i < cnt.length; i++) if (cnt[i] >= 2) full++;
+      return full >= G * G * 0.3;
+    }
+
+    function search(r) {
+      const f = MAPS[p.famille] || MAPS.clifford, e = p.errance;
+      for (let tries = 0; tries < 500; tries++) {
+        const q = p.famille === 'bedhead'
+          ? [r() * 2 - 1, (r() < 0.5 ? -1 : 1) * (0.4 + r() * 0.8), 0, 0]
+          : p.famille === 'svensson' ? [r() * 6 - 3, r() * 6 - 3, r() * 6 - 3, r() * 6 - 3]
+          : [r() * 6 - 3, r() * 6 - 3, r() * 4 - 2, r() * 4 - 2];
+        // Deux départs (attracteurs coexistants) et un voisin dans la marge d'errance.
+        if (!chaotic(f, q, 0.1, 0.1) || !chaotic(f, q, r() * 2 - 1, r() * 2 - 1)) continue;
+        if (e > 0 && !chaotic(f, q.map((v, i) => v + (i & 1 ? -e : e) * 0.7), 0.2, -0.1)) continue;
+        app.set('a', +q[0].toFixed(3)); app.set('b', +q[1].toFixed(3)); app.set('c', +q[2].toFixed(3)); app.set('d', +q[3].toFixed(3));
+        reset();
+        return;
+      }
+    }
+
+    function frame(t, dt) {
+      lastT = t;
+      if (!H) alloc();
+      const budget = p.densite * 100000;
+      if (fresh) {
+        // Démarrage : plusieurs images d'un coup pour ne pas partir d'un écran vide.
+        const k = app.thumbnail ? 14 : 6;
+        for (let i = 0; i < k; i++) iterate(budget, t);
+        render(1);
+        fresh = false;
+      } else if (dt > 0) {
+        // À bas régime, plus de points et plus d'estompage par image : l'équilibre reste le même.
+        const k = Math.min(3, Math.max(0.5, dt * 60));
+        iterate(budget * k, t);
+        render(Math.pow(p.persistance, k));
+      } else render(1);
+      const { w, h, dpr } = app.size;
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high';
+      ctx.drawImage(off, 0, 0, canvas.width, canvas.height);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      app.finish(ctx);
+    }
+
+    alloc();
+    app.loop(frame);
+  </script>
+</body>
+</html>
