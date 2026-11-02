@@ -1,0 +1,15 @@
+{
+  "slug": "moulinets",
+  "title": "Moulinets",
+  "type": "motion",
+  "description": "Un champ de moulinets en papier aux couleurs de la marque : rafales qui traversent le champ en vagues, souffle du pointeur qui se propage, logo.",
+  "tags": ["moulinets", "vent", "rotation", "papier", "logo", "svg"],
+  "inspiration": [
+    "Moulinets en papier plié des fêtes foraines",
+    "Champs de moulinets des jardins japonais (kazaguruma)",
+    "Palettes biennale, kegelbahn, salon, glyphes"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
