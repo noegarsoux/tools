@@ -1,0 +1,265 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Givre</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Givre : agrégation limitée par diffusion (DLA, Witten et Sander). Des particules errent au hasard
+    // et se figent au contact du cristal ; les branches qui dépassent captent davantage de particules,
+    // d'où les dendrites. Sur un réseau hexagonal, avec une « réduction du bruit » (un site ne se fige
+    // qu'après plusieurs contacts), les branches suivent les six axes : du givre. Le cristal part du logo,
+    // d'un germe central (flocon à symétrie d'ordre 6), d'une ligne ou de ce que l'on trace.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2, SQ3 = Math.sqrt(3) / 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const NUIT = PAL('trame-nuit'), P60 = PAL('papier-60'), MENTHE = PAL('menthe'), KB = PAL('kegelbahn'), LU = PAL('luzern');
+    const BIEN = PAL('biennale'), ORB = PAL('orbite'), TH = PAL('thermique'), ACIDE = PAL('acide');
+
+    let ready = false, dirty = true, G = null, layer = null, lctx = null, walkers = null, rnd = Math.random;
+    let count = 0, done = 0, rmax = 0, drag = null, lastT = 0, cells = [], life = null;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.04, vignette: 0 },
+      hint: 'Cliquez pour poser un germe · glissez pour tracer une ligne de germes · molette : vitesse',
+      notes: 'Des particules errent au hasard et se figent au contact du cristal. Les pointes captent davantage de particules : les branches s’allongent. Sur un réseau hexagonal avec réduction du bruit, elles suivent les six axes du givre.',
+      params: {
+        'Germe': {
+          germe: { type: 'segmented', label: 'Germe', options: { flocon: 'Flocon', logo: 'Logo', ligne: 'Ligne', points: 'Points' }, value: 'flocon' },
+          reseau: { type: 'segmented', label: 'Réseau', options: { hex: 'Hexagonal', carre: 'Carré' }, value: 'hex' },
+          symetrie: { type: 'toggle', label: 'Symétrie d’ordre 6 (flocon, réseau hexagonal)', value: true },
+          taille: { type: 'range', label: 'Taille des cellules', min: 1.5, max: 8, step: 0.1, value: 3 },
+          tailleLogo: { type: 'range', label: 'Taille du logo', min: 0.2, max: 0.9, step: 0.01, value: 0.45 },
+        },
+        'Croissance': {
+          lissage: { type: 'range', label: 'Réduction du bruit (contacts)', min: 1, max: 12, step: 1, value: 6 },
+          adherence: { type: 'range', label: 'Adhérence', min: 0.05, max: 1, step: 0.01, value: 1 },
+          particules: { type: 'range', label: 'Particules en vol', min: 100, max: 6000, step: 50, value: 1500 },
+          vitesse: { type: 'range', label: 'Vitesse', min: 1, max: 40, step: 1, value: 10 },
+          vent: { type: 'range', label: 'Vent', min: 0, max: 0.6, step: 0.01, value: 0 },
+          direction: { type: 'range', label: 'Direction du vent (°)', min: -180, max: 180, step: 1, value: 90 },
+          remplissage: { type: 'range', label: 'Arrêt à (% de l’image)', min: 2, max: 40, step: 0.5, value: 12 },
+          pause: { type: 'range', label: 'Pause avant de recommencer (s)', min: 0, max: 20, step: 0.5, value: 4 },
+        },
+        'Couleur': {
+          fond: { type: 'color', label: 'Fond', value: NUIT[0] },
+          encre: { type: 'color', label: 'Germe', value: '#ffffff' },
+          couleurs: { type: 'palette', label: 'Couleurs de croissance', value: ['#ffffff', '#9fc7e8', '#3c5f9c'] },
+          forme: { type: 'segmented', label: 'Cellule', options: { rond: 'Ronde', carre: 'Carrée' }, value: 'rond' },
+        },
+      },
+      presets: {
+        'Flocon': {},
+        'Givre sur logo': { germe: 'logo', symetrie: false, lissage: 3, taille: 2.4, fond: '#0e1620', couleurs: ['#ffffff', '#b8d6ef', '#4f78b0'], encre: '#ffffff', remplissage: 18 },
+        'Corail': { germe: 'ligne', reseau: 'carre', lissage: 2, adherence: 1, taille: 3, vent: 0.05, direction: 90, fond: MENTHE[0], encre: MENTHE[1], couleurs: [MENTHE[1], MENTHE[3], MENTHE[2]], remplissage: 22 },
+        'Lichen': { germe: 'points', reseau: 'carre', lissage: 1, adherence: 0.35, taille: 3.5, fond: P60[0], encre: P60[1], couleurs: [P60[1], '#6b6a68', '#e5452a'], forme: 'carre', remplissage: 25 },
+        'Kegelbahn': { germe: 'flocon', lissage: 6, taille: 3.5, fond: KB[0], encre: KB[3], couleurs: [KB[3], KB[1], KB[2], KB[4]] },
+        'Luzern': { germe: 'logo', lissage: 2, adherence: 0.8, taille: 3, fond: LU[3], encre: LU[4], couleurs: [LU[0], LU[1], LU[2]], remplissage: 20 },
+        'Biennale': { germe: 'flocon', symetrie: false, reseau: 'carre', lissage: 2, taille: 4, fond: BIEN[0], encre: BIEN[1], couleurs: [BIEN[1], BIEN[2], BIEN[3]], forme: 'carre' },
+        'Orbite': { germe: 'points', lissage: 5, taille: 2.6, fond: ORB[0], encre: ORB[1], couleurs: [ORB[1], ORB[2]], remplissage: 18 },
+        'Thermique': { germe: 'ligne', lissage: 3, vent: 0.12, direction: 90, taille: 2.6, fond: TH[0], encre: TH[1], couleurs: [TH[1], TH[4], TH[2], TH[3]], remplissage: 20 },
+        'Acide': { germe: 'flocon', lissage: 9, taille: 2.2, fond: ACIDE[1], encre: ACIDE[2], couleurs: [ACIDE[2], ACIDE[0], ACIDE[3]] },
+      },
+      brand(colors) {
+        const rest = colors.slice(1);
+        return { fond: colors[0], encre: colors[1] || colors[0], couleurs: (rest.length ? rest : ['#ffffff']).slice(0, 6) };
+      },
+      pointer: {
+        down: (q) => { drag = { x: q.x, y: q.y }; seedAt(q.x, q.y); },
+        drag: (q) => {
+          if (!drag) return;
+          const d = Math.hypot(q.x - drag.x, q.y - drag.y), n = Math.ceil(d / (p.taille * 0.8));
+          for (let i = 1; i <= n; i++) seedAt(drag.x + (q.x - drag.x) * i / n, drag.y + (q.y - drag.y) * i / n);
+          drag = { x: q.x, y: q.y };
+        },
+        up: () => { drag = null; },
+        wheel: (q, dy) => app.set('vitesse', Math.max(1, Math.min(40, Math.round(p.vitesse - dy * 0.02)))),
+      },
+      onChange(k) { if (['*', 'germe', 'reseau', 'symetrie', 'taille', 'tailleLogo', '_logo', 'fond', 'encre', 'forme'].includes(k)) dirty = true; },
+      onSeed() { dirty = true; },
+      export: { name: 'givre' },
+    });
+    const p = app.params;
+
+    // ——— Réseau : coordonnées « odd-r » pour l'hexagonal ———
+    const hex = () => p.reseau === 'hex';
+    function nbrs(q, r) {
+      if (!hex()) return [[q + 1, r], [q - 1, r], [q, r + 1], [q, r - 1]];
+      const o = r & 1;
+      return [[q + 1, r], [q - 1, r], [q - 1 + o, r - 1], [q + o, r - 1], [q - 1 + o, r + 1], [q + o, r + 1]];
+    }
+    function nbrs8(q, r) {
+      if (hex()) return nbrs(q, r);
+      return [[q + 1, r], [q - 1, r], [q, r + 1], [q, r - 1], [q + 1, r + 1], [q - 1, r - 1], [q + 1, r - 1], [q - 1, r + 1]];
+    }
+    function toPx(q, r) {
+      const c = p.taille;
+      return hex() ? [G.ox + (q + (r & 1) * 0.5 + 0.5) * c, G.oy + (r * SQ3 + 0.5) * c] : [G.ox + (q + 0.5) * c, G.oy + (r + 0.5) * c];
+    }
+    function fromPx(x, y) {
+      const c = p.taille;
+      if (!hex()) return [Math.floor((x - G.ox) / c), Math.floor((y - G.oy) / c)];
+      const r = Math.round((y - G.oy) / c / SQ3 - 0.5);
+      return [Math.round((x - G.ox) / c - 0.5 - (r & 1) * 0.5), r];
+    }
+    // Rotations de 60° autour du centre, en coordonnées cubiques.
+    function sym6(q, r) {
+      const cq = G.cq, cr = G.cr;
+      const cube = (q2, r2) => { const x = q2 - (r2 - (r2 & 1)) / 2; return [x, -x - r2, r2]; };
+      const [x0, y0, z0] = cube(q, r), [xc, yc, zc] = cube(cq, cr);
+      let x = x0 - xc, y = y0 - yc, z = z0 - zc;
+      const out = [];
+      for (let k = 0; k < 6; k++) {
+        const X = x + xc, Z = z + zc;
+        out.push([X + (Z - (Z & 1)) / 2, Z]);
+        [x, y, z] = [-z, -x, -y];
+      }
+      return out;
+    }
+
+    // ——— Mise en place ———
+    const hexToRgb = (h) => { const n = parseInt(String(h).slice(1, 7), 16) || 0; return [n >> 16 & 255, n >> 8 & 255, n & 255]; };
+    function setup() {
+      const { w, h, dpr } = app.size, c = p.taille;
+      const W = Math.max(8, Math.floor(w / c) - 1), H = Math.max(8, Math.floor(h / (hex() ? c * SQ3 : c)) - 1);
+      G = { W, H, occ: new Uint8Array(W * H), hits: new Uint8Array(W * H), ox: (w - W * c) / 2, oy: (h - H * (hex() ? c * SQ3 : c)) / 2, cq: W >> 1, cr: H >> 1 };
+      if (hex() && (G.cr & 1)) G.cr -= 1;
+      rnd = app.rng(1); count = 0; done = 0; rmax = 2; cells = [];
+      layer = document.createElement('canvas'); layer.width = Math.round(w * dpr); layer.height = Math.round(h * dpr);
+      lctx = layer.getContext('2d'); lctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      // Germes.
+      lctx.fillStyle = p.encre;
+      if (p.germe === 'flocon') occupy(G.cq, G.cr, true);
+      else if (p.germe === 'ligne') for (let q = 0; q < W; q++) occupy(q, H - 1, true);
+      else if (p.germe === 'points') { const n = 5 + Math.floor(rnd() * 4); for (let i = 0; i < n; i++) occupy(Math.floor(W * (0.1 + 0.8 * rnd())), Math.floor(H * (0.1 + 0.8 * rnd())), true); }
+      else logoSeeds();
+      walkers = new Int32Array(6000 * 2).fill(-1); life = new Int32Array(6000);
+      dirty = false;
+      // Miniature : la croissance est avancée d'emblée.
+      if (app.thumbnail) { const t0 = performance.now(); while (performance.now() - t0 < 1600 && count < G.W * G.H * p.remplissage / 100 * 0.7) walk(40000); }
+    }
+    function logoSeeds() {
+      const { w, h } = app.size, U = Math.min(w, h), S = 256;
+      const cv = document.createElement('canvas'); cv.width = cv.height = S;
+      const x = cv.getContext('2d', { willReadFrequently: true });
+      const img = app.logoImg;
+      let mask;
+      if (img) {
+        const iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height, k = S / Math.max(iw, ih);
+        x.drawImage(img, (S - iw * k) / 2, (S - ih * k) / 2, iw * k, ih * k);
+        const d = x.getImageData(0, 0, S, S).data;
+        let clear = 0;
+        for (let i = 3; i < d.length; i += 4) if (d[i] < 128) clear++;
+        const useAlpha = clear > S * S * 0.1;
+        mask = (i) => useAlpha ? d[i * 4 + 3] > 128 : (d[i * 4 + 3] > 128 && (d[i * 4] * 0.2126 + d[i * 4 + 1] * 0.7152 + d[i * 4 + 2] * 0.0722) < 128);
+      } else {
+        // Sans logo : un disque percé d'un anneau, la marque par défaut de l'atelier.
+        mask = (i) => { const a = (i % S) - S / 2 + 0.5, b = Math.floor(i / S) - S / 2 + 0.5, r = Math.hypot(a, b) / (S / 2); return r < 0.98 && !(r > 0.6 && r < 0.74) && r > 0.0; };
+      }
+      const L = U * p.tailleLogo, x0 = w / 2 - L / 2, y0 = h / 2 - L / 2;
+      for (let r = 0; r < G.H; r++) for (let q = 0; q < G.W; q++) {
+        const [px, py] = toPx(q, r), i = Math.floor((px - x0) / L * S), j = Math.floor((py - y0) / L * S);
+        if (i >= 0 && j >= 0 && i < S && j < S && mask(j * S + i)) occupy(q, r, true);
+      }
+    }
+    function seedAt(x, y) {
+      if (!G) return;
+      const [q, r] = fromPx(x, y);
+      lctx.fillStyle = p.encre;
+      if (q >= 0 && r >= 0 && q < G.W && r < G.H && !G.occ[r * G.W + q]) { occupy(q, r, true); done = 0; }
+    }
+    // Un site se fige : il est dessiné une fois pour toutes dans le calque.
+    function occupy(q, r, isSeed) {
+      if (q < 0 || r < 0 || q >= G.W || r >= G.H) return;
+      const i = r * G.W + q;
+      if (G.occ[i]) return;
+      G.occ[i] = 1; count++; cells.push(i);
+      if (!isSeed) {
+        const cols = p.couleurs.length ? p.couleurs : ['#ffffff'], target = G.W * G.H * p.remplissage / 100;
+        const t = Math.min(0.999, count / target) * (cols.length - 1), k = Math.floor(t);
+        const a = hexToRgb(cols[k]), b = hexToRgb(cols[Math.min(cols.length - 1, k + 1)]), f = t - k;
+        lctx.fillStyle = `rgb(${a.map((v, j) => Math.round(v + (b[j] - v) * f)).join(',')})`;
+      }
+      const [x, y] = toPx(q, r), c = p.taille;
+      if (p.forme === 'rond') { lctx.beginPath(); lctx.arc(x, y, c * 0.58, 0, TAU); lctx.fill(); }
+      else lctx.fillRect(x - c / 2, y - c / 2, c + 0.4, c + 0.4);
+      if (p.germe === 'flocon') rmax = Math.max(rmax, Math.hypot(q - G.cq, (r - G.cr) * (hex() ? SQ3 : 1)));
+    }
+
+    // ——— Marcheurs ———
+    function spawn(k) {
+      let q, r;
+      if (p.germe === 'flocon') {
+        // Lancés sur un cercle juste au-delà du cristal.
+        const a = rnd() * TAU, R = rmax + 6;
+        q = Math.round(G.cq + Math.cos(a) * R); r = Math.round(G.cr + Math.sin(a) * R / (hex() ? SQ3 : 1));
+      } else {
+        // Ailleurs : lancés à quelques dizaines de cellules d'un site déjà figé, avec une durée de vie.
+        const c = cells[Math.floor(rnd() * cells.length)] ?? 0, a = rnd() * TAU, R = 15 + rnd() * 50;
+        q = Math.round(c % G.W + Math.cos(a) * R); r = Math.round(Math.floor(c / G.W) + Math.sin(a) * R);
+        life[k] = 5000;
+      }
+      if (q < 0 || r < 0 || q >= G.W || r >= G.H || G.occ[r * G.W + q]) { walkers[k * 2] = -1; return; }
+      walkers[k * 2] = q; walkers[k * 2 + 1] = r;
+    }
+    function walk(steps) {
+      const N = Math.min(6000, p.particules), W = G.W, H = G.H, occ = G.occ;
+      const wa = p.direction * Math.PI / 180, wind = p.vent, sym = p.symetrie && p.germe === 'flocon' && hex();
+      const target = G.W * G.H * p.remplissage / 100;
+      for (let s = 0; s < steps; s++) {
+        const k = s % N;
+        let q = walkers[k * 2], r = walkers[k * 2 + 1];
+        if (q < 0) { spawn(k); continue; }
+        // Un pas au hasard, éventuellement poussé par le vent.
+        const nb = nbrs(q, r);
+        let pick = nb[Math.floor(rnd() * nb.length)];
+        if (wind > 0 && rnd() < wind) {
+          let best = -2;
+          for (const c of nb) { const [x0, y0] = toPx(q, r), [x1, y1] = toPx(c[0], c[1]); const d = Math.cos(Math.atan2(y1 - y0, x1 - x0) - wa); if (d > best) { best = d; pick = c; } }
+        }
+        q = pick[0]; r = pick[1];
+        if (q < 0 || r < 0 || q >= W || r >= H) { spawn(k); continue; }
+        if (p.germe === 'flocon' && Math.hypot(q - G.cq, (r - G.cr) * (hex() ? SQ3 : 1)) > rmax * 2 + 30) { spawn(k); continue; }
+        if (occ[r * W + q] || (p.germe !== 'flocon' && --life[k] <= 0)) { spawn(k); continue; }
+        walkers[k * 2] = q; walkers[k * 2 + 1] = r;
+        let touch = false;
+        for (const c of nbrs8(q, r)) if (c[0] >= 0 && c[1] >= 0 && c[0] < W && c[1] < H && occ[c[1] * W + c[0]]) { touch = true; break; }
+        if (!touch || rnd() > p.adherence) continue;
+        // Réduction du bruit : le site ne se fige qu'après plusieurs contacts.
+        const i = r * W + q;
+        if (++G.hits[i] < p.lissage) { spawn(k); continue; }
+        if (sym) for (const [a, b] of sym6(q, r)) occupy(a, b, false);
+        else occupy(q, r, false);
+        spawn(k);
+        if (count >= target) return true;
+      }
+      return count >= target;
+    }
+
+    function render(t, dt) {
+      const { w, h, dpr } = app.size;
+      if (dirty || !G || layer.width !== Math.round(w * dpr) || layer.height !== Math.round(h * dpr)) setup();
+      if (dt > 0) {
+        if (done > 0) { done += dt; if (done > p.pause + 1) setup(); }
+        else if (walk(p.vitesse * 4000)) done = 1e-6;
+      }
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.fillStyle = p.fond; ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(layer, 0, 0, canvas.width, canvas.height);
+      app.finish(ctx);
+    }
+
+    ready = true;
+    app.loop((t, dt) => { lastT = t; render(t, dt); });
+  </script>
+</body>
+</html>
