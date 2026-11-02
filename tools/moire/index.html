@@ -1,0 +1,324 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Moiré révélateur</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Moiré révélateur : deux trames superposées (lignes, ondes, cercles, rayons, points).
+    // La seconde tourne, glisse et change d'échelle : des franges de moiré naissent.
+    // Dans une forme (ou le logo), la première trame est décalée d'une demi-période :
+    // quand les deux trames s'alignent, la forme apparaît ; dès qu'elles divergent, elle se dissout.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2, DEG = Math.PI / 180;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const P60 = PAL('papier-60'), KB = PAL('kegelbahn'), BIEN = PAL('biennale'), NUIT = PAL('trame-nuit'), LUZ = PAL('luzern');
+    const PHOTO = PAL('photocopie'), MENTHE = PAL('menthe'), ACIDE = PAL('acide'), THER = PAL('thermique'), ORB = PAL('orbite');
+    const MOTIFS = { lignes: 'Lignes', ondes: 'Ondes', cercles: 'Cercles', rayons: 'Rayons', points: 'Points' };
+
+    let off = { x: 0, y: 0 }, drag = null, snap = 0, alignV = 0, clock = 0;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.02, vignette: 0 },
+      hint: 'Glissez pour faire glisser la seconde trame · touchez pour l’aligner (la forme apparaît) · molette : période',
+      notes: 'Dans la forme, la première trame est décalée d’une demi-période : la forme n’existe que dans l’alignement des deux trames. Avec « Logo », votre logo (charte ou image) devient la forme cachée.',
+      params: {
+        'Trames': {
+          motif1: { type: 'select', label: 'Première trame', options: MOTIFS, value: 'lignes' },
+          motif2: { type: 'select', label: 'Seconde trame', options: MOTIFS, value: 'lignes' },
+          periode: { type: 'range', label: 'Période', min: 4, max: 40, step: 0.5, value: 10 },
+          plein: { type: 'range', label: 'Plein', min: 0.1, max: 0.9, step: 0.01, value: 0.5 },
+          angle1: { type: 'range', label: 'Angle de la première (°)', min: -90, max: 90, step: 1, value: 0 },
+        },
+        'Mouvement': {
+          oscillation: { type: 'range', label: 'Oscillation (°)', min: 0, max: 30, step: 0.1, value: 6 },
+          echelle: { type: 'range', label: 'Écart d’échelle', min: 0, max: 0.2, step: 0.001, value: 0.02 },
+          derive: { type: 'range', label: 'Dérive', min: 0, max: 2, step: 0.01, value: 0.4 },
+          vitesse: { type: 'range', label: 'Vitesse', min: 0, max: 3, step: 0.01, value: 0.6 },
+        },
+        'Révélation': {
+          forme: { type: 'select', label: 'Forme cachée', options: { aucune: 'Aucune', cercle: 'Cercle', anneau: 'Anneau', carre: 'Carré', triangle: 'Triangle', etoile: 'Étoile', croix: 'Croix', logo: 'Logo' }, value: 'etoile' },
+          image: { type: 'file', label: 'Logo ou image', accept: 'image/*', show: (q) => q.forme === 'logo' },
+          taille: { type: 'range', label: 'Taille de la forme', min: 0.2, max: 0.95, step: 0.01, value: 0.6 },
+        },
+        'Couleur': {
+          fond: { type: 'color', label: 'Fond', value: P60[0] },
+          encre1: { type: 'color', label: 'Première encre', value: P60[1] },
+          encre2: { type: 'color', label: 'Seconde encre', value: P60[1] },
+          melange: { type: 'segmented', label: 'Superposition', options: { multiply: 'Produit', 'source-over': 'Normale', difference: 'Différence' }, value: 'multiply' },
+        },
+      },
+      presets: {
+        'Papier': {},
+        'Cercles': { motif1: 'cercles', motif2: 'cercles', forme: 'anneau', periode: 9, oscillation: 0, echelle: 0.03, derive: 1, fond: BIEN[0], encre1: BIEN[1], encre2: BIEN[2] },
+        'Kegelbahn': { motif1: 'lignes', motif2: 'lignes', forme: 'croix', fond: KB[0], encre1: KB[1], encre2: KB[2], melange: 'difference', periode: 12, oscillation: 8 },
+        'Rayons': { motif1: 'rayons', motif2: 'rayons', forme: 'cercle', periode: 14, plein: 0.5, oscillation: 4, derive: 0.8, fond: LUZ[4], encre1: LUZ[1], encre2: LUZ[0] },
+        'Nuit': { motif1: 'ondes', motif2: 'lignes', forme: 'triangle', fond: NUIT[0], encre1: NUIT[1], encre2: NUIT[1], melange: 'difference', periode: 8, oscillation: 5 },
+        'Photocopie': { motif1: 'points', motif2: 'points', forme: 'carre', periode: 12, plein: 0.6, oscillation: 3, echelle: 0.01, fond: PHOTO[0], encre1: PHOTO[1], encre2: PHOTO[2] },
+        'Menthe': { motif1: 'lignes', motif2: 'cercles', forme: 'aucune', periode: 7, plein: 0.45, fond: MENTHE[0], encre1: MENTHE[1], encre2: MENTHE[3], derive: 1.2 },
+        'Acide': { motif1: 'ondes', motif2: 'ondes', forme: 'etoile', fond: ACIDE[1], encre1: ACIDE[2], encre2: ACIDE[3], melange: 'difference', periode: 11, oscillation: 10 },
+        'Thermique': { motif1: 'cercles', motif2: 'lignes', forme: 'aucune', periode: 6, plein: 0.5, fond: THER[3], encre1: THER[1], encre2: THER[2], derive: 0.6, oscillation: 12 },
+        'Orbite': { motif1: 'lignes', motif2: 'lignes', forme: 'cercle', fond: ORB[2], encre1: ORB[1], encre2: ORB[0], periode: 16, oscillation: 2.5, taille: 0.5 },
+      },
+      brand(colors) {
+        return { fond: colors[0], encre1: colors[1] || '#111111', encre2: colors[2] || colors[1] || '#111111' };
+      },
+      pointer: {
+        down: (q) => { drag = { x: q.x, y: q.y, ox: off.x, oy: off.y, moved: false }; },
+        drag: (q) => {
+          if (!drag) return;
+          if (Math.hypot(q.x - drag.x, q.y - drag.y) > 5) drag.moved = true;
+          if (drag.moved) { off.x = drag.ox + (q.x - drag.x); off.y = drag.oy + (q.y - drag.y); snap = 0; }
+        },
+        up: () => { if (drag && !drag.moved) snap = snap > 0 ? 0 : 3.5; drag = null; },
+        wheel: (q, dy) => app.set('periode', Math.max(4, Math.min(40, +(p.periode - dy * 0.01).toFixed(1)))),
+      },
+      onChange(k) { if (k === '*') { off.x = off.y = 0; snap = 0; } },
+      onSeed() { const r = app.rng(4); off.x = (r() - 0.5) * 20; off.y = (r() - 0.5) * 20; },
+      export: { name: 'moire', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    // ——— Géométrie d'une trame : une liste de primitives (bandes, anneaux, points) ———
+    // spec : motif, centre (cx, cy), angle, échelle, décalage (dx, dy), demi = décalage d'une demi-période.
+    function layer(kind, w, h, a, s, dx, dy, half) {
+      const P = p.periode * s, fill = p.plein, cx = w / 2 + dx, cy = h / 2 + dy;
+      const R = Math.hypot(w, h) / 2 + Math.hypot(dx, dy) + P * 2;
+      const c = Math.cos(a), sn = Math.sin(a);
+      const T = (u, v) => [cx + u * c - v * sn, cy + u * sn + v * c];
+      const out = { bands: [], rings: [], dots: [] };
+      const ph = half ? 0.5 : 0;
+      switch (kind) {
+        case 'ondes': {
+          const amp = P * 0.9, wl = P * 7;
+          for (let k = Math.floor(-R / P) - 1; k <= R / P + 1; k++) {
+            const v0 = (k + ph) * P, q = [], N = Math.ceil((2 * R) / (P * 0.8));
+            for (let i = 0; i <= N; i++) { const u = -R + (2 * R * i) / N; q.push(...T(u, v0 + Math.sin(u / wl * TAU) * amp)); }
+            for (let i = N; i >= 0; i--) { const u = -R + (2 * R * i) / N; q.push(...T(u, v0 + fill * P + Math.sin(u / wl * TAU) * amp)); }
+            out.bands.push(q);
+          }
+          break;
+        }
+        case 'cercles': {
+          for (let k = 0; k * P < R; k++) { const r = (k + ph + fill / 2) * P; if (r > 0) out.rings.push([cx, cy, r, fill * P]); }
+          break;
+        }
+        case 'rayons': {
+          const n = Math.max(12, Math.round((TAU * Math.min(w, h) * 0.25) / P)), da = TAU / n;
+          for (let k = 0; k < n; k++) {
+            const a0 = a + (k + ph) * da, a1 = a0 + da * fill;
+            out.bands.push([cx, cy, cx + Math.cos(a0) * R, cy + Math.sin(a0) * R, cx + Math.cos(a1) * R, cy + Math.sin(a1) * R]);
+          }
+          break;
+        }
+        case 'points': {
+          const r = (P * Math.sqrt(fill)) / 1.8;
+          for (let j = Math.floor(-R / P); j <= R / P; j++) for (let i = Math.floor(-R / P); i <= R / P; i++) {
+            const [x, y] = T((i + ph) * P, (j + ph) * P);
+            if (x < -P || y < -P || x > w + P || y > h + P) continue;
+            out.dots.push([x, y, r]);
+          }
+          break;
+        }
+        default: { // lignes
+          for (let k = Math.floor(-R / P) - 1; k <= R / P + 1; k++) {
+            const v0 = (k + ph) * P, v1 = v0 + fill * P;
+            out.bands.push([...T(-R, v0), ...T(R, v0), ...T(R, v1), ...T(-R, v1)]);
+          }
+        }
+      }
+      return out;
+    }
+
+    // ——— Forme cachée ———
+    function shapePath(w, h) {
+      const cx = w / 2, cy = h / 2, R = Math.min(w, h) * p.taille * 0.5, rings = [];
+      const poly = (n, rot, k = 1) => { const q = []; for (let i = 0; i < n; i++) { const a = rot + (i / n) * TAU; q.push(cx + Math.cos(a) * R * k, cy + Math.sin(a) * R * k); } return q; };
+      switch (p.forme) {
+        case 'cercle': rings.push(poly(120, 0)); break;
+        case 'anneau': rings.push(poly(120, 0), poly(120, 0, 0.55)); break;
+        case 'carre': rings.push(poly(4, Math.PI / 4, 1.1)); break;
+        case 'triangle': { const q = poly(3, -Math.PI / 2, 1.15); for (let i = 1; i < q.length; i += 2) q[i] += R * 0.15; rings.push(q); break; }
+        case 'etoile': { const q = []; for (let i = 0; i < 10; i++) { const a = -Math.PI / 2 + (i / 10) * TAU, r = i % 2 ? R * 0.45 : R * 1.05; q.push(cx + Math.cos(a) * r, cy + Math.sin(a) * r); } rings.push(q); break; }
+        case 'croix': { const t = R * 0.32, L = R; rings.push([cx - t, cy - L, cx + t, cy - L, cx + t, cy - t, cx + L, cy - t, cx + L, cy + t, cx + t, cy + t, cx + t, cy + L, cx - t, cy + L, cx - t, cy + t, cx - L, cy + t, cx - L, cy - t, cx - t, cy - t]); break; }
+      }
+      return rings;
+    }
+    let logoSrc = null, logoMask = null, logoURL = null;
+    function logoMaskCanvas() {
+      const img = p.image || app.logoImg;
+      if (!img) return null;
+      if (img !== logoSrc) {
+        logoSrc = img;
+        const iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height, k = 1024 / Math.max(iw, ih);
+        logoMask = document.createElement('canvas'); logoMask.width = Math.max(1, Math.round(iw * k)); logoMask.height = Math.max(1, Math.round(ih * k));
+        const x = logoMask.getContext('2d', { willReadFrequently: true }); x.drawImage(img, 0, 0, logoMask.width, logoMask.height);
+        const d = x.getImageData(0, 0, logoMask.width, logoMask.height);
+        let transp = 0; for (let i = 3; i < d.data.length; i += 16) if (d.data[i] < 128) transp++;
+        const useA = transp > d.data.length / 16 * 0.05;
+        for (let i = 0; i < d.data.length; i += 4) { const l = (d.data[i] * 0.2126 + d.data[i + 1] * 0.7152 + d.data[i + 2] * 0.0722) / 255; d.data[i + 3] = useA ? d.data[i + 3] : Math.round(d.data[i + 3] * (1 - l)); d.data[i] = d.data[i + 1] = d.data[i + 2] = 255; }
+        x.putImageData(d, 0, 0);
+        logoURL = null;
+      }
+      return logoMask;
+    }
+    function logoBox(w, h) { const m = logoMask, k = (Math.min(w, h) * p.taille) / Math.max(m.width, m.height); return { x: w / 2 - (m.width * k) / 2, y: h / 2 - (m.height * k) / 2, w: m.width * k, h: m.height * k }; }
+
+    // ——— État courant des deux trames ———
+    function state(t) {
+      const a1 = p.angle1 * DEG, osc = p.oscillation * DEG, v = p.vitesse;
+      // Alignement : la seconde trame rejoint la première (angle, échelle, glissement) quand on touche.
+      const e = alignV, align = e * e * (3 - 2 * e);
+      const a2 = a1 + osc * Math.sin(t * v * 0.7) * (1 - align);
+      const s2 = 1 + p.echelle * Math.sin(t * v * 0.45 + 1) * (1 - align);
+      const dr = p.derive * p.periode * 2;
+      const dx = (off.x + Math.sin(t * v * 0.33) * dr) * (1 - align), dy = (off.y + Math.cos(t * v * 0.27) * dr * 0.6) * (1 - align);
+      return { a1, a2, s2, dx, dy };
+    }
+
+    // ——— Rendu canvas ———
+    function fillLayer(c, L, col) {
+      c.fillStyle = col; c.beginPath();
+      for (const q of L.bands) { c.moveTo(q[0], q[1]); for (let i = 2; i < q.length; i += 2) c.lineTo(q[i], q[i + 1]); c.closePath(); }
+      for (const [x, y, r] of L.dots) { c.moveTo(x + r, y); c.arc(x, y, r, 0, TAU); }
+      c.fill();
+      if (L.rings.length) {
+        c.strokeStyle = col; c.lineWidth = L.rings[0][3]; c.beginPath();
+        for (const [x, y, r] of L.rings) { c.moveTo(x + r, y); c.arc(x, y, r, 0, TAU); }
+        c.stroke();
+      }
+    }
+    let offA = null, offB = null;
+    function off2(w, h, dpr) {
+      const W = Math.round(w * dpr), H = Math.round(h * dpr);
+      for (const k of ['A', 'B']) {
+        let cv = k === 'A' ? offA : offB;
+        if (!cv) { cv = document.createElement('canvas'); if (k === 'A') offA = cv; else offB = cv; }
+        if (cv.width !== W || cv.height !== H) { cv.width = W; cv.height = H; }
+      }
+    }
+    // La première trame (et la forme cachée) ne bouge pas : elle est rendue une fois puis réutilisée.
+    let base = null, baseKey = '';
+    function render(c, w, h, dpr, t) {
+      const st = state(t);
+      const key = [p.motif1, p.periode, p.plein, p.angle1, p.forme, p.taille, p.encre1, p.fond, w, h, dpr, p.forme === 'logo' ? (logoMaskCanvas() ? logoSrc && (logoSrc.src || logoSrc.width) : 0) : 0].join('|');
+      if (key !== baseKey || !base) {
+        if (!base) base = document.createElement('canvas');
+        base.width = Math.round(w * dpr); base.height = Math.round(h * dpr);
+        renderBase(base.getContext('2d'), w, h, dpr, st);
+        baseKey = key;
+      }
+      c.setTransform(1, 0, 0, 1, 0, 0); c.drawImage(base, 0, 0); c.setTransform(dpr, 0, 0, dpr, 0, 0);
+      c.globalCompositeOperation = p.melange;
+      const pat = ['lignes', 'ondes', 'points'].includes(p.motif2) ? patternFor(c, p.motif2, p.encre2) : null;
+      if (pat) {
+        // Trames périodiques : un motif de canvas transformé (une seule opération de remplissage).
+        const P = p.periode * st.s2;
+        pat.setTransform(new DOMMatrix().translate(w / 2 + st.dx, h / 2 + st.dy).rotate(st.a2 / DEG).scale(P / TILE).translate(p.motif2 === 'points' ? -TILE / 2 : 0, p.motif2 === 'points' ? -TILE / 2 : 0));
+        c.fillStyle = pat; c.fillRect(0, 0, w, h);
+      } else fillLayer(c, layer(p.motif2, w, h, st.a2, st.s2, st.dx, st.dy, false), p.encre2);
+      c.globalCompositeOperation = 'source-over';
+    }
+    const TILE = 64;
+    let patKey = '', patObj = null;
+    function patternFor(c, kind, col) {
+      const key = kind + col + p.plein;
+      if (key === patKey && patObj) return patObj;
+      const T = TILE, fill = p.plein, tw = kind === 'ondes' ? T * 7 : T;
+      const cv = document.createElement('canvas'); cv.width = tw; cv.height = T;
+      const x = cv.getContext('2d'); x.fillStyle = col;
+      if (kind === 'lignes') x.fillRect(0, 0, tw, fill * T);
+      else if (kind === 'points') { x.beginPath(); x.arc(T / 2, T / 2, (T * Math.sqrt(fill)) / 1.8, 0, TAU); x.fill(); }
+      else {
+        // Ondes : la bande ondule sur la largeur de la tuile (une longueur d'onde), recopiée en haut et en bas.
+        for (const o of [-T, 0, T]) {
+          x.beginPath();
+          for (let i = 0; i <= tw; i += 2) x.lineTo(i, o + Math.sin((i / tw) * TAU) * T * 0.9);
+          for (let i = tw; i >= 0; i -= 2) x.lineTo(i, o + fill * T + Math.sin((i / tw) * TAU) * T * 0.9);
+          x.closePath(); x.fill();
+        }
+      }
+      patKey = key; patObj = c.createPattern(cv, 'repeat');
+      return patObj;
+    }
+    function renderBase(c, w, h, dpr, st) {
+      const L1 = layer(p.motif1, w, h, st.a1, 1, 0, 0, false);
+      c.setTransform(dpr, 0, 0, dpr, 0, 0);
+      c.fillStyle = p.fond; c.fillRect(0, 0, w, h);
+      const isLogo = p.forme === 'logo' && logoMaskCanvas();
+      if (p.forme === 'aucune' || (p.forme === 'logo' && !isLogo)) fillLayer(c, L1, p.encre1);
+      else {
+        const L1h = layer(p.motif1, w, h, st.a1, 1, 0, 0, true);
+        if (isLogo) {
+          off2(w, h, dpr);
+          const b = logoBox(w, h);
+          for (const [cv, L, op] of [[offA, L1, 'destination-out'], [offB, L1h, 'destination-in']]) {
+            const x = cv.getContext('2d'); x.setTransform(1, 0, 0, 1, 0, 0); x.clearRect(0, 0, cv.width, cv.height);
+            x.setTransform(dpr, 0, 0, dpr, 0, 0); x.globalCompositeOperation = 'source-over'; fillLayer(x, L, p.encre1);
+            x.globalCompositeOperation = op; x.drawImage(logoMask, b.x, b.y, b.w, b.h); x.globalCompositeOperation = 'source-over';
+          }
+          c.setTransform(1, 0, 0, 1, 0, 0); c.drawImage(offA, 0, 0); c.drawImage(offB, 0, 0); c.setTransform(dpr, 0, 0, dpr, 0, 0);
+        } else {
+          const rings = shapePath(w, h);
+          const path = (outside) => { c.beginPath(); if (outside) c.rect(-2, -2, w + 4, h + 4); for (const q of rings) { c.moveTo(q[0], q[1]); for (let i = 2; i < q.length; i += 2) c.lineTo(q[i], q[i + 1]); c.closePath(); } };
+          c.save(); path(true); c.clip('evenodd'); fillLayer(c, L1, p.encre1); c.restore();
+          c.save(); path(false); c.clip('evenodd'); fillLayer(c, L1h, p.encre1); c.restore();
+        }
+      }
+    }
+
+    app.loop((t, dt) => {
+      const { w, h, dpr } = app.size;
+      dt = Math.min(0.05, dt || 0);
+      clock = t;
+      if (snap > 0) snap = Math.max(0, snap - dt);
+      alignV += ((snap > 1 ? 1 : snap) - alignV) * Math.min(1, dt * 3);
+      render(ctx, w, h, dpr, t);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      app.finish(ctx);
+    });
+
+    // ——— Export SVG ———
+    function toSVG() {
+      const { w, h } = app.size, st = state(clock), f = (v) => Math.round(v * 100) / 100;
+      const d = (L) => {
+        let s = '';
+        for (const q of L.bands) { s += 'M' + f(q[0]) + ' ' + f(q[1]); for (let i = 2; i < q.length; i += 2) s += 'L' + f(q[i]) + ' ' + f(q[i + 1]); s += 'Z'; }
+        for (const [x, y, r] of L.dots) s += `M${f(x - r)} ${f(y)}a${f(r)} ${f(r)} 0 1 0 ${f(2 * r)} 0a${f(r)} ${f(r)} 0 1 0 ${f(-2 * r)} 0Z`;
+        return s;
+      };
+      const ringsSvg = (L, col) => L.rings.length ? `<g fill="none" stroke="${col}" stroke-width="${f(L.rings[0][3])}">${L.rings.map(([x, y, r]) => `<circle cx="${f(x)}" cy="${f(y)}" r="${f(r)}"/>`).join('')}</g>` : '';
+      const draw = (L, col) => `<path d="${d(L)}" fill="${col}"/>${ringsSvg(L, col)}`;
+      const L1 = layer(p.motif1, w, h, st.a1, 1, 0, 0, false), L2 = layer(p.motif2, w, h, st.a2, st.s2, st.dx, st.dy, false);
+      let defs = '', first;
+      const isLogo = p.forme === 'logo' && logoMaskCanvas();
+      if (p.forme === 'aucune' || (p.forme === 'logo' && !isLogo)) first = draw(L1, p.encre1);
+      else {
+        const L1h = layer(p.motif1, w, h, st.a1, 1, 0, 0, true);
+        if (isLogo) {
+          if (!logoURL) logoURL = logoMask.toDataURL('image/png');
+          const b = logoBox(w, h);
+          defs += `<mask id="dedans" maskUnits="userSpaceOnUse" x="0" y="0" width="${w}" height="${h}" style="mask-type:alpha"><image href="${logoURL}" x="${f(b.x)}" y="${f(b.y)}" width="${f(b.w)}" height="${f(b.h)}"/></mask>`;
+          defs += `<mask id="dehors" maskUnits="userSpaceOnUse" x="0" y="0" width="${w}" height="${h}"><rect width="${w}" height="${h}" fill="#fff"/><image href="${logoURL}" x="${f(b.x)}" y="${f(b.y)}" width="${f(b.w)}" height="${f(b.h)}" style="filter:brightness(0)"/></mask>`;
+          first = `<g mask="url(#dehors)">${draw(L1, p.encre1)}</g><g mask="url(#dedans)">${draw(L1h, p.encre1)}</g>`;
+        } else {
+          const rings = shapePath(w, h), pd = rings.map((q) => { let s = 'M' + f(q[0]) + ' ' + f(q[1]); for (let i = 2; i < q.length; i += 2) s += 'L' + f(q[i]) + ' ' + f(q[i + 1]); return s + 'Z'; }).join('');
+          defs += `<clipPath id="dedans"><path d="${pd}" clip-rule="evenodd"/></clipPath><clipPath id="dehors"><path d="M-2 -2H${w + 2}V${h + 2}H-2Z${pd}" clip-rule="evenodd"/></clipPath>`;
+          first = `<g clip-path="url(#dehors)">${draw(L1, p.encre1)}</g><g clip-path="url(#dedans)">${draw(L1h, p.encre1)}</g>`;
+        }
+      }
+      const blend = p.melange === 'source-over' ? 'normal' : p.melange;
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">\n<defs>${defs}</defs>\n<rect width="100%" height="100%" fill="${p.fond}"/>\n${first}\n<g style="mix-blend-mode:${blend}">${draw(L2, p.encre2)}</g>\n</svg>`;
+    }
+  </script>
+</body>
+</html>

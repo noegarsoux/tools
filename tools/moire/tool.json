@@ -1,0 +1,15 @@
+{
+  "slug": "moire",
+  "title": "Moiré révélateur",
+  "type": "pattern",
+  "description": "Deux trames superposées (lignes, ondes, cercles, rayons, points) qui glissent et tournent ; une forme ou le logo cachés n’apparaissent qu’à l’alignement.",
+  "tags": ["moire", "trame", "interference", "logo", "svg", "motion"],
+  "inspiration": [
+    "Moirés optiques de l’op art et des écrans de sécurité imprimés",
+    "Images cachées par décalage de demi-période (Moiré magnifier)",
+    "references/techniques.md ; palettes papier-60, kegelbahn, biennale, trame-nuit, photocopie"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
