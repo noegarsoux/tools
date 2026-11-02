@@ -1,0 +1,15 @@
+{
+  "slug": "trame-barres",
+  "title": "Trame en barres",
+  "type": "filter",
+  "description": "Une image, un logo ou un sujet rendu en tirets horizontaux comme une photocopie tramée : seuil qui respire, moiré volontaire et export vectoriel.",
+  "tags": ["trame", "barres", "moire", "photocopie", "svg", "image"],
+  "inspiration": [
+    "Moodboard de Noé, fiche 17 : arbre en barres horizontales et anneaux en moiré",
+    "Trames de photocopie et de sérigraphie, modulation de largeur d'impulsion",
+    "Palettes photocopie, papier-60, trame-nuit, acide, thermique, biennale, orbite"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
