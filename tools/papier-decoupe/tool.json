@@ -1,0 +1,15 @@
+{
+  "slug": "papier-decoupe",
+  "title": "Papier découpé",
+  "type": "pattern",
+  "description": "Un champ (relief, ondes, bulles, rayures ou logo) tranché en feuilles de papier découpé empilées, chacune avec son ombre ; le pointeur soulève le papier.",
+  "tags": ["papier", "decoupe", "relief", "ombre", "logo", "svg"],
+  "inspiration": [
+    "Illustrations en papier découpé superposé (paper cut, layered paper art)",
+    "Cartes topographiques en relief à plaques (maquettes d’architecte)",
+    "references/techniques.md ; palettes biennale, thermique, kegelbahn, menthe, luzern"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}

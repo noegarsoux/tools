@@ -1,0 +1,395 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Papier découpé</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Papier découpé : un champ scalaire (relief, ondes, bulles, rayures ou logo) est tranché
+    // en couches. Chaque couche est une feuille découpée (marching squares), posée sur la
+    // précédente et portant son ombre. Le champ dérive lentement ; le pointeur soulève le papier.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2, DEG = Math.PI / 180;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const P60 = PAL('papier-60'), BIEN = PAL('biennale'), KB = PAL('kegelbahn'), MENTHE = PAL('menthe'), THER = PAL('thermique');
+    const LUZ = PAL('luzern'), GR = PAL('good-room'), ACIDE = PAL('acide'), SALON = PAL('salon'), PYR = PAL('pyramides'), NUIT = PAL('trame-nuit');
+
+    let hover = null, bump = null, ripples = [], lightDrag = null, time = 0;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.05, vignette: 0 },
+      hint: 'Survolez pour soulever le papier · glissez pour déplacer la lumière · touchez pour une onde · molette : couches',
+      notes: 'Chaque couche est un tracé fermé (marching squares sur le champ), posé sur la précédente avec son ombre portée. En SVG, chaque feuille est un chemin avec un filtre d’ombre.',
+      params: {
+        'Champ': {
+          champ: { type: 'select', label: 'Champ', options: { relief: 'Relief', ondes: 'Ondes', bulles: 'Bulles', rayures: 'Rayures', logo: 'Logo' }, value: 'relief' },
+          image: { type: 'file', label: 'Logo', accept: 'image/*', show: (q) => q.champ === 'logo' },
+          echelle: { type: 'range', label: 'Échelle', min: 0.3, max: 3, step: 0.01, value: 0.8 },
+          detail: { type: 'range', label: 'Détail', min: 1, max: 5, step: 1, value: 2 },
+          vitesse: { type: 'range', label: 'Dérive', min: 0, max: 2, step: 0.01, value: 0.3 },
+          arrondi: { type: 'range', label: 'Arrondi', min: 0, max: 4, step: 1, value: 1 },
+        },
+        'Couches': {
+          couches: { type: 'range', label: 'Couches', min: 2, max: 18, step: 1, value: 8 },
+          ecart: { type: 'range', label: 'Répartition', min: 0.4, max: 2.5, step: 0.01, value: 1 },
+          soulevement: { type: 'range', label: 'Soulèvement au survol', min: 0, max: 1, step: 0.01, value: 0.5 },
+        },
+        'Lumière': {
+          angle: { type: 'range', label: 'Direction', min: 0, max: 360, step: 1, value: 135 },
+          hauteur: { type: 'range', label: 'Hauteur des feuilles', min: 0, max: 30, step: 0.5, value: 6 },
+          flou: { type: 'range', label: 'Flou de l’ombre', min: 0, max: 40, step: 0.5, value: 10 },
+          ombre: { type: 'range', label: 'Densité de l’ombre', min: 0, max: 0.9, step: 0.01, value: 0.35 },
+          tranche: { type: 'range', label: 'Tranche claire', min: 0, max: 1, step: 0.01, value: 0.3 },
+        },
+        'Couleur': {
+          fond: { type: 'color', label: 'Fond', value: BIEN[0] },
+          couleurs: { type: 'palette', label: 'Feuilles', value: [BIEN[1], BIEN[3], BIEN[2], BIEN[4]] },
+          teinte: { type: 'segmented', label: 'Répartition', options: { cycle: 'En cycle', degrade: 'En dégradé' }, value: 'cycle' },
+        },
+      },
+      presets: {
+        'Biennale': {},
+        'Blanc': { champ: 'relief', couches: 10, fond: '#e9e8e4', couleurs: ['#f7f6f3', '#efeee9'], teinte: 'cycle', hauteur: 5, flou: 12, ombre: 0.32, tranche: 0.6, echelle: 1.2 },
+        'Thermique': { champ: 'relief', couches: 12, echelle: 0.8, fond: THER[1], couleurs: [THER[1], THER[4], THER[2], THER[3], THER[5]], teinte: 'degrade', hauteur: 3, flou: 6, ombre: 0.4, tranche: 0 },
+        'Kegelbahn': { champ: 'ondes', couches: 9, fond: KB[0], couleurs: [KB[2], KB[1], KB[3], KB[5], KB[4]], hauteur: 8, flou: 14, ombre: 0.6, tranche: 0.15 },
+        'Menthe': { champ: 'bulles', couches: 7, fond: MENTHE[0], couleurs: [MENTHE[2], MENTHE[3], MENTHE[1]], teinte: 'degrade', hauteur: 7, flou: 16, ombre: 0.3, tranche: 0.5, arrondi: 2 },
+        'Luzern': { champ: 'rayures', couches: 6, fond: LUZ[0], couleurs: [LUZ[2], LUZ[1], LUZ[3], LUZ[4]], echelle: 0.9, hauteur: 9, flou: 8, ombre: 0.45, tranche: 0.2 },
+        'Good Room': { champ: 'bulles', couches: 12, ecart: 0.7, fond: GR[0], couleurs: [GR[4], GR[3], GR[2], GR[1]], teinte: 'degrade', hauteur: 4, flou: 10, ombre: 0.7, tranche: 0 },
+        'Acide': { champ: 'ondes', couches: 14, ecart: 1.4, fond: ACIDE[1], couleurs: [ACIDE[2], ACIDE[3]], hauteur: 3, flou: 5, ombre: 0.55, tranche: 0, echelle: 1.6 },
+        'Salon': { champ: 'rayures', couches: 10, fond: SALON[0], couleurs: [SALON[2], SALON[3], SALON[4], SALON[1]], hauteur: 5, flou: 9, ombre: 0.35, echelle: 1.5, detail: 2 },
+        'Pyramides': { champ: 'relief', couches: 14, ecart: 1.3, fond: PYR[0], couleurs: [PYR[0], PYR[5], PYR[3], PYR[2], PYR[4], PYR[1]], teinte: 'degrade', hauteur: 2.5, flou: 4, ombre: 0.45, tranche: 0.25, echelle: 1.1, detail: 3 },
+        'Logo papier': { champ: 'logo', couches: 9, fond: P60[0], couleurs: ['#ffffff', '#f1f0ec'], hauteur: 6, flou: 14, ombre: 0.3, tranche: 0.6, vitesse: 0.5 },
+        'Nuit': { champ: 'logo', couches: 7, fond: NUIT[0], couleurs: ['#1d1d1d', '#2a2a2a', NUIT[2], NUIT[1]], teinte: 'degrade', hauteur: 7, flou: 18, ombre: 0.85, tranche: 0.2 },
+      },
+      brand(colors) {
+        const c = colors.slice(1).length ? colors.slice(1) : ['#111111'];
+        return { fond: colors[0], couleurs: c.slice(0, 7) };
+      },
+      pointer: {
+        move: (q) => { hover = { x: q.x, y: q.y }; },
+        down: (q) => { lightDrag = { x: q.x, y: q.y, moved: false }; },
+        drag: (q) => {
+          if (!lightDrag) return;
+          if (Math.hypot(q.x - lightDrag.x, q.y - lightDrag.y) > 6) lightDrag.moved = true;
+          if (!lightDrag.moved) return;
+          // La lumière vient du côté opposé au pointeur : l'ombre « suit » le doigt.
+          const { w, h } = app.size, dx = q.x - w / 2, dy = q.y - h / 2;
+          let a = Math.atan2(dy, dx) / DEG; a = ((a % 360) + 360) % 360;
+          app.set('angle', Math.round(a));
+          app.set('hauteur', Math.round(Math.min(30, 2 + Math.hypot(dx, dy) / Math.min(w, h) * 40) * 2) / 2);
+        },
+        up: (q) => {
+          if (lightDrag && !lightDrag.moved) ripples.push({ x: q.x, y: q.y, t: 0 });
+          if (ripples.length > 6) ripples.shift();
+          lightDrag = null;
+        },
+        wheel: (q, dy) => app.set('couches', Math.max(2, Math.min(18, p.couches + (dy > 0 ? -1 : 1)))),
+      },
+      onChange(k) { if (k === 'image' || k === '*') logoKey = null; if (k === '*') ripples = []; },
+      onSeed() { buildPerm(); },
+      export: { name: 'papier-decoupe', svg: () => toSVG() },
+    });
+    const p = app.params;
+    canvas.addEventListener('pointerleave', () => { hover = null; });
+
+    // ——— Bruit de valeur 3D (permutation dépendant de la graine) ———
+    const perm = new Uint8Array(512), vals = new Float32Array(256);
+    function buildPerm() {
+      const r = app.rng(7), a = [...Array(256).keys()];
+      for (let i = 255; i > 0; i--) { const j = Math.floor(r() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; }
+      for (let i = 0; i < 512; i++) perm[i] = a[i & 255];
+      for (let i = 0; i < 256; i++) vals[i] = r() * 2 - 1;
+    }
+    buildPerm();
+    const fade = (t) => t * t * t * (t * (t * 6 - 15) + 10);
+    function vnoise(x, y, z) {
+      const X = Math.floor(x), Y = Math.floor(y), Z = Math.floor(z);
+      const fx = fade(x - X), fy = fade(y - Y), fz = fade(z - Z), xi = X & 255, yi = Y & 255, zi = Z & 255;
+      const h = (i, j, k) => vals[perm[perm[perm[(xi + i) & 255] + ((yi + j) & 255)] + ((zi + k) & 255)]];
+      const l = (a, b, t) => a + (b - a) * t;
+      return l(l(l(h(0, 0, 0), h(1, 0, 0), fx), l(h(0, 1, 0), h(1, 1, 0), fx), fy), l(l(h(0, 0, 1), h(1, 0, 1), fx), l(h(0, 1, 1), h(1, 1, 1), fx), fy), fz);
+    }
+    function fbm(x, y, z, oct) {
+      let s = 0, a = 1, n = 0;
+      for (let o = 0; o < oct; o++) { s += vnoise(x, y, z + o * 7.1) * a; n += a; a *= 0.5; x *= 2.03; y *= 2.03; }
+      return s / n;
+    }
+
+    // ——— Logo : champ flou de la silhouette (repli : une marque géométrique) ———
+    let logoKey = null, logoField = null;
+    function demoMark(c, s) {
+      c.fillStyle = '#000';
+      c.beginPath(); c.arc(s * 0.5, s * 0.5, s * 0.36, 0, TAU); c.arc(s * 0.5, s * 0.5, s * 0.2, 0, TAU, true); c.fill();
+      c.fillRect(s * 0.44, s * 0.08, s * 0.12, s * 0.84);
+    }
+    function buildLogo(G) {
+      const key = G.cols + 'x' + G.rows + ':' + ((p.image || app.logoImg) ? 'img' : 'demo') + ':' + (p.image ? p.image.src : app.logoImg ? app.logoImg.src : '');
+      if (key === logoKey && logoField) return;
+      logoKey = key;
+      const c = document.createElement('canvas'); c.width = G.cols; c.height = G.rows;
+      const x = c.getContext('2d', { willReadFrequently: true });
+      const img = p.image || app.logoImg;
+      // Zone visible dans la grille, puis logo centré sur ~60 % du petit côté.
+      const vx = G.m / G.cell, vy = G.m / G.cell, vw = G.w / G.cell, vh = G.h / G.cell, S = Math.min(vw, vh) * 0.62;
+      const t = document.createElement('canvas'), ts = 256; t.width = t.height = ts;
+      const tc = t.getContext('2d', { willReadFrequently: true });
+      if (img) {
+        const iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height, k = ts / Math.max(iw, ih);
+        tc.drawImage(img, (ts - iw * k) / 2, (ts - ih * k) / 2, iw * k, ih * k);
+        const d = tc.getImageData(0, 0, ts, ts);
+        let transp = 0; for (let i = 3; i < d.data.length; i += 16) if (d.data[i] < 128) transp++;
+        const useA = transp > d.data.length / 16 * 0.05;
+        for (let i = 0; i < d.data.length; i += 4) { const l = (d.data[i] * 0.2126 + d.data[i + 1] * 0.7152 + d.data[i + 2] * 0.0722) / 255; d.data[i + 3] = useA ? d.data[i + 3] : Math.round(d.data[i + 3] * (1 - l)); d.data[i] = d.data[i + 1] = d.data[i + 2] = 0; }
+        tc.putImageData(d, 0, 0);
+      } else demoMark(tc, ts);
+      // Pseudo-distance : silhouette nette + halos de plus en plus flous → paliers autour du logo.
+      logoField = new Float32Array(G.cols * G.rows);
+      const radii = [[0.6, 0.5], [S * 0.06, 0.25], [S * 0.16, 0.25]];
+      for (const [rad, wgt] of radii) {
+        x.clearRect(0, 0, G.cols, G.rows); x.filter = `blur(${rad}px)`;
+        x.drawImage(t, vx + (vw - S) / 2, vy + (vh - S) / 2, S, S);
+        const a = x.getImageData(0, 0, G.cols, G.rows).data;
+        for (let i = 0; i < logoField.length; i++) logoField[i] += Math.min(1, a[i * 4 + 3] / 255 * (rad > 1 ? 1.6 : 1)) * wgt;
+      }
+    }
+
+    // ——— Grille du champ (déborde du cadre pour fermer les découpes hors champ) ———
+    function grid(w, h) {
+      const cell = Math.max(4, Math.min(w, h) / 120), m = cell * 3;
+      const cols = Math.ceil((w + 2 * m) / cell) + 1, rows = Math.ceil((h + 2 * m) / cell) + 1;
+      return { cell, m, cols, rows, w, h };
+    }
+    function field(G, t) {
+      const { cols, rows, cell, m, w, h } = G, f = new Float32Array(cols * rows);
+      const sc = (p.echelle * 2.6) / Math.min(w, h), z = t * 0.12 * p.vitesse, oct = Math.round(p.detail);
+      const r = app.rng(3), centers = [];
+      for (let i = 0; i < 4; i++) centers.push([r(), r(), 0.5 + r(), r() * TAU]);
+      if (p.champ === 'logo') buildLogo(G);
+      const S = Math.min(w, h);
+      for (let j = 0; j < rows; j++) for (let i = 0; i < cols; i++) {
+        const x = i * cell - m, y = j * cell - m, k = j * cols + i;
+        let v;
+        switch (p.champ) {
+          case 'ondes': {
+            v = 0;
+            for (let c = 0; c < 3; c++) {
+              const C = centers[c], cx = (0.2 + 0.6 * C[0] + Math.sin(z * 0.9 + C[3]) * 0.12) * w, cy = (0.2 + 0.6 * C[1] + Math.cos(z * 0.7 + C[3]) * 0.12) * h;
+              const d = Math.hypot(x - cx, y - cy) / S;
+              v += Math.cos(d * 16 * p.echelle - z * 6 * C[2]) / (1 + d * 3);
+            }
+            v = 0.5 + v * 0.28 + fbm(x * sc, y * sc, z, oct) * 0.15;
+            break;
+          }
+          case 'bulles': {
+            v = 0;
+            for (let c = 0; c < 4; c++) {
+              const C = centers[c], cx = (0.5 + Math.sin(z * C[2] + C[3]) * 0.32) * w, cy = (0.5 + Math.cos(z * C[2] * 0.8 + C[3] * 1.7) * 0.3) * h;
+              const d2 = ((x - cx) ** 2 + (y - cy) ** 2) / (S * S) * 9 * p.echelle * p.echelle;
+              v += 0.55 / (0.25 + d2);
+            }
+            v = Math.min(1.2, v * 0.28) + fbm(x * sc, y * sc, z, oct) * 0.12;
+            break;
+          }
+          case 'rayures': {
+            const wx = fbm(x * sc * 0.6, y * sc * 0.6, z, oct), d = (x * 0.7 + y * 0.7) / S * 4 * p.echelle + wx * 2.2;
+            v = 0.5 + 0.48 * Math.sin(d * Math.PI - z * 2);
+            break;
+          }
+          case 'logo': {
+            v = logoField[k] * 0.9 + 0.06 + fbm(x * sc, y * sc, z, oct) * 0.16;
+            break;
+          }
+          default: v = 0.5 + fbm(x * sc, y * sc, z, oct) * 1.25;
+        }
+        f[k] = v;
+      }
+      // Soulèvement au survol et ondes au toucher.
+      if (bump && p.soulevement > 0) {
+        const R = S * 0.2, A = p.soulevement * 1.1;
+        const i0 = Math.max(0, Math.floor((bump.x + m - R * 2.5) / cell)), i1 = Math.min(cols - 1, Math.ceil((bump.x + m + R * 2.5) / cell));
+        const j0 = Math.max(0, Math.floor((bump.y + m - R * 2.5) / cell)), j1 = Math.min(rows - 1, Math.ceil((bump.y + m + R * 2.5) / cell));
+        for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) {
+          const dx = i * cell - m - bump.x, dy = j * cell - m - bump.y;
+          f[j * cols + i] += A * bump.a * Math.exp(-(dx * dx + dy * dy) / (R * R));
+        }
+      }
+      for (const rp of ripples) {
+        const rad = rp.t * S * 0.55, wd = S * 0.08, amp = 0.55 * Math.max(0, 1 - rp.t / 1.6);
+        if (amp <= 0) continue;
+        for (let j = 0; j < rows; j++) for (let i = 0; i < cols; i++) {
+          const d = Math.hypot(i * cell - m - rp.x, j * cell - m - rp.y) - rad;
+          if (Math.abs(d) < wd * 2.5) f[j * cols + i] += amp * Math.exp(-(d * d) / (wd * wd));
+        }
+      }
+      // Arrondi : flou boîte séparable.
+      const tmp = new Float32Array(f.length);
+      for (let pass = 0; pass < Math.round(p.arrondi); pass++) {
+        for (let j = 0; j < rows; j++) for (let i = 0; i < cols; i++) { const k = j * cols + i; tmp[k] = (f[k - (i > 0)] + f[k] + f[k + (i < cols - 1)]) / 3; }
+        for (let j = 0; j < rows; j++) for (let i = 0; i < cols; i++) { const k = j * cols + i; f[k] = (tmp[k - (j > 0 ? cols : 0)] + tmp[k] + tmp[k + (j < rows - 1 ? cols : 0)]) / 3; }
+      }
+      // Bord forcé bas : toutes les découpes se referment hors du cadre.
+      for (let i = 0; i < cols; i++) { f[i] = -9; f[(rows - 1) * cols + i] = -9; }
+      for (let j = 0; j < rows; j++) { f[j * cols] = -9; f[j * cols + cols - 1] = -9; }
+      return f;
+    }
+
+    // ——— Marching squares → boucles fermées (coordonnées de grille) ———
+    function marching(g, W, H, T) {
+      const hid = (x, y) => (y * W + x) * 2, vid = (x, y) => (y * W + x) * 2 + 1;
+      const link = new Map();
+      const add = (a, b) => { (link.get(a) || link.set(a, []).get(a)).push(b); (link.get(b) || link.set(b, []).get(b)).push(a); };
+      const pos = (id) => {
+        const e = id >> 1, x = e % W, y = (e - x) / W;
+        if (id & 1) { const a = g[y * W + x], b = g[(y + 1) * W + x]; return [x, y + (T - a) / (b - a || 1e-6)]; }
+        const a = g[y * W + x], b = g[y * W + x + 1]; return [x + (T - a) / (b - a || 1e-6), y];
+      };
+      for (let y = 0; y < H - 1; y++) for (let x = 0; x < W - 1; x++) {
+        const a = g[y * W + x] > T, b = g[y * W + x + 1] > T, c = g[(y + 1) * W + x + 1] > T, d = g[(y + 1) * W + x] > T;
+        const code = (a << 3) | (b << 2) | (c << 1) | d;
+        if (code === 0 || code === 15) continue;
+        const t = hid(x, y), bo = hid(x, y + 1), l = vid(x, y), r = vid(x + 1, y);
+        const center = (g[y * W + x] + g[y * W + x + 1] + g[(y + 1) * W + x + 1] + g[(y + 1) * W + x]) / 4 > T;
+        switch (code) {
+          case 1: case 14: add(l, bo); break;
+          case 2: case 13: add(bo, r); break;
+          case 3: case 12: add(l, r); break;
+          case 4: case 11: add(t, r); break;
+          case 6: case 9: add(t, bo); break;
+          case 7: case 8: add(l, t); break;
+          case 5: if (center) { add(l, t); add(bo, r); } else { add(t, r); add(l, bo); } break;
+          case 10: if (center) { add(t, r); add(l, bo); } else { add(l, t); add(bo, r); } break;
+        }
+      }
+      const seen = new Set(), loops = [];
+      for (const start of link.keys()) {
+        if (seen.has(start)) continue;
+        const lp = []; let prev = -1, cur = start, guard = 0;
+        while (guard++ < 400000) {
+          seen.add(cur); const [px, py] = pos(cur); lp.push(px, py);
+          const nb = link.get(cur); const nx = nb[0] !== prev ? nb[0] : nb[1];
+          if (nx == null || nx === start || seen.has(nx)) break;
+          prev = cur; cur = nx;
+        }
+        if (lp.length >= 14) loops.push(simplify(lp, 0.08));
+      }
+      return loops;
+    }
+
+    // Douglas-Peucker sur une boucle fermée.
+    function simplify(lp, eps) {
+      const n = lp.length / 2;
+      if (n < 6) return lp;
+      let far = 0, fd = -1;
+      for (let i = 1; i < n; i++) { const d = (lp[i * 2] - lp[0]) ** 2 + (lp[i * 2 + 1] - lp[1]) ** 2; if (d > fd) { fd = d; far = i; } }
+      const keep = new Uint8Array(n); keep[0] = keep[far] = 1;
+      const stack = [[0, far], [far, n]];
+      while (stack.length) {
+        const [a, b] = stack.pop();
+        if (b - a < 2) continue;
+        const ax = lp[a * 2], ay = lp[a * 2 + 1], bx = lp[(b % n) * 2], by = lp[(b % n) * 2 + 1];
+        const dx = bx - ax, dy = by - ay, L = Math.hypot(dx, dy) || 1e-9;
+        let mi = -1, md = eps;
+        for (let i = a + 1; i < b; i++) { const d = Math.abs((lp[i * 2] - ax) * dy - (lp[i * 2 + 1] - ay) * dx) / L; if (d > md) { md = d; mi = i; } }
+        if (mi >= 0) { keep[mi] = 1; stack.push([a, mi], [mi, b]); }
+      }
+      const out = [];
+      for (let i = 0; i < n; i++) if (keep[i]) out.push(lp[i * 2], lp[i * 2 + 1]);
+      return out;
+    }
+
+    // ——— Couleurs ———
+    const hex2 = (h) => { const n = parseInt(h.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; };
+    const rgb2 = (c) => '#' + c.map((v) => Math.round(Math.max(0, Math.min(255, v))).toString(16).padStart(2, '0')).join('');
+    function layerColor(i, L) {
+      const P = p.couleurs && p.couleurs.length ? p.couleurs : ['#111111'];
+      if (p.teinte !== 'degrade' || P.length < 2) return P[i % P.length];
+      const t = L > 1 ? (i / (L - 1)) * (P.length - 1) : 0, a = Math.floor(Math.min(P.length - 2, t)), f = t - a;
+      const A = hex2(P[a]), B = hex2(P[a + 1]);
+      return rgb2([A[0] + (B[0] - A[0]) * f, A[1] + (B[1] - A[1]) * f, A[2] + (B[2] - A[2]) * f]);
+    }
+    function lighten(h, k) { const c = hex2(h); return rgb2(c.map((v) => v + (255 - v) * k)); }
+
+    // ——— Scène : couches (tracés en pixels) ———
+    function layers(w, h) {
+      const G = grid(w, h), f = field(G, time), L = Math.round(p.couches), out = [];
+      for (let i = 0; i < L; i++) {
+        const T = 0.08 + 0.84 * Math.pow((i + 0.5) / L, p.ecart);
+        const loops = marching(f, G.cols, G.rows, T).map((lp) => { const q = new Float32Array(lp.length); for (let k = 0; k < lp.length; k += 2) { q[k] = lp[k] * G.cell - G.m; q[k + 1] = lp[k + 1] * G.cell - G.m; } return q; });
+        out.push({ loops, col: layerColor(i, L), T });
+      }
+      out.G = G; out.f = f;
+      return out;
+    }
+
+    // ——— Ombre portée : copies décalées de la feuille, de plus en plus loin et légères ———
+    // (pénombre le long de la lumière, sans flou coûteux ; identique en SVG).
+    function shadowSteps(ang) {
+      const n = Math.max(1, Math.min(5, 1 + Math.ceil(p.flou / 4))), a = 1 - Math.pow(1 - p.ombre, 1 / n), out = [];
+      const ux = -Math.cos(ang), uy = -Math.sin(ang);
+      for (let j = 0; j < n; j++) {
+        const t = n > 1 ? j / (n - 1) : 1, D = p.hauteur * (0.35 + 0.65 * t) + p.flou * 0.6 * t;
+        out.push([ux * D, uy * D, a]);
+      }
+      return out;
+    }
+
+        app.loop((t, dt) => {
+      const { w, h, dpr } = app.size;
+      dt = Math.min(0.05, dt || 0);
+      time += dt;
+      // Le soulèvement suit le pointeur avec un peu d'inertie et s'éteint en douceur.
+      if (hover) bump = bump ? { x: bump.x + (hover.x - bump.x) * Math.min(1, dt * 7), y: bump.y + (hover.y - bump.y) * Math.min(1, dt * 7), a: Math.min(1, bump.a + dt * 3) } : { x: hover.x, y: hover.y, a: 0 };
+      else if (bump) { bump.a -= dt * 2; if (bump.a <= 0) bump = null; }
+      for (const r of ripples) r.t += dt;
+      ripples = ripples.filter((r) => r.t < 1.6);
+
+      const ls = layers(w, h); const ang = p.angle * DEG, ox = -Math.cos(ang) * p.hauteur, oy = -Math.sin(ang) * p.hauteur;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = p.fond; ctx.fillRect(0, 0, w, h);
+      const steps = p.ombre > 0 ? shadowSteps(ang) : [], lx = Math.cos(ang) * 1.3, ly = Math.sin(ang) * 1.3;
+      for (const l of ls) {
+        if (!l.loops.length) continue;
+        const path = new Path2D();
+        for (const q of l.loops) { path.moveTo(q[0], q[1]); for (let i = 2; i < q.length; i += 2) path.lineTo(q[i], q[i + 1]); path.closePath(); }
+        ctx.fillStyle = '#000';
+        for (const [dx, dy, a] of steps) { ctx.globalAlpha = a; ctx.setTransform(dpr, 0, 0, dpr, dx * dpr, dy * dpr); ctx.fill(path, 'evenodd'); }
+        if (p.tranche > 0) { ctx.globalAlpha = p.tranche; ctx.fillStyle = lighten(l.col, 0.6); ctx.setTransform(dpr, 0, 0, dpr, lx * dpr, ly * dpr); ctx.fill(path, 'evenodd'); }
+        ctx.globalAlpha = 1; ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        ctx.fillStyle = l.col; ctx.fill(path, 'evenodd');
+      }
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      app.finish(ctx);
+    });
+
+    function toSVG() {
+      const { w, h } = app.size, r = (v) => Math.round(v * 10) / 10, ls = layers(w, h);
+      const ang = p.angle * DEG, steps = p.ombre > 0 ? shadowSteps(ang) : [], lx = r(Math.cos(ang) * 1.3), ly = r(Math.sin(ang) * 1.3);
+      const defs = [], body = [];
+      ls.forEach((l, i) => {
+        if (!l.loops.length) return;
+        const d = l.loops.map((q) => { let s = 'M' + r(q[0]) + ' ' + r(q[1]); for (let k = 2; k < q.length; k += 2) s += 'L' + r(q[k]) + ' ' + r(q[k + 1]); return s + 'Z'; }).join('');
+        defs.push(`<path id="f${i}" d="${d}" fill-rule="evenodd"/>`);
+        for (const [dx, dy, a] of steps) body.push(`<use href="#f${i}" fill="#000" fill-opacity="${a.toFixed(3)}" transform="translate(${r(dx)} ${r(dy)})"/>`);
+        if (p.tranche > 0) body.push(`<use href="#f${i}" fill="${lighten(l.col, 0.6)}" fill-opacity="${p.tranche}" transform="translate(${lx} ${ly})"/>`);
+        body.push(`<use href="#f${i}" fill="${l.col}"/>`);
+      });
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">
+<defs>
+${defs.join('\n')}
+</defs>
+<rect width="100%" height="100%" fill="${p.fond}"/>
+${body.join('\n')}
+</svg>`;
+    }
+  </script>
+</body>
+</html>
