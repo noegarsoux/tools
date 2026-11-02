@@ -1,0 +1,23 @@
+{
+  "slug": "verre",
+  "title": "Verre et réfraction",
+  "type": "webgl",
+  "description": "Une scène de marque vue à travers du verre cannelé, ondulé, en galets ou en prisme : réfraction, dispersion des couleurs, dépoli et reflet qui suit le pointeur.",
+  "tags": [
+    "verre",
+    "refraction",
+    "dispersion",
+    "webgl",
+    "cannele",
+    "logo"
+  ],
+  "inspiration": [
+    "Verre cannelé et verre imprimé des vitrines et des portes de douche",
+    "Lois de Snell-Descartes et dispersion ; Inigo Quilez, champs de hauteur et normales",
+    "references/physique-maths.md (lumière) ; references/shaders.md",
+    "Palettes kegelbahn, menthe, acide, biennale, thermique, papier-60, good-room, luzern"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
