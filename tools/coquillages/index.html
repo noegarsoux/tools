@@ -1,0 +1,300 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Coquillages</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Coquillages : le bord d'une coquille ne voit que lui-même. Chaque cellule du bord est un milieu
+    // excitable (modèle de Barkley) : une cellule s'allume au hasard, l'onde part des deux côtés, les
+    // ondes qui se croisent s'annulent. La coquille enregistre ces ondes ligne après ligne en grandissant :
+    // triangles, chevrons et zigzags. Rendu en bande, en cône (Conus) qui tourne, en spirale infinie ou dans le logo.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const BIEN = PAL('biennale'), KB = PAL('kegelbahn'), SALON = PAL('salon'), MENTHE = PAL('menthe'), PYR = PAL('pyramides'), EVT = PAL('eventail'), GLY = PAL('glyphes');
+
+    const H = 4096; // lignes gardées en mémoire
+    let N = 0, U = null, V = null, NU = null, HU = null, HV = null, head = 0, total = 0, rowAcc = 0, seed = 1;
+    let buf = null, img = null, lut = null, lutKey = '', mask = null, maskKey = null, simKey = '', time = 0, frozen = false, drag = null, spin = 0;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.05, vignette: 0.25 },
+      hint: 'Touchez la coquille pour lancer une onde · glissez pour en semer · molette : fréquence des départs',
+      notes: 'Chaque cellule du bord de croissance est un milieu excitable : allumée, elle allume ses voisines puis reste un temps réfractaire. Une étincelle produit deux ondes qui s’écartent ; deux ondes qui se rencontrent s’éteignent. La coquille ajoute une ligne à chaque instant et garde la trace de ces ondes : c’est ainsi que Hans Meinhardt explique les triangles des cônes et les chevrons des olives.',
+      params: {
+        'Coquille': {
+          forme: { type: 'select', label: 'Forme', options: { cone: 'Cône', spirale: 'Spirale', bande: 'Bande', logo: 'Logo' }, value: 'cone' },
+          image: { type: 'file', label: 'Logo', accept: 'image/*', show: (q) => q.forme === 'logo' },
+          croissance: { type: 'range', label: 'Croissance (lignes/s)', min: 5, max: 160, step: 1, value: 45 },
+          rotation: { type: 'range', label: 'Rotation', min: -1, max: 1, step: 0.01, value: 0.25, show: (q) => q.forme === 'cone' },
+          enroulement: { type: 'range', label: 'Évasement', min: 1.4, max: 4, step: 0.05, value: 2.3, show: (q) => q.forme === 'spirale' },
+        },
+        'Bord excitable': {
+          cellules: { type: 'range', label: 'Cellules du bord', min: 80, max: 420, step: 10, value: 260 },
+          taux: { type: 'range', label: 'Étincelles', min: 0, max: 1, step: 0.01, value: 0.72 },
+          vitesse: { type: 'range', label: 'Vitesse des ondes', min: 0, max: 1, step: 0.01, value: 0.25 },
+          traine: { type: 'range', label: 'Traîne', min: 0, max: 1, step: 0.01, value: 0.5 },
+          excitabilite: { type: 'range', label: 'Excitabilité', min: 0, max: 1, step: 0.01, value: 0.6 },
+          irregularite: { type: 'range', label: 'Irrégularité', min: 0, max: 1, step: 0.01, value: 0.3 },
+        },
+        'Couleurs': {
+          rendu: { type: 'segmented', label: 'Rendu', options: { fondu: 'Fondu', pleins: 'Pleins', lignes: 'Lignes' }, value: 'pleins' },
+          nacre: { type: 'color', label: 'Fond de coquille', value: '#f1e6d2' },
+          pigments: { type: 'palette', label: 'Pigments', value: ['#6b2f1a', '#1f1410'] },
+          fond: { type: 'color', label: 'Fond', value: '#1c1a17' },
+          brillance: { type: 'range', label: 'Brillance', min: 0, max: 1, step: 0.01, value: 0.55 },
+        },
+      },
+      presets: {
+        'Cône textile': {},
+        'Grands triangles': { taux: 0.55, vitesse: 0.6, traine: 0.6, cellules: 180 },
+        'Chevrons serrés': { taux: 0.75, vitesse: 0.15, traine: 0.15, rendu: 'lignes', pigments: ['#2b1a12', '#7a3b1e'] },
+        'Spirale': { forme: 'spirale', taux: 0.4, cellules: 140, rendu: 'fondu', pigments: ['#8a3a1c', '#3a170c'], nacre: '#efe2cc' },
+        'Bande': { forme: 'bande', croissance: 60, rendu: 'pleins' },
+        'Logo': { forme: 'logo', croissance: 70, taux: 0.55 },
+        'Oscillante': { excitabilite: 0.95, taux: 0.1, vitesse: 0.4, traine: 0.4 },
+        'Biennale': { nacre: BIEN[0], pigments: [BIEN[2], BIEN[1], BIEN[3]], fond: BIEN[1], rendu: 'pleins' },
+        'Kegelbahn': { nacre: KB[3], pigments: [KB[1], KB[0], KB[2]], fond: KB[0], forme: 'spirale', cellules: 120 },
+        'Salon': { nacre: SALON[0], pigments: [SALON[2], SALON[1]], fond: '#d8d4cc', forme: 'bande', rendu: 'lignes' },
+        'Menthe': { nacre: MENTHE[0], pigments: [MENTHE[3], MENTHE[1]], fond: MENTHE[1], taux: 0.6 },
+        'Pyramides': { nacre: '#e9dcc4', pigments: [PYR[1], PYR[6], PYR[2]], fond: PYR[0], rendu: 'fondu', vitesse: 0.6 },
+        'Éventail': { nacre: '#efe2c4', pigments: [EVT[3], EVT[0]], fond: EVT[0], forme: 'spirale', enroulement: 3.2, cellules: 180 },
+      },
+      brand(colors) {
+        const lum = (h) => { const n = parseInt(h.slice(1), 16); return ((n >> 16) & 255) * 0.299 + ((n >> 8) & 255) * 0.587 + (n & 255) * 0.114; };
+        const all = colors.slice().sort((a, b) => lum(b) - lum(a));
+        return { nacre: all[0], fond: all[all.length - 1], pigments: all.slice(1).length ? all.slice(1) : [all[0]] };
+      },
+      pointer: {
+        down: (q) => { drag = { x: q.x, y: q.y, moved: false }; },
+        drag: (q) => { if (!drag) return; if (Math.hypot(q.x - drag.x, q.y - drag.y) > 6) { drag.moved = true; drag.x = q.x; drag.y = q.y; spark(q.x, q.y, 1); } },
+        up: (q) => { if (drag && !drag.moved) spark(q.x, q.y, 3); drag = null; },
+        wheel: (q, dy) => app.set('taux', Math.max(0, Math.min(1, +(p.taux + (dy > 0 ? -0.04 : 0.04)).toFixed(2)))),
+      },
+      onChange(k) { if (k === 'image') maskKey = null; if (k === 'cellules') simKey = ''; frozen = false; },
+      onSeed() { simKey = ''; frozen = false; },
+      export: { name: 'coquillages', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    const hex = (h) => { const n = parseInt(h.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; };
+    const mixc = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+    const sstep = (a, b, x) => { const t = Math.max(0, Math.min(1, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
+    function rnd() { seed = (seed * 16807) % 2147483647; return seed / 2147483647; }
+    function hash(n) { const s = Math.sin(n * 127.1 + app.seed * 0.0131) * 43758.5453; return s - Math.floor(s); }
+    function vnoise(x, o) { const i = Math.floor(x), f = x - i, u = f * f * (3 - 2 * f); return hash(i + o) * (1 - u) + hash(i + 1 + o) * u; }
+
+    // ——— Le bord excitable (Barkley) ———
+    // la simulation tourne sur 4 sous-cellules par cellule affichée : fronts lisses, sans accrochage au réseau
+    const SUB = 4;
+    let M = 0;
+    function resetSim() {
+      N = p.cellules; M = N * SUB; U = new Float32Array(M); V = new Float32Array(M); NU = new Float32Array(M);
+      HU = new Uint8Array(N * H); HV = new Uint8Array(N * H); head = 0; total = 0; rowAcc = 0; seed = (app.seed % 2147483646) + 1;
+      for (let k = 0; k < 6; k++) fire(Math.floor(rnd() * M), SUB);
+    }
+    function simRow() {
+      const a = 0.75, b = 0.07 - 0.1 * p.excitabilite, eps = 0.02, D = (1.5 + 10 * p.vitesse) * SUB * SUB, dt = 0.0025, rv = 1 - 0.9 * p.traine, ts = 2;
+      const lam = p.taux <= 0 ? 0 : 0.0003 * Math.pow(120, p.taux) * ts, irr = p.irregularite;
+      for (let s = 0; s < 16; s++) {
+        for (let i = 0; i < M; i++) {
+          const u = U[i], l = i ? U[i - 1] : U[M - 1], r = i < M - 1 ? U[i + 1] : U[0];
+          let nu = u + dt * (u * (1 - u) * (u - (V[i] + b) / a) / eps + D * (l + r - 2 * u));
+          NU[i] = nu < 0 ? 0 : nu > 1 ? 1 : nu;
+          V[i] += dt * ts * (u - V[i]) * (u > V[i] ? 1 : rv);
+        }
+        const t = U; U = NU; NU = t;
+        // étincelles spontanées (par cellule affichée), plus fréquentes par endroits
+        let m = lam * N * dt; while (m > 0) { if (rnd() < Math.min(1, m)) { const k = Math.floor(rnd() * M), loc = 1 + irr * (vnoise(k / M * 7, 50) - 0.5) * 2.4; if (V[k] < 0.12 && rnd() < loc) fire(k, SUB); } m -= 1; }
+        if (b < 0) for (let i = 0; i < M; i++) U[i] += rnd() * 1e-4;
+      }
+      const o = head * N;
+      for (let i = 0; i < N; i++) { let su = 0, sv = 0; for (let k = 0; k < SUB; k++) { su += U[i * SUB + k]; sv += V[i * SUB + k]; } HU[o + i] = Math.min(255, su / SUB * 255); HV[o + i] = Math.min(255, sv / SUB * 330); }
+      head = (head + 1) % H; total++;
+    }
+    function fire(k, w) { for (let j = -w; j <= w; j++) U[(k + j + M) % M] = 1; }
+    function spark(x, y, w) { const e = edgeAt(x, y); if (e !== null && U) fire(Math.floor(e * M) % M, w * SUB); }
+
+    // ——— Couleurs : table (u, v) → rgb ———
+    function buildLUT() {
+      const key = [p.rendu, p.nacre, p.pigments.join()].join();
+      if (key === lutKey && lut) return lut; lutKey = key;
+      const base = hex(p.nacre), c1 = hex(p.pigments[0] || '#6b2f1a'), c2 = hex(p.pigments[1] || p.pigments[0] || '#1f1410'), c3 = p.pigments[2] ? hex(p.pigments[2]) : null;
+      lut = new Uint8ClampedArray(64 * 256 * 3);
+      for (let ui = 0; ui < 64; ui++) for (let vi = 0; vi < 256; vi++) {
+        const u = ui / 63, v = vi / 255; let c;
+        if (p.rendu === 'fondu') { c = mixc(base, c1, Math.pow(v, 0.8)); if (c3) c = mixc(c, c3, sstep(0.75, 1, v) * 0.6); c = mixc(c, c2, sstep(0.3, 0.8, u)); }
+        else if (p.rendu === 'pleins') { c = mixc(base, c1, sstep(0.3, 0.46, v)); if (c3) c = mixc(c, c3, sstep(0.74, 0.88, v)); c = mixc(c, c2, sstep(0.3, 0.6, u)); }
+        else { c = mixc(base, c1, sstep(0.35, 0.6, u) * 0.95 + sstep(0.55, 0.9, v) * 0.15); if (c3) c = mixc(c, c3, sstep(0.84, 0.9, v) * 0.5); }
+        const o = (ui * 256 + vi) * 3; lut[o] = c[0]; lut[o + 1] = c[1]; lut[o + 2] = c[2];
+      }
+      return lut;
+    }
+
+    // ——— Logo ———
+    function logoMask() {
+      const img0 = p.image || app.logoImg, key = img0 ? (img0.src || 'c') : 'demo';
+      if (key === maskKey && mask) return mask; maskKey = key;
+      const M = 256, c = document.createElement('canvas'); c.width = c.height = M; const x = c.getContext('2d', { willReadFrequently: true });
+      if (img0) { const iw = img0.naturalWidth || img0.width, ih = img0.naturalHeight || img0.height, k = M * 0.96 / Math.max(iw, ih); x.drawImage(img0, (M - iw * k) / 2, (M - ih * k) / 2, iw * k, ih * k); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(128, 128, 120, 0, TAU); x.arc(128, 128, 64, 0, TAU, true); x.fill('evenodd'); x.fillRect(112, 4, 32, 248); }
+      const d = x.getImageData(0, 0, M, M).data, a = new Float32Array(M * M);
+      let transp = 0; for (let i = 3; i < d.length; i += 16) if (d[i] < 128) transp++;
+      const useA = transp > d.length / 16 * 0.05;
+      for (let i = 0; i < M * M; i++) { const l = (d[i * 4] * 0.2126 + d[i * 4 + 1] * 0.7152 + d[i * 4 + 2] * 0.0722) / 255; a[i] = useA ? d[i * 4 + 3] / 255 : (d[i * 4 + 3] > 128 && l < 0.5 ? 1 : 0); }
+      mask = { M, a }; return mask;
+    }
+
+    // ——— Géométrie des formes ———
+    function geom() {
+      const { w, h } = app.size, S = Math.min(w, h);
+      if (p.forme === 'cone') { const Hs = h * 0.84, y0 = h * 0.08, ys = y0 + Hs * 0.2, y1 = y0 + Hs, W = Math.min(w * 0.34, Hs * 0.34); return { cx: w / 2, y0, ys, y1, W }; }
+      if (p.forme === 'spirale') { const R = S * 0.46; return { cx: w / 2, cy: h / 2, R }; }
+      if (p.forme === 'logo') { const L = Math.min(w, h) * 0.86; return { x0: (w - L) / 2, y0: (h - L) / 2, L }; }
+      return {};
+    }
+    const coneHW = (g, y) => y < g.ys ? g.W * Math.pow((y - g.y0) / (g.ys - g.y0), 0.9) : g.W * (1 - 0.9 * Math.pow((y - g.ys) / (g.y1 - g.ys), 1.15));
+    function edgeAt(x, y) {
+      const { w, h } = app.size, g = geom();
+      if (p.forme === 'cone') { if (y < g.ys || y > g.y1 || Math.abs(x - g.cx) > coneHW(g, y)) return null; return (y - g.ys) / (g.y1 - g.ys); }
+      if (p.forme === 'spirale') { const b = Math.log(p.enroulement) / TAU, r = Math.hypot(x - g.cx, y - g.cy), th = Math.atan2(y - g.cy, x - g.cx); const s = Math.log(r / spiralR0(g)) / b - th; const u = s / TAU; return u - Math.floor(u); }
+      if (p.forme === 'logo') return Math.max(0, Math.min(0.999, (x - g.x0) / g.L));
+      return Math.max(0, Math.min(0.999, x / w));
+    }
+    const rowsPerTurn = () => N * 6;
+    // la spirale s'agrandit indéfiniment ; on recule pour garder le dernier tour à l'écran
+    function spiralR0(g) { const b = Math.log(p.enroulement) / TAU, th = total / rowsPerTurn() * TAU; return g.R / Math.exp(b * (th + TAU)); }
+
+    // ——— Rendu ———
+    // géométrie par pixel, recalculée seulement quand la taille ou la forme change
+    let G = null, gKey = '';
+    function geometry(bw, bh, q) {
+      const { w, h } = app.size, key = [bw, bh, w, h, p.forme, p.enroulement, maskKey].join();
+      if (key === gKey && G) return G; gKey = key;
+      const n = bw * bh, g = geom(), E = new Float32Array(n), A = new Float32Array(n), K = new Float32Array(n), SH = new Float32Array(n), SP = new Float32Array(n), AL = new Float32Array(n), TH = new Float32Array(n);
+      const b = Math.log(p.enroulement) / TAU, m = p.forme === 'logo' ? logoMask() : null;
+      for (let j = 0; j < bh; j++) {
+        const y = (j + 0.5) / q;
+        for (let i = 0; i < bw; i++) {
+          const x = (i + 0.5) / q, o = j * bw + i;
+          AL[o] = 0; SH[o] = 1; SP[o] = 0;
+          if (p.forme === 'cone') {
+            const hw = coneHW(g, y);
+            if (!(y > g.y0 && y < g.y1 && hw > 0 && Math.abs(x - g.cx) < hw)) continue;
+            const sx = (x - g.cx) / hw, th = Math.asin(sx), cosn = Math.sqrt(1 - sx * sx);
+            A[o] = (th / Math.PI + 0.5) * 0.5;
+            if (y >= g.ys) { E[o] = (y - g.ys) / (g.y1 - g.ys); K[o] = 0; }
+            else { const t = Math.pow((y - g.y0) / (g.ys - g.y0), 1.4) * 5, k = Math.floor(t), fr = t - k; E[o] = fr * 0.22; K[o] = 5 - k; SH[o] = 0.75 + 0.25 * Math.sin(Math.min(1, fr * 1.15) * Math.PI); }
+            SH[o] *= 0.5 + 0.55 * Math.max(0, cosn * 0.85 - sx * 0.4);
+            SP[o] = Math.pow(Math.max(0, cosn * 0.6 - sx * 0.8), 24);
+            AL[o] = Math.min(1, (hw - Math.abs(x - g.cx)) * 0.5);
+          } else if (p.forme === 'spirale') {
+            const dx = x - g.cx, dy = y - g.cy, r = Math.hypot(dx, dy) + 1e-6, th = Math.atan2(dy, dx);
+            A[o] = (Math.log(r) / b - th) / TAU; TH[o] = th; K[o] = r; AL[o] = 1;
+          } else if (p.forme === 'logo') {
+            const mu = Math.floor((x - g.x0) / g.L * m.M), mv = Math.floor((y - g.y0) / g.L * m.M);
+            if (mu < 0 || mv < 0 || mu >= m.M || mv >= m.M || m.a[mv * m.M + mu] <= 0.02) continue;
+            AL[o] = m.a[mv * m.M + mu]; E[o] = Math.max(0, Math.min(0.999, (x - g.x0) / g.L)); A[o] = (g.y0 + g.L - y) / g.L;
+            const up = mv > 2 ? m.a[(mv - 3) * m.M + mu] : 0; SH[o] = 0.86 + 0.14 * up; SP[o] = (1 - up) * 0.25;
+          } else { AL[o] = 1; E[o] = Math.min(0.999, x / w); A[o] = (h - y) / w; }
+        }
+      }
+      G = { E, A, K, SH, SP, AL, TH }; return G;
+    }
+
+    // ——— Rendu ———
+    function render() {
+      const { w, h } = app.size, q = 0.45, bw = Math.ceil(w * q), bh = Math.ceil(h * q);
+      if (!buf) buf = document.createElement('canvas');
+      if (buf.width !== bw || buf.height !== bh) { buf.width = bw; buf.height = bh; img = null; }
+      const bx = buf.getContext('2d');
+      if (!img) img = bx.createImageData(bw, bh);
+      const D = img.data, L = buildLUT(), bg = hex(p.fond), g = geom(), gl = p.brillance, Gm = geometry(bw, bh, q);
+      const { E, A, K, SH, SP, AL, TH } = Gm;
+      // lecture interpolée d'une cellule à une ligne d'âge donné (0 = la plus récente)
+      const av = Math.min(total, H) - 1;
+      const sample = (e, age) => {
+        if (age < 0 || av < 2) return -1;
+        if (age >= av) age = age % av;
+        const fx = e * N - 0.5, ix = Math.floor(fx), tx = fx - ix, ia = Math.floor(age), ty = age - ia;
+        const r0 = ((head - 1 - ia) % H + H) % H * N, r1 = ((head - 2 - ia) % H + H) % H * N, i0 = (ix + N) % N, i1 = (ix + 1 + N) % N;
+        const u = (HU[r0 + i0] * (1 - tx) + HU[r0 + i1] * tx) * (1 - ty) + (HU[r1 + i0] * (1 - tx) + HU[r1 + i1] * tx) * ty;
+        const v = (HV[r0 + i0] * (1 - tx) + HV[r0 + i1] * tx) * (1 - ty) + (HV[r1 + i0] * (1 - tx) + HV[r1 + i1] * tx) * ty;
+        return ((u >> 2) * 256 + (v | 0)) * 3;
+      };
+      const circ = N * 2.6, b = Math.log(p.enroulement) / TAU, c0 = Math.log(spiralR0(g)) / b / TAU, thMax = total / rowsPerTurn() * TAU, rpt = rowsPerTurn();
+      for (let o = 0, n = bw * bh; o < n; o++) {
+        const al = AL[o], d = o * 4;
+        let li = -1, shade = SH[o], spec = SP[o] * gl, alpha = al;
+        if (al > 0) {
+          if (p.forme === 'cone') {
+            const ang = A[o] + spin, fa = ang - Math.floor(ang);
+            li = K[o] ? sample(E[o], (fa + K[o]) * circ * 0.5) : sample(E[o], fa * circ);
+            if (!K[o] && fa < 0.006) shade *= 0.7;
+          } else if (p.forme === 'spirale') {
+            const uu = A[o] - c0, k = Math.floor(uu), f = uu - k, th = TH[o], Th = th + TAU * k;
+            if (Th <= thMax && Th > thMax - TAU * 7) {
+              li = sample(f, (thMax - Th) / TAU * rpt);
+              const tube = Math.sin(f * Math.PI);
+              shade = 0.35 + 0.7 * Math.pow(tube, 0.6) * (0.75 + 0.25 * Math.cos(th + 2.2));
+              spec = Math.pow(Math.max(0, tube * 0.5 + Math.cos(th + 2.4) * 0.5), 18) * gl * 0.8;
+              alpha = Math.min(1, (thMax - Th) * K[o] * 0.25);
+            }
+          } else li = sample(E[o], A[o] * N);
+        }
+        if (li < 0) { D[d] = bg[0]; D[d + 1] = bg[1]; D[d + 2] = bg[2]; D[d + 3] = 255; continue; }
+        const r = L[li] * shade + 255 * spec, gg = L[li + 1] * shade + 255 * spec, bb = L[li + 2] * shade + 255 * spec;
+        D[d] = bg[0] + (r - bg[0]) * alpha; D[d + 1] = bg[1] + (gg - bg[1]) * alpha; D[d + 2] = bg[2] + (bb - bg[2]) * alpha; D[d + 3] = 255;
+      }
+      bx.putImageData(img, 0, 0);
+      return buf;
+    }
+
+    app.loop((tt, dt) => {
+      const { w, h, dpr } = app.size;
+      dt = Math.min(0.05, dt || 0);
+      const key = [p.cellules, app.seed].join();
+      if (key !== simKey) { simKey = key; resetSim(); }
+      if (app.thumbnail) { if (!frozen) { resetSim(); for (let i = 0; i < N * 9; i++) simRow(); spin = 0.18; frozen = true; } }
+      else {
+        time += dt; rowAcc += dt * p.croissance;
+        // au départ on remplit vite la coquille
+        if (total < N * 8) rowAcc += 40;
+        let n = 0; while (rowAcc >= 1 && n < 80) { rowAcc -= 1; simRow(); n++; }
+        if (rowAcc > 80) rowAcc = 0;
+        spin += dt * p.rotation * 0.05;
+      }
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over';
+      ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high';
+      ctx.drawImage(render(), 0, 0, w, h);
+      app.finish(ctx);
+    });
+
+    // SVG : le patron déroulé de la coquille (lignes = temps), en aplats par plages
+    function toSVG() {
+      const { w, h } = app.size, rows = Math.min(total, H, 420), L = buildLUT(), cw = w / N, rh = h / rows, out = [];
+      const hx = (c) => '#' + c.map((v) => Math.round(v).toString(16).padStart(2, '0')).join('');
+      const q = (li) => { const c = [L[li], L[li + 1], L[li + 2]].map((v) => Math.round(v / 24) * 24); return hx(c.map((v) => Math.min(255, v))); };
+      out.push(`<rect width="100%" height="100%" fill="${p.nacre}"/>`);
+      for (let k = 0; k < rows; k++) {
+        const row = ((head - 1 - k) % H + H) % H, y = h - (k + 1) * rh; let start = 0, cur = null;
+        for (let i = 0; i <= N; i++) {
+          const c = i < N ? q(((HU[row * N + i] >> 2) * 256 + HV[row * N + i]) * 3) : null;
+          if (c !== cur) { if (cur && cur.toLowerCase() !== hx(hex(p.nacre).map((v) => Math.min(255, Math.round(v / 24) * 24)))) out.push(`<rect x="${(start * cw).toFixed(1)}" y="${y.toFixed(1)}" width="${((i - start) * cw + 0.3).toFixed(1)}" height="${(rh + 0.3).toFixed(1)}" fill="${cur}"/>`); cur = c; start = i; }
+        }
+      }
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" shape-rendering="crispEdges">\n${out.join('\n')}\n</svg>`;
+    }
+  </script>
+</body>
+</html>

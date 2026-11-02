@@ -1,0 +1,15 @@
+{
+  "slug": "coquillages",
+  "title": "Coquillages",
+  "type": "motion",
+  "description": "Le bord d'une coquille comme milieu excitable : ondes qui naissent et s'annulent, gravées ligne à ligne en triangles et chevrons, sur un cône, une spirale ou le logo.",
+  "tags": ["coquillages", "reaction-diffusion", "motifs", "croissance", "logo", "svg"],
+  "inspiration": [
+    "Hans Meinhardt, The Algorithmic Beauty of Sea Shells",
+    "Dwight Barkley, modèle de milieu excitable (1991)",
+    "Conus textile, Oliva porphyria ; palettes biennale, kegelbahn, pyramides"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
