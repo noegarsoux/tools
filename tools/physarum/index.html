@@ -1,0 +1,468 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Physarum</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Physarum : une moisissure simulée sur le GPU (modèle de Jeff Jones, tel que l'a popularisé Sage Jenson).
+    // Chaque agent avance, dépose une trace et sonde la carte de traces avec trois capteurs (gauche, devant,
+    // droite) pour tourner vers le plus fort. La carte diffuse et s'évapore : des réseaux de filaments
+    // apparaissent, se resserrent et se réorganisent sans fin. Les agents vivent dans une texture flottante
+    // (x, y, cap, espèce) mise à jour en un passage ; le dépôt est un nuage de points en mélange additif.
+    // Plusieurs espèces se repoussent ; le logo, des points ou ce que l'on peint servent de nourriture.
+    const canvas = document.querySelector('canvas');
+    const gl = canvas.getContext('webgl2', { alpha: false, antialias: false, depth: false, stencil: false, preserveDrawingBuffer: false });
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const KB = PAL('kegelbahn'), LU = PAL('luzern'), ACIDE = PAL('acide'), MENTHE = PAL('menthe'), NUIT = PAL('trame-nuit');
+    const BIEN = PAL('biennale'), P60 = PAL('papier-60'), GR = PAL('good-room'), TH = PAL('thermique');
+    const MAXC = 6;
+
+    let hasPaint = false, ready = false, dirty = true, foodDirty = true, ptr = null, painting = null, lastT = 0, frame = 0;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.04, vignette: 0 },
+      hint: 'Survol : le pointeur écarte la moisissure · glissez pour semer de la nourriture · molette : portée des capteurs',
+      notes: 'Chaque agent sonde la trace devant lui (à gauche, en face, à droite) et tourne vers la plus forte. La trace diffuse et s’évapore : les filaments se forment, se resserrent et se réorganisent. Les espèces se repoussent ; le logo et ce que vous semez les nourrissent.',
+      params: {
+        'Colonie': {
+          agents: { type: 'segmented', label: 'Agents', options: { 128: '16 k', 256: '65 k', 512: '262 k', 1024: '1 M' }, value: '512' },
+          especes: { type: 'segmented', label: 'Espèces', options: { 1: '1', 2: '2', 3: '3' }, value: '1' },
+          depart: { type: 'segmented', label: 'Départ', options: { pluie: 'Pluie', disque: 'Disque', anneau: 'Anneau', centre: 'Centre' }, value: 'pluie' },
+          finesse: { type: 'segmented', label: 'Finesse des filaments', options: { 0.4: 'Épais', 0.6: 'Moyen', 1: 'Fin' }, value: '1' },
+        },
+        'Capteurs': {
+          angle: { type: 'range', label: 'Angle des capteurs (°)', min: 5, max: 90, step: 0.5, value: 25 },
+          distance: { type: 'range', label: 'Portée des capteurs', min: 1, max: 40, step: 0.5, value: 10 },
+          rotation: { type: 'range', label: 'Rotation (°)', min: 2, max: 90, step: 0.5, value: 40 },
+          pas: { type: 'range', label: 'Pas', min: 0.2, max: 3, step: 0.05, value: 1.1 },
+          divergence: { type: 'range', label: 'Écart entre espèces', min: 0, max: 1, step: 0.01, value: 0.35 },
+        },
+        'Trace': {
+          depot: { type: 'range', label: 'Dépôt', min: 0.05, max: 2, step: 0.01, value: 0.5 },
+          evaporation: { type: 'range', label: 'Évaporation', min: 0.005, max: 0.3, step: 0.001, value: 0.09 },
+          diffusion: { type: 'range', label: 'Diffusion', min: 0, max: 1, step: 0.01, value: 0.3 },
+          repulsion: { type: 'range', label: 'Répulsion entre espèces', min: 0, max: 3, step: 0.01, value: 1 },
+        },
+        'Nourriture': {
+          nourriture: { type: 'segmented', label: 'Source', options: { aucune: 'Aucune', logo: 'Logo', points: 'Points', anneau: 'Anneau' }, value: 'aucune' },
+          attrait: { type: 'range', label: 'Attrait', min: 0, max: 4, step: 0.01, value: 1.6 },
+          taille: { type: 'range', label: 'Taille de la source', min: 0.2, max: 0.95, step: 0.01, value: 0.6 },
+          effacer: { type: 'button', label: 'Effacer la nourriture semée', action: () => { paintCtx && paintCtx.clearRect(0, 0, paintCv.width, paintCv.height); hasPaint = false; foodDirty = true; } },
+        },
+        'Mouvement': {
+          vitesse: { type: 'range', label: 'Pas de simulation par image', min: 1, max: 8, step: 1, value: 2 },
+          respiration: { type: 'range', label: 'Respiration des capteurs', min: 0, max: 1, step: 0.01, value: 0.3 },
+          boucle: { type: 'range', label: 'Durée d’une respiration (s)', min: 4, max: 60, step: 1, value: 18 },
+        },
+        'Couleur': {
+          rendu: { type: 'segmented', label: 'Rendu', options: { degrade: 'Dégradé', encre: 'Encre', lumiere: 'Lumière' }, value: 'degrade' },
+          fond: { type: 'color', label: 'Fond', value: KB[0] },
+          couleurs: { type: 'palette', label: 'Couleurs (espèces ou dégradé)', value: [KB[2], KB[1], KB[3]] },
+          intensite: { type: 'range', label: 'Intensité', min: 0.05, max: 3, step: 0.01, value: 0.6 },
+          contraste: { type: 'range', label: 'Contraste', min: 0.3, max: 3, step: 0.01, value: 1.6 },
+        },
+      },
+      presets: {
+        'Réseau': {},
+        'Veines': { angle: 22.5, distance: 22, rotation: 22.5, pas: 1.4, evaporation: 0.03, diffusion: 0.35, finesse: '1', fond: P60[0], couleurs: ['#c9c6bf', P60[1], '#e5452a'], rendu: 'degrade', intensite: 0.6, contraste: 1.4 },
+        'Trois colonies': { especes: '3', depart: 'pluie', rendu: 'encre', fond: BIEN[0], couleurs: [BIEN[2], BIEN[1], '#2f4fa8'], repulsion: 1.6, intensite: 1.3, contraste: 2, divergence: 0.5 },
+        'Lumière': { especes: '2', rendu: 'lumiere', fond: '#060606', couleurs: [LU[0], LU[1]], angle: 35, rotation: 30, distance: 14, intensite: 0.5, repulsion: 1.4 },
+        'Logo': { nourriture: 'logo', attrait: 2.6, taille: 0.7, depart: 'pluie', fond: '#0b0b0b', couleurs: ['#333333', '#9a9a9a', '#ffffff'], intensite: 0.9 },
+        'Coraux': { angle: 70, rotation: 20, distance: 6, pas: 0.8, evaporation: 0.02, diffusion: 0.2, fond: MENTHE[0], couleurs: [MENTHE[3], MENTHE[1], MENTHE[2]], rendu: 'encre', contraste: 1.6 },
+        'Cellules': { angle: 60, rotation: 60, distance: 25, pas: 1.6, evaporation: 0.12, diffusion: 0.8, fond: ACIDE[1], couleurs: ['#3d3d33', ACIDE[0], ACIDE[2]], intensite: 1.2 },
+        'Thermique': { especes: '2', depart: 'disque', rendu: 'encre', fond: TH[0], couleurs: [TH[1], TH[2], TH[3]], angle: 35, distance: 15, respiration: 0.6 },
+        'Nuit': { depart: 'disque', distance: 16, fond: NUIT[0], couleurs: ['#3a3a3a', NUIT[2], NUIT[1]], depot: 0.25, evaporation: 0.04, intensite: 0.5 },
+        'Points': { nourriture: 'points', attrait: 2.2, especes: '2', fond: GR[0], couleurs: [GR[1], GR[3], GR[2]], rendu: 'lumiere', intensite: 0.45 },
+      },
+      brand(colors) {
+        const rest = colors.slice(1);
+        return { fond: colors[0], couleurs: (rest.length ? rest : ['#ffffff']).slice(0, MAXC) };
+      },
+      pointer: {
+        move: (q) => { ptr = { x: q.x, y: q.y }; },
+        down: (q) => { painting = { x: q.x, y: q.y }; paintAt(q.x, q.y, q.x, q.y); },
+        drag: (q) => { if (painting) { paintAt(painting.x, painting.y, q.x, q.y); painting = { x: q.x, y: q.y }; } ptr = { x: q.x, y: q.y }; },
+        up: () => { painting = null; },
+        wheel: (q, dy) => app.set('distance', Math.max(1, Math.min(40, Math.round((p.distance + dy * 0.02) * 2) / 2))),
+      },
+      onChange(k) {
+        if (!ready) return;
+        if (k === '*' || k === 'agents' || k === 'especes' || k === 'depart' || k === 'finesse') dirty = true;
+        if (k === '*' && paintCtx) { paintCtx.clearRect(0, 0, paintCv.width, paintCv.height); hasPaint = false; }
+        if (k === '*' || k === '_logo' || k === 'nourriture' || k === 'taille') foodDirty = true;
+      },
+      onSeed() { dirty = true; foodDirty = true; },
+      export: { name: 'physarum' },
+    });
+    const p = app.params;
+    canvas.addEventListener('pointerleave', () => { ptr = null; });
+
+    // ——— WebGL ———
+    const okFloat = !!gl.getExtension('EXT_color_buffer_float');
+    gl.getExtension('EXT_float_blend');
+    const VS = `#version 300 es
+    layout(location = 0) in vec2 aP;
+    void main() { gl_Position = vec4(aP, 0., 1.); }`;
+
+    // Agents : (x, y) en pixels de simulation, cap, espèce.
+    const FS_AGENT = `#version 300 es
+    precision highp float;
+    uniform sampler2D uA, uT, uF;
+    uniform vec2 uSim, uPtr;
+    uniform float uSA, uSD, uRA, uStep, uRep, uFood, uFood2, uFrame, uDiv, uPtrR, uNS;
+    out vec4 o;
+    float rnd(uvec3 v) {
+      uint h = v.x * 1973u + v.y * 9277u + v.z * 26699u;
+      h ^= h >> 16; h *= 0x7feb352du; h ^= h >> 15; h *= 0x846ca68bu; h ^= h >> 16;
+      return float(h) / 4294967295.;
+    }
+    float sense(vec2 q, vec3 own, vec3 act) {
+      vec2 uv = q / uSim;
+      vec3 T = texture(uT, uv).rgb;
+      float s = dot(T, own) - uRep * dot(T, act - own) + uFood * texture(uF, uv).r;
+      if (uPtrR > 0.) { vec2 d = q - uPtr; s -= uFood2 * exp(-dot(d, d) / (uPtrR * uPtrR)); }
+      return s;
+    }
+    void main() {
+      vec4 A = texelFetch(uA, ivec2(gl_FragCoord.xy), 0);
+      float sp = A.w;
+      vec3 own = vec3(equal(vec3(0., 1., 2.), vec3(sp)));
+      vec3 act = vec3(lessThan(vec3(0., 1., 2.), vec3(uNS)));
+      // Chaque espèce s'écarte un peu des réglages communs : des morphologies différentes cohabitent.
+      float k = 1. + uDiv * (sp - 1.) * 0.45;
+      float sa = uSA * k, sd = uSD * (2. - k), ra = uRA * k;
+      float a = A.z;
+      float F = sense(A.xy + sd * vec2(cos(a), sin(a)), own, act);
+      float L = sense(A.xy + sd * vec2(cos(a + sa), sin(a + sa)), own, act);
+      float R = sense(A.xy + sd * vec2(cos(a - sa), sin(a - sa)), own, act);
+      float r = rnd(uvec3(uvec2(gl_FragCoord.xy), uint(uFrame)));
+      if (F > L && F > R) {}
+      else if (F < L && F < R) a += (r < 0.5 ? -ra : ra);
+      else if (L > R) a += ra * (0.8 + 0.4 * r);
+      else if (R > L) a -= ra * (0.8 + 0.4 * r);
+      // Sur la nourriture, l'agent erre davantage : il explore la forme au lieu de la traverser.
+      a += (rnd(uvec3(uvec2(gl_FragCoord.yx), uint(uFrame) + 7u)) - 0.5) * ra * 3. * texture(uF, A.xy / uSim).r * step(0.01, uFood);
+      vec2 pos = A.xy + uStep * vec2(cos(a), sin(a));
+      pos = mod(pos, uSim);
+      o = vec4(pos, mod(a, 6.2831853), sp);
+    }`;
+
+    // Dépôt : un point par agent, ajouté au canal de son espèce.
+    const VS_DEP = `#version 300 es
+    uniform sampler2D uA, uF;
+    uniform vec2 uSim;
+    uniform int uAW;
+    uniform float uDep, uFoodDep;
+    out vec3 vC;
+    void main() {
+      vec4 A = texelFetch(uA, ivec2(gl_VertexID % uAW, gl_VertexID / uAW), 0);
+      gl_Position = vec4(A.xy / uSim * 2. - 1., 0., 1.);
+      gl_PointSize = 1.;
+      // Sur la nourriture, l'agent dépose davantage : la forme se remplit de filaments.
+      vC = vec3(equal(vec3(0., 1., 2.), vec3(A.w))) * uDep * (1. + uFoodDep * texture(uF, A.xy / uSim).r);
+    }`;
+    const FS_DEP = `#version 300 es
+    precision highp float;
+    in vec3 vC;
+    out vec4 o;
+    void main() { o = vec4(vC, 0.); }`;
+
+    // Diffusion (flou 3 × 3 sur un tore) et évaporation ; la nourriture entretient sa propre trace.
+    const FS_DIFF = `#version 300 es
+    precision highp float;
+    uniform sampler2D uT, uF;
+    uniform vec2 uSim;
+    uniform float uDiff, uDecay, uInj, uNS;
+    out vec4 o;
+    void main() {
+      ivec2 c = ivec2(gl_FragCoord.xy), S = ivec2(uSim);
+      vec4 s = vec4(0.);
+      for (int j = -1; j <= 1; j++) for (int i = -1; i <= 1; i++) s += texelFetch(uT, (c + ivec2(i, j) + S) % S, 0);
+      vec4 v = mix(texelFetch(uT, c, 0), s / 9., uDiff) * (1. - uDecay);
+      vec3 act = vec3(lessThan(vec3(0., 1., 2.), vec3(uNS)));
+      v.rgb += act * texelFetch(uF, c, 0).r * uInj;
+      o = min(v, vec4(400.));
+    }`;
+
+    const FS_SHOW = `#version 300 es
+    precision highp float;
+    uniform sampler2D uT;
+    uniform vec2 uRes;
+    uniform vec3 uBg, uC[${MAXC}];
+    uniform int uNC, uMode;
+    uniform float uGain, uGamma, uNS, uGrain, uVig, uFrame;
+    out vec4 o;
+    float hash(vec2 p) { uvec2 q = uvec2(ivec2(p)) * uvec2(1597334673u, 3812015801u); uint n = (q.x ^ q.y) * 1597334673u; n ^= n >> 16; n *= 2246822519u; n ^= n >> 13; return float(n) / 4294967295.; }
+    vec3 ramp(float x) {
+      // Fond → couleurs, à intervalles réguliers.
+      float n = float(uNC);
+      float f = clamp(x, 0., 1.) * n;
+      int i = int(min(floor(f), n - 1.));
+      vec3 a = i == 0 ? uBg : uC[i - 1];
+      return mix(a, uC[i], f - float(i));
+    }
+    void main() {
+      vec2 uv = gl_FragCoord.xy / uRes;
+      vec3 T = texture(uT, uv).rgb;
+      vec3 act = vec3(lessThan(vec3(0., 1., 2.), vec3(uNS)));
+      vec3 a = pow(1. - exp(-T * act * uGain), vec3(uGamma));
+      vec3 col = uBg;
+      if (uMode == 0) {
+        float s = pow(1. - exp(-dot(T, act) * uGain), uGamma);
+        col = ramp(s);
+      } else if (uMode == 1) {
+        col = mix(col, uC[0], a.r);
+        col = mix(col, uC[min(1, uNC - 1)], a.g);
+        col = mix(col, uC[min(2, uNC - 1)], a.b);
+      } else {
+        col += uC[0] * a.r + uC[min(1, uNC - 1)] * a.g + uC[min(2, uNC - 1)] * a.b;
+        col = col / (1. + max(col - 1., 0.) * 0.5);
+      }
+      vec2 q = uv * 2. - 1.;
+      col *= 1. - uVig * 0.85 * smoothstep(0.35, 1.25, length(q));
+      col += (hash(gl_FragCoord.xy + uFrame * 17.31) - 0.5) * uGrain * 0.22;
+      o = vec4(col, 1.);
+    }`;
+
+    function sh(type, src) { const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s); if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s)); return s; }
+    function program(vs, fs) {
+      const pr = gl.createProgram();
+      gl.attachShader(pr, sh(gl.VERTEX_SHADER, vs)); gl.attachShader(pr, sh(gl.FRAGMENT_SHADER, fs));
+      gl.linkProgram(pr);
+      if (!gl.getProgramParameter(pr, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(pr));
+      const L = {}; pr.u = (n) => (n in L ? L[n] : (L[n] = gl.getUniformLocation(pr, n)));
+      return pr;
+    }
+    const pAgent = program(VS, FS_AGENT), pDep = program(VS_DEP, FS_DEP), pDiff = program(VS, FS_DIFF), pShow = program(VS, FS_SHOW);
+
+    const quad = gl.createVertexArray(); gl.bindVertexArray(quad);
+    const buf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+    const empty = gl.createVertexArray();
+
+    function tex(w, h, ifmt, fmt, type, filter, wrap, data = null) {
+      const t = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, t);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, wrap); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, wrap);
+      gl.texImage2D(gl.TEXTURE_2D, 0, ifmt, w, h, 0, fmt, type, data);
+      return t;
+    }
+    function fbo(t) { const f = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, f); gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, t, 0); return f; }
+
+    // État de la simulation (recréé quand la colonie ou la taille change).
+    let sim = null;
+    function dispose() {
+      if (!sim) return;
+      for (const t of [...sim.A, ...sim.T, sim.F]) gl.deleteTexture(t);
+      for (const f of [...sim.fA, ...sim.fT]) gl.deleteFramebuffer(f);
+      sim = null;
+    }
+
+    // ——— Nourriture : une carte en niveaux de gris à la taille de la simulation ———
+    let foodCv = null, foodCtx = null, paintCv = null, paintCtx = null, logoCache = null;
+    function logoMask() {
+      const img = app.logoImg;
+      if (!img) return null;
+      if (logoCache && logoCache.img === img) return logoCache.cv;
+      // Encre du logo : l'opacité s'il est détouré, sinon les zones sombres.
+      const N = 512, iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height, k = N / Math.max(iw, ih);
+      const cv = document.createElement('canvas'); cv.width = Math.max(1, Math.round(iw * k)); cv.height = Math.max(1, Math.round(ih * k));
+      const x = cv.getContext('2d', { willReadFrequently: true });
+      x.drawImage(img, 0, 0, cv.width, cv.height);
+      const im = x.getImageData(0, 0, cv.width, cv.height), d = im.data;
+      let clear = 0;
+      for (let i = 3; i < d.length; i += 4) if (d[i] < 128) clear++;
+      const useAlpha = clear > d.length / 4 * 0.1;
+      for (let i = 0; i < d.length; i += 4) {
+        const lum = (d[i] * 0.2126 + d[i + 1] * 0.7152 + d[i + 2] * 0.0722) / 255;
+        const v = useAlpha ? d[i + 3] / 255 : (1 - lum) * d[i + 3] / 255;
+        d[i] = d[i + 1] = d[i + 2] = 255; d[i + 3] = Math.round(v * 255);
+      }
+      x.putImageData(im, 0, 0);
+      logoCache = { img, cv };
+      return cv;
+    }
+    function buildFood() {
+      const { sw, sh: shh } = sim;
+      if (!foodCv || foodCv.width !== sw || foodCv.height !== shh) {
+        foodCv = document.createElement('canvas'); foodCv.width = sw; foodCv.height = shh;
+        foodCtx = foodCv.getContext('2d', { willReadFrequently: true });
+        const old = paintCv;
+        paintCv = document.createElement('canvas'); paintCv.width = sw; paintCv.height = shh;
+        paintCtx = paintCv.getContext('2d');
+        if (old) paintCtx.drawImage(old, 0, 0, sw, shh);
+      }
+      const c = foodCtx, U = Math.min(sw, shh), R = U * p.taille / 2;
+      c.globalCompositeOperation = 'source-over';
+      c.fillStyle = '#000'; c.fillRect(0, 0, sw, shh);
+      c.fillStyle = '#fff'; c.strokeStyle = '#fff';
+      if (p.nourriture === 'logo') {
+        const m = logoMask();
+        if (m) {
+          const k = (2 * R) / Math.max(m.width, m.height);
+          c.drawImage(m, sw / 2 - m.width * k / 2, shh / 2 - m.height * k / 2, m.width * k, m.height * k);
+        } else {
+          // Sans logo : un anneau et un point, la marque par défaut de l'atelier.
+          c.lineWidth = R * 0.22; c.beginPath(); c.arc(sw / 2, shh / 2, R * 0.82, 0, TAU); c.stroke();
+          c.beginPath(); c.arc(sw / 2, shh / 2, R * 0.26, 0, TAU); c.fill();
+        }
+      } else if (p.nourriture === 'points') {
+        const r = app.rng(77), n = 5 + Math.floor(r() * 4);
+        for (let i = 0; i < n; i++) {
+          const a = r() * TAU, d = Math.sqrt(r()) * R * 1.4;
+          c.beginPath(); c.arc(sw / 2 + Math.cos(a) * d * sw / U, shh / 2 + Math.sin(a) * d, U * (0.006 + r() * 0.012), 0, TAU); c.fill();
+        }
+      } else if (p.nourriture === 'anneau') {
+        c.lineWidth = Math.max(1.5, U * 0.008); c.beginPath(); c.arc(sw / 2, shh / 2, R, 0, TAU); c.stroke();
+      }
+      c.drawImage(paintCv, 0, 0);
+      gl.bindTexture(gl.TEXTURE_2D, sim.F);
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true); gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, sw, shh, 0, gl.RED, gl.UNSIGNED_BYTE, toRed(c.getImageData(0, 0, sw, shh).data));
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+      foodDirty = false;
+    }
+    function toRed(d) {
+      const out = new Uint8Array(d.length / 4);
+      for (let i = 0; i < out.length; i++) out[i] = d[i * 4];
+      return out;
+    }
+    // Le pointeur sème : un trait dans la couche peinte, à l'échelle de la simulation.
+    function paintAt(x0, y0, x1, y1) {
+      if (!sim || !paintCtx) return;
+      const { w, h } = app.size, kx = sim.sw / w, ky = sim.sh / h, U = Math.min(sim.sw, sim.sh);
+      paintCtx.strokeStyle = '#fff'; paintCtx.lineCap = 'round'; paintCtx.lineWidth = Math.max(2, U * 0.012);
+      paintCtx.beginPath(); paintCtx.moveTo(x0 * kx, y0 * ky); paintCtx.lineTo(x1 * kx + 0.01, y1 * ky); paintCtx.stroke();
+      hasPaint = true; foodDirty = true;
+    }
+
+    // ——— Colonie ———
+    function setup() {
+      dispose();
+      const { w, h } = app.size, f = +p.finesse;
+      let sw = Math.max(64, Math.round(w * f)), shh = Math.max(64, Math.round(h * f));
+      const cap = 1600 / Math.max(sw, shh); if (cap < 1) { sw = Math.round(sw * cap); shh = Math.round(shh * cap); }
+      const AW = +p.agents, NA = AW * AW, NS = +p.especes, r = app.rng(1);
+      const data = new Float32Array(NA * 4), cx = sw / 2, cy = shh / 2, U = Math.min(sw, shh);
+      for (let i = 0; i < NA; i++) {
+        let x, y, a, s = i % NS;
+        const t = r() * TAU;
+        if (p.depart === 'disque') { const d = Math.sqrt(r()) * U * 0.36; x = cx + Math.cos(t) * d; y = cy + Math.sin(t) * d; a = t; }
+        else if (p.depart === 'anneau') { const d = U * (0.4 + (r() - 0.5) * 0.03); x = cx + Math.cos(t) * d; y = cy + Math.sin(t) * d; a = t + Math.PI; }
+        else if (p.depart === 'centre') { const d = r() * U * 0.02; x = cx + Math.cos(t) * d; y = cy + Math.sin(t) * d; a = t; }
+        else { x = r() * sw; y = r() * shh; a = t; }
+        // Plusieurs espèces : chacune part de son secteur, pour que les fronts se rencontrent.
+        if (NS > 1 && p.depart !== 'pluie') s = Math.min(NS - 1, Math.floor(((t / TAU) % 1) * NS));
+        data.set([((x % sw) + sw) % sw, ((y % shh) + shh) % shh, a, s], i * 4);
+      }
+      const A = [0, 1].map((i) => tex(AW, AW, gl.RGBA32F, gl.RGBA, gl.FLOAT, gl.NEAREST, gl.CLAMP_TO_EDGE, i ? null : data));
+      const T = [0, 1].map(() => tex(sw, shh, gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT, gl.LINEAR, gl.REPEAT));
+      const F = tex(sw, shh, gl.R8, gl.RED, gl.UNSIGNED_BYTE, gl.NEAREST, gl.REPEAT);
+      sim = { sw, sh: shh, AW, NA, NS, A, T, F, fA: A.map(fbo), fT: T.map(fbo), a: 0, t: 0, w, h, cssW: w, cssH: h };
+      for (const f2 of sim.fT) { gl.bindFramebuffer(gl.FRAMEBUFFER, f2); gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT); }
+      buildFood();
+      dirty = false;
+      // Pré-roulage : la colonie a déjà commencé à s'organiser quand l'image apparaît.
+      for (let i = 0; i < 140; i++) step(0);
+    }
+
+    function step(t) {
+      const S = sim, dep = p.depot * Math.min(4, (S.sw * S.sh) / S.NA) * 2, unit = dep / p.evaporation, fed = p.nourriture !== 'aucune' || hasPaint, ph = TAU * t / p.boucle, br = p.respiration;
+      const sa = p.angle * Math.PI / 180 * (1 + 0.5 * br * Math.sin(ph));
+      const sd = Math.min(60, p.distance * (1 + 0.5 * br * Math.cos(ph * 0.5 + 1)) * (+p.finesse / 0.6));
+      // 1. Agents
+      gl.bindVertexArray(quad);
+      gl.useProgram(pAgent);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, S.fA[1 - S.a]); gl.viewport(0, 0, S.AW, S.AW);
+      gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, S.A[S.a]);
+      gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, S.T[S.t]);
+      gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, S.F);
+      const u = pAgent.u;
+      gl.uniform1i(u('uA'), 0); gl.uniform1i(u('uT'), 1); gl.uniform1i(u('uF'), 2);
+      gl.uniform2f(u('uSim'), S.sw, S.sh);
+      gl.uniform1f(u('uSA'), sa); gl.uniform1f(u('uSD'), sd); gl.uniform1f(u('uRA'), p.rotation * Math.PI / 180);
+      gl.uniform1f(u('uStep'), p.pas * (+p.finesse / 0.6)); gl.uniform1f(u('uRep'), p.repulsion);
+      gl.uniform1f(u('uFood'), fed ? p.attrait * unit * 1.5 : 0); gl.uniform1f(u('uFood2'), unit * 20);
+      gl.uniform1f(u('uFrame'), (frame++) % 100000); gl.uniform1f(u('uDiv'), S.NS > 1 ? p.divergence : 0);
+      gl.uniform1f(u('uNS'), S.NS);
+      if (ptr && !painting) {
+        gl.uniform2f(u('uPtr'), ptr.x * S.sw / app.size.w, (app.size.h - ptr.y) * S.sh / app.size.h);
+        gl.uniform1f(u('uPtrR'), Math.min(S.sw, S.sh) * 0.07);
+      } else gl.uniform1f(u('uPtrR'), 0);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+      S.a = 1 - S.a;
+      // 2. Dépôt (additif) dans la carte courante
+      gl.bindVertexArray(empty);
+      gl.useProgram(pDep);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, S.fT[S.t]); gl.viewport(0, 0, S.sw, S.sh);
+      gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, S.A[S.a]);
+      gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, S.F);
+      gl.uniform1i(pDep.u('uF'), 1); gl.uniform1f(pDep.u('uFoodDep'), fed ? p.attrait * 1.5 : 0);
+      gl.uniform1i(pDep.u('uA'), 0); gl.uniform2f(pDep.u('uSim'), S.sw, S.sh); gl.uniform1i(pDep.u('uAW'), S.AW);
+      // Le dépôt suit la densité : une colonie plus peuplée dépose moins par agent.
+      gl.uniform1f(pDep.u('uDep'), dep);
+      gl.enable(gl.BLEND); gl.blendFunc(gl.ONE, gl.ONE);
+      gl.drawArrays(gl.POINTS, 0, S.NA);
+      gl.disable(gl.BLEND);
+      // 3. Diffusion et évaporation
+      gl.bindVertexArray(quad);
+      gl.useProgram(pDiff);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, S.fT[1 - S.t]);
+      gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, S.T[S.t]);
+      gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, S.F);
+      gl.uniform1i(pDiff.u('uT'), 0); gl.uniform1i(pDiff.u('uF'), 1);
+      gl.uniform2f(pDiff.u('uSim'), S.sw, S.sh);
+      gl.uniform1f(pDiff.u('uDiff'), p.diffusion); gl.uniform1f(pDiff.u('uDecay'), p.evaporation);
+      gl.uniform1f(pDiff.u('uInj'), fed ? p.attrait * dep * 0.04 : 0);
+      gl.uniform1f(pDiff.u('uNS'), S.NS);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+      S.t = 1 - S.t;
+    }
+
+    const rgbf = (hx) => { const n = parseInt(String(hx).slice(1, 7), 16) || 0; return [(n >> 16 & 255) / 255, (n >> 8 & 255) / 255, (n & 255) / 255]; };
+    function show() {
+      const S = sim;
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.viewport(0, 0, canvas.width, canvas.height);
+      gl.bindVertexArray(quad);
+      gl.useProgram(pShow);
+      const u = pShow.u;
+      gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, S.T[S.t]);
+      gl.uniform1i(u('uT'), 0);
+      gl.uniform2f(u('uRes'), canvas.width, canvas.height);
+      gl.uniform3fv(u('uBg'), rgbf(p.fond));
+      const pal = (p.couleurs && p.couleurs.length ? p.couleurs : ['#ffffff']).slice(0, MAXC), flat = [];
+      for (let i = 0; i < MAXC; i++) flat.push(...rgbf(pal[Math.min(i, pal.length - 1)]));
+      gl.uniform3fv(u('uC[0]'), flat); gl.uniform1i(u('uNC'), pal.length);
+      gl.uniform1i(u('uMode'), p.rendu === 'degrade' ? 0 : p.rendu === 'encre' ? 1 : 2);
+      gl.uniform1f(u('uGain'), p.intensite * 0.03); gl.uniform1f(u('uGamma'), 1 / p.contraste);
+      gl.uniform1f(u('uNS'), S.NS);
+      gl.uniform1f(u('uGrain'), p.grain ?? 0); gl.uniform1f(u('uVig'), p.vignette ?? 0); gl.uniform1f(u('uFrame'), frame % 997);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+    }
+
+    function render(t, dt) {
+      if (!okFloat) { const c = rgbf(p.fond); gl.clearColor(c[0], c[1], c[2], 1); gl.clear(gl.COLOR_BUFFER_BIT); return; }
+      const { w, h } = app.size;
+      if (!sim || dirty || sim.cssW !== w || sim.cssH !== h) setup();
+      if (foodDirty) buildFood();
+      if (dt > 0) for (let i = 0; i < p.vitesse; i++) step(t);
+      show();
+    }
+    ready = true;
+    app.loop((t, dt) => { lastT = t; render(t, dt); });
+  </script>
+</body>
+</html>
