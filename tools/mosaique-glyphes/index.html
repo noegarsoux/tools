@@ -1,0 +1,394 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mosaïque de glyphes</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Mosaïque de glyphes : une grille très dense de petits motifs (ronds, croix, rayures, damiers…)
+    // organisée en grandes régions. Un champ basse fréquence (bruit, cellules, image ou logo) est
+    // découpé en K niveaux : chaque niveau est une région, avec son glyphe et sa couleur. Un bruit fin
+    // par case perturbe le seuil, ce qui mélange les glyphes aux frontières, comme sur une tapisserie.
+    // Chaque glyphe est un chemin vectoriel dans une case unité : le même dessin sert à l'écran et au SVG.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const GL = PAL('glyphes'), GR = PAL('good-room'), P60 = PAL('papier-60'), KB = PAL('kegelbahn');
+    const NUIT = PAL('trame-nuit'), ACIDE = PAL('acide'), MENTHE = PAL('menthe'), BIT = PAL('bitmap');
+
+    // ——— Bibliothèque de glyphes : chemins SVG dans la case [-0.5, 0.5]² ———
+    const f3 = (n) => +n.toFixed(3);
+    // Cercle en deux arcs ; sens = 1 horaire, 0 antihoraire (règle nonzero : un anneau = deux sens opposés).
+    const circ = (cx, cy, r, s = 1) => `M${f3(cx - r)} ${f3(cy)}A${f3(r)} ${f3(r)} 0 1 ${s} ${f3(cx + r)} ${f3(cy)}A${f3(r)} ${f3(r)} 0 1 ${s} ${f3(cx - r)} ${f3(cy)}Z`;
+    const poly = (pts) => 'M' + pts.map((q) => `${f3(q[0])} ${f3(q[1])}`).join('L') + 'Z';
+    const rect = (x, y, w, h) => poly([[x, y], [x + w, y], [x + w, y + h], [x, y + h]]);
+    const plusPts = (a, b) => [[-b, -a], [b, -a], [b, -b], [a, -b], [a, b], [b, b], [b, a], [-b, a], [-b, b], [-a, b], [-a, -b], [-b, -b]];
+    const rot = (pts, an) => pts.map(([x, y]) => [x * Math.cos(an) - y * Math.sin(an), x * Math.sin(an) + y * Math.cos(an)]);
+    const GLYPHS = {
+      point: circ(0, 0, 0.2),
+      rond: circ(0, 0, 0.42),
+      anneau: circ(0, 0, 0.43, 1) + circ(0, 0, 0.25, 0),
+      cible: circ(0, 0, 0.45, 1) + circ(0, 0, 0.32, 0) + circ(0, 0, 0.18, 1),
+      plus: poly(plusPts(0.44, 0.13)),
+      croix: poly(rot(plusPts(0.5, 0.12), Math.PI / 4)),
+      rayures: rect(-0.5, -0.5, 1, 0.2) + rect(-0.5, -0.1, 1, 0.2) + rect(-0.5, 0.3, 1, 0.2),
+      damier: rect(-0.5, -0.5, 0.5, 0.5) + rect(0, 0, 0.5, 0.5),
+      demi: `M-0.44 0.12A0.44 0.44 0 0 1 0.44 0.12Z`,
+      quart: `M-0.5 -0.5L0.5 -0.5A1 1 0 0 1 -0.5 0.5Z`,
+      losange: poly([[0, -0.48], [0.48, 0], [0, 0.48], [-0.48, 0]]),
+      triangle: poly([[-0.45, 0.4], [0.45, 0.4], [0, -0.42]]),
+      carre: rect(-0.38, -0.38, 0.76, 0.76),
+      grille: [-0.3, 0, 0.3].flatMap((y) => [-0.3, 0, 0.3].map((x) => circ(x, y, 0.1))).join(''),
+      sablier: poly([[-0.42, -0.42], [0.42, -0.42], [0, 0], [0.42, 0.42], [-0.42, 0.42], [0, 0]]),
+      fente: rect(-0.42, -0.08, 0.84, 0.16),
+    };
+    const JEUX = {
+      tapisserie: ['rond', 'croix', 'rayures', 'damier', 'anneau', 'plus', 'losange'],
+      points: ['point', 'rond', 'anneau', 'cible', 'grille', 'demi', 'quart'],
+      aigu: ['triangle', 'losange', 'croix', 'sablier', 'rayures', 'quart', 'carre'],
+      lignes: ['fente', 'rayures', 'plus', 'croix', 'damier', 'sablier', 'point'],
+    };
+    const PATHS = {};
+    for (const k in GLYPHS) PATHS[k] = new Path2D(GLYPHS[k]);
+
+    let ready = false, hover = null, painting = false, lastT = 0, seedOff = [0, 0, 0, 0];
+    let paint = null, paintW = 0, paintH = 0, paintCell = 0, paintStamp = 0;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.04, vignette: 0 },
+      hint: 'Glissez pour peindre une région · survol : les glyphes grossissent · molette : taille des cases',
+      notes: 'Un champ lent est découpé en régions ; chaque région a son glyphe et sa couleur, et un bruit fin mêle les glyphes aux frontières. Importez une image en noir sur blanc pour en faire votre propre glyphe.',
+      params: {
+        'Régions': {
+          champ: { type: 'segmented', label: 'Les régions viennent', options: { bruit: 'du bruit', cellules: 'de cellules', logo: 'du logo', image: 'd’une image' }, value: 'bruit' },
+          image: { type: 'file', label: 'Logo ou image', accept: 'image/*', show: (q) => q.champ === 'logo' || q.champ === 'image' },
+          regions: { type: 'range', label: 'Nombre de régions', min: 2, max: 7, step: 1, value: 5 },
+          echelle: { type: 'range', label: 'Échelle des régions', min: 0.2, max: 3, step: 0.01, value: 1 },
+          melange: { type: 'range', label: 'Mélange aux frontières', min: 0, max: 1, step: 0.01, value: 0.35 },
+          contours: { type: 'toggle', label: 'Cerner les régions', value: false },
+        },
+        'Glyphes': {
+          jeu: { type: 'segmented', label: 'Jeu', options: { tapisserie: 'Tapisserie', points: 'Points', aigu: 'Aigu', lignes: 'Lignes' }, value: 'tapisserie' },
+          glyphe: { type: 'file', label: 'Glyphe importé (noir sur blanc)', accept: 'image/*' },
+          taille: { type: 'range', label: 'Taille des cases (px)', min: 6, max: 64, step: 1, value: 18 },
+          remplissage: { type: 'range', label: 'Remplissage', min: 0.3, max: 1.1, step: 0.01, value: 0.86 },
+          orientation: { type: 'segmented', label: 'Orientation', options: { droite: 'Droite', quart: 'Par quart', libre: 'Libre' }, value: 'quart' },
+        },
+        'Mouvement': {
+          boucle: { type: 'range', label: 'Boucle (s)', min: 4, max: 40, step: 1, value: 14 },
+          derive: { type: 'range', label: 'Dérive des régions', min: 0, max: 1, step: 0.01, value: 0.45 },
+          bascule: { type: 'range', label: 'Vague de bascule', min: 0, max: 1, step: 0.01, value: 0.5 },
+          respiration: { type: 'range', label: 'Respiration', min: 0, max: 1, step: 0.01, value: 0.25 },
+          memoire: { type: 'range', label: 'Mémoire de la peinture (s)', min: 0.5, max: 30, step: 0.5, value: 6 },
+          loupe: { type: 'range', label: 'Grossissement au survol', min: 0, max: 1, step: 0.01, value: 0.5 },
+        },
+        'Couleur': {
+          rendu: { type: 'segmented', label: 'Rendu', options: { glyphes: 'Glyphes', aplats: 'Aplats', inverse: 'Inversé' }, value: 'inverse' },
+          fond: { type: 'color', label: 'Fond', value: GL[1] },
+          palette: { type: 'palette', label: 'Couleurs des régions', value: [GL[0], GL[2], GL[3], GL[4], GL[5], GL[6]] },
+        },
+      },
+      presets: {
+        'Tapisserie': {},
+        'Glyphes': { rendu: 'glyphes', palette: [GL[0], GL[2], GL[4], GL[6]], regions: 4, taille: 18, remplissage: 1.02, jeu: 'points' },
+        'Aplats': { rendu: 'aplats', taille: 22, regions: 6, echelle: 0.8, melange: 0.5, remplissage: 0.8 },
+        'Good Room': { jeu: 'lignes', rendu: 'aplats', fond: GR[0], palette: GR.slice(1), taille: 26, regions: 4, echelle: 1.4, melange: 0.2, orientation: 'quart', bascule: 0.8 },
+        'Points': { jeu: 'points', rendu: 'glyphes', champ: 'cellules', fond: P60[0], palette: [P60[1]], regions: 5, taille: 16, remplissage: 0.95, melange: 0.25, orientation: 'droite', respiration: 0.5 },
+        'Kegelbahn': { jeu: 'aigu', rendu: 'inverse', fond: KB[0], palette: KB.slice(1), regions: 4, taille: 20, echelle: 0.6, melange: 0.15, contours: true },
+        'Nuit': { jeu: 'points', rendu: 'glyphes', champ: 'cellules', fond: NUIT[0], palette: [NUIT[1], NUIT[2]], regions: 4, taille: 15, remplissage: 0.95, melange: 0.4, echelle: 1.1, respiration: 0.5, bascule: 0.3, contours: true },
+        'Acide': { jeu: 'aigu', champ: 'cellules', rendu: 'aplats', fond: ACIDE[0], palette: ACIDE.slice(1).concat([ACIDE[0]]), regions: 4, taille: 30, melange: 0.1, orientation: 'quart', bascule: 1 },
+        'Menthe': { jeu: 'tapisserie', rendu: 'inverse', fond: MENTHE[0], palette: MENTHE.slice(1), taille: 15, regions: 3, echelle: 1.3, melange: 0.45, remplissage: 0.8 },
+        'Bitmap': { jeu: 'lignes', rendu: 'glyphes', remplissage: 1.05, fond: BIT[0], palette: BIT.slice(1), taille: 12, regions: 4, echelle: 0.7, melange: 0.6, orientation: 'droite', bascule: 0, respiration: 0 },
+        'Logo': { champ: 'logo', rendu: 'aplats', regions: 5, taille: 14, melange: 0.2, derive: 0.2 },
+      },
+      brand(colors) {
+        return { fond: colors[0], palette: colors.length > 1 ? colors.slice(1) : [colors[0]] };
+      },
+      pointer: {
+        move: (q) => { hover = { x: q.x, y: q.y }; },
+        down: (q) => { painting = true; paintBrush(q.x, q.y, true); },
+        drag: (q) => { hover = { x: q.x, y: q.y }; if (painting) paintBrush(q.x, q.y, false); },
+        up: () => { painting = false; },
+        wheel: (q, dy) => app.set('taille', Math.max(6, Math.min(64, Math.round(p.taille + dy * 0.02)))),
+      },
+      onChange(k) {
+        if (!ready) return;
+        if (k === 'image' || k === '_logo' || k === '*' || k === 'champ') srcDirty = true;
+        if (k === 'glyphe' || k === '*') buildCustom();
+        if (k === 'taille' || k === '*') paint = null;
+      },
+      onSeed() { if (ready) { reseed(); paint = null; } },
+      export: { name: 'mosaique-de-glyphes', svg: () => toSVG() },
+    });
+    const p = app.params;
+    canvas.addEventListener('pointerleave', () => { hover = null; });
+
+    // ——— Glyphe importé : l'image est réduite à un masque 24×24, converti en rectangles (vectoriel) ———
+    let custom = null;
+    function buildCustom() {
+      custom = null; delete PATHS._custom; delete GLYPHS._custom;
+      const img = p.glyphe;
+      if (!img) return;
+      const N = 24, cv = document.createElement('canvas'); cv.width = cv.height = N;
+      const x = cv.getContext('2d', { willReadFrequently: true });
+      x.fillStyle = '#fff'; x.fillRect(0, 0, N, N);
+      const iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height, k = N / Math.max(iw, ih);
+      x.drawImage(img, (N - iw * k) / 2, (N - ih * k) / 2, iw * k, ih * k);
+      const d = x.getImageData(0, 0, N, N).data;
+      let path = '';
+      for (let j = 0; j < N; j++) {
+        let run = -1;
+        for (let i = 0; i <= N; i++) {
+          const on = i < N && (d[(j * N + i) * 4] * 0.3 + d[(j * N + i) * 4 + 1] * 0.59 + d[(j * N + i) * 4 + 2] * 0.11) < 128;
+          if (on && run < 0) run = i;
+          if (!on && run >= 0) { path += rect(run / N - 0.5, j / N - 0.5, (i - run) / N, 1 / N + 0.002); run = -1; }
+        }
+      }
+      if (!path) return;
+      GLYPHS._custom = path; PATHS._custom = new Path2D(path); custom = true;
+    }
+
+    // Luminance relative d'une couleur #rrggbb, et écart entre deux couleurs (0 à 1).
+    const lumCache = new Map();
+    function lum(hex) {
+      if (lumCache.has(hex)) return lumCache.get(hex);
+      const n = parseInt(String(hex).slice(1, 7), 16) || 0, r = (n >> 16) / 255, g = ((n >> 8) & 255) / 255, b = (n & 255) / 255;
+      const v = 0.2126 * r + 0.7152 * g + 0.0722 * b; lumCache.set(hex, v); return v;
+    }
+    const contrast = (a, b) => Math.abs(lum(a) - lum(b));
+
+    // ——— Bruit de valeur lissé (pour le champ des régions) ———
+    function hash2(x, y) {
+      let h = (Math.imul(x | 0, 374761393) + Math.imul(y | 0, 668265263) + Math.imul(seedOff[3] | 0, 2246822519)) | 0;
+      h = Math.imul(h ^ (h >>> 13), 1274126177); h ^= h >>> 16;
+      return (h >>> 0) / 4294967296;
+    }
+    function vnoise(x, y) {
+      const xi = Math.floor(x), yi = Math.floor(y), fx = x - xi, fy = y - yi;
+      const ux = fx * fx * (3 - 2 * fx), uy = fy * fy * (3 - 2 * fy);
+      const a = hash2(xi, yi), b = hash2(xi + 1, yi), c = hash2(xi, yi + 1), d = hash2(xi + 1, yi + 1);
+      return (a + (b - a) * ux) * (1 - uy) + (c + (d - c) * ux) * uy;
+    }
+    const fbm = (x, y) => (vnoise(x, y) * 0.62 + vnoise(x * 2.03 + 7.1, y * 2.03 - 3.3) * 0.28 + vnoise(x * 4.1 - 2.7, y * 4.1 + 9.2) * 0.1);
+
+    // ——— Logo ou image → carte de valeur (sombre = 1), floutée pour donner des bandes autour du logo ———
+    let srcDirty = true, src = null;
+    function buildSource() {
+      srcDirty = false; src = null;
+      let img = p.champ === 'logo' ? (p.image || app.logoImg) : p.champ === 'image' ? p.image : null;
+      if (!img && p.champ !== 'logo') return;
+      if (!img) {
+        // Sans logo : une pastille en croissant, pour que les régions gardent une forme.
+        const cv = document.createElement('canvas'); cv.width = cv.height = 200;
+        const x = cv.getContext('2d'); x.fillStyle = '#fff'; x.fillRect(0, 0, 200, 200); x.fillStyle = '#000';
+        x.beginPath(); x.arc(100, 100, 80, 0, TAU); x.fill();
+        x.fillStyle = '#fff'; x.beginPath(); x.arc(130, 82, 58, 0, TAU); x.fill();
+        img = cv;
+      }
+      const M = 240, iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height, k = M / Math.max(iw, ih);
+      const w = Math.max(2, Math.round(iw * k)), h = Math.max(2, Math.round(ih * k)), pad = p.champ === 'logo' ? 60 : 0;
+      const cv = document.createElement('canvas'); cv.width = w + pad * 2; cv.height = h + pad * 2;
+      const x = cv.getContext('2d', { willReadFrequently: true });
+      x.fillStyle = '#fff'; x.fillRect(0, 0, cv.width, cv.height);
+      x.drawImage(img, pad, pad, w, h);
+      if (p.champ === 'logo') {
+        // Halo : le logo net par-dessus des versions de plus en plus floues → niveaux concentriques.
+        const sharp = document.createElement('canvas'); sharp.width = cv.width; sharp.height = cv.height;
+        sharp.getContext('2d').drawImage(cv, 0, 0);
+        x.fillStyle = '#fff'; x.fillRect(0, 0, cv.width, cv.height);
+        x.globalAlpha = 1; x.filter = 'blur(26px)'; x.drawImage(sharp, 0, 0); x.drawImage(sharp, 0, 0);
+        x.filter = 'blur(9px)'; x.globalCompositeOperation = 'multiply'; x.drawImage(sharp, 0, 0);
+        x.filter = 'none'; x.drawImage(sharp, 0, 0); x.globalCompositeOperation = 'source-over';
+      }
+      const d = x.getImageData(0, 0, cv.width, cv.height).data, v = new Float32Array(cv.width * cv.height);
+      for (let i = 0; i < v.length; i++) v[i] = 1 - (d[i * 4] * 0.2126 + d[i * 4 + 1] * 0.7152 + d[i * 4 + 2] * 0.0722) / 255;
+      src = { w: cv.width, h: cv.height, v, logo: p.champ === 'logo' };
+    }
+    function sampleSrc(x, y, w, h) {
+      const U = Math.min(w, h) * (src.logo ? 1.1 : 1) * Math.max(0.3, Math.min(2.5, 1 / p.echelle * 0.9 + 0.1));
+      const asp = src.w / src.h, ww = src.logo ? (asp >= 1 ? U : U * asp) : Math.max(w, h * asp), hh = src.logo ? (asp >= 1 ? U / asp : U) : ww / asp;
+      const u = (x - w / 2) / ww + 0.5, v = (y - h / 2) / hh + 0.5;
+      if (u < 0 || v < 0 || u >= 1 || v >= 1) return 0;
+      return src.v[Math.floor(v * src.h) * src.w + Math.floor(u * src.w)];
+    }
+
+    // ——— Champ des régions : valeur dans [0, 1] → niveau entier ———
+    let cells = [];
+    function reseed() {
+      const r = app.rng(11);
+      seedOff = [r() * 100, r() * 100, r() * TAU, Math.floor(r() * 1e6)];
+      cells = Array.from({ length: 14 }, () => ({ x: r(), y: r(), r: 0.04 + r() * 0.08, ph: r() * TAU, k: Math.floor(r() * 7), dir: r() < 0.5 ? 1 : -1 }));
+    }
+    function field(x, y, w, h, ph) {
+      const U = Math.min(w, h);
+      if ((p.champ === 'logo' || p.champ === 'image') && src) {
+        // L'image reste lisible ; un peu de bruit qui tourne la fait vibrer aux frontières.
+        const n = vnoise(x / U * 6 + Math.cos(ph) * p.derive * 1.5 + seedOff[0], y / U * 6 + Math.sin(ph) * p.derive * 1.5);
+        return { v: Math.min(0.999, Math.max(0, sampleSrc(x, y, w, h) * 0.94 + (n - 0.5) * 0.12)), id: -1 };
+      }
+      if (p.champ === 'cellules') {
+        // Voronoï de germes qui tournent sur de petits cercles (boucle parfaite).
+        let best = 1e9, second = 1e9, bk = 0;
+        const sx = x / U, sy = y / U, A = w / U, sc = p.echelle;
+        for (const c of cells) {
+          const cx = (c.x * A) + Math.cos(c.ph + ph * c.dir) * c.r * p.derive * 2, cy = c.y + Math.sin(c.ph + ph * c.dir) * c.r * p.derive * 2;
+          const dd = ((sx - cx) ** 2 + (sy - cy) ** 2) / (sc * sc);
+          if (dd < best) { second = best; best = dd; bk = c.k; } else if (dd < second) second = dd;
+        }
+        return { v: null, id: bk, edge: Math.sqrt(second) - Math.sqrt(best) };
+      }
+      // Bruit qui tourne sur un cercle dans l'espace du bruit : la boucle est exacte.
+      const s = 2.2 / (U * p.echelle), R = p.derive * 1.6;
+      return { v: Math.min(0.999, Math.max(0, (fbm(x * s + seedOff[0] + Math.cos(ph) * R, y * s + seedOff[1] + Math.sin(ph) * R) - 0.18) / 0.64)), id: -1 };
+    }
+
+    // ——— Peinture au pointeur : une grille de cases qui retient un niveau imposé, puis s'efface ———
+    let paintLevel = 0;
+    function ensurePaint() {
+      const { w, h } = app.size, s = p.taille;
+      const W = Math.ceil(w / s) + 1, H = Math.ceil(h / s) + 1;
+      if (!paint || W !== paintW || H !== paintH || s !== paintCell) {
+        paintW = W; paintH = H; paintCell = s;
+        paint = { lvl: new Int8Array(W * H).fill(-1), age: new Float32Array(W * H) };
+      }
+    }
+    function paintBrush(x, y, first) {
+      ensurePaint();
+      const s = p.taille, K = p.regions;
+      if (first) {
+        // On peint avec la région suivante de celle qu'on touche : le geste fait toujours apparaître autre chose.
+        const i = Math.floor(x / s), j = Math.floor(y / s), idx = j * paintW + i;
+        const cur = paint.lvl[idx] >= 0 ? paint.lvl[idx] : levelAt(x, y);
+        paintLevel = (cur + 1) % K;
+      }
+      const R = Math.max(2.2, 70 / s), ci = x / s, cj = y / s;
+      for (let j = Math.floor(cj - R); j <= Math.ceil(cj + R); j++) for (let i = Math.floor(ci - R); i <= Math.ceil(ci + R); i++) {
+        if (i < 0 || j < 0 || i >= paintW || j >= paintH) continue;
+        const dd = Math.hypot(i + 0.5 - ci, j + 0.5 - cj);
+        if (dd > R * (0.75 + 0.25 * hash2(i * 3 + 1, j * 7 + 2))) continue;
+        paint.lvl[j * paintW + i] = paintLevel; paint.age[j * paintW + i] = 0;
+      }
+    }
+    function levelAt(x, y) {
+      const { w, h } = app.size, f = field(x, y, w, h, TAU * lastT / p.boucle);
+      return f.id >= 0 ? f.id % p.regions : Math.floor(f.v * p.regions);
+    }
+
+    // ——— La mosaïque : une liste de cases { x, y, s, g (glyphe), a (angle), c (couleur), bg } ———
+    function mosaic(t) {
+      const { w, h } = app.size, s = p.taille, K = p.regions, T = t / p.boucle, ph = TAU * T;
+      if (srcDirty) buildSource();
+      const jeu = JEUX[p.jeu] || JEUX.tapisserie, pal = p.palette.length ? p.palette : ['#000'];
+      const nI = Math.ceil(w / s), nJ = Math.ceil(h / s), ox = (w - nI * s) / 2, oy = (h - nJ * s) / 2;
+      // Chaque région reçoit un glyphe et une couleur ; le graine décale les attributions.
+      const sh = seedOff[3] % 97;
+      const glyphOf = (k) => (custom && k % 2 === 1) ? '_custom' : jeu[(k * 3 + sh) % jeu.length];
+      const colOf = (k) => pal[(k + sh) % pal.length];
+      const out = [], U = Math.min(w, h), hv = hover, lr = U * 0.22;
+      const usePaint = paint && paintCell === s;
+      const darkest = [...pal, p.fond].reduce((a, b) => (lum(b) < lum(a) ? b : a));
+      // Vague de bascule : un front diagonal qui fait pivoter les glyphes d'un quart de tour, un tour par boucle.
+      const wa = seedOff[2], wx = Math.cos(wa), wy = Math.sin(wa);
+      for (let j = 0; j < nJ; j++) for (let i = 0; i < nI; i++) {
+        const x = ox + (i + 0.5) * s, y = oy + (j + 0.5) * s;
+        const f = field(x, y, w, h, ph);
+        let k;
+        if (f.id >= 0) {
+          k = f.id % K;
+          // Frontière des cellules : le bruit fin fait déborder les glyphes de la voisine.
+          if (f.edge < p.melange * 0.06 && hash2(i, j) < 0.5) k = (k + 1) % K;
+        } else {
+          const jit = (hash2(i, j) - 0.5) * p.melange * 0.5;
+          k = Math.max(0, Math.min(K - 1, Math.floor((f.v + jit) * K)));
+        }
+        let edge = false;
+        if (p.contours && f.id < 0) {
+          const fr = (f.v * K) % 1; edge = fr < 0.06 || fr > 0.94;
+        } else if (p.contours && f.id >= 0) edge = f.edge < 0.012;
+        if (usePaint) {
+          const pi = Math.floor(x / s), pj = Math.floor(y / s), idx = pj * paintW + pi;
+          if (pi < paintW && pj < paintH && paint.lvl[idx] >= 0) {
+            const life = 1 - paint.age[idx] / p.memoire;
+            if (hash2(i + 91, j + 17) < life * 1.4) k = paint.lvl[idx] % K;
+          }
+        }
+        // Angle : selon l'orientation, plus la vague (en quarts de tour pour garder la grille nette).
+        const hk = hash2(i * 5 + 3, j * 11 + 7);
+        let a = p.orientation === 'droite' ? 0 : p.orientation === 'quart' ? Math.floor(hk * 4) * Math.PI / 2 : hk * TAU;
+        if (p.bascule > 0) {
+          const d = ((x - w / 2) * wx + (y - h / 2) * wy) / Math.hypot(w, h);
+          const z = Math.sin(ph - d * TAU * 1.5 - k * 0.6) * 0.5 + 0.5;
+          const e = Math.min(1, Math.max(0, (z - (1 - p.bascule)) / Math.max(0.05, p.bascule)));
+          a += e * e * (3 - 2 * e) * Math.PI / 2;
+        }
+        let sc = p.remplissage * (1 - p.respiration * 0.35 * (0.5 + 0.5 * Math.sin(ph * 2 + k * 1.7 + hk * 0.8)));
+        if (hv && p.loupe > 0) {
+          const dd = Math.hypot(x - hv.x, y - hv.y) / lr;
+          if (dd < 1) sc *= 1 + p.loupe * 0.9 * (1 - dd * dd) * (1 - dd * dd);
+        }
+        const g = edge ? 'point' : glyphOf(k);
+        let c = colOf(k), bg = null;
+        if (p.rendu === 'aplats') { bg = colOf(k); c = pal.length > 1 ? colOf(k + 1) : p.fond; }
+        else if (p.rendu === 'inverse') { bg = colOf(k); c = contrast(bg, p.fond) > 0.28 ? p.fond : darkest; }
+        if (edge) { c = p.rendu === 'glyphes' ? colOf(k) : p.fond; sc = p.remplissage * 0.9; }
+        out.push({ x, y, s, g, a, c, bg, sc });
+      }
+      return out;
+    }
+
+    function draw(t) {
+      const { w, h, dpr } = app.size;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = p.fond; ctx.fillRect(0, 0, w, h);
+      const list = mosaic(t);
+      // Aplats : une passe par couleur de fond de case.
+      const bgs = new Map();
+      for (const c of list) if (c.bg) { if (!bgs.has(c.bg)) bgs.set(c.bg, []); bgs.get(c.bg).push(c); }
+      for (const [col, arr] of bgs) {
+        ctx.fillStyle = col; ctx.beginPath();
+        for (const c of arr) ctx.rect(c.x - c.s / 2 - 0.25, c.y - c.s / 2 - 0.25, c.s + 0.5, c.s + 0.5);
+        ctx.fill();
+      }
+      // Glyphes : on regroupe par couleur dans un seul Path2D (addPath avec matrice) puis un seul fill.
+      const byCol = new Map(), m = new DOMMatrix();
+      for (const c of list) {
+        const path = PATHS[c.g]; if (!path) continue;
+        let P = byCol.get(c.c); if (!P) { P = new Path2D(); byCol.set(c.c, P); }
+        const k = c.s * c.sc, co = Math.cos(c.a) * k, si = Math.sin(c.a) * k;
+        m.a = co; m.b = si; m.c = -si; m.d = co; m.e = c.x; m.f = c.y;
+        P.addPath(path, m);
+      }
+      for (const [col, P] of byCol) { ctx.fillStyle = col; ctx.fill(P); }
+      app.finish(ctx);
+    }
+
+    function toSVG() {
+      const { w, h } = app.size, list = mosaic(lastT), f = (n) => +n.toFixed(2);
+      const used = new Set(list.map((c) => c.g));
+      const defs = [...used].filter((g) => GLYPHS[g]).map((g) => `<path id="g-${g.replace('_', 'x')}" d="${GLYPHS[g]}"/>`).join('');
+      const bg = list.filter((c) => c.bg).map((c) => `<rect x="${f(c.x - c.s / 2)}" y="${f(c.y - c.s / 2)}" width="${f(c.s)}" height="${f(c.s)}" fill="${c.bg}"/>`).join('');
+      const gl = list.filter((c) => GLYPHS[c.g]).map((c) => {
+        const k = c.s * c.sc, deg = f(c.a * 180 / Math.PI);
+        return `<use href="#g-${c.g.replace('_', 'x')}" fill="${c.c}" transform="translate(${f(c.x)} ${f(c.y)}) rotate(${deg}) scale(${+k.toFixed(3)})"/>`;
+      }).join('');
+      return `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><defs>${defs}</defs><rect width="100%" height="100%" fill="${p.fond}"/><g shape-rendering="crispEdges">${bg}</g>${gl}</svg>`;
+    }
+
+    ready = true;
+    reseed(); buildCustom();
+    app.loop((t, dt) => {
+      if (paint && dt) for (let i = 0; i < paint.age.length; i++) if (paint.lvl[i] >= 0) { paint.age[i] += dt; if (paint.age[i] > p.memoire) paint.lvl[i] = -1; }
+      lastT = t; draw(t);
+    });
+  </script>
+</body>
+</html>
