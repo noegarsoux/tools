@@ -1,0 +1,372 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Craquelures</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Craquelures : une couche (boue, émail, peinture) posée sur un support sèche et rétrécit. Elle est modélisée
+    // par un réseau triangulaire de ressorts accrochés au support ; les ressorts raccourcissent, la tension monte,
+    // le lien le plus tendu cède, la tension se reporte sur ses voisins : les fissures se propagent, se rejoignent
+    // en T et découpent des plaques dont la taille dépend de l'adhérence. Les bords des plaques se soulèvent.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2, SQ3 = Math.sqrt(3);
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const PYR = PAL('pyramides'), MENTHE = PAL('menthe'), BIEN = PAL('biennale'), KB = PAL('kegelbahn'), SALON = PAL('salon');
+
+    let N = 0, M = 0, a = 10, X, Y, X0, Y0, HN, bonds, bA, bB, bTh, bOk, tris, tB, t = 0, phase = 'dry', hold = 0, rng = Math.random, simKey = '', frozen = false;
+    let broken = 0, dist = null, distDirty = true, drag = null, mask = null, maskKey = null, shrinkN = null, ox = 0, oy = 0;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.06, vignette: 0.22 },
+      hint: 'Touchez pour un impact · glissez pour rayer la couche · molette : vitesse de séchage',
+      notes: 'La couche est un réseau de ressorts accrochés au support. En séchant, chaque ressort veut raccourcir ; le support l’en empêche et la tension monte. Le lien le plus tendu par rapport à sa résistance (tirée au hasard) cède, ses voisins se retrouvent plus chargés : la fissure avance. Une fissure qui en rencontre une autre s’arrête net, d’où les jonctions en T. Plus la couche adhère au support, plus les plaques sont petites.',
+      params: {
+        'Couche': {
+          matiere: { type: 'segmented', label: 'Rendu', options: { boue: 'Boue', kintsugi: 'Kintsugi', encre: 'Encre' }, value: 'boue' },
+          motif: { type: 'select', label: 'Séchage', options: { uniforme: 'Uniforme', bords: 'Depuis les bords', logo: 'Autour du logo' }, value: 'uniforme' },
+          image: { type: 'file', label: 'Logo', accept: 'image/*', show: (q) => q.motif === 'logo' },
+          finesse: { type: 'range', label: 'Finesse du réseau', min: 50, max: 140, step: 1, value: 85 },
+          adherence: { type: 'range', label: 'Adhérence', min: 0, max: 1, step: 0.01, value: 0.25 },
+          retrait: { type: 'range', label: 'Retrait', min: 0.02, max: 0.2, step: 0.005, value: 0.06 },
+          desordre: { type: 'range', label: 'Désordre', min: 0, max: 1, step: 0.01, value: 0.3 },
+          duree: { type: 'range', label: 'Durée du séchage (s)', min: 3, max: 40, step: 0.5, value: 12 },
+          vitesse: { type: 'range', label: 'Vitesse des fissures', min: 0, max: 1, step: 0.01, value: 0.4 },
+          pause: { type: 'range', label: 'Pause (s)', min: 0, max: 12, step: 0.5, value: 4 },
+        },
+        'Relief': {
+          soulevement: { type: 'range', label: 'Bords soulevés', min: 0, max: 1, step: 0.01, value: 0.55 },
+          lumiere: { type: 'range', label: 'Direction de la lumière', min: 0, max: 360, step: 1, value: 225 },
+          epaisseur: { type: 'range', label: 'Épaisseur des fissures', min: 0.2, max: 3, step: 0.05, value: 1 },
+        },
+        'Couleurs': {
+          couche: { type: 'color', label: 'Couche', value: '#c8915e' },
+          fond: { type: 'color', label: 'Fond des fissures', value: '#2a1810' },
+          trait: { type: 'color', label: 'Trait (kintsugi, encre)', value: '#d4a637' },
+        },
+      },
+      presets: {
+        'Boue séchée': {},
+        'Grandes plaques': { adherence: 0.05, retrait: 0.1, soulevement: 0.8, finesse: 60, epaisseur: 1.3 },
+        'Craquelé fin': { adherence: 0.6, epaisseur: 0.7, retrait: 0.09, vitesse: 1, duree: 10, finesse: 120, soulevement: 0.2, couche: '#d9c7a4', fond: '#4a3a2a' },
+        'Kintsugi': { matiere: 'kintsugi', couche: '#efe9de', fond: '#2c2620', trait: '#c9962c', adherence: 0.25, soulevement: 0.1, epaisseur: 1.3 },
+        'Encre': { matiere: 'encre', couche: '#f4f1ea', fond: '#f4f1ea', trait: '#151515', adherence: 0.45, soulevement: 0, epaisseur: 0.8 },
+        'Depuis les bords': { motif: 'bords', adherence: 0.3, duree: 16 },
+        'Logo': { motif: 'logo', adherence: 0.3 },
+        'Pyramides': { couche: PYR[4], fond: PYR[6], trait: PYR[2] },
+        'Menthe': { matiere: 'kintsugi', couche: MENTHE[0], fond: MENTHE[1], trait: MENTHE[3], adherence: 0.4 },
+        'Biennale': { matiere: 'encre', couche: BIEN[0], fond: BIEN[0], trait: BIEN[2], adherence: 0.3 },
+        'Kegelbahn': { couche: KB[1], fond: KB[0], trait: KB[3], soulevement: 0.7 },
+      },
+      brand(colors) {
+        const lum = (x) => { const c = hex(x); return c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114; };
+        const sat = (x) => { const c = hex(x), mx = Math.max(...c), mn = Math.min(...c); return mx ? (mx - mn) / mx : 0; };
+        const all = colors.slice().sort((u, v) => lum(v) - lum(u));
+        return { couche: all[0], fond: all[all.length - 1], trait: colors.slice().sort((u, v) => sat(v) - sat(u))[0] };
+      },
+      pointer: {
+        down: (q) => { drag = { x: q.x, y: q.y, moved: false }; },
+        drag: (q) => { if (!drag) return; if (Math.hypot(q.x - drag.x, q.y - drag.y) > 5) { drag.moved = true; scratch(drag.x, drag.y, q.x, q.y); drag.x = q.x; drag.y = q.y; } },
+        up: (q) => { if (drag && !drag.moved) impact(q.x, q.y); drag = null; },
+        wheel: (q, dy) => app.set('duree', Math.max(3, Math.min(40, p.duree + (dy > 0 ? 1 : -1)))),
+      },
+      onChange(k) { if (k === 'image') maskKey = null; if (k === '*' || ['finesse', 'motif', 'image', 'desordre'].includes(k)) simKey = ''; frozen = false; },
+      onSeed() { simKey = ''; frozen = false; },
+      export: { name: 'craquelures', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    const hex = (x) => { const n = parseInt(x.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; };
+    const mixHex = (u, v, k) => { const A = hex(u), B = hex(v); return '#' + A.map((c, i) => Math.round(c + (B[i] - c) * k).toString(16).padStart(2, '0')).join(''); };
+    function mulberry(s) { return () => { s |= 0; s = s + 0x6D2B79F5 | 0; let q = Math.imul(s ^ s >>> 15, 1 | s); q = q + Math.imul(q ^ q >>> 7, 61 | q) ^ q; return ((q ^ q >>> 14) >>> 0) / 4294967296; }; }
+
+    // ——— Logo ———
+    function logoAt() {
+      const img0 = p.image || app.logoImg, { w, h } = app.size, key = (img0 ? (img0.src || 'c') : 'demo') + w + 'x' + h;
+      if (key === maskKey && mask) return mask; maskKey = key;
+      const S = 4, c = document.createElement('canvas'); c.width = Math.ceil(w / S); c.height = Math.ceil(h / S); const x = c.getContext('2d', { willReadFrequently: true });
+      const L = Math.min(w, h) * 0.55 / S, cx = c.width / 2, cy = c.height / 2;
+      if (img0) { const iw = img0.naturalWidth || img0.width, ih = img0.naturalHeight || img0.height, k = L / Math.max(iw, ih); x.drawImage(img0, cx - iw * k / 2, cy - ih * k / 2, iw * k, ih * k); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(cx, cy, L * 0.48, 0, TAU); x.arc(cx, cy, L * 0.26, 0, TAU, true); x.fill('evenodd'); x.fillRect(cx - L * 0.06, cy - L * 0.5, L * 0.12, L); }
+      const d = x.getImageData(0, 0, c.width, c.height).data; let transp = 0; for (let i = 3; i < d.length; i += 4) if (d[i] < 128) transp++;
+      const useA = transp > c.width * c.height * 0.05, A = new Uint8Array(c.width * c.height);
+      for (let i = 0; i < A.length; i++) { const l = (d[i * 4] * 0.2126 + d[i * 4 + 1] * 0.7152 + d[i * 4 + 2] * 0.0722) / 255; A[i] = useA ? (d[i * 4 + 3] > 110 ? 1 : 0) : (d[i * 4 + 3] > 128 && l < 0.5 ? 1 : 0); }
+      mask = { A, W: c.width, H: c.height, S, at: (px, py) => { const i = Math.floor(px / S), j = Math.floor(py / S); return i >= 0 && j >= 0 && i < c.width && j < c.height ? A[j * c.width + i] : 0; } };
+      return mask;
+    }
+
+    // ——— Réseau triangulaire ———
+    function build() {
+      const { w, h } = app.size; a = Math.max(w, h) / p.finesse;
+      N = Math.ceil(w / a) + 3; M = Math.ceil(h / (a * SQ3 / 2)) + 3; ox = -a; oy = -a;
+      const nn = N * M; X = new Float32Array(nn); Y = new Float32Array(nn); X0 = new Float32Array(nn); Y0 = new Float32Array(nn); HN = new Float32Array(nn); shrinkN = new Float32Array(nn);
+      for (let j = 0; j < M; j++) for (let i = 0; i < N; i++) { const k = j * N + i; X0[k] = ox + (i + (j & 1) * 0.5) * a; Y0[k] = oy + j * a * SQ3 / 2; }
+      const A = [], B = [], key = new Map(), bid = (u, v) => key.get(u < v ? u * nn + v : v * nn + u);
+      const add = (u, v) => { key.set(u < v ? u * nn + v : v * nn + u, A.length); A.push(u); B.push(v); };
+      for (let j = 0; j < M; j++) for (let i = 0; i < N; i++) {
+        const k = j * N + i; if (i + 1 < N) add(k, k + 1);
+        if (j + 1 < M) { const o = j & 1; const dl = (j + 1) * N + i - 1 + o, dr = (j + 1) * N + i + o; if (i - 1 + o >= 0 && i - 1 + o < N) add(k, dl); if (i + o < N) add(k, dr); }
+      }
+      bA = Int32Array.from(A); bB = Int32Array.from(B); bTh = new Float32Array(A.length); bOk = new Uint8Array(A.length);
+      // triangles (3 nœuds, 3 liens)
+      const T = [], TB = [];
+      for (let j = 0; j + 1 < M; j++) for (let i = 0; i < N; i++) {
+        const o = j & 1, k = j * N + i, dl = (j + 1) * N + i - 1 + o, dr = (j + 1) * N + i + o;
+        if (i - 1 + o >= 0 && i + o < N) { T.push(k, dl, dr); TB.push(bid(k, dl), bid(k, dr), bid(dl, dr)); }
+        if (i + 1 < N && i + o < N) { T.push(k, k + 1, dr); TB.push(bid(k, k + 1), bid(k, dr), bid(k + 1, dr)); }
+      }
+      tris = Int32Array.from(T); tB = Int32Array.from(TB);
+      bTri = new Int32Array(A.length * 2).fill(-1); for (let q = 0; q < tB.length; q++) { const b = tB[q], tq = (q / 3) | 0; if (bTri[b * 2] < 0) bTri[b * 2] = tq; else bTri[b * 2 + 1] = tq; }
+      dist = new Float32Array(nn);
+    }
+    function reset() {
+      rng = mulberry(app.seed * 6007 + (resetN++) * 131);
+      const nn = N * M, dis = p.desordre;
+      X.set(X0); Y.set(Y0); HN.fill(0); bOk.fill(1); broken = 0; tips = []; t = 0; phase = 'dry'; hold = 0; distDirty = true; dist.fill(99);
+      for (let b = 0; b < bTh.length; b++) { const r = rng(); bTh[b] = 0.012 * (1 + dis * 2.2 * (Math.pow(r, 1.6) - 0.3)); }
+      // retrait local : uniforme, plus fort près des bords, ou nul dans le logo
+      const { w, h } = app.size, m = p.motif === 'logo' ? logoAt() : null;
+      for (let k = 0; k < nn; k++) {
+        let f = 1; const x = X0[k], y = Y0[k];
+        if (p.motif === 'bords') { const d = Math.min(x, y, w - x, h - y) / (Math.min(w, h) * 0.5); f = 1.25 - 0.65 * Math.min(1, Math.max(0, d)); }
+        else if (m && m.at(x, y)) f = 0;
+        shrinkN[k] = f * (0.92 + 0.16 * rng());
+      }
+      if (m) for (let b = 0; b < bA.length; b++) if (m.at(X0[bA[b]], Y0[bA[b]]) !== m.at(X0[bB[b]], Y0[bB[b]])) bOk[b] = 0; // le contour du logo est une fissure
+    }
+    let resetN = 0;
+
+    // ——— Physique (PBD) ———
+    function relax(s, iters) {
+      const ka = 0.004 + p.adherence * p.adherence * 0.12, nb = bA.length;
+      for (let it = 0; it < iters; it++) {
+        for (let b = (it & 1) ? nb - 1 : 0, e = (it & 1) ? -1 : nb, st = (it & 1) ? -1 : 1; b !== e; b += st) {
+          if (!bOk[b]) continue;
+          const u = bA[b], v = bB[b], dx = X[v] - X[u], dy = Y[v] - Y[u], d = Math.sqrt(dx * dx + dy * dy) || 1e-6;
+          const L = a * (1 - s * 0.5 * (shrinkN[u] + shrinkN[v])), c = (d - L) / d * 0.5;
+          X[u] += dx * c; Y[u] += dy * c; X[v] -= dx * c; Y[v] -= dy * c;
+        }
+        for (let k = 0, nn = N * M; k < nn; k++) { X[k] += (X0[k] - X[k]) * ka; Y[k] += (Y0[k] - Y[k]) * ka; }
+      }
+    }
+    // ——— Fissures : amorçage au lien le plus chargé, puis la pointe traverse les triangles ———
+    // une pointe est dans un triangle, entrée par un lien rompu ; elle sort par l'autre lien le plus tendu,
+    // et s'arrête en rejoignant une fissure existante (jonction en T) ou le bord.
+    let tips = [];
+    const ratio = (b, s) => { const u = bA[b], v = bB[b], dx = X[v] - X[u], dy = Y[v] - Y[u], d = Math.sqrt(dx * dx + dy * dy), L = a * (1 - s * 0.5 * (shrinkN[u] + shrinkN[v])); return (d - L) / L / bTh[b]; };
+    function cut(b) { if (!bOk[b]) return; bOk[b] = 0; broken++; distDirty = true; }
+    function spawnTips(b) { for (const tq of [bTri[b * 2], bTri[b * 2 + 1]]) if (tq >= 0) tips.push({ t: tq, from: b }); }
+    function nucleate(s) {
+      // amorçage : tirage parmi les liens proches du maximum de tension (le défaut le plus faible, pas toujours au même endroit)
+      const R = new Float32Array(bA.length); let rmax = 1;
+      for (let b = 0; b < bA.length; b++) { if (!bOk[b]) continue; const r = ratio(b, s); R[b] = r; if (r > rmax) rmax = r; }
+      if (rmax <= 1) return false;
+      const lim = Math.max(1, rmax * 0.93), cand = [];
+      for (let b = 0; b < bA.length; b++) if (bOk[b] && R[b] >= lim) cand.push(b);
+      const b = cand[Math.floor(rng() * cand.length)]; cut(b); spawnTips(b); return true;
+    }
+    function advanceTips(s, steps) {
+      for (let k = 0; k < steps && tips.length; k++) {
+        const next = [];
+        for (const tp of tips) {
+          const q = tp.t * 3, e = [tB[q], tB[q + 1], tB[q + 2]].filter((b) => b !== tp.from);
+          if (!bOk[e[0]] || !bOk[e[1]]) continue; // rejoint une fissure
+          const r0 = Math.max(0.01, ratio(e[0], s)), r1 = Math.max(0.01, ratio(e[1], s)), p0 = Math.pow(r0, 6) / (Math.pow(r0, 6) + Math.pow(r1, 6));
+          const b = rng() < p0 ? e[0] : e[1]; cut(b);
+          const o = bTri[b * 2] === tp.t ? bTri[b * 2 + 1] : bTri[b * 2];
+          if (o >= 0) next.push({ t: o, from: b });
+        }
+        tips = next;
+      }
+    }
+    function computeDist() {
+      // distance (en liens) au bord de plaque le plus proche : sert au soulèvement des bords
+      const nn = N * M, q = new Int32Array(nn); let qh = 0, qt = 0; dist.fill(99);
+      for (let b = 0; b < bA.length; b++) if (!bOk[b]) { for (const k of [bA[b], bB[b]]) if (dist[k] > 0) { dist[k] = 0; q[qt++] = k; } }
+      const adj = adjacency();
+      while (qh < qt) { const k = q[qh++], d = dist[k] + 1; if (d > 8) continue; for (let e = adj.s[k]; e < adj.s[k + 1]; e++) { const b = adj.b[e]; if (!bOk[b]) continue; const o = bA[b] === k ? bB[b] : bA[b]; if (dist[o] > d) { dist[o] = d; q[qt++] = o; } } }
+      distDirty = false;
+    }
+    let adjC = null;
+    function adjacency() {
+      if (adjC && adjC.n === bA.length) return adjC;
+      const nn = N * M, cnt = new Int32Array(nn + 1); for (let b = 0; b < bA.length; b++) { cnt[bA[b] + 1]++; cnt[bB[b] + 1]++; }
+      for (let k = 0; k < nn; k++) cnt[k + 1] += cnt[k];
+      const fill = cnt.slice(), arr = new Int32Array(bA.length * 2); for (let b = 0; b < bA.length; b++) { arr[fill[bA[b]]++] = b; arr[fill[bB[b]]++] = b; }
+      adjC = { s: cnt, b: arr, n: bA.length }; return adjC;
+    }
+    function shrinkAt() { return p.retrait * smooth(Math.min(1, t / p.duree)); }
+    const smooth = (u) => u * u * (3 - 2 * u);
+    function step(dt) {
+      if (phase === 'dry') {
+        // quasi statique : tant que des liens cèdent, le séchage attend (la fissure finit de se propager)
+        // quasi statique : tant qu'une fissure court, le séchage attend
+        if (!tips.length) t += dt;
+        const s = shrinkAt(); relax(s, 5);
+        if (tips.length) advanceTips(s, Math.round((2 + p.vitesse * 6) * Math.pow(p.finesse / 85, 1.6)));
+        else if (nucleate(s)) relax(s, 2);
+        if (t > p.duree * 1.15) { phase = 'hold'; hold = 0; }
+      } else if (phase === 'hold') { hold += dt; relax(shrinkAt(), 2); if (hold > p.pause) { phase = 'rain'; hold = 0; } }
+      else if (phase === 'rain') { hold += dt; if (hold > 1.2) reset(); }
+      if (distDirty && (frame % 6 === 0 || phase !== 'dry')) computeDist();
+      const lift = p.soulevement * a * 1.6;
+      for (let k = 0, nn = N * M; k < nn; k++) { const target = dist[k] < 99 ? lift * Math.exp(-dist[k] / 2.2) : 0; HN[k] += (target - HN[k]) * 0.15; }
+    }
+    let frame = 0, stalled = false;
+
+    // ——— Interactions ———
+    function nearestNode(x, y) { const j = Math.max(0, Math.min(M - 1, Math.round((y - oy) / (a * SQ3 / 2)))), i = Math.max(0, Math.min(N - 1, Math.round((x - ox) / a - (j & 1) * 0.5))); return j * N + i; }
+    function impact(x, y) {
+      // étoile : les liens autour du point cèdent et lancent chacun une pointe de fissure
+      const k = nearestNode(x, y), adj = adjacency();
+      for (let e = adj.s[k]; e < adj.s[k + 1]; e++) { const b = adj.b[e]; if (bOk[b]) { cut(b); spawnTips(b); } }
+      for (let bb = 0; bb < bA.length; bb++) { const mx = (X[bA[bb]] + X[bB[bb]]) / 2 - x, my = (Y[bA[bb]] + Y[bB[bb]]) / 2 - y, d = Math.hypot(mx, my); if (d < a * 8) bTh[bb] *= 0.5 + 0.5 * d / (a * 8); }
+      if (phase !== 'dry') { phase = 'dry'; t = Math.min(t, p.duree); }
+    }
+    function scratch(x0, y0, x1, y1) {
+      // rayure : on coupe les liens qui croisent le trait (chemin continu dans le réseau)
+      const minx = Math.min(x0, x1) - a, maxx = Math.max(x0, x1) + a, miny = Math.min(y0, y1) - a, maxy = Math.max(y0, y1) + a;
+      const cross = (ax, ay, bx, by, cx, cy, dx, dy) => { const d1 = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax), d2 = (bx - ax) * (dy - ay) - (by - ay) * (dx - ax), d3 = (dx - cx) * (ay - cy) - (dy - cy) * (ax - cx), d4 = (dx - cx) * (by - cy) - (dy - cy) * (bx - cx); return d1 * d2 < 0 && d3 * d4 < 0; };
+      for (let b = 0; b < bA.length; b++) {
+        if (!bOk[b]) continue; const u = bA[b], v = bB[b];
+        if (Math.max(X[u], X[v]) < minx || Math.min(X[u], X[v]) > maxx || Math.max(Y[u], Y[v]) < miny || Math.min(Y[u], Y[v]) > maxy) continue;
+        if (cross(X[u], Y[u], X[v], Y[v], x0, y0, x1, y1)) cut(b);
+      }
+      if (phase !== 'dry') { phase = 'dry'; t = Math.min(t, p.duree); }
+    }
+
+    // ——— Rendu ———
+    const LV = 64; let VN = null, VL = null;
+    // rastérisation maison des triangles (bien plus rapide que des milliers de chemins canvas), puis agrandissement lissé
+    let rb = null, rbx = null, rimg = null, r32 = null;
+    function draw() {
+      const { w, h, dpr } = app.size;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over';
+      const sc = app.thumbnail ? dpr : Math.min(dpr, 1.5) * 0.75, RW = Math.ceil(w * sc), RH = Math.ceil(h * sc);
+      if (!rb || rb.width !== RW || rb.height !== RH) { rb = document.createElement('canvas'); rb.width = RW; rb.height = RH; rbx = rb.getContext('2d'); rimg = rbx.createImageData(RW, RH); r32 = new Uint32Array(rimg.data.buffer); }
+      const mode = p.matiere, C = hex(p.couche), F = hex(p.fond), la = p.lumiere * Math.PI / 180, lx = Math.cos(la) * 0.6, ly = Math.sin(la) * 0.6, lz = 0.8;
+      const rainK = phase === 'rain' ? Math.min(1, hold / 1.2) : 0;
+      const pack = (r, g, b) => (255 << 24) | (Math.max(0, Math.min(255, b | 0)) << 16) | (Math.max(0, Math.min(255, g | 0)) << 8) | Math.max(0, Math.min(255, r | 0));
+      const lut = new Uint32Array(LV);
+      for (let i = 0; i < LV; i++) {
+        const l = 0.35 + i / (LV - 1) * 0.7, k = Math.min(1, l);
+        let r = C[0] * k, g = C[1] * k, b = C[2] * k; if (l > 1) { const e = (l - 1) * 1.5; r += (255 - r) * e; g += (255 - g) * e; b += (255 - b) * e; }
+        if (rainK > 0) { r += (C[0] - r) * rainK; g += (C[1] - g) * rainK; b += (C[2] - b) * rainK; }
+        lut[i] = pack(r, g, b);
+      }
+      r32.fill(rainK > 0 && mode === 'boue' ? pack(F[0] + (C[0] - F[0]) * rainK, F[1] + (C[1] - F[1]) * rainK, F[2] + (C[2] - F[2]) * rainK) : pack(F[0], F[1], F[2]));
+      // ombrage de Gouraud : normales accumulées par nœud, lumière interpolée dans chaque triangle (plus de facettes)
+      const nn = N * M; if (!VN || VN.length !== nn * 3) { VN = new Float32Array(nn * 3); VL = new Float32Array(nn); }
+      VN.fill(0);
+      for (let q = 0; q < tris.length; q += 3) {
+        const u = tris[q], v = tris[q + 1], wv = tris[q + 2];
+        const ax = X[v] - X[u], ay = Y[v] - Y[u], az = HN[v] - HN[u], bx = X[wv] - X[u], by = Y[wv] - Y[u], bz = HN[wv] - HN[u];
+        let nx = ay * bz - az * by, ny = az * bx - ax * bz, nz = ax * by - ay * bx; if (nz < 0) { nx = -nx; ny = -ny; nz = -nz; }
+        const il = 1 / (Math.hypot(nx, ny, nz) || 1); nx *= il; ny *= il; nz *= il;
+        VN[u * 3] += nx; VN[u * 3 + 1] += ny; VN[u * 3 + 2] += nz; VN[v * 3] += nx; VN[v * 3 + 1] += ny; VN[v * 3 + 2] += nz; VN[wv * 3] += nx; VN[wv * 3 + 1] += ny; VN[wv * 3 + 2] += nz;
+      }
+      const flat = mode !== 'boue';
+      for (let k = 0; k < nn; k++) {
+        const nx = VN[k * 3], ny = VN[k * 3 + 1], nz = VN[k * 3 + 2], nl = Math.hypot(nx, ny, nz) || 1;
+        let lv = (Math.max(0, (nx * lx + ny * ly + nz * lz) / nl) - 0.35) / 0.7 * (LV - 1);
+        if (flat) lv = LV * 0.62 + (lv - LV * 0.62) * 0.25;
+        VL[k] = Math.max(0, Math.min(LV - 1, lv));
+      }
+      for (let q = 0; q < tris.length; q += 3) {
+        const u = tris[q], v = tris[q + 1], wv = tris[q + 2];
+        fillTri(X[u] * sc, Y[u] * sc, X[v] * sc, Y[v] * sc, X[wv] * sc, Y[wv] * sc, VL[u], VL[v], VL[wv], lut, RW, RH);
+      }
+      rbx.putImageData(rimg, 0, 0);
+      ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high'; ctx.drawImage(rb, 0, 0, w, h);
+      // fissures dessinées (kintsugi, encre) : segments entre les centres des deux triangles de chaque lien rompu
+      const P = crackPath(); ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+      if (mode === 'boue') {
+        const op = a * (0.25 + 0.75 * Math.min(1, t / p.duree)) * p.epaisseur;
+        ctx.strokeStyle = mixHex(p.fond, p.couche, 0.25); ctx.lineWidth = op * 0.95; ctx.stroke(P.path);
+        ctx.strokeStyle = p.fond; ctx.lineWidth = op * 0.6; ctx.stroke(P.path);
+      } else {
+        if (mode === 'kintsugi') { ctx.strokeStyle = mixHex(p.trait, '#000000', 0.35); ctx.lineWidth = a * 0.42 * p.epaisseur; ctx.stroke(P.path); ctx.strokeStyle = p.trait; ctx.lineWidth = a * 0.3 * p.epaisseur; ctx.stroke(P.path); ctx.strokeStyle = mixHex(p.trait, '#ffffff', 0.45); ctx.lineWidth = a * 0.08 * p.epaisseur; ctx.globalAlpha = 0.7; ctx.stroke(P.path); ctx.globalAlpha = 1; }
+        else { ctx.strokeStyle = p.trait; ctx.lineWidth = a * 0.22 * p.epaisseur; ctx.stroke(P.path); }
+      }
+      if (rainK > 0) { ctx.globalAlpha = rainK; ctx.fillStyle = p.couche; ctx.fillRect(0, 0, w, h); ctx.globalAlpha = 1; }
+    }
+    function fillTri(x0, y0, x1, y1, x2, y2, c0, c1, c2, lut, RW, RH) {
+      // remplissage par demi-plans, légèrement gonflé pour éviter les joints, lumière interpolée (barycentrique)
+      let minX = Math.max(0, Math.floor(Math.min(x0, x1, x2))), maxX = Math.min(RW - 1, Math.ceil(Math.max(x0, x1, x2)));
+      let minY = Math.max(0, Math.floor(Math.min(y0, y1, y2))), maxY = Math.min(RH - 1, Math.ceil(Math.max(y0, y1, y2)));
+      const area = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0); if (Math.abs(area) < 1e-6) return;
+      const sg = area > 0 ? 1 : -1, e = 0.35, ia = 1 / Math.abs(area);
+      const A0 = (y1 - y2) * sg, B0 = (x2 - x1) * sg, A1 = (y2 - y0) * sg, B1 = (x0 - x2) * sg, A2 = (y0 - y1) * sg, B2 = (x1 - x0) * sg;
+      const L0 = Math.hypot(A0, B0) * e, L1 = Math.hypot(A1, B1) * e, L2 = Math.hypot(A2, B2) * e, top = lut.length - 1;
+      for (let y = minY; y <= maxY; y++) {
+        const py = y + 0.5; let o = y * RW + minX;
+        for (let x = minX; x <= maxX; x++, o++) {
+          const px = x + 0.5, w0 = A0 * (px - x1) + B0 * (py - y1), w1 = A1 * (px - x2) + B1 * (py - y2), w2 = A2 * (px - x0) + B2 * (py - y0);
+          if (w0 >= -L0 && w1 >= -L1 && w2 >= -L2) { const l = (w0 * c0 + w1 * c1 + w2 * c2) * ia; r32[o] = lut[l < 0 ? 0 : l > top ? top : l | 0]; }
+        }
+      }
+    }
+    // pour chaque lien rompu : ses deux triangles voisins → segment entre leurs centres
+    let bTri = null;
+    function crackPath() {
+            // graphe des fissures : nœuds = triangles (ou milieu d'un lien de bord), arêtes = liens rompus
+      const adj = new Map(), addE = (u, v) => { (adj.get(u) || adj.set(u, []).get(u)).push(v); (adj.get(v) || adj.set(v, []).get(v)).push(u); };
+      for (let b = 0; b < bA.length; b++) { if (bOk[b]) continue; const t0 = bTri[b * 2], t1 = bTri[b * 2 + 1]; if (t0 < 0) continue; addE(t0, t1 >= 0 ? t1 : -1 - b); }
+      const pos = (id) => id >= 0 ? [(X[tris[id * 3]] + X[tris[id * 3 + 1]] + X[tris[id * 3 + 2]]) / 3, (Y[tris[id * 3]] + Y[tris[id * 3 + 1]] + Y[tris[id * 3 + 2]]) / 3]
+        : [(X[bA[-1 - id]] + X[bB[-1 - id]]) / 2, (Y[bA[-1 - id]] + Y[bB[-1 - id]]) / 2];
+      const used = new Set(), ek = (u, v) => u < v ? u + ',' + v : v + ',' + u, polys = [];
+      const walk = (start, next) => {
+        const L = [start]; let prev = start, cur = next; used.add(ek(start, next));
+        while (true) { L.push(cur); const nb = adj.get(cur); if (nb.length !== 2) break; const nx = nb[0] === prev ? nb[1] : nb[0]; const k = ek(cur, nx); if (used.has(k)) break; used.add(k); prev = cur; cur = nx; }
+        return L;
+      };
+      for (const [u, nb] of adj) if (nb.length !== 2) for (const v of nb) if (!used.has(ek(u, v))) polys.push(walk(u, v));
+      for (const [u, nb] of adj) for (const v of nb) if (!used.has(ek(u, v))) polys.push(walk(u, v));
+      // lissage de Chaikin (extrémités gardées) : les fissures perdent l'escalier du réseau
+      const path = new Path2D(), out = [];
+      for (const ids of polys) {
+        const n0 = adj.get(ids[0]).length, n1 = adj.get(ids[ids.length - 1]).length;
+        if (ids.length <= 3 && (n0 === 1 || n1 === 1)) continue; // petites amorces qui ne se sont pas propagées
+        const closed = ids.length > 2 && ids[0] === ids[ids.length - 1]; if (closed && ids.length < 9) continue; // minuscules boucles
+        let P = ids.map(pos);
+        // lissage laplacien (extrémités fixes) puis Chaikin : l'escalier du réseau disparaît
+        for (let it = 0; it < 6; it++) { const Q = P.map((q) => q.slice()); for (let i = 1; i < P.length - 1; i++) { Q[i][0] = (P[i - 1][0] + P[i][0] * 2 + P[i + 1][0]) / 4; Q[i][1] = (P[i - 1][1] + P[i][1] * 2 + P[i + 1][1]) / 4; } P = Q; }
+        for (let it = 0; it < 1; it++) { const Q = [P[0]]; for (let i = 0; i < P.length - 1; i++) { const A = P[i], B = P[i + 1]; Q.push([A[0] * 0.75 + B[0] * 0.25, A[1] * 0.75 + B[1] * 0.25], [A[0] * 0.25 + B[0] * 0.75, A[1] * 0.25 + B[1] * 0.75]); } Q.push(P[P.length - 1]); P = Q; }
+        path.moveTo(P[0][0], P[0][1]); for (let i = 1; i < P.length; i++) path.lineTo(P[i][0], P[i][1]); if (closed) path.closePath();
+        out.push(P);
+      }
+      return { path, polys: out };
+    }
+
+    app.loop((tt, dt) => {
+      dt = Math.min(0.05, dt || 0); frame++;
+      const { w, h } = app.size, key = [p.finesse, p.motif, p.desordre, w, h, app.seed, maskKey].join();
+      if (key !== simKey) { build(); adjC = null; resetN = 0; reset(); simKey = [p.finesse, p.motif, p.desordre, w, h, app.seed, maskKey].join(); }
+      if (app.thumbnail) { if (!frozen) { build(); adjC = null; resetN = 0; reset(); for (let i = 0; i < 400 && phase === 'dry'; i++) step(p.duree / 300); computeDist(); for (let i = 0; i < 40; i++) step(0); frozen = true; } }
+      else step(dt);
+      draw();
+      app.finish(ctx);
+    });
+
+    // ——— Export SVG ———
+    function toSVG() {
+      const { w, h } = app.size, out = [], f = (v) => v.toFixed(1), P = crackPath();
+      out.push(`<rect width="100%" height="100%" fill="${p.couche}"/>`);
+      const d = P.polys.map((L) => 'M' + L.map(([x, y]) => f(x) + ' ' + f(y)).join('L')).join('');
+      const col = p.matiere === 'boue' ? p.fond : p.trait, wdt = a * (p.matiere === 'boue' ? 0.6 * (0.25 + 0.75 * Math.min(1, t / p.duree)) : p.matiere === 'kintsugi' ? 0.3 : 0.22) * p.epaisseur;
+      if (p.matiere === 'kintsugi') out.push(`<path d="${d}" fill="none" stroke="${mixHex(p.trait, '#000000', 0.35)}" stroke-width="${(wdt * 1.4).toFixed(2)}" stroke-linecap="round" stroke-linejoin="round"/>`);
+      out.push(`<path d="${d}" fill="none" stroke="${col}" stroke-width="${wdt.toFixed(2)}" stroke-linecap="round" stroke-linejoin="round"/>`);
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">\n${out.join('\n')}\n</svg>`;
+    }
+  </script>
+</body>
+</html>
