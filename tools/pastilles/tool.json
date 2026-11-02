@@ -1,0 +1,15 @@
+{
+  "slug": "pastilles",
+  "title": "Grille de pastilles",
+  "type": "typography",
+  "description": "On tape le texte d'une affiche : chaque ligne devient une rangée de carrés arrondis, une lettre par pastille, une couleur par bloc, des cases vides qui clignotent.",
+  "tags": ["grille", "affiche", "pastilles", "typographie", "svg", "motion"],
+  "inspiration": [
+    "Affiche du Salon Skug, grille récursive de pastilles (moodboard 19)",
+    "Karl Gerstner, Designing Programmes : la grille comme programme",
+    "references/moodboard.md ; palettes salon, biennale, kegelbahn, papier-60, menthe, pixels, good-room, glyphes"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
