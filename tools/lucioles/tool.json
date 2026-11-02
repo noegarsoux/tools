@@ -1,0 +1,15 @@
+{
+  "slug": "lucioles",
+  "title": "Lucioles",
+  "type": "motion",
+  "description": "Un essaim de lucioles dont les éclairs se couplent : vagues locales puis clignotement à l'unisson, dans un pré, une forêt ou dessinant le logo.",
+  "tags": ["lucioles", "synchronisation", "nuit", "lumiere", "logo", "svg"],
+  "inspiration": [
+    "Mirollo et Strogatz, synchronisation d'oscillateurs couplés par impulsions (1990)",
+    "Lucioles synchrones des Great Smoky Mountains (Photinus carolinus)",
+    "Photographies de lucioles en pose longue ; palettes menthe, biennale, good-room"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
