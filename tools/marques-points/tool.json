@@ -1,0 +1,15 @@
+{
+  "slug": "marques-points",
+  "title": "Marques en points",
+  "type": "pattern",
+  "description": "Une planche de marques faites de points ronds qui se soudent : grilles cisaillées, éventails, anneaux et spirales dans une silhouette ou le logo.",
+  "tags": ["points", "marque", "monogramme", "gerstner", "svg", "logo"],
+  "inspiration": [
+    "Moodboard de Noé, fiche 7 : marques en points des années 60",
+    "Karl Gerstner, Programme entwerfen ; catalogues de marques des années 60",
+    "Palettes papier-60, trame-nuit, acide, kegelbahn, biennale, orbite"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}

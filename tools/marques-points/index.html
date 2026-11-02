@@ -1,0 +1,325 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Marques en points</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Marques en points : une planche de marques faites de points ronds, comme un catalogue des années 60.
+    // Chaque marque est une structure de points (grille, éventail, anneaux, spirale) découpée par une
+    // silhouette, déformée (cisaillement, rotation) et modulée par un dégradé de taille. Quand deux points
+    // voisins se touchent presque, un pont les soude. La pulsation fait grossir les points le long du
+    // dégradé : les soudures apparaissent et se défont, en boucle.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2, GOLD = Math.PI * (3 - Math.sqrt(5));
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const P60 = PAL('papier-60'), NUIT = PAL('trame-nuit'), ACIDE = PAL('acide'), KB = PAL('kegelbahn');
+    const BIEN = PAL('biennale'), GR = PAL('good-room'), MENTHE = PAL('menthe'), ORB = PAL('orbite');
+
+    let ready = false, marks = [], focus = -1, focusAnim = 0, hoverMark = -1, lastT = 0, grab = null;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.05, vignette: 0 },
+      hint: 'Cliquez une marque pour l’isoler · glissez dessus pour la cisailler · molette : densité des points',
+      notes: 'Chaque marque est une structure de points découpée par une silhouette, cisaillée et modulée par un dégradé de taille. Les points voisins qui se touchent presque se soudent : la pulsation fait naître et défaire ces soudures.',
+      params: {
+        'Planche': {
+          variantes: { type: 'segmented', label: 'Variantes', options: { 1: '1', 4: '4', 6: '6', 9: '9', 12: '12' }, value: '6' },
+          structure: { type: 'segmented', label: 'Structure', options: { mixte: 'Mixte', grille: 'Grille', eventail: 'Éventail', anneaux: 'Anneaux', spirale: 'Spirale' }, value: 'mixte' },
+          silhouette: { type: 'segmented', label: 'Silhouette', options: { mixte: 'Mixte', rond: 'Rond', carre: 'Carré', triangle: 'Triangle', anneau: 'Anneau', logo: 'Logo' }, value: 'mixte' },
+          variete: { type: 'range', label: 'Variété entre marques', min: 0, max: 1, step: 0.01, value: 0.6 },
+          marge: { type: 'range', label: 'Marge des cases', min: 0.05, max: 0.45, step: 0.01, value: 0.2 },
+        },
+        'Points': {
+          densite: { type: 'range', label: 'Points par côté', min: 4, max: 22, step: 1, value: 9 },
+          taille: { type: 'range', label: 'Taille des points', min: 0.2, max: 1.2, step: 0.01, value: 0.78 },
+          gradient: { type: 'range', label: 'Dégradé de taille', min: 0, max: 1, step: 0.01, value: 0.6 },
+          cisaillement: { type: 'range', label: 'Cisaillement', min: -1, max: 1, step: 0.01, value: 0.15 },
+          rotation: { type: 'range', label: 'Rotation (°)', min: -90, max: 90, step: 1, value: 0 },
+          fusion: { type: 'range', label: 'Soudure des points', min: 0, max: 1, step: 0.01, value: 0.55 },
+        },
+        'Mouvement': {
+          boucle: { type: 'range', label: 'Boucle (s)', min: 4, max: 30, step: 1, value: 8 },
+          pulsation: { type: 'range', label: 'Pulsation', min: 0, max: 1, step: 0.01, value: 0.45 },
+          tour: { type: 'range', label: 'Rotation par boucle (quarts)', min: -4, max: 4, step: 1, value: 0 },
+          decalage: { type: 'range', label: 'Décalage entre marques', min: 0, max: 1, step: 0.01, value: 0.5 },
+        },
+        'Couleur': {
+          fond: { type: 'color', label: 'Fond', value: P60[0] },
+          encre: { type: 'color', label: 'Encre', value: P60[1] },
+          accent: { type: 'color', label: 'Point d’accent', value: '#e5452a' },
+          accents: { type: 'range', label: 'Fréquence des accents', min: 0, max: 1, step: 0.01, value: 0.35 },
+        },
+      },
+      presets: {
+        'Catalogue 60': {},
+        'Une marque': { variantes: '1', structure: 'eventail', silhouette: 'rond', densite: 12, gradient: 0.85, fusion: 0.7, accents: 0 },
+        'Grilles': { structure: 'grille', silhouette: 'carre', variantes: '9', densite: 7, cisaillement: 0.35, gradient: 0.75, fusion: 0.8, accents: 0 },
+        'Éventails': { structure: 'eventail', variantes: '4', densite: 11, gradient: 0.9, fusion: 0.4, pulsation: 0.6 },
+        'Spirales': { structure: 'spirale', silhouette: 'rond', variantes: '6', densite: 13, taille: 0.9, gradient: 0.8, fusion: 0.3, fond: NUIT[0], encre: NUIT[1], accent: NUIT[2] },
+        'Acide': { variantes: '9', fond: ACIDE[2], encre: ACIDE[1], accent: ACIDE[3], densite: 8, fusion: 0.7, taille: 0.85, accents: 0.6 },
+        'Kegelbahn': { variantes: '12', fond: KB[0], encre: KB[1], accent: KB[3], structure: 'anneaux', densite: 8, gradient: 0.7, accents: 0.8, variete: 0.9 },
+        'Biennale': { variantes: '4', fond: BIEN[0], encre: BIEN[1], accent: BIEN[2], structure: 'grille', silhouette: 'triangle', densite: 10, cisaillement: -0.4, fusion: 0.65 },
+        'Orbite': { variantes: '6', fond: ORB[0], encre: ORB[1], accent: ORB[2] || ORB[1], structure: 'anneaux', silhouette: 'anneau', densite: 12, tour: 1, pulsation: 0.3 },
+        'Logo': { variantes: '1', silhouette: 'logo', structure: 'grille', densite: 18, taille: 0.85, gradient: 0.5, fusion: 0.6, cisaillement: 0.1, accents: 0 },
+      },
+      brand(colors) {
+        return { fond: colors[0], encre: colors[1] || colors[0], accent: colors[2] || colors[1] || colors[0] };
+      },
+      pointer: {
+        move: (q) => { hoverMark = markAt(q.x, q.y); },
+        down: (q) => { const i = markAt(q.x, q.y); grab = { i, x: q.x, y: q.y, moved: false, sh: i >= 0 ? marks[i].dsh : 0, rot: i >= 0 ? marks[i].drot : 0 }; },
+        drag: (q) => {
+          if (!grab || grab.i < 0) return;
+          const dx = q.x - grab.x, dy = q.y - grab.y;
+          if (Math.hypot(dx, dy) > 4) grab.moved = true;
+          // Horizontal : cisaillement ; vertical : rotation. Le réglage reste propre à la marque.
+          const M = marks[grab.i], cell = cellSize();
+          M.dsh = Math.max(-1.5, Math.min(1.5, grab.sh + dx / cell * 1.6));
+          M.drot = grab.rot + dy / cell * 1.2;
+        },
+        up: () => {
+          if (grab && !grab.moved) focus = (focus >= 0) ? -1 : grab.i;
+          grab = null;
+        },
+        wheel: (q, dy) => app.set('densite', Math.max(4, Math.min(22, Math.round(p.densite + dy * 0.01)))),
+      },
+      onChange(k) {
+        if (!ready) return;
+        if (k === '*' || k === 'variantes' || k === 'structure' || k === 'silhouette' || k === 'variete' || k === 'accents') { generate(); focus = -1; }
+        if (k === '_logo' || k === '*' || k === 'silhouette') buildLogo();
+      },
+      onSeed() { if (ready) { generate(); focus = -1; } },
+      export: { name: 'marques-en-points', svg: () => toSVG() },
+    });
+    const p = app.params;
+    canvas.addEventListener('pointerleave', () => { hoverMark = -1; });
+
+    // ——— Silhouettes (repère unité [-1, 1]²) ———
+    const SIL = {
+      rond: (x, y) => x * x + y * y < 0.95 * 0.95,
+      carre: (x, y) => Math.abs(x) < 0.88 && Math.abs(y) < 0.88,
+      triangle: (x, y) => y < 0.8 && y > -0.95 + Math.abs(x) * 1.95 - 0.05 + 0 && Math.abs(x) < 1,
+      anneau: (x, y) => { const r = Math.hypot(x, y); return r < 0.96 && r > 0.42; },
+      demi: (x, y) => y < 0.15 && x * x + y * y < 0.95 * 0.95,
+      losange: (x, y) => Math.abs(x) + Math.abs(y) < 1.0,
+      logo: (x, y) => logoAt(x, y),
+    };
+    const SIL_MIX = ['rond', 'carre', 'triangle', 'anneau', 'demi', 'losange', 'rond', 'carre'];
+    const STRUCTS = ['grille', 'eventail', 'anneaux', 'spirale', 'grille'];
+
+    // ——— Logo : carte d'encre (1 = encre), échantillonnée dans le repère unité ———
+    let logoMap = null;
+    function buildLogo() {
+      logoMap = null;
+      const img = app.logoImg;
+      if (!img) return;
+      const N = 160, iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height, k = N * 0.92 / Math.max(iw, ih);
+      const cv = document.createElement('canvas'); cv.width = cv.height = N;
+      const x = cv.getContext('2d', { willReadFrequently: true });
+      x.fillStyle = '#fff'; x.fillRect(0, 0, N, N);
+      x.drawImage(img, (N - iw * k) / 2, (N - ih * k) / 2, iw * k, ih * k);
+      const d = x.getImageData(0, 0, N, N).data, v = new Uint8Array(N * N);
+      for (let i = 0; i < v.length; i++) v[i] = (d[i * 4] * 0.2126 + d[i * 4 + 1] * 0.7152 + d[i * 4 + 2] * 0.0722) < 128 ? 1 : 0;
+      logoMap = { N, v };
+    }
+    function logoAt(x, y) {
+      // Sans logo : une pastille percée d'un croissant, pour garder une silhouette de marque.
+      if (!logoMap) { const r = Math.hypot(x, y), r2 = Math.hypot(x - 0.35, y + 0.2); return r < 0.95 && r2 > 0.48; }
+      const N = logoMap.N, i = Math.floor((x + 1) / 2 * N), j = Math.floor((y + 1) / 2 * N);
+      if (i < 0 || j < 0 || i >= N || j >= N) return false;
+      return logoMap.v[j * N + i] === 1;
+    }
+
+    // ——— Génération de la planche : chaque marque reçoit ses propres écarts autour des réglages ———
+    function generate() {
+      const n = +p.variantes, r = app.rng(31);
+      marks = [];
+      for (let i = 0; i < n; i++) {
+        const v = p.variete;
+        marks.push({
+          struct: p.structure === 'mixte' ? STRUCTS[Math.floor(r() * STRUCTS.length)] : p.structure,
+          sil: p.silhouette === 'mixte' ? SIL_MIX[Math.floor(r() * SIL_MIX.length)] : p.silhouette,
+          gAng: Math.round(r() * 8) * Math.PI / 4, gRad: r() < 0.35,
+          sh: (r() - 0.5) * 1.2 * v, rot: Math.round((r() - 0.5) * 4 * v) * Math.PI / 12,
+          dens: Math.round((r() - 0.5) * 6 * v), size: 1 + (r() - 0.5) * 0.4 * v,
+          fanSpread: 0.6 + r() * 0.5, pivot: r() < 0.5 ? 1 : -1,
+          accent: r() < p.accents ? Math.floor(r() * 1e6) : -1,
+          phase: r(), dsh: 0, drot: 0,
+        });
+      }
+    }
+
+    // ——— Points d'une marque (repère unité) : { x, y, r, t } avec t ∈ [0, 1] la position dans le dégradé ———
+    function dotsOf(M, T) {
+      const n = Math.max(3, p.densite + M.dens), s = 2 / n, out = [];
+      const sh = p.cisaillement + M.sh + M.dsh, rot = p.rotation * Math.PI / 180 + M.rot + M.drot + TAU / 4 * p.tour * T;
+      const cr = Math.cos(rot), sr = Math.sin(rot);
+      // L'éventail garde sa propre forme (seul le logo le découpe) ; les autres structures prennent la silhouette.
+      const inside = M.struct === 'eventail' && M.sil !== 'logo' ? (x, y) => x * x + y * y < 1.1 : SIL[M.sil] || SIL.rond;
+      const push = (x, y, rr) => {
+        // Cisaillement puis rotation ; la silhouette reste droite, la structure se déforme dedans.
+        const xs = x + sh * y, X = xs * cr - y * sr, Y = xs * sr + y * cr;
+        if (!inside(X, Y)) return;
+        out.push({ x: X, y: Y, r: rr, s });
+      };
+      if (M.struct === 'grille') {
+        for (let j = -n; j <= n; j++) for (let i = -n; i <= n; i++) push((i + (n % 2 ? 0 : 0.5)) * s, (j + (n % 2 ? 0 : 0.5)) * s, s / 2);
+      } else if (M.struct === 'eventail') {
+        // Rayons depuis un pivot au bord ; les points s'écartent et grossissent en s'éloignant.
+        const rays = Math.max(3, Math.round(n * 0.9)), py = M.pivot * 1.05;
+        for (let k = 0; k < rays; k++) {
+          const a = -Math.PI / 2 * M.pivot + (k / (rays - 1) - 0.5) * M.fanSpread * Math.PI;
+          for (let d = s * 0.8, m = 0; d < 2.4; m++) {
+            const rr = s * 0.32 * (1 + d * 0.6);
+            push(Math.cos(a) * d, py + Math.sin(a) * d, rr);
+            d += rr * 1.75;
+          }
+        }
+      } else if (M.struct === 'anneaux') {
+        push(0, 0, s / 2);
+        for (let k = 1; k * s < 1.5; k++) {
+          const R = k * s, m = Math.max(4, Math.round(TAU * R / s)), off = (k & 1) * 0.5;
+          for (let i = 0; i < m; i++) { const a = (i + off) / m * TAU; push(Math.cos(a) * R, Math.sin(a) * R, s / 2); }
+        }
+      } else {
+        const N = Math.round(n * n * 0.85);
+        for (let i = 0; i < N; i++) { const rr = Math.sqrt((i + 0.5) / N) * 1.0, a = i * GOLD; push(Math.cos(a) * rr, Math.sin(a) * rr, s / 2 * 1.02); }
+      }
+      // Dégradé (linéaire orienté ou radial) et pulsation qui le parcourt.
+      const ga = M.gAng, gx = Math.cos(ga), gy = Math.sin(ga), ph = TAU * (T + M.phase * p.decalage);
+      for (const d of out) {
+        const t = M.gRad ? Math.min(1, Math.hypot(d.x, d.y)) : (d.x * gx + d.y * gy) * 0.5 + 0.5;
+        const g = 1 - p.gradient * 0.75 * t;
+        const pulse = 1 + p.pulsation * 0.38 * Math.sin(ph - t * Math.PI * 1.5);
+        d.r = d.r * p.taille * M.size * g * pulse; d.t = t;
+      }
+      return out.filter((d) => d.r > s * 0.04);
+    }
+
+    // Soudures (ponts tournant dans le même sens que les cercles, pour que tout s'additionne) : deux voisins presque en contact sont reliés par un pont.
+    function bridgesOf(dots) {
+      const out = []; if (p.fusion <= 0 || dots.length < 2) return out;
+      const s = dots[0].s, cell = s * 1.6, grid = new Map(), key = (i, j) => i * 73856093 ^ j * 19349663;
+      dots.forEach((d, k) => { const K = key(Math.floor(d.x / cell), Math.floor(d.y / cell)); if (!grid.has(K)) grid.set(K, []); grid.get(K).push(k); });
+      const reach = 1 - p.fusion * 0.45;
+      dots.forEach((a, ka) => {
+        const ci = Math.floor(a.x / cell), cj = Math.floor(a.y / cell);
+        for (let dj = -1; dj <= 1; dj++) for (let di = -1; di <= 1; di++) {
+          const L = grid.get(key(ci + di, cj + dj)); if (!L) continue;
+          for (const kb of L) {
+            if (kb <= ka) continue;
+            const b = dots[kb], dd = Math.hypot(a.x - b.x, a.y - b.y);
+            if (dd > s * 1.5 || dd < 1e-6) continue;
+            if (a.r + b.r < dd * reach) continue;
+            out.push({ a, b, w: Math.min(a.r, b.r) * (0.5 + 0.45 * p.fusion) });
+          }
+        }
+      });
+      return out;
+    }
+
+    // ——— Mise en page de la planche ———
+    function layout() {
+      const { w, h } = app.size, n = marks.length;
+      // On choisit le nombre de colonnes qui donne les plus grandes cases (à égalité, le moins de trous).
+      let cols = 1, bestR = -1;
+      for (let c = 1; c <= n; c++) { const r = Math.ceil(n / c), R = Math.min(w / c, h / r) - (c * r - n) * 0.01; if (R > bestR) { bestR = R; cols = c; } }
+      const rows = Math.ceil(n / cols);
+      const cw = w / cols, ch = h / rows;
+      return marks.map((_, i) => {
+        const c = i % cols, r = Math.floor(i / cols), lastRow = r === rows - 1, inRow = lastRow ? n - r * cols : cols;
+        const ox = (w - inRow * cw) / 2;
+        return { x: ox + (c + 0.5) * cw, y: (r + 0.5) * ch, R: Math.min(cw, ch) / 2 * (1 - p.marge) };
+      });
+    }
+    function cellSize() { const L = layout(); return L.length ? L[0].R * 2 : 100; }
+    function placed() {
+      const L = layout(), { w, h } = app.size, full = Math.min(w, h) / 2 * (1 - p.marge * 0.5), e = focusAnim * focusAnim * (3 - 2 * focusAnim);
+      return L.map((c, i) => {
+        if (focus < 0 && focusAnim <= 0) return { ...c, a: 1 };
+        if (i === (focus >= 0 ? focus : lastFocus)) return { x: c.x + (w / 2 - c.x) * e, y: c.y + (h / 2 - c.y) * e, R: c.R + (full - c.R) * e, a: 1 };
+        return { ...c, a: 1 - e };
+      });
+    }
+    let lastFocus = -1;
+    function markAt(x, y) {
+      const P = placed();
+      if (focus >= 0) return focus;
+      for (let i = 0; i < P.length; i++) if (Math.hypot(x - P[i].x, y - P[i].y) < P[i].R * 1.05) return i;
+      return -1;
+    }
+
+    // ——— Rendu commun (canvas et SVG) ———
+    function scene(t) {
+      const T = t / p.boucle, P = placed(), items = [];
+      marks.forEach((M, i) => {
+        const c = P[i]; if (c.a <= 0.01) return;
+        const dots = dotsOf(M, T), br = bridgesOf(dots);
+        let acc = -1;
+        if (M.accent >= 0 && dots.length) {
+          // L'accent va au plus gros point (en cas d'égalité, celui que désigne le tirage).
+          let best = 0; dots.forEach((d, k) => { if (d.r > dots[best].r + 1e-6 || (Math.abs(d.r - dots[best].r) < 1e-6 && (k * 7919 + M.accent) % 5 === 0)) best = k; }); acc = best;
+        }
+        const k = c.R * (hoverMark === i && focus < 0 ? 1.04 : 1);
+        items.push({ c, k, dots, br, acc });
+      });
+      return items;
+    }
+    function draw(t) {
+      const { w, h, dpr } = app.size;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = p.fond; ctx.fillRect(0, 0, w, h);
+      for (const it of scene(t)) {
+        const { c, k, dots, br, acc } = it, X = (x) => c.x + x * k, Y = (y) => c.y + y * k;
+        ctx.globalAlpha = c.a;
+        ctx.fillStyle = p.encre; ctx.beginPath();
+        dots.forEach((d, i) => { if (i === acc) return; ctx.moveTo(X(d.x) + d.r * k, Y(d.y)); ctx.arc(X(d.x), Y(d.y), d.r * k, 0, TAU); });
+        for (const b of br) {
+          if (dots.indexOf(b.a) === acc || dots.indexOf(b.b) === acc) continue;
+          const dx = b.b.x - b.a.x, dy = b.b.y - b.a.y, L = Math.hypot(dx, dy), nx = -dy / L * b.w, ny = dx / L * b.w;
+          ctx.moveTo(X(b.a.x - nx), Y(b.a.y - ny)); ctx.lineTo(X(b.b.x - nx), Y(b.b.y - ny)); ctx.lineTo(X(b.b.x + nx), Y(b.b.y + ny)); ctx.lineTo(X(b.a.x + nx), Y(b.a.y + ny)); ctx.closePath();
+        }
+        ctx.fill('nonzero');
+        if (acc >= 0) { const d = dots[acc]; ctx.fillStyle = p.accent; ctx.beginPath(); ctx.arc(X(d.x), Y(d.y), d.r * k, 0, TAU); ctx.fill(); }
+      }
+      ctx.globalAlpha = 1;
+      app.finish(ctx);
+    }
+
+    function toSVG() {
+      const { w, h } = app.size, f = (n) => +n.toFixed(2), parts = [];
+      for (const it of scene(lastT)) {
+        const { c, k, dots, br, acc } = it; if (c.a < 0.5) continue;
+        const X = (x) => f(c.x + x * k), Y = (y) => f(c.y + y * k);
+        const cs = dots.map((d, i) => i === acc ? '' : `<circle cx="${X(d.x)}" cy="${Y(d.y)}" r="${f(d.r * k)}"/>`).join('');
+        const bs = br.filter((b) => dots.indexOf(b.a) !== acc && dots.indexOf(b.b) !== acc).map((b) => {
+          const dx = b.b.x - b.a.x, dy = b.b.y - b.a.y, L = Math.hypot(dx, dy), nx = -dy / L * b.w, ny = dx / L * b.w;
+          return `M${X(b.a.x - nx)} ${Y(b.a.y - ny)}L${X(b.b.x - nx)} ${Y(b.b.y - ny)}L${X(b.b.x + nx)} ${Y(b.b.y + ny)}L${X(b.a.x + nx)} ${Y(b.a.y + ny)}Z`;
+        }).join('');
+        parts.push(`<g fill="${p.encre}">${cs}${bs ? `<path d="${bs}"/>` : ''}</g>`);
+        if (acc >= 0) { const d = dots[acc]; parts.push(`<circle cx="${X(d.x)}" cy="${Y(d.y)}" r="${f(d.r * k)}" fill="${p.accent}"/>`); }
+      }
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><rect width="100%" height="100%" fill="${p.fond}"/>${parts.join('')}</svg>`;
+    }
+
+    ready = true;
+    generate(); buildLogo();
+    app.loop((t, dt) => {
+      // Zoom doux vers la marque isolée, et retour.
+      if (focus >= 0) lastFocus = focus;
+      focusAnim = Math.max(0, Math.min(1, focusAnim + (focus >= 0 ? 1 : -1) * (dt || 0) * 3));
+      lastT = t; draw(t);
+    });
+  </script>
+</body>
+</html>
