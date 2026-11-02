@@ -1,0 +1,15 @@
+{
+  "slug": "flocons",
+  "title": "Flocons",
+  "type": "motion",
+  "description": "Cristaux de neige de Reiter sur réseau hexagonal : plaques, étoiles et fougères qui poussent, changent de régime avec la météo, tombent ou dessinent le logo.",
+  "tags": ["flocons", "cristal", "automate-cellulaire", "croissance", "logo", "svg"],
+  "inspiration": [
+    "Clifford A. Reiter, A local cellular model for snow crystal growth (2005)",
+    "Kenneth Libbrecht, diagramme morphologique des cristaux de neige",
+    "Wilson Bentley, photographies de flocons (1885–1931)"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
