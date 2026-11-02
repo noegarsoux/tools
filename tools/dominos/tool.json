@@ -1,0 +1,15 @@
+{
+  "slug": "dominos",
+  "title": "Dominos",
+  "type": "motion",
+  "description": "Une chaîne de dominos aux couleurs de la marque, en spirale, serpentin, arbre ou contour du logo, qui tombe en vague puis se relève.",
+  "tags": ["dominos", "physique", "chaine", "3d", "logo", "svg"],
+  "inspiration": [
+    "Records de chutes de dominos (Domino Day)",
+    "Fischli et Weiss, Der Lauf der Dinge (1987)",
+    "references/physique-maths.md ; palettes biennale, salon, kegelbahn, menthe"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
