@@ -1,0 +1,15 @@
+{
+  "slug": "dithering",
+  "title": "Dithering de marque",
+  "type": "filter",
+  "description": "Une image, un logo ou un sujet en mouvement réduit à deux, trois ou quatre couleurs de la charte : Bayer, bruit bleu, Floyd-Steinberg, Atkinson, Stucki.",
+  "tags": ["dithering", "trame", "bayer", "pixel", "image", "svg"],
+  "inspiration": [
+    "Surma, Ditherpunk : the article I wish I had about monochrome image dithering",
+    "Robert Ulichney, The void-and-cluster method for dither array generation (1993)",
+    "Bill Atkinson et l'écran du Macintosh ; palettes papier-60, photocopie, menthe, kegelbahn, acide, orbite"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}

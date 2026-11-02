@@ -1,0 +1,358 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Dithering de marque</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Dithering de marque : une image en tons continus réduite à deux, trois ou quatre couleurs de la
+    // charte. Les tons intermédiaires naissent de la répartition des pixels : matrice de Bayer, bruit
+    // bleu (void-and-cluster), bruit blanc, ou diffusion de l'erreur (Floyd-Steinberg, Atkinson, Stucki).
+    // Le sujet bouge (lumière qui tourne, plis qui ondulent) et le seuil respire.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const P60 = PAL('papier-60'), NUIT = PAL('trame-nuit'), KB = PAL('kegelbahn'), MENTHE = PAL('menthe'), ACIDE = PAL('acide');
+    const ORB = PAL('orbite'), PHOTO = PAL('photocopie'), BIEN = PAL('biennale'), LU = PAL('luzern'), TH = PAL('thermique');
+
+    let ready = false, light = null, centre = { x: 0, y: 0 }, dragFrom = null, lastT = 0, srcDirty = true, src = null;
+    let grid = null; // { gw, gh, lv: Uint8Array } : le niveau de chaque cellule après tramage
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0, vignette: 0 },
+      hint: 'Survol : la lumière suit le pointeur · glissez pour déplacer le sujet · molette : taille des pixels',
+      notes: 'Le fond est le premier ton, puis les encres dans l’ordre de la palette. Les matrices (Bayer, bruit bleu) gardent une texture fixe ; la diffusion d’erreur répartit les tons au plus juste mais grouille à chaque image.',
+      params: {
+        'Sujet': {
+          sujet: { type: 'segmented', label: 'Sujet', options: { spheres: 'Sphères', plis: 'Plis', degrade: 'Dégradé', logo: 'Logo', image: 'Image' }, value: 'spheres' },
+          image: { type: 'file', label: 'Image', accept: 'image/*', show: (q) => q.sujet === 'image' },
+          echelle: { type: 'range', label: 'Échelle', min: 0.4, max: 2.5, step: 0.01, value: 0.9 },
+          contraste: { type: 'range', label: 'Contraste', min: 0.3, max: 3, step: 0.01, value: 1.1 },
+          luminosite: { type: 'range', label: 'Luminosité', min: -0.5, max: 0.5, step: 0.01, value: 0 },
+          inverser: { type: 'toggle', label: 'Inverser', value: false },
+        },
+        'Tramage': {
+          algorithme: { type: 'segmented', label: 'Algorithme', options: { bayer: 'Bayer', bleu: 'Bruit bleu', blanc: 'Bruit blanc', floyd: 'Floyd-Steinberg', atkinson: 'Atkinson', stucki: 'Stucki', seuil: 'Seuil' }, value: 'atkinson' },
+          matrice: { type: 'segmented', label: 'Matrice de Bayer', options: { 2: '2×2', 4: '4×4', 8: '8×8' }, value: '4', show: (q) => q.algorithme === 'bayer' },
+          serpentin: { type: 'toggle', label: 'Parcours en serpentin', value: true, show: (q) => ['floyd', 'atkinson', 'stucki'].includes(q.algorithme) },
+          pixel: { type: 'range', label: 'Taille des pixels (px)', min: 2, max: 24, step: 1, value: 4 },
+          forme: { type: 'segmented', label: 'Forme', options: { carre: 'Carré', rond: 'Rond', trait: 'Trait' }, value: 'carre' },
+        },
+        'Mouvement': {
+          vitesse: { type: 'range', label: 'Vitesse du sujet', min: 0, max: 1, step: 0.01, value: 0.3 },
+          respiration: { type: 'range', label: 'Seuil qui respire', min: 0, max: 0.4, step: 0.01, value: 0.08 },
+          defilement: { type: 'range', label: 'Défilement de la matrice', min: -4, max: 4, step: 1, value: 0, show: (q) => ['bayer', 'bleu'].includes(q.algorithme) },
+        },
+        'Couleur': {
+          fond: { type: 'color', label: 'Fond (ton le plus clair)', value: P60[0] },
+          couleurs: { type: 'palette', label: 'Encres, du ton moyen au plus soutenu', value: ['#e5452a', P60[1]] },
+        },
+      },
+      presets: {
+        'Atkinson': {},
+        'Bayer': { algorithme: 'bayer', matrice: '4', pixel: 5, sujet: 'spheres', fond: PHOTO[0], couleurs: [PHOTO[2], PHOTO[1]] },
+        'Bruit bleu': { algorithme: 'bleu', pixel: 3, sujet: 'plis', fond: P60[0], couleurs: [P60[1]], contraste: 1.3 },
+        'Floyd-Steinberg': { algorithme: 'floyd', pixel: 4, sujet: 'degrade', fond: NUIT[0], couleurs: [NUIT[2], NUIT[1]], inverser: true },
+        'Menthe': { algorithme: 'bayer', matrice: '8', pixel: 6, sujet: 'spheres', fond: MENTHE[0], couleurs: [MENTHE[2], MENTHE[3], MENTHE[1]] },
+        'Kegelbahn': { algorithme: 'bleu', pixel: 6, forme: 'rond', sujet: 'plis', fond: KB[0], couleurs: [KB[2], KB[1], KB[3]], inverser: true, contraste: 1.2 },
+        'Acide': { algorithme: 'stucki', pixel: 5, sujet: 'spheres', fond: ACIDE[2], couleurs: [ACIDE[1]], contraste: 1.4 },
+        'Orbite': { algorithme: 'bayer', matrice: '8', pixel: 9, forme: 'rond', sujet: 'degrade', fond: ORB[0], couleurs: [ORB[1]], defilement: 1 },
+        'Logo': { algorithme: 'atkinson', pixel: 4, sujet: 'logo', fond: BIEN[0], couleurs: [BIEN[2], BIEN[1]], echelle: 1 },
+        'Thermique': { algorithme: 'blanc', pixel: 3, forme: 'trait', sujet: 'plis', fond: TH[0], couleurs: [TH[1], TH[2], TH[3]], inverser: true, contraste: 1.2 },
+      },
+      brand(colors) {
+        return { fond: colors[0], couleurs: (colors.length > 1 ? colors.slice(1) : ['#000000']).slice(0, 4) };
+      },
+      pointer: {
+        move: (q) => { light = { x: q.x / app.size.w, y: q.y / app.size.h }; },
+        down: (q) => { dragFrom = { x: q.x, y: q.y, cx: centre.x, cy: centre.y }; },
+        drag: (q) => {
+          if (!dragFrom) return;
+          const u = Math.min(app.size.w, app.size.h);
+          centre = { x: dragFrom.cx + (q.x - dragFrom.x) / u, y: dragFrom.cy + (q.y - dragFrom.y) / u };
+          light = { x: q.x / app.size.w, y: q.y / app.size.h };
+        },
+        up: () => { dragFrom = null; },
+        wheel: (q, dy) => app.set('pixel', Math.max(2, Math.min(24, Math.round(p.pixel + Math.sign(dy))))),
+      },
+      onChange(k) {
+        if (k === 'image' || k === '*' || k === 'sujet' || k === '_logo') srcDirty = true;
+        if (k === '*') centre = { x: 0, y: 0 };
+      },
+      onSeed() { centre = { x: 0, y: 0 }; reseed(); },
+      export: { name: 'dithering', svg: () => toSVG() },
+    });
+    const p = app.params;
+    canvas.addEventListener('pointerleave', () => { light = null; });
+
+    // ——— Matrices de seuil ———
+    function bayer(n) {
+      let m = [[0]];
+      while (m.length < n) {
+        const k = m.length, q = Array.from({ length: k * 2 }, () => new Array(k * 2));
+        for (let y = 0; y < k; y++) for (let x = 0; x < k; x++) {
+          const v = m[y][x] * 4;
+          q[y][x] = v; q[y][x + k] = v + 2; q[y + k][x] = v + 3; q[y + k][x + k] = v + 1;
+        }
+        m = q;
+      }
+      const out = new Float32Array(n * n);
+      for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) out[y * n + x] = (m[y][x] + 0.5) / (n * n);
+      return out;
+    }
+    const BAYER = { 2: bayer(2), 4: bayer(4), 8: bayer(8) };
+
+    // Bruit bleu par void-and-cluster (Ulichney) sur 64×64, calculé une fois.
+    const BN = 64, BLUE = (() => {
+      const N = BN * BN, sig = 1.5, R = 6, rnd = Atelier.rng ? Math.random : Math.random;
+      const ker = [];
+      for (let dy = -R; dy <= R; dy++) for (let dx = -R; dx <= R; dx++) ker.push([dx, dy, Math.exp(-(dx * dx + dy * dy) / (2 * sig * sig))]);
+      const on = new Uint8Array(N), E = new Float32Array(N), rank = new Float32Array(N);
+      const splat = (i, s) => {
+        const x = i % BN, y = (i / BN) | 0;
+        for (const [dx, dy, w] of ker) E[((y + dy + BN) % BN) * BN + ((x + dx + BN) % BN)] += s * w;
+      };
+      const tightest = () => { let b = -1, v = -1; for (let i = 0; i < N; i++) if (on[i] && E[i] > v) { v = E[i]; b = i; } return b; };
+      const voidest = () => { let b = -1, v = Infinity; for (let i = 0; i < N; i++) if (!on[i] && E[i] < v) { v = E[i]; b = i; } return b; };
+      // Graine déterministe : le motif est le même à chaque chargement.
+      let s = 12345; const r = () => ((s = (s * 1103515245 + 12345) >>> 0) / 4294967296);
+      const n0 = Math.round(N * 0.1);
+      for (let k = 0; k < n0;) { const i = (r() * N) | 0; if (!on[i]) { on[i] = 1; splat(i, 1); k++; } }
+      for (let guard = 0; guard < N; guard++) {
+        const c = tightest(); on[c] = 0; splat(c, -1);
+        const v = voidest();
+        if (v === c) { on[c] = 1; splat(c, 1); break; }
+        on[v] = 1; splat(v, 1);
+      }
+      const proto = on.slice(), Ep = E.slice();
+      for (let k = n0 - 1; k >= 0; k--) { const c = tightest(); on[c] = 0; splat(c, -1); rank[c] = k; }
+      on.set(proto); E.set(Ep);
+      for (let k = n0; k < N; k++) { const v = voidest(); on[v] = 1; splat(v, 1); rank[v] = k; }
+      for (let i = 0; i < N; i++) rank[i] = (rank[i] + 0.5) / N;
+      return rank;
+    })();
+
+    // ——— Sujet : valeur d'encre v ∈ [0, 1] (0 = fond) en coordonnées centrées, unité = petit côté ———
+    function buildSource() {
+      srcDirty = false; src = null;
+      const img = p.sujet === 'image' ? p.image : p.sujet === 'logo' ? app.logoImg : null;
+      const M = 420, cv = document.createElement('canvas');
+      const x = cv.getContext('2d', { willReadFrequently: true });
+      if (img) {
+        const iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height, k = M / Math.max(iw, ih);
+        cv.width = Math.max(2, Math.round(iw * k)); cv.height = Math.max(2, Math.round(ih * k));
+        x.fillStyle = '#fff'; x.fillRect(0, 0, cv.width, cv.height);
+        if (p.sujet === 'logo') x.filter = 'blur(14px)';
+        x.drawImage(img, 0, 0, cv.width, cv.height);
+      } else if (p.sujet === 'logo') {
+        // Sans logo : un disque percé, la marque par défaut de l'atelier.
+        cv.width = cv.height = M; x.fillStyle = '#fff'; x.fillRect(0, 0, M, M);
+        x.filter = 'blur(14px)'; x.fillStyle = '#000';
+        x.beginPath(); x.arc(M / 2, M / 2, M * 0.46, 0, TAU); x.arc(M / 2, M / 2, M * 0.3, 0, TAU, true); x.fill();
+        x.beginPath(); x.arc(M / 2, M / 2, M * 0.17, 0, TAU); x.fill();
+      } else return;
+      const w = cv.width, h = cv.height, px = x.getImageData(0, 0, w, h).data, d = new Float32Array(w * h);
+      for (let i = 0; i < d.length; i++) d[i] = 1 - (px[i * 4] * 0.2126 + px[i * 4 + 1] * 0.7152 + px[i * 4 + 2] * 0.0722) / 255;
+      src = { w, h, d };
+    }
+    function sampleSrc(u, v) {
+      if (u < 0 || v < 0 || u > 1 || v > 1) return 0;
+      const fx = u * (src.w - 1), fy = v * (src.h - 1), x0 = fx | 0, y0 = fy | 0, x1 = Math.min(src.w - 1, x0 + 1), y1 = Math.min(src.h - 1, y0 + 1);
+      const ax = fx - x0, ay = fy - y0, d = src.d, W = src.w;
+      return (d[y0 * W + x0] * (1 - ax) + d[y0 * W + x1] * ax) * (1 - ay) + (d[y1 * W + x0] * (1 - ax) + d[y1 * W + x1] * ax) * ay;
+    }
+
+    let seedOff = [0, 0, 0, 0];
+    function reseed() { const r = app.rng(11); seedOff = [r() * TAU, r() * TAU, r() * TAU, r() * TAU]; }
+    reseed();
+
+    // Lumière : suit le pointeur, sinon tourne lentement.
+    function lightDir(t) {
+      if (light) {
+        const lx = (light.x - 0.5) * 2.2, ly = (light.y - 0.5) * 2.2;
+        return norm3(lx, ly, 0.9);
+      }
+      const a = t * p.vitesse * 0.9 + seedOff[0];
+      return norm3(Math.cos(a) * 0.85, -0.45 + 0.2 * Math.sin(a * 0.7), 0.55 + 0.35 * Math.sin(a));
+    }
+    function norm3(x, y, z) { const l = Math.hypot(x, y, z); return [x / l, y / l, z / l]; }
+
+    // Trois sphères posées sur un sol en dégradé, ombres portées comprises.
+    const SPH = [[-0.33, 0.06, 0.25], [0.2, -0.08, 0.3], [0.5, 0.2, 0.13]];
+    function subject(X, Y, t, L) {
+      const s = p.echelle, x = (X - centre.x) / s, y = (Y - centre.y) / s;
+      switch (p.sujet) {
+        case 'spheres': {
+          for (const [cx, cy, R] of SPH) {
+            const dx = (x - cx) / R, dy = (y - cy) / R, r2 = dx * dx + dy * dy;
+            if (r2 < 1) {
+              const nz = Math.sqrt(1 - r2), lam = Math.max(0, dx * L[0] + dy * L[1] + nz * L[2]);
+              const spec = Math.pow(Math.max(0, 2 * lam * nz - L[2]), 24) * 0.5;
+              return 1 - Math.min(1, 0.06 + 0.86 * lam + spec);
+            }
+          }
+          // Sol : plus sombre vers le haut, ombres portées allongées à l'opposé de la lumière.
+          let v = 0.12 + 0.3 * Math.max(0, Math.min(1, 0.5 - y));
+          for (const [cx, cy, R] of SPH) {
+            const ox = cx - L[0] * R * 0.9, oy = cy + R * 0.8 - L[1] * R * 0.3;
+            const ex = (x - ox) / (R * 1.25), ey = (y - oy) / (R * 0.4);
+            v += 0.5 * Math.max(0, 1 - ex * ex - ey * ey);
+          }
+          return Math.min(1, v);
+        }
+        case 'plis': {
+          // Un drapé : plis qui ondulent, ombrés par la lumière (dérivée de la hauteur).
+          const k = 13, ph = t * p.vitesse;
+          const h = (xx, yy) => Math.sin(xx * k + Math.sin(yy * 2.4 + xx * 0.8 + ph * 0.8 + seedOff[1]) * 2.4 + ph)
+            + 0.5 * Math.sin(xx * k * 1.9 - yy * 1.3 + ph * 1.3 + seedOff[2]) + 0.3 * Math.sin(yy * 5.1 + xx * 0.7 - ph * 0.6 + seedOff[3]);
+          const e = 0.01, hx = (h(x + e, y) - h(x - e, y)) / (2 * e), hy = (h(x, y + e) - h(x, y - e)) / (2 * e);
+          const n = norm3(-hx * 0.05, -hy * 0.05, 1), lam = Math.max(0, n[0] * L[0] + n[1] * L[1] + n[2] * L[2]);
+          // Centré sur le ton d'une surface plane : les plis tirent vers la lumière ou vers l'ombre.
+          return 1 - Math.min(1, Math.max(0, 0.55 + (lam - L[2]) * 1.3));
+        }
+        case 'degrade': {
+          // Dégradé radial dont le foyer suit la lumière, traversé d'anneaux lents.
+          const fx = L[0] * 0.35, fy = L[1] * 0.35, r = Math.hypot(x - fx, y - fy);
+          return Math.max(0, Math.min(1, r * 1.25 - 0.05 + 0.08 * Math.sin(r * 14 - t * p.vitesse * 3)));
+        }
+        default: {
+          if (!src) return 0;
+          const U = p.sujet === 'logo' ? 0.82 : 1.0, asp = src.w / src.h, { w, h } = app.size, fr = w / h;
+          // L'image couvre le cadre ; le logo y est contenu.
+          let ww, hh;
+          if (p.sujet === 'logo') { ww = asp >= 1 ? U : U * asp; hh = asp >= 1 ? U / asp : U; }
+          else { const cw = Math.max(fr, 1), ch = Math.max(1 / fr, 1); if (asp > cw / ch) { hh = ch; ww = ch * asp; } else { ww = cw; hh = cw / asp; } }
+          const z = 1 + 0.025 * Math.sin(t * p.vitesse * 2);
+          let v = sampleSrc(x / (ww * z) + 0.5, y / (hh * z) + 0.5);
+          // Le logo reçoit une lumière rasante qui le fait vivre.
+          if (p.sujet === 'logo') v = Math.min(1, v * (0.75 + 0.35 * (0.5 + 0.5 * Math.sin(x * 3 * L[0] + y * 3 * L[1] + t * p.vitesse * 2))) + 0.05 * (1 - Math.hypot(x, y)));
+          return v;
+        }
+      }
+    }
+
+    // ——— Tramage ———
+    const DIFF = {
+      floyd: [[1, 0, 7], [-1, 1, 3], [0, 1, 5], [1, 1, 1]].map(([a, b, c]) => [a, b, c / 16]),
+      atkinson: [[1, 0, 1], [2, 0, 1], [-1, 1, 1], [0, 1, 1], [1, 1, 1], [0, 2, 1]].map(([a, b, c]) => [a, b, c / 8]),
+      stucki: [[1, 0, 8], [2, 0, 4], [-2, 1, 2], [-1, 1, 4], [0, 1, 8], [1, 1, 4], [2, 1, 2], [-2, 2, 1], [-1, 2, 2], [0, 2, 4], [1, 2, 2], [2, 2, 1]].map(([a, b, c]) => [a, b, c / 42]),
+    };
+    let V = null, rnd = Math.random;
+    function dither(t) {
+      const { w, h } = app.size, px = p.pixel, gw = Math.max(2, Math.ceil(w / px)), gh = Math.max(2, Math.ceil(h / px));
+      if (!grid || grid.gw !== gw || grid.gh !== gh) { grid = { gw, gh, lv: new Uint8Array(gw * gh) }; V = new Float32Array(gw * gh); }
+      if (srcDirty) buildSource();
+      const U = Math.min(w, h), L = lightDir(t), levels = (p.couleurs.length || 1) + 1, M = levels - 1;
+      const bias = p.respiration * Math.sin(t * 1.3), lv = grid.lv;
+      for (let j = 0; j < gh; j++) for (let i = 0; i < gw; i++) {
+        const X = ((i + 0.5) * px - w / 2) / U, Y = ((j + 0.5) * px - h / 2) / U;
+        let v = subject(X, Y, t, L);
+        if (p.inverser) v = 1 - v;
+        v = (v - 0.5) * p.contraste + 0.5 - p.luminosite + bias;
+        V[j * gw + i] = Math.max(0, Math.min(1, v)) * M;
+      }
+      const algo = p.algorithme;
+      if (DIFF[algo]) {
+        const K = DIFF[algo], serp = p.serpentin;
+        for (let j = 0; j < gh; j++) {
+          const rev = serp && (j & 1), i0 = rev ? gw - 1 : 0, di = rev ? -1 : 1;
+          for (let n = 0, i = i0; n < gw; n++, i += di) {
+            const k = j * gw + i, v = V[k], q = Math.max(0, Math.min(M, Math.round(v))), e = v - q;
+            lv[k] = q;
+            for (const [dx, dy, wt] of K) {
+              const x2 = i + (rev ? -dx : dx), y2 = j + dy;
+              if (x2 >= 0 && x2 < gw && y2 < gh) V[y2 * gw + x2] += e * wt;
+            }
+          }
+        }
+      } else {
+        const sc = Math.round(t * p.defilement * 3);
+        const n = algo === 'bayer' ? +p.matrice : BN, mat = algo === 'bayer' ? BAYER[n] : BLUE;
+        for (let j = 0; j < gh; j++) for (let i = 0; i < gw; i++) {
+          const k = j * gw + i;
+          const th = algo === 'seuil' ? 0.5 : algo === 'blanc' ? rnd() : mat[(((j + sc) % n + n) % n) * n + (((i + sc) % n + n) % n)];
+          lv[k] = Math.min(M, Math.floor(V[k] + th));
+        }
+      }
+    }
+
+    function tones() {
+      const all = [p.fond, ...(p.couleurs.length ? p.couleurs : ['#000000'])];
+      return all.map((c) => [parseInt(c.slice(1, 3), 16), parseInt(c.slice(3, 5), 16), parseInt(c.slice(5, 7), 16)]);
+    }
+
+    let off = null, octx = null, img = null;
+    function draw() {
+      const { w, h, dpr } = app.size, { gw, gh, lv } = grid, px = p.pixel, T = tones();
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = p.fond; ctx.fillRect(0, 0, w, h);
+      if (p.forme === 'carre') {
+        if (!off || off.width !== gw || off.height !== gh) { off = document.createElement('canvas'); off.width = gw; off.height = gh; octx = off.getContext('2d'); img = octx.createImageData(gw, gh); }
+        const d = img.data;
+        for (let k = 0; k < lv.length; k++) { const c = T[lv[k]]; d[k * 4] = c[0]; d[k * 4 + 1] = c[1]; d[k * 4 + 2] = c[2]; d[k * 4 + 3] = 255; }
+        octx.putImageData(img, 0, 0);
+        ctx.imageSmoothingEnabled = false;
+        ctx.drawImage(off, 0, 0, gw * px, gh * px);
+        ctx.imageSmoothingEnabled = true;
+        return;
+      }
+      // Ronds et traits : un tracé par ton, le fond reste le papier.
+      for (let l = 1; l < T.length; l++) {
+        ctx.fillStyle = `rgb(${T[l][0]},${T[l][1]},${T[l][2]})`;
+        ctx.beginPath();
+        for (let j = 0; j < gh; j++) for (let i = 0; i < gw; i++) {
+          if (lv[j * gw + i] !== l) continue;
+          const x = i * px, y = j * px;
+          if (p.forme === 'rond') { ctx.moveTo(x + px * 0.96, y + px / 2); ctx.arc(x + px / 2, y + px / 2, px * 0.46, 0, TAU); }
+          else ctx.rect(x, y + px * 0.3, px, px * 0.4);
+        }
+        ctx.fill();
+      }
+    }
+
+    // SVG : les cellules d'un même ton sont fusionnées en segments horizontaux.
+    function toSVG() {
+      const { w, h } = app.size, { gw, gh, lv } = grid, px = p.pixel, cols = [p.fond, ...(p.couleurs.length ? p.couleurs : ['#000000'])];
+      const f = (v) => +v.toFixed(2);
+      let s = `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">\n<rect width="100%" height="100%" fill="${p.fond}"/>\n`;
+      for (let l = 1; l < cols.length; l++) {
+        let d = '';
+        for (let j = 0; j < gh; j++) {
+          if (p.forme === 'rond') {
+            for (let i = 0; i < gw; i++) if (lv[j * gw + i] === l) { const cx = f(i * px + px / 2), cy = f(j * px + px / 2), r = f(px * 0.46); d += `M${f(cx - r)} ${cy}a${r} ${r} 0 1 0 ${f(2 * r)} 0a${r} ${r} 0 1 0 ${f(-2 * r)} 0z`; }
+            continue;
+          }
+          const y0 = p.forme === 'trait' ? j * px + px * 0.3 : j * px, hh = p.forme === 'trait' ? px * 0.4 : px;
+          for (let i = 0; i < gw;) {
+            if (lv[j * gw + i] !== l) { i++; continue; }
+            let e = i; while (e < gw && lv[j * gw + e] === l) e++;
+            d += `M${f(i * px)} ${f(y0)}h${f((e - i) * px)}v${f(hh)}h${f(-(e - i) * px)}z`;
+            i = e;
+          }
+        }
+        if (d) s += `<path fill="${cols[l]}" d="${d}"/>\n`;
+      }
+      return s + '</svg>';
+    }
+
+    ready = true;
+    app.loop((t, dt) => {
+      lastT = t;
+      // Le bruit blanc n'est retiré qu'en mouvement : une image figée (export) garde son grain.
+      if (dt > 0 || !grid) rnd = Math.random; else { let s = 99; rnd = () => ((s = (s * 1103515245 + 12345) >>> 0) / 4294967296); }
+      dither(t);
+      draw();
+      app.finish(ctx);
+    });
+  </script>
+</body>
+</html>
