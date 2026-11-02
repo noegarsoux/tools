@@ -1,0 +1,15 @@
+{
+  "slug": "confettis",
+  "title": "Confettis",
+  "type": "motion",
+  "description": "Des confettis aux couleurs de la marque, en pluie, en canons ou en explosion : ils papillonnent, dérivent au vent et s'entassent au sol.",
+  "tags": ["confettis", "fete", "particules", "physique", "logo", "svg"],
+  "inspiration": [
+    "Confettis et serpentins de carnaval",
+    "Andersen, Pesavento et Wang, chute papillonnante des plaques (2005)",
+    "references/physique-maths.md ; palettes biennale, kegelbahn, salon, bitmap"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
