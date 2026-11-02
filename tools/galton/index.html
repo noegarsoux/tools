@@ -1,0 +1,446 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Galton</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Galton : une planche de Galton. Des billes tombent d'un entonnoir, rebondissent sur des rangées
+    // de clous et s'empilent dans des cases : la somme de petits hasards gauche/droite dessine une
+    // cloche (loi binomiale). Les billes sont simulées une à une : gravité, chocs, empilement.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const BIEN = PAL('biennale'), KB = PAL('kegelbahn'), SALON = PAL('salon'), MENTHE = PAL('menthe'), BIT = PAL('bitmap'), THER = PAL('thermique'), GLY = PAL('glyphes'), ACIDE = PAL('acide'), ORB = PAL('orbite');
+
+    const MAXB = 2600;
+    const bx = new Float32Array(MAXB), by = new Float32Array(MAXB), bvx = new Float32Array(MAXB), bvy = new Float32Array(MAXB), bc = new Uint8Array(MAXB), btx = new Float32Array(MAXB), brow = new Int16Array(MAXB), bdec = new Uint32Array(MAXB), bbin = new Int16Array(MAXB);
+    let KICK = 0, KF = 0.2, overT = 0, nb = 0, spawned = 0, spawnAcc = 0, phase = 'fill', phaseT = 0, geo = null, geoKey = '', sprites = [], sprKey = '', drag = null, warm = false;
+    let mask = null, maskKey = null;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.04, vignette: 0.08 },
+      hint: 'Touchez pour lâcher une poignée de billes · glissez à gauche ou à droite pour pencher la planche · molette : débit',
+      notes: 'À chaque clou, une bille part à gauche ou à droite presque au hasard. Après n rangées, le nombre de « droite » suit la loi binomiale, et les cases se remplissent en cloche (théorème central limite). Pencher la planche déplace la cloche ; la courbe montre la répartition attendue.',
+      params: {
+        'Planche': {
+          clous: { type: 'select', label: 'Clous', options: { triangle: 'Triangle', grille: 'Grille', logo: 'Logo' }, value: 'triangle' },
+          image: { type: 'file', label: 'Logo', accept: 'image/*', show: (q) => q.clous === 'logo' },
+          rangees: { type: 'range', label: 'Rangées', min: 4, max: 22, step: 1, value: 12 },
+          biais: { type: 'range', label: 'Pente', min: -1, max: 1, step: 0.01, value: 0 },
+          courbe: { type: 'toggle', label: 'Courbe attendue', value: true },
+        },
+        'Billes': {
+          billes: { type: 'range', label: 'Billes', min: 100, max: 2400, step: 50, value: 900 },
+          debit: { type: 'range', label: 'Billes par seconde', min: 5, max: 200, step: 1, value: 28 },
+          taille: { type: 'range', label: 'Taille', min: 0.08, max: 0.32, step: 0.005, value: 0.15 },
+          rebond: { type: 'range', label: 'Rebond', min: 0.05, max: 0.8, step: 0.01, value: 0.35 },
+          coloration: { type: 'select', label: 'Couleur', options: { cases: 'Par case', hasard: 'Au hasard', une: 'Une seule' }, value: 'cases' },
+          rendu: { type: 'segmented', label: 'Rendu', options: { plat: 'Plat', relief: 'Relief' }, value: 'plat' },
+        },
+        'Couleurs': {
+          fond: { type: 'color', label: 'Fond', value: '#f4f3f0' },
+          trait: { type: 'color', label: 'Clous et cases', value: '#111111' },
+          couleurs: { type: 'palette', label: 'Billes', value: ['#e5452a', '#111111', '#f2b0c8', '#f2e640'] },
+        },
+      },
+      presets: {
+        'Biennale': {},
+        'Grille': { clous: 'grille', rangees: 14, billes: 1400, debit: 80, taille: 0.24, couleurs: [SALON[2], SALON[3], SALON[4], SALON[1]], fond: SALON[0], trait: SALON[1] },
+        'Logo': { clous: 'logo', rangees: 18, billes: 1500, debit: 110, taille: 0.3, couleurs: [KB[1], KB[2], KB[3]], fond: KB[0], trait: '#f4f3f0' },
+        'Kegelbahn': { couleurs: [KB[1], KB[2], KB[3], KB[4], KB[5]], fond: KB[0], trait: '#f4f3f0', rendu: 'relief' },
+        'Penché': { biais: 0.55, rangees: 14, couleurs: [BIT[2], BIT[3], BIT[4]], fond: BIT[0], trait: BIT[1] },
+        'Fin': { rangees: 22, taille: 0.16, billes: 2400, debit: 70, coloration: 'cases', couleurs: [THER[1], THER[2], THER[3], THER[4], THER[5]], fond: '#efece6', trait: '#222222' },
+        'Gros grains': { rangees: 7, taille: 0.24, billes: 400, debit: 12, rebond: 0.55, rendu: 'relief', couleurs: [GLY[2], GLY[3], GLY[4], GLY[5], GLY[6]], fond: GLY[1], trait: GLY[0] },
+        'Menthe': { couleurs: [MENTHE[3], MENTHE[1]], fond: MENTHE[0], trait: MENTHE[1], coloration: 'hasard' },
+        'Acide': { couleurs: [ACIDE[2], ACIDE[3]], fond: ACIDE[1], trait: ACIDE[3], coloration: 'cases', rangees: 10 },
+        'Orbite': { couleurs: [ORB[0]], fond: ORB[1], trait: ORB[2], coloration: 'une', rendu: 'relief', courbe: false },
+        'Nuit': { fond: '#0d0f14', trait: '#c9cbd2', couleurs: ['#9db0ef', '#b07ad8', '#6dbf45', '#e8782f'], rendu: 'relief', clous: 'grille' },
+        'Sans courbe': { courbe: false, couleurs: ['#111111'], coloration: 'une', fond: '#f4f3f0', trait: '#111111', rangees: 14 },
+      },
+      brand(colors) {
+        const lum = (h) => { const n = parseInt(h.slice(1), 16); return ((n >> 16) & 255) * 0.299 + ((n >> 8) & 255) * 0.587 + (n & 255) * 0.114; };
+        const fond = colors[0], others = colors.slice(1);
+        const trait = others.slice().sort((a, b) => Math.abs(lum(b) - lum(fond)) - Math.abs(lum(a) - lum(fond)))[0] || '#111111';
+        return { fond, trait, couleurs: others.length ? others : [trait] };
+      },
+      pointer: {
+        down: (q) => { drag = { x0: q.x, y0: q.y, b0: p.biais, moved: false }; },
+        drag: (q) => {
+          if (!drag) return;
+          if (Math.hypot(q.x - drag.x0, q.y - drag.y0) > 8) drag.moved = true;
+          if (drag.moved) app.set('biais', Math.max(-1, Math.min(1, +(drag.b0 + (q.x - drag.x0) / (app.size.w * 0.4)).toFixed(2))));
+        },
+        up: (q) => { if (drag && !drag.moved) handful(q.x, q.y); drag = null; },
+        wheel: (q, dy) => app.set('debit', Math.max(5, Math.min(200, Math.round(p.debit + (dy > 0 ? -5 : 5))))),
+      },
+      onChange(k) {
+        if (k === 'image') maskKey = null;
+        if (['clous', 'image', 'rangees', 'taille', 'billes'].includes(k)) restart();
+      },
+      onSeed() { restart(); },
+      export: { name: 'galton', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    function restart() { nb = 0; spawned = 0; spawnAcc = 0; phase = 'fill'; phaseT = 0; geoKey = ''; }
+
+    // ——— Logo : masque binaire ———
+    function logoMask() {
+      const img = p.image || app.logoImg, key = img ? (img.src || 'c') : 'demo';
+      if (key === maskKey && mask) return mask;
+      maskKey = key; geoKey = '';
+      const M = 160, c = document.createElement('canvas'); c.width = c.height = M; const x = c.getContext('2d', { willReadFrequently: true });
+      if (img) { const iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height, k = M * 0.96 / Math.max(iw, ih); x.drawImage(img, (M - iw * k) / 2, (M - ih * k) / 2, iw * k, ih * k); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(80, 80, 76, 0, TAU); x.arc(80, 80, 44, 0, TAU, true); x.fill('evenodd'); x.fillRect(70, 2, 20, 156); }
+      const d = x.getImageData(0, 0, M, M).data, inside = new Uint8Array(M * M);
+      let transp = 0; for (let i = 3; i < d.length; i += 4) if (d[i] < 128) transp++;
+      const useA = transp > M * M * 0.05;
+      for (let i = 0; i < M * M; i++) { const l = (d[i * 4] * 0.2126 + d[i * 4 + 1] * 0.7152 + d[i * 4 + 2] * 0.0722) / 255; inside[i] = (useA ? d[i * 4 + 3] > 128 : d[i * 4 + 3] > 128 && l < 0.5) ? 1 : 0; }
+      mask = { M, inside };
+      return mask;
+    }
+
+    // ——— Géométrie : clous, cases, entonnoir ———
+    function geometry() {
+      const { w, h } = app.size, key = [w, h, p.clous, p.rangees, p.taille, maskKey].join();
+      if (geo && key === geoKey) return geo;
+      geoKey = key;
+      const n = p.rangees, cx = w / 2;
+      // pas des clous : les rangées gardent leur proportion (quinconce), la planche s'ajuste à la place
+      const dx = Math.min(w * 0.9 / (n + 2), h * 0.42 / (Math.max(1, n - 1) * 0.72));
+      const bins = p.clous === 'triangle' ? n + 1 : Math.max(n + 1, Math.floor(w * 0.88 / dx) - 1);
+      const boardW = dx * (bins + 1);
+      const r = dx * p.taille, pr = Math.max(1.5, dx * 0.06);
+      const top = h * 0.07, pegTop = top + h * 0.05;
+      let pegs = [];
+      const dyy = dx * 0.72, rowsH = dyy * Math.max(1, n - 1);
+      if (p.clous === 'triangle') {
+        for (let i = 0; i < n; i++) for (let j = 0; j <= i + 1; j++) pegs.push([cx + (j - (i + 1) / 2) * dx, pegTop + i * dyy]);
+      } else {
+        const m = p.clous === 'logo' ? logoMask() : null;
+        for (let i = 0; i < n; i++) {
+          const off = i % 2 ? 0.5 : 0;
+          for (let j = -1; j <= bins + 1; j++) {
+            const x = cx + (j + off - bins / 2 - 0.5) * dx, y = pegTop + i * dyy;
+            if (x < cx - boardW / 2 + dx * 0.3 || x > cx + boardW / 2 - dx * 0.3) continue;
+            if (m) {
+              // le logo est lu sur la zone des clous ; hors du logo, une grille plus lâche
+              const S = Math.min(boardW, rowsH * 1.1), u = (x - cx) / S + 0.5, v = (y - pegTop - rowsH / 2) / S + 0.5;
+              const ii = Math.floor(u * m.M), jj = Math.floor(v * m.M);
+              const inn = ii >= 0 && jj >= 0 && ii < m.M && jj < m.M && m.inside[jj * m.M + ii];
+              if (!inn && (i % 3 !== 1)) continue;
+            }
+            pegs.push([x, y]);
+          }
+          if (m) { // logo : grille plus fine à l'intérieur
+            for (let j = -1; j <= bins * 2 + 2; j++) {
+              const x = cx + (j / 2 + off / 2 - bins / 2 - 0.25) * dx, y = pegTop + i * dyy + dyy * 0.5;
+              if (i === n - 1 || x < cx - boardW / 2 + dx * 0.3 || x > cx + boardW / 2 - dx * 0.3) continue;
+              const S = Math.min(boardW, rowsH * 1.1), u = (x - cx) / S + 0.5, v = (y - pegTop - rowsH / 2) / S + 0.5;
+              const ii = Math.floor(u * m.M), jj = Math.floor(v * m.M);
+              if (ii >= 0 && jj >= 0 && ii < m.M && jj < m.M && m.inside[jj * m.M + ii]) pegs.push([x, y]);
+            }
+          }
+        }
+      }
+      const pegBot = pegTop + (n - 1) * dyy;
+      const binTop = pegBot + dyy * 0.9, floor = Math.min(h * 0.95, binTop + h * 0.36);
+      const left = cx - (bins / 2) * dx, right = cx + (bins / 2) * dx;
+      const walls = []; for (let k = 0; k <= bins; k++) walls.push(left + k * dx);
+      // entonnoir : deux pentes qui guident vers le centre (triangle) ; sinon pluie sur toute la largeur
+      const funnel = p.clous === 'triangle';
+      // grille des clous pour les collisions
+      const cell = dx, gx0 = left - dx * 2, gy0 = 0, GW = Math.ceil((boardW + dx * 4) / cell) + 2, GH = Math.ceil(h / cell) + 2;
+      const grid = Array.from({ length: GW * GH }, () => []);
+      for (const [x, y] of pegs) { const gi = Math.floor((x - gx0) / cell), gj = Math.floor((y - gy0) / cell); if (gi >= 0 && gj >= 0 && gi < GW && gj < GH) grid[gj * GW + gi].push(x, y); }
+      // capacité : la case la plus remplie (loi binomiale) ne doit pas déborder
+      const perLayer = Math.max(1, Math.floor((dx - 2.4) / (2 * r) * 4) / 4 * 0.9), layers = (floor - binTop) / (2 * r * 0.93);
+      const pr0 = 0.5 + Math.abs(p.biais) * 0.22; let c = 1, pmax = 0; for (let k = 0; k <= n; k++) { if (k > 0) c = c * (n - k + 1) / k; pmax = Math.max(pmax, c * Math.pow(pr0, k) * Math.pow(1 - pr0, n - k)); }
+      const cap = funnel ? Math.floor(perLayer * layers / pmax * 0.97) : Math.floor(perLayer * layers * bins * 0.85);
+      geo = { cap, perLayer, layers, n, bins, dx, dyy, r, pr, top, pegTop, pegBot, binTop, floor, left, right, walls, pegs, cx, funnel, grid, cell, gx0, gy0, GW, GH, boardW };
+      return geo;
+    }
+
+    // ——— Billes ———
+    function addBall(x, y, vx, vy) {
+      if (nb >= MAXB) return;
+      bx[nb] = x; by[nb] = y; bvx[nb] = vx; bvy[nb] = vy; btx[nb] = x; bbin[nb] = -1; brow[nb] = geo ? Math.floor((y - geo.pegTop) / geo.dyy + 0.5) : -1;
+      const nc = Math.max(1, p.couleurs.length);
+      // les pile-ou-face de chaque rangée sont tirés d'avance : la case d'arrivée est connue, d'où sa couleur
+      let dec = 0, rights = 0; const pr = 0.5 + p.biais * 0.2;
+      for (let k = 0; k < 22; k++) if (app.random() < pr) { dec |= 1 << k; if (k < (geo ? geo.n : 12)) rights++; }
+      bdec[nb] = dec >>> 0;
+      const n = geo ? geo.n : 12;
+      bc[nb] = p.coloration === 'une' ? 0 : p.coloration === 'hasard' ? Math.floor(app.random() * nc) : (rights + (n % 2 ? 0 : 0)) % nc;
+      nb++;
+    }
+    function spawnOne() {
+      const g = geo, r = app.random;
+      if (g.funnel) addBall(g.cx + (r() - 0.5) * g.dx * 0.3, g.top, (r() - 0.5) * 8, Math.sqrt(Math.min(app.size.w, app.size.h) * 1.6 * g.dx));
+      else addBall(g.left + g.r + r() * (g.right - g.left - 2 * g.r), g.top, (r() - 0.5) * 8, 20);
+      spawned++;
+    }
+    // l'entonnoir ne lâche une bille que si la précédente a dégagé la sortie
+    function spawnFree() {
+      const g = geo; if (!g.funnel) return true;
+      const lim = (2.2 * g.r) ** 2;
+      for (let i = nb - 1; i >= Math.max(0, nb - 40); i--) { const dx = bx[i] - g.cx, dy = by[i] - g.top; if (dx * dx + dy * dy < lim) return false; }
+      return true;
+    }
+    function handful(x, y) {
+      geometry();
+      for (let i = 0; i < 24; i++) { const a = app.random() * TAU, d = Math.sqrt(app.random()) * geo.dx * 0.5; addBall(x + Math.cos(a) * d, Math.min(y, geo.binTop - geo.r) + Math.sin(a) * d, 0, 0); }
+      if (phase === 'hold') { phase = 'fill'; phaseT = 0; }
+    }
+
+    // grille des billes (chaînage par case) pour les chocs entre billes
+    let head = new Int32Array(1), next = new Int32Array(MAXB);
+    function step(dt) {
+      const g = geo, S = Math.min(app.size.w, app.size.h), G = S * 1.6, gxF = G * p.biais * 0.18, VM = S * 1.3;
+      KICK = Math.sqrt(G * g.dyy) * KF; const STEER = G / g.dyy * KF * 6, VB = Math.sqrt(G * g.dx) * 0.9;
+      const fr = Math.exp(-1.6 * dt), e = p.rebond, R = g.r, R2 = 4 * R * R, PR = R + g.pr;
+      const { w, h } = app.size;
+      const left = g.left, right = g.right, pegsOn = phase !== 'drain';
+      for (let i = 0; i < nb; i++) {
+        bvy[i] += G * dt; bvx[i] += gxF * dt;
+        // la bille roule sur une planche inclinée : frottement, et vitesse plafonnée
+        bvx[i] *= fr; const sp2 = bvx[i] * bvx[i] + bvy[i] * bvy[i]; if (sp2 > VM * VM) { const k = VM / Math.sqrt(sp2); bvx[i] *= k; bvy[i] *= k; }
+        bx[i] += bvx[i] * dt; by[i] += bvy[i] * dt;
+        let x = bx[i], y = by[i];
+        // pile ou face à chaque rangée : la bille vise le passage de gauche ou de droite
+        if (pegsOn) {
+          const row = Math.floor((y - g.pegTop) / g.dyy + 0.5);
+          if (row > brow[i] && row >= 0 && row < g.n) { brow[i] = row; btx[i] += ((bdec[i] >>> row) & 1 ? 0.5 : -0.5) * g.dx; const lo = g.left + g.dx * 0.5, hi = g.right - g.dx * 0.5; if (btx[i] < lo) btx[i] = 2 * lo - btx[i]; if (btx[i] > hi) btx[i] = 2 * hi - btx[i]; }
+          if (y > g.pegTop - g.dyy && y < g.binTop) bvx[i] += ((btx[i] - x) * STEER - bvx[i] * 2 * Math.sqrt(STEER)) * dt;
+        }
+        // clous
+        if (pegsOn && y > g.pegTop - g.dx && y < g.pegBot + g.dx) {
+          const gi = Math.floor((x - g.gx0) / g.cell), gj = Math.floor((y - g.gy0) / g.cell);
+          for (let a = -1; a <= 1; a++) for (let b = -1; b <= 1; b++) {
+            const ci = gi + a, cj = gj + b; if (ci < 0 || cj < 0 || ci >= g.GW || cj >= g.GH) continue;
+            const L = g.grid[cj * g.GW + ci];
+            for (let k = 0; k < L.length; k += 2) {
+              const ddx = x - L[k], ddy = y - L[k + 1], d2 = ddx * ddx + ddy * ddy;
+              if (d2 < PR * PR && d2 > 1e-6) {
+                const d = Math.sqrt(d2), nx = ddx / d, ny = ddy / d, pen = PR - d;
+                x += nx * pen; y += ny * pen;
+                const vn = bvx[i] * nx + bvy[i] * ny;
+                if (vn < 0) {
+                  bvx[i] -= (1 + e) * vn * nx; bvy[i] -= (1 + e) * vn * ny;
+                  const vt = -bvx[i] * ny + bvy[i] * nx; bvx[i] -= -ny * vt * 0.12; bvy[i] -= nx * vt * 0.12;
+                  // un rien de hasard : la planche n'est jamais parfaite
+                  const j = (app.random() - 0.5) * 0.5 * Math.abs(vn); bvx[i] += -ny * j; bvy[i] += nx * j;
+
+                }
+              }
+            }
+          }
+        }
+        // dans les cases, la bille arrive amortie et se pose sur le tas au lieu de s'y enfoncer
+        if (y > g.binTop && phase !== 'drain') { const vm = VB; if (bvy[i] > vm) bvy[i] = vm; bvx[i] *= 0.96; }
+        bx[i] = x; by[i] = y;
+        walls(i, g, R, e, left, right);
+      }
+      for (let it = 0; it < 3; it++) {
+      // chocs entre billes
+      const cs = 2 * R, GW = Math.ceil(w / cs) + 1, GH = Math.ceil((h + 400) / cs) + 1;
+      if (head.length < GW * GH) head = new Int32Array(GW * GH);
+      head.fill(-1, 0, GW * GH);
+      for (let i = 0; i < nb; i++) { const ci = Math.min(GW - 1, Math.max(0, Math.floor(bx[i] / cs))), cj = Math.min(GH - 1, Math.max(0, Math.floor(by[i] / cs))), c = cj * GW + ci; next[i] = head[c]; head[c] = i; }
+      // les billes ne se heurtent que dans les cases : dans les clous, chacune suit son propre hasard
+      const zone = g.binTop - 3 * R;
+      for (let i = 0; i < nb; i++) {
+        if (by[i] < zone) continue;
+        const ci = Math.min(GW - 1, Math.max(0, Math.floor(bx[i] / cs))), cj = Math.min(GH - 1, Math.max(0, Math.floor(by[i] / cs)));
+        for (let a = -1; a <= 1; a++) for (let b = 0; b <= 1; b++) {
+          if (b === 0 && a < 0) continue;
+          const ni = ci + a, nj = cj + b; if (ni < 0 || ni >= GW || nj >= GH) continue;
+          for (let j = head[nj * GW + ni]; j >= 0; j = next[j]) {
+            if ((b === 0 && a === 0 && j <= i) || by[j] < zone) continue;
+            const ddx = bx[j] - bx[i], ddy = by[j] - by[i], d2 = ddx * ddx + ddy * ddy;
+            if (d2 >= R2 || d2 < 1e-8) continue;
+            const d = Math.sqrt(d2), nx = ddx / d, ny = ddy / d, pen = (2 * R - d) * 0.5;
+            bx[i] -= nx * pen; by[i] -= ny * pen; bx[j] += nx * pen; by[j] += ny * pen;
+            const vn = (bvx[j] - bvx[i]) * nx + (bvy[j] - bvy[i]) * ny;
+            if (vn < 0) { const im = -(1 + e * 0.3) * vn * 0.5; bvx[i] -= im * nx; bvy[i] -= im * ny; bvx[j] += im * nx; bvy[j] += im * ny; }
+          }
+        }
+      }
+      for (let i = 0; i < nb; i++) walls(i, g, R, e, left, right);
+      }
+    }
+
+    // cloisons, bords et fond : appliqués après le mouvement et après les chocs entre billes
+    function walls(i, g, R, e, left, right) {
+      let x = bx[i], y = by[i];
+      if (x < left + R) { x = left + R; if (bvx[i] < 0) bvx[i] *= -e; }
+      if (x > right - R) { x = right - R; if (bvx[i] > 0) bvx[i] *= -e; }
+      if (y > g.binTop - R) {
+        // la case où se trouve la bille (par son centre) ; elle n'en sort pas par les côtés
+        // la case est fixée à l'entrée : la pression du tas ne fait pas passer une bille chez la voisine
+        if (y > g.binTop && bbin[i] < 0) bbin[i] = Math.floor((x - g.left) / g.dx);
+        const k = bbin[i];
+        if (y > g.binTop && k >= 0 && k < g.bins) {
+          const a = g.left + k * g.dx + R + 1.2, b = g.left + (k + 1) * g.dx - R - 1.2;
+          if (x < a) { x = a; if (bvx[i] < 0) bvx[i] *= -e; }
+          if (x > b) { x = b; if (bvx[i] > 0) bvx[i] *= -e; }
+        } else if (y <= g.binTop) {
+          for (const wx of g.walls) {
+            const ddx = x - wx, ddy = y - g.binTop, d = Math.hypot(ddx, ddy);
+            if (d < R + 1.2 && d > 1e-6) { x = wx + ddx / d * (R + 1.2); y = g.binTop + ddy / d * (R + 1.2); const vn = (bvx[i] * ddx + bvy[i] * ddy) / d; if (vn < 0) { bvx[i] -= (1 + e) * vn * ddx / d; bvy[i] -= (1 + e) * vn * ddy / d; } if (ddy / d < -0.8) bvx[i] = (Math.abs(bvx[i]) + KICK) * (app.random() < 0.5 ? 1 : -1); }
+          }
+        }
+      }
+      if (phase !== 'drain' && y > g.floor - R) { y = g.floor - R; if (bvy[i] > 0) bvy[i] *= -e * 0.4; bvx[i] *= 0.9; }
+      bx[i] = x; by[i] = y;
+    }
+
+    let binCount = new Int32Array(64), inBins = 0;
+    function countBins() {
+      const g = geo; if (binCount.length < g.bins) binCount = new Int32Array(g.bins);
+      binCount.fill(0); inBins = 0;
+      for (let i = 0; i < nb; i++) if (by[i] > g.binTop) { const k = Math.floor((bx[i] - g.left) / g.dx); if (k >= 0 && k < g.bins) { binCount[k]++; inBins++; } }
+    }
+    function cycle(dt) {
+      const g = geo;
+      countBins();
+      phaseT += dt;
+      if (phase === 'fill') {
+        spawnAcc += dt * p.debit;
+        const target = Math.min(p.billes, g.cap);
+        while (spawnAcc >= 1 && spawned < target && spawnFree()) { spawnAcc -= 1; spawnOne(); }
+        if (spawnAcc > 1) spawnAcc = 1;
+        // une case déborde ? on arrête de verser
+        // une case pleine ? on arrête de verser
+        let over = 0; const full = g.perLayer * g.layers * 0.8;
+        for (let k = 0; k < g.bins; k++) if (binCount[k] >= full) over++;
+        for (let i = 0; i < nb; i++) if (bbin[i] >= 0 && by[i] < g.binTop + g.r * 2) { over++; break; }
+        for (let i = 0; i < nb; i++) if (by[i] < g.binTop - g.r && by[i] > g.pegBot && Math.abs(bvy[i]) < 12 && Math.abs(bvx[i]) < 12) over++;
+        overT = over ? overT + dt : 0;
+        if (overT > 0.6 || spawned >= target) { phase = 'settle'; phaseT = 0; }
+      } else if (phase === 'settle') {
+        let moving = 0; for (let i = 0; i < nb; i++) if (by[i] < g.binTop) moving++;
+        if (phaseT > 1.5 && moving < 3) { phase = 'hold'; phaseT = 0; }
+        if (phaseT > 8) { phase = 'hold'; phaseT = 0; }
+      } else if (phase === 'hold') {
+        if (phaseT > 3) { phase = 'drain'; phaseT = 0; }
+      } else if (phase === 'drain') {
+        // on retire les billes sorties par le bas
+        let k = 0; const H = app.size.h;
+        for (let i = 0; i < nb; i++) if (by[i] < H + 40) { bx[k] = bx[i]; by[k] = by[i]; bvx[k] = bvx[i]; bvy[k] = bvy[i]; bc[k] = bc[i]; btx[k] = btx[i]; brow[k] = brow[i]; bbin[k] = bbin[i]; bdec[k] = bdec[i]; k++; }
+        nb = k;
+        if (nb === 0 || phaseT > 6) { nb = 0; spawned = 0; spawnAcc = 0; phase = 'fill'; phaseT = 0; }
+      }
+    }
+
+    // ——— Dessin ———
+    function ballSprites() {
+      const key = p.couleurs.join() + p.rendu + geo.r.toFixed(2) + app.size.dpr;
+      if (key === sprKey) return sprites; sprKey = key;
+      const dpr = app.size.dpr, R = geo.r, s = Math.ceil((R * 2 + 2) * dpr);
+      sprites = (p.couleurs.length ? p.couleurs : ['#111111']).map((c) => {
+        const cv = document.createElement('canvas'); cv.width = cv.height = s; const x = cv.getContext('2d');
+        x.scale(dpr, dpr); const m = R + 1;
+        x.fillStyle = c; x.beginPath(); x.arc(m, m, R, 0, TAU); x.fill();
+        if (p.rendu === 'relief') {
+          const gr = x.createRadialGradient(m - R * 0.35, m - R * 0.4, R * 0.05, m, m, R);
+          gr.addColorStop(0, 'rgba(255,255,255,0.75)'); gr.addColorStop(0.35, 'rgba(255,255,255,0.08)'); gr.addColorStop(0.75, 'rgba(0,0,0,0.05)'); gr.addColorStop(1, 'rgba(0,0,0,0.35)');
+          x.fillStyle = gr; x.beginPath(); x.arc(m, m, R, 0, TAU); x.fill();
+        }
+        return cv;
+      });
+      return sprites;
+    }
+    // courbe attendue : loi binomiale, convertie en hauteur d'empilement
+    function expected() {
+      const g = geo, n = g.n, N = inBins;
+      const pr = Math.max(0.02, Math.min(0.98, 0.5 + p.biais * 0.22));
+      const out = []; let c = 1;
+      for (let k = 0; k <= n; k++) { if (k > 0) c = c * (n - k + 1) / k; out.push(c * Math.pow(pr, k) * Math.pow(1 - pr, n - k)); }
+      // une bille occupe environ (2r)² × 0,9 dans une case de largeur dx
+      const per = (g.dx - 2.4) / (2 * g.r) * 0.9;
+      return out.map((q) => q * N / per * 2 * g.r * 0.66);
+    }
+
+    app.loop((t, dt) => {
+      const { w, h, dpr } = app.size;
+      const g = geometry();
+      if (app.thumbnail && !warm) { warm = true; for (let k = 0; k < 2400 && (phase === 'fill' || phase === 'settle'); k++) { cycle(1 / 60); for (let s = 0; s < 3; s++) step(1 / 180); } }
+      dt = Math.min(1 / 30, dt || 0);
+      if (!app.thumbnail) { cycle(dt); const sub = 3; for (let s = 0; s < sub; s++) step(dt / sub); }
+
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = p.fond; ctx.fillRect(0, 0, w, h);
+      // planche : cloisons, fond, entonnoir
+      ctx.strokeStyle = p.trait; ctx.fillStyle = p.trait; ctx.lineCap = 'round';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      for (const wx of g.walls) { ctx.moveTo(wx, g.binTop); ctx.lineTo(wx, g.floor); }
+      if (phase !== 'drain') { ctx.moveTo(g.left, g.floor); ctx.lineTo(g.right, g.floor); }
+      if (g.funnel) {
+        const fw = g.dx * 0.9, ft = g.top - g.dx * 1.2;
+        ctx.moveTo(g.cx - g.dx * 2.2, ft); ctx.lineTo(g.cx - fw / 2, g.top + g.dx * 0.1);
+        ctx.moveTo(g.cx + g.dx * 2.2, ft); ctx.lineTo(g.cx + fw / 2, g.top + g.dx * 0.1);
+      }
+      ctx.stroke();
+      for (const [x, y] of g.pegs) { ctx.beginPath(); ctx.arc(x, y, g.pr, 0, TAU); ctx.fill(); }
+      // billes
+      const sp = ballSprites(), s = sp[0].width / dpr, half = s / 2;
+      for (let i = 0; i < nb; i++) ctx.drawImage(sp[bc[i] % sp.length], bx[i] - half, by[i] - half, s, s);
+      // courbe attendue
+      if (p.courbe && p.clous === 'triangle') {
+        const ex = expected(), pts = ex.map((v, k) => [g.left + (k + 0.5) * g.dx, g.floor - v]);
+        ctx.strokeStyle = p.trait; ctx.lineWidth = 1.5; ctx.setLineDash([4, 4]); ctx.beginPath();
+        // spline de Catmull-Rom par les sommets des cases
+        ctx.moveTo(pts[0][0], pts[0][1]);
+        for (let k = 0; k < pts.length - 1; k++) {
+          const p0 = pts[Math.max(0, k - 1)], p1 = pts[k], p2 = pts[k + 1], p3 = pts[Math.min(pts.length - 1, k + 2)];
+          ctx.bezierCurveTo(p1[0] + (p2[0] - p0[0]) / 6, p1[1] + (p2[1] - p0[1]) / 6, p2[0] - (p3[0] - p1[0]) / 6, p2[1] - (p3[1] - p1[1]) / 6, p2[0], p2[1]);
+        }
+        ctx.stroke(); ctx.setLineDash([]);
+      }
+      app.finish(ctx);
+    });
+
+    function toSVG() {
+      const { w, h } = app.size, g = geometry(), f = (v) => v.toFixed(1), out = [];
+      out.push(`<rect width="100%" height="100%" fill="${p.fond}"/>`);
+      let d = '';
+      for (const wx of g.walls) d += `M${f(wx)} ${f(g.binTop)}V${f(g.floor)}`;
+      if (phase !== 'drain') d += `M${f(g.left)} ${f(g.floor)}H${f(g.right)}`;
+      if (g.funnel) { const fw = g.dx * 0.9, ft = g.top - g.dx * 1.2; d += `M${f(g.cx - g.dx * 2.2)} ${f(ft)}L${f(g.cx - fw / 2)} ${f(g.top + g.dx * 0.1)}M${f(g.cx + g.dx * 2.2)} ${f(ft)}L${f(g.cx + fw / 2)} ${f(g.top + g.dx * 0.1)}`; }
+      out.push(`<path d="${d}" stroke="${p.trait}" stroke-width="2" stroke-linecap="round" fill="none"/>`);
+      out.push(`<g fill="${p.trait}">${g.pegs.map(([x, y]) => `<circle cx="${f(x)}" cy="${f(y)}" r="${f(g.pr)}"/>`).join('')}</g>`);
+      const cols = p.couleurs.length ? p.couleurs : ['#111111'];
+      const defs = p.rendu === 'relief' ? `<defs><radialGradient id="rel" cx="0.32" cy="0.3" r="0.75"><stop offset="0" stop-color="#fff" stop-opacity="0.75"/><stop offset="0.35" stop-color="#fff" stop-opacity="0.08"/><stop offset="0.75" stop-color="#000" stop-opacity="0.05"/><stop offset="1" stop-color="#000" stop-opacity="0.35"/></radialGradient></defs>` : '';
+      const balls = [];
+      for (let i = 0; i < nb; i++) {
+        if (by[i] > h + g.r) continue;
+        balls.push(`<circle cx="${f(bx[i])}" cy="${f(by[i])}" r="${f(g.r)}" fill="${cols[bc[i] % cols.length]}"/>`);
+        if (p.rendu === 'relief') balls.push(`<circle cx="${f(bx[i])}" cy="${f(by[i])}" r="${f(g.r)}" fill="url(#rel)"/>`);
+      }
+      out.push(`<g>${balls.join('')}</g>`);
+      if (p.courbe && p.clous === 'triangle') {
+        const ex = expected(), pts = ex.map((v, k) => [g.left + (k + 0.5) * g.dx, g.floor - v]);
+        let c = `M${f(pts[0][0])} ${f(pts[0][1])}`;
+        for (let k = 0; k < pts.length - 1; k++) {
+          const p0 = pts[Math.max(0, k - 1)], p1 = pts[k], p2 = pts[k + 1], p3 = pts[Math.min(pts.length - 1, k + 2)];
+          c += `C${f(p1[0] + (p2[0] - p0[0]) / 6)} ${f(p1[1] + (p2[1] - p0[1]) / 6)} ${f(p2[0] - (p3[0] - p1[0]) / 6)} ${f(p2[1] - (p3[1] - p1[1]) / 6)} ${f(p2[0])} ${f(p2[1])}`;
+        }
+        out.push(`<path d="${c}" stroke="${p.trait}" stroke-width="1.5" stroke-dasharray="4 4" fill="none"/>`);
+      }
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">\n${defs}\n${out.join('\n')}\n</svg>`;
+    }
+  </script>
+</body>
+</html>
