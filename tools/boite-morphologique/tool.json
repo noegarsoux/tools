@@ -1,0 +1,15 @@
+{
+  "slug": "boite-morphologique",
+  "title": "Boîte morphologique",
+  "type": "system",
+  "description": "Une marque ou le logo déclinés en grille selon deux axes croisés (forme, pointes, bandes, coupe, rotation, couleur), une troisième variable vit dans le temps.",
+  "tags": ["identite", "systeme", "grille", "logo", "variations", "svg"],
+  "inspiration": [
+    "Karl Gerstner, Designing Programmes (1964) : la boîte morphologique",
+    "Tableaux de déclinaisons des identités flexibles (CodeCrafted)",
+    "references/identites.md ; palettes biennale, kegelbahn, salon, good-room, luzern, bitmap"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
