@@ -1,0 +1,17 @@
+{
+  "slug": "trame-liquide",
+  "title": "Trame liquide",
+  "type": "pattern",
+  "description": "Une trame de points qui se soudent en métaballes selon un champ de bruit, d'ondes, d'image ou de logo. Pinceau pour gonfler la trame, export SVG fidèle.",
+  "tags": ["trame", "halftone", "metaballes", "sdf", "motif", "boucle"],
+  "inspiration": [
+    "Moodboard de Noé, fiche 2 — silhouettes en métaballes tramées (palette gris-0006)",
+    "Moodboard de Noé, fiche 25 — trame ouverte (palette trame-nuit)",
+    "Moodboard de Noé, fiche 7 — marques en points des années 60",
+    "Inigo Quilez — smooth minimum et fonctions de distance 2D",
+    "Potentiel électrostatique et métaballes (physique-maths.md, champs)"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
