@@ -1,0 +1,15 @@
+{
+  "slug": "typo-colonnes",
+  "title": "Typo en colonnes",
+  "type": "typography",
+  "description": "Un mot condensé rastérisé en gros pixels, découpé en colonnes qui glissent par à-coups, se recolorent, coulent et se recomposent, en datamosh.",
+  "tags": ["pixels", "glitch", "datamosh", "typographie", "svg", "motion"],
+  "inspiration": [
+    "Lettres en colonnes de pixels avec glitchs verticaux (moodboard 23)",
+    "Datamosh et pixel sorting (Kim Asendorf, ASDFPixelSort)",
+    "references/moodboard.md ; palettes pixels, code, trame-nuit, papier-60, kegelbahn, bitmap, acide, glyphes"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}

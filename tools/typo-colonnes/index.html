@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Typo en colonnes</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Typo en colonnes (moodboard 23) : un mot condensé est rastérisé en gros pixels, puis découpé en
+    // colonnes. Chaque colonne a sa couleur et glisse verticalement par à-coups (datamosh) avant de se
+    // remettre en place ; certaines coulent, comme des pixels étirés. Tout est fonction du temps
+    // (créneaux et hachage), donc l'animation boucle proprement et l'export SVG reprend l'instant exact.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const PIX = PAL('pixels'), KB = PAL('kegelbahn'), P60 = PAL('papier-60'), NUIT = PAL('trame-nuit'), BIT = PAL('bitmap');
+    const ACIDE = PAL('acide'), GLY = PAL('glyphes'), TH = PAL('thermique'), CODE = PAL('code'), BIEN = PAL('biennale');
+    const FONTS = {
+      grotesque: "'Helvetica Neue', Helvetica, Arial, sans-serif",
+      serif: "Georgia, 'Times New Roman', Times, serif",
+      mono: "'Courier New', Courier, monospace",
+    };
+
+    let ptr = null, burstAt = -1e9, grid = null, clock = 0;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.04, vignette: 0 },
+      hint: 'Survol : les colonnes s’écartent sous le pointeur · touchez pour une salve de glitchs · molette : taille des pixels',
+      notes: 'Le mot est rastérisé en gros pixels puis découpé en colonnes. Chaque colonne glisse par à-coups, change de couleur pendant le glitch et se remet en place ; certaines coulent.',
+      params: {
+        'Texte': {
+          texte: { type: 'textarea', label: 'Texte (une ligne par retour)', value: 'PIXEL', rows: 2 },
+          police: { type: 'font', label: 'Police', options: { grotesque: 'Grotesque', serif: 'Sérif', mono: 'Machine' }, value: 'grotesque' },
+          graisse: { type: 'segmented', label: 'Graisse', options: { 400: 'Normale', 700: 'Grasse', 900: 'Noire' }, value: '900' },
+          condense: { type: 'range', label: 'Condensation', min: 0.4, max: 1.2, step: 0.01, value: 0.5 },
+          taille: { type: 'range', label: 'Taille', min: 0.2, max: 1, step: 0.01, value: 0.86 },
+        },
+        'Pixels': {
+          pixel: { type: 'range', label: 'Taille des pixels', min: 3, max: 48, step: 1, value: 12 },
+          forme: { type: 'segmented', label: 'Forme', options: { carre: 'Carré', rond: 'Rond', barre: 'Barre' }, value: 'carre' },
+          ecart: { type: 'range', label: 'Écart', min: 0, max: 0.45, step: 0.01, value: 0.08 },
+        },
+        'Glitch': {
+          glitch: { type: 'range', label: 'Fréquence des glitchs', min: 0, max: 1, step: 0.01, value: 0.28 },
+          amplitude: { type: 'range', label: 'Amplitude (en pixels)', min: 0, max: 40, step: 1, value: 9 },
+          duree: { type: 'range', label: 'Durée d’un glitch (s)', min: 0.2, max: 4, step: 0.05, value: 1.1 },
+          coulure: { type: 'range', label: 'Coulures', min: 0, max: 1, step: 0.01, value: 0.18 },
+          vague: { type: 'range', label: 'Vague', min: 0, max: 1, step: 0.01, value: 0 },
+          rayon: { type: 'range', label: 'Rayon du pointeur', min: 0.03, max: 0.5, step: 0.01, value: 0.12 },
+        },
+        'Couleur': {
+          colorer: { type: 'segmented', label: 'Couleur des colonnes', options: { hasard: 'Hasard', bandes: 'Bandes', lettre: 'Par lettre', degrade: 'Dégradé' }, value: 'bandes' },
+          largeurBande: { type: 'range', label: 'Largeur des bandes (colonnes)', min: 1, max: 12, step: 1, value: 2, show: (q) => q.colorer === 'bandes' },
+          fond: { type: 'color', label: 'Fond', value: PIX[0] },
+          couleurs: { type: 'palette', label: 'Couleurs', value: [PIX[1], PIX[2], PIX[3], PIX[4], PIX[5]] },
+        },
+      },
+      presets: {
+        'Pixels': {},
+        'Code': { texte: 'RETURN', police: 'mono', graisse: '700', condense: 0.8, pixel: 9, colorer: 'bandes', largeurBande: 2, fond: CODE[6], couleurs: [CODE[1], CODE[2], CODE[3], CODE[4], CODE[5]], glitch: 0.4, coulure: 0.35 },
+        'Nuit': { texte: 'NOISE', pixel: 7, forme: 'rond', ecart: 0.18, fond: NUIT[0], couleurs: [NUIT[1], NUIT[2]], colorer: 'hasard', glitch: 0.5, amplitude: 14, duree: 0.6 },
+        'Papier': { texte: 'DATA\nMOSH', pixel: 10, fond: P60[0], couleurs: [P60[1]], colorer: 'hasard', glitch: 0.22, coulure: 0.3, condense: 0.7 },
+        'Kegelbahn': { texte: 'GLITCH', pixel: 14, forme: 'barre', ecart: 0.2, fond: KB[0], couleurs: [KB[1], KB[2], KB[3], KB[4], KB[5]], colorer: 'degrade', vague: 0.4, glitch: 0.15 },
+        'Bitmap': { texte: 'BIT\nMAP', pixel: 16, fond: BIT[0], couleurs: [BIT[1], BIT[2], BIT[3], BIT[4]], colorer: 'lettre', amplitude: 6, glitch: 0.35, ecart: 0.04 },
+        'Acide': { texte: 'RAVE', pixel: 11, fond: ACIDE[1], couleurs: [ACIDE[2], ACIDE[3], ACIDE[0]], colorer: 'bandes', largeurBande: 4, glitch: 0.6, amplitude: 20, duree: 0.45, coulure: 0.4 },
+        'Glyphes': { texte: 'SIGNE', police: 'serif', graisse: '700', condense: 0.75, pixel: 8, fond: GLY[1], couleurs: [GLY[2], GLY[3], GLY[4], GLY[5], GLY[6]], colorer: 'hasard', glitch: 0.2 },
+        'Thermique': { texte: 'CHALEUR', pixel: 9, forme: 'rond', ecart: 0.1, fond: TH[0], couleurs: [TH[1], TH[2], TH[3], TH[4], TH[5]], colorer: 'degrade', vague: 0.7, glitch: 0.1, coulure: 0 },
+        'Biennale': { texte: 'AFFICHE', pixel: 13, fond: BIEN[0], couleurs: [BIEN[1], BIEN[2], BIEN[3], BIEN[4]], colorer: 'lettre', glitch: 0.3, amplitude: 12, forme: 'barre', ecart: 0.12 },
+      },
+      brand(colors) {
+        const rest = colors.slice(1);
+        return { fond: colors[0], couleurs: (rest.length ? rest : ['#ffffff']).slice(0, 6) };
+      },
+      pointer: {
+        move: (q) => { ptr = { x: q.x, y: q.y }; },
+        down: (q) => { ptr = { x: q.x, y: q.y }; burstAt = clock; },
+        wheel: (q, dy) => app.set('pixel', Math.max(3, Math.min(48, Math.round(p.pixel + (dy > 0 ? -1 : 1))))),
+      },
+      onChange(k) { if (k === '*' || ['texte', 'police', 'graisse', 'condense', 'taille', 'pixel', '_logo'].includes(k)) grid = null; },
+      onSeed() { grid = null; },
+      export: { name: 'typo-colonnes', svg: () => toSVG() },
+    });
+    const p = app.params;
+    canvas.addEventListener('pointerleave', () => { ptr = null; });
+    if (document.fonts) document.fonts.addEventListener('loadingdone', () => { grid = null; });
+
+    // ——— Rastérisation : le mot en grille de gros pixels ———
+    function family() { return p.police === 'AtelierBrand' ? "'AtelierBrand', sans-serif" : (FONTS[p.police] || FONTS.grotesque); }
+    function build(w, h) {
+      const s = p.pixel, cols = Math.max(4, Math.floor(w / s)), rows = Math.max(4, Math.floor(h / s));
+      const k = 4, cv = document.createElement('canvas'); cv.width = cols * k; cv.height = rows * k;
+      const c = cv.getContext('2d', { willReadFrequently: true });
+      c.fillStyle = '#000'; c.fillRect(0, 0, cv.width, cv.height);
+      const lines = String(p.texte || '').split('\n').map((x) => x.trim()).filter(Boolean);
+      const boxes = [];
+      if (lines.length) {
+        const W = cv.width, H = cv.height, sx = p.condense, fam = family();
+        c.font = `${p.graisse} 100px ${fam}`;
+        let mw = 1;
+        for (const l of lines) mw = Math.max(mw, c.measureText(l).width * sx);
+        const lh = 0.9, size = Math.min(W * p.taille / mw * 100, H * Math.min(0.94, p.taille * 1.05) / (lines.length * lh));
+        c.font = `${p.graisse} ${size}px ${fam}`;
+        c.textBaseline = 'middle'; c.fillStyle = '#fff';
+        lines.forEach((l, i) => {
+          const lw = c.measureText(l).width * sx, y = H / 2 + (i - (lines.length - 1) / 2) * size * lh + size * 0.05;
+          let x = W / 2 - lw / 2;
+          c.save(); c.translate(x, y); c.scale(sx, 1); c.fillText(l, 0, 0); c.restore();
+          for (const ch of l) { const cw = c.measureText(ch).width * sx; if (ch.trim()) boxes.push([x / k, (x + cw) / k]); x += cw; }
+        });
+      }
+      // Un pixel est allumé si la lettre couvre au moins la moitié de sa case.
+      const d = c.getImageData(0, 0, cv.width, cv.height).data, on = new Uint8Array(cols * rows);
+      for (let j = 0; j < rows; j++) for (let i = 0; i < cols; i++) {
+        let sum = 0;
+        for (let y = 0; y < k; y++) for (let x = 0; x < k; x++) sum += d[((j * k + y) * cv.width + i * k + x) * 4];
+        on[j * cols + i] = sum / (k * k * 255) >= 0.5 ? 1 : 0;
+      }
+      // Lettre de chaque colonne (pour la couleur par lettre) et étendue verticale du mot.
+      const letterOf = new Int16Array(cols);
+      for (let i = 0; i < cols; i++) {
+        let best = 0, bd = 1e9;
+        boxes.forEach((b, n) => { const x = i + 0.5, dd = x < b[0] ? b[0] - x : x > b[1] ? x - b[1] : 0; if (dd < bd) { bd = dd; best = n; } });
+        letterOf[i] = best;
+      }
+      grid = { cols, rows, s, on, letterOf, w, h, x0: (w - cols * s) / 2, y0: (h - rows * s) / 2 };
+    }
+
+    // ——— Colonnes animées ———
+    const hash = (a, b, c = 0) => { let n = (a * 374761393 + b * 668265263 + c * 2147483647 + app.seed * 1013904223) | 0; n = Math.imul(n ^ (n >>> 13), 1274126177); return ((n ^ (n >>> 16)) >>> 0) / 4294967295; };
+    const smooth = (x) => x * x * (3 - 2 * x);
+    function columnState(i, t) {
+      const G = grid, D = p.duree;
+      // Créneaux décalés par colonne : à chaque créneau, la colonne glitche ou non.
+      const ph = hash(i, 1), slot = Math.floor(t / D + ph), u = t / D + ph - slot;
+      const burst = Math.max(0, 1 - (t - burstAt) / 1.2);
+      const prob = Math.min(1, p.glitch * 0.45 + burst * 0.9);
+      let off = 0, recolor = 0, drip = null;
+      if (hash(i, slot, 2) < prob) {
+        // Montée rapide, palier, retour : la colonne se recompose avant la fin du créneau.
+        const env = u < 0.18 ? smooth(u / 0.18) : u > 0.78 ? smooth(1 - (u - 0.78) / 0.22) : 1;
+        const target = Math.round((hash(i, slot, 3) * 2 - 1) * p.amplitude);
+        off = Math.round(target * env);
+        recolor = env > 0.5 ? 1 + Math.floor(hash(i, slot, 4) * 3) : 0;
+      }
+      if (hash(i, slot, 5) < p.coulure * 0.5) {
+        const r0 = Math.floor(hash(i, slot, 6) * G.rows), len = Math.round((u < 0.85 ? smooth(Math.min(1, u / 0.5)) : smooth((1 - u) / 0.15)) * hash(i, slot, 7) * G.rows * 0.5);
+        if (len > 0) drip = [r0, len];
+      }
+      if (p.vague > 0) off += Math.round(p.vague * G.rows * 0.08 * Math.sin(t * 1.4 - i * 0.22));
+      if (ptr) {
+        // Survol : les colonnes proches s'écartent du pointeur, vers le haut ou vers le bas.
+        const cx = G.x0 + (i + 0.5) * G.s, R = Math.min(G.w, G.h) * p.rayon, dx = Math.abs(cx - ptr.x);
+        if (dx < R) {
+          const f = (1 - dx / R) ** 2, dir = ptr.y > G.h / 2 ? -1 : 1;
+          off += Math.round(dir * f * Math.max(4, p.amplitude) * 1.2);
+        }
+      }
+      return { off, recolor, drip };
+    }
+    function colColor(i, recolor, pal) {
+      const G = grid, n = pal.length;
+      let k;
+      if (p.colorer === 'bandes') k = Math.floor(i / p.largeurBande);
+      else if (p.colorer === 'lettre') k = G.letterOf[i];
+      else if (p.colorer === 'degrade') k = Math.floor(i / G.cols * n);
+      else k = Math.floor(hash(i, 9) * n);
+      return pal[(((k + recolor) % n) + n) % n];
+    }
+    // Parcourt les pixels allumés, colonne par colonne, en suites verticales (une suite = un rectangle en SVG).
+    function eachRun(t, fn) {
+      const G = grid, pal = p.couleurs && p.couleurs.length ? p.couleurs : ['#ffffff'];
+      for (let i = 0; i < G.cols; i++) {
+        const st = columnState(i, t), col = colColor(i, st.recolor, pal);
+        const at = (j) => {
+          let src = j - st.off;
+          // Coulure : sous la ligne r0, la colonne répète le pixel de r0.
+          if (st.drip && src > st.drip[0] && src <= st.drip[0] + st.drip[1]) src = st.drip[0];
+          return src >= 0 && src < G.rows && G.on[src * G.cols + i];
+        };
+        let start = -1;
+        for (let j = 0; j <= G.rows; j++) {
+          const v = j < G.rows && at(j);
+          if (v && start < 0) start = j;
+          if (!v && start >= 0) { fn(i, start, j - start, col); start = -1; }
+        }
+      }
+    }
+
+    function drawRun(c, i, j0, n, col) {
+      const G = grid, s = G.s, g = s * p.ecart, x = G.x0 + i * s + g / 2, wd = s - g;
+      c.fillStyle = col;
+      if (p.forme === 'carre') { c.fillRect(x, G.y0 + j0 * s + g / 2, wd, n * s - g); return; }
+      if (p.forme === 'barre') { c.beginPath(); c.roundRect(x, G.y0 + j0 * s + g / 2, wd, n * s - g, wd / 2); c.fill(); return; }
+      for (let j = j0; j < j0 + n; j++) { c.beginPath(); c.arc(x + wd / 2, G.y0 + (j + 0.5) * s, wd / 2, 0, Math.PI * 2); c.fill(); }
+    }
+
+    app.loop((t) => {
+      clock = t;
+      const { w, h, dpr } = app.size;
+      if (!grid || grid.w !== w || grid.h !== h) build(w, h);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = p.fond; ctx.fillRect(0, 0, w, h);
+      eachRun(t, (i, j0, n, col) => drawRun(ctx, i, j0, n, col));
+      app.finish(ctx);
+    });
+
+    // ——— Export SVG : les suites de pixels de l'instant, regroupées par couleur ———
+    function toSVG() {
+      const { w, h } = app.size;
+      if (!grid) build(w, h);
+      const G = grid, s = G.s, g = s * p.ecart, wd = s - g, f = (v) => +v.toFixed(2), groups = new Map();
+      eachRun(clock, (i, j0, n, col) => {
+        const x = G.x0 + i * s + g / 2;
+        let el;
+        if (p.forme === 'carre') el = `<rect x="${f(x)}" y="${f(G.y0 + j0 * s + g / 2)}" width="${f(wd)}" height="${f(n * s - g)}"/>`;
+        else if (p.forme === 'barre') el = `<rect x="${f(x)}" y="${f(G.y0 + j0 * s + g / 2)}" width="${f(wd)}" height="${f(n * s - g)}" rx="${f(wd / 2)}"/>`;
+        else { el = ''; for (let j = j0; j < j0 + n; j++) el += `<circle cx="${f(x + wd / 2)}" cy="${f(G.y0 + (j + 0.5) * s)}" r="${f(wd / 2)}"/>`; }
+        if (!groups.has(col)) groups.set(col, []);
+        groups.get(col).push(el);
+      });
+      let body = '';
+      for (const [col, els] of groups) body += `<g fill="${col}">${els.join('')}</g>\n`;
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"${p.forme === 'carre' ? ' shape-rendering="crispEdges"' : ''}>\n<rect width="100%" height="100%" fill="${p.fond}"/>\n${body}</svg>`;
+    }
+  </script>
+</body>
+</html>
