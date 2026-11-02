@@ -1,0 +1,293 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Cerfs-volants</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Cerfs-volants : des cerfs-volants aux couleurs de la marque, retenus par leur corde, qui montent
+    // quand le vent forcit, retombent quand il mollit, dessinent des huit et traînent des queues de rubans
+    // (chaînes souples soumises au vent). Losanges, deltas, ou voiles imprimées du logo.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const BIEN = PAL('biennale'), KB = PAL('kegelbahn'), SALON = PAL('salon'), MENTHE = PAL('menthe'), THER = PAL('thermique'), GLY = PAL('glyphes'), BIT = PAL('bitmap'), EVT = PAL('eventail');
+
+    let kites = [], kKey = '', clouds = [], time = 0, gust = 0, drag = null, logoSpr = null, logoKey = null, frozen = false;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.04, vignette: 0.18 },
+      hint: 'Attrapez un cerf-volant pour tirer sa corde · touchez le ciel pour une rafale · molette : force du vent',
+      notes: 'Chaque cerf-volant tient au bout de sa corde : son angle avec la verticale cherche un équilibre qui dépend du vent (plus il souffle, plus il monte) et oscille autour, avec une dérive latérale en huit. Les queues sont des chaînes de points (intégration de Verlet) tirées par le vent et la pesanteur ; la corde fléchit quand le vent faiblit.',
+      params: {
+        'Cerfs-volants': {
+          forme: { type: 'select', label: 'Forme', options: { losange: 'Losange', delta: 'Delta', logo: 'Logo sur la voile', mixte: 'Mélange' }, value: 'mixte' },
+          image: { type: 'file', label: 'Logo', accept: 'image/*', show: (q) => q.forme === 'logo' || q.forme === 'mixte' },
+          nombre: { type: 'range', label: 'Nombre', min: 1, max: 9, step: 1, value: 4 },
+          taille: { type: 'range', label: 'Taille', min: 0.04, max: 0.2, step: 0.005, value: 0.09 },
+          corde: { type: 'range', label: 'Longueur des cordes', min: 0.3, max: 1, step: 0.01, value: 0.75 },
+          queue: { type: 'range', label: 'Longueur des queues', min: 0, max: 1, step: 0.01, value: 0.55 },
+          couleurs: { type: 'palette', label: 'Voiles', value: ['#e5452a', '#f2e640', '#4b6cf0', '#f2b0c8', '#111111'] },
+        },
+        'Vent': {
+          vent: { type: 'range', label: 'Force', min: 0, max: 1, step: 0.01, value: 0.55 },
+          rafales: { type: 'range', label: 'Rafales', min: 0, max: 1, step: 0.01, value: 0.5 },
+          direction: { type: 'segmented', label: 'Direction', options: { droite: '→', gauche: '←' }, value: 'droite' },
+        },
+        'Paysage': {
+          ciel: { type: 'color', label: 'Ciel (haut)', value: '#7fb2e8' },
+          horizon: { type: 'color', label: 'Ciel (bas)', value: '#e9eef2' },
+          nuages: { type: 'range', label: 'Nuages', min: 0, max: 1, step: 0.01, value: 0.5 },
+          sol: { type: 'select', label: 'Sol', options: { collines: 'Collines', mer: 'Mer', aucun: 'Aucun' }, value: 'collines' },
+          terre: { type: 'color', label: 'Couleur du sol', value: '#5f8f4e' },
+        },
+      },
+      presets: {
+        'Prairie': {},
+        'Grand vent': { vent: 0.95, rafales: 0.8, nombre: 6, queue: 0.8 },
+        'Brise': { vent: 0.22, rafales: 0.3, nombre: 3, taille: 0.11 },
+        'Logo': { forme: 'logo', nombre: 3, taille: 0.13, couleurs: ['#f4f3f0', '#111111'] },
+        'Deltas': { forme: 'delta', nombre: 6, taille: 0.08, queue: 0.35 },
+        'Losanges': { forme: 'losange', nombre: 5, queue: 0.9 },
+        'Plage': { sol: 'mer', terre: '#2f6fa8', ciel: '#58a6d6', horizon: '#f4e7c8', nombre: 5 },
+        'Crépuscule': { ciel: '#2d2a5a', horizon: '#f28a5a', terre: '#2a1f2e', nuages: 0.35, couleurs: ['#f2c230', '#e5452a', '#f4f1ea'] },
+        'Biennale': { couleurs: [BIEN[2], BIEN[3], BIEN[4], BIEN[1]], ciel: '#cfd8df', horizon: BIEN[0], terre: '#c9c4bb', sol: 'collines', nuages: 0.3 },
+        'Kegelbahn': { couleurs: [KB[1], KB[2], KB[3], KB[5]], ciel: '#1a1440', horizon: '#3a2a6a', terre: KB[0], nuages: 0.2 },
+        'Salon': { couleurs: [SALON[2], SALON[3], SALON[4], SALON[1]], ciel: '#bcd6e8', horizon: SALON[0], terre: '#c8c2b4', forme: 'losange' },
+        'Bitmap': { couleurs: [BIT[2], BIT[3], BIT[4], BIT[1]], ciel: '#9fc3e6', horizon: BIT[0], terre: '#7d9e5a', forme: 'delta', nombre: 7 },
+        'Éventail': { couleurs: [EVT[1], EVT[2], EVT[3], EVT[4]], ciel: '#a8c4cc', horizon: '#efe5cf', terre: EVT[0], sol: 'collines' },
+      },
+      brand(colors) {
+        const lum = (h) => { const n = parseInt(h.slice(1), 16); return ((n >> 16) & 255) * 0.299 + ((n >> 8) & 255) * 0.587 + (n & 255) * 0.114; };
+        const all = colors.slice().sort((a, b) => lum(b) - lum(a));
+        return { horizon: all[0], couleurs: all.slice(1).length ? all.slice(1) : all, terre: all[all.length - 1] };
+      },
+      pointer: {
+        down: (q) => {
+          let best = null, bd = Infinity; for (const k of kites) { const d = Math.hypot(k.x - q.x, k.y - q.y); if (d < bd) { bd = d; best = k; } }
+          drag = { x: q.x, y: q.y, x0: q.x, y0: q.y, k: best && bd < best.s * 1.6 ? best : null, moved: false };
+        },
+        drag: (q) => { if (!drag) return; drag.x = q.x; drag.y = q.y; if (Math.hypot(q.x - drag.x0, q.y - drag.y0) > 6) drag.moved = true; },
+        up: (q) => { if (drag && !drag.moved && !drag.k) gust = Math.min(1.5, gust + 0.9); drag = null; },
+        wheel: (q, dy) => app.set('vent', Math.max(0, Math.min(1, +(p.vent + (dy > 0 ? -0.05 : 0.05)).toFixed(2)))),
+      },
+      onChange(k) { if (['forme', 'nombre', 'taille', 'corde', 'queue', 'sol'].includes(k)) kKey = ''; if (k === 'image') logoKey = null; frozen = false; },
+      onSeed() { kKey = ''; frozen = false; },
+      export: { name: 'cerfs-volants', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    const hex = (h) => { const n = parseInt(h.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; };
+    const rgb = (c) => `rgb(${Math.round(c[0])},${Math.round(c[1])},${Math.round(c[2])})`;
+    const mixc = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+    const shadeHex = (h, t) => rgb(mixc(hex(h), t > 0 ? [255, 255, 255] : [0, 0, 0], Math.abs(t)));
+    function hash(n) { const s = Math.sin(n * 127.1 + app.seed * 0.0131) * 43758.5453; return s - Math.floor(s); }
+    function vnoise(x, o) { const i = Math.floor(x), f = x - i, u = f * f * (3 - 2 * f); return hash(i + o) * (1 - u) + hash(i + 1 + o) * u; }
+    const lumHex = (h) => { const c = hex(h); return c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114; };
+
+    const groundY = () => app.size.h * (p.sol === 'aucun' ? 1.02 : 0.86);
+    const dir = () => p.direction === 'gauche' ? -1 : 1;
+
+    function logoSprite(col) {
+      const img = p.image || app.logoImg, key = (img ? (img.src || 'c') : 'demo') + col;
+      if (logoSpr && logoKey === key) return logoSpr; logoKey = key;
+      const M = 160, c = document.createElement('canvas'); c.width = c.height = M; const x = c.getContext('2d');
+      if (img) {
+        const iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height, k = M * 0.9 / Math.max(iw, ih);
+        x.drawImage(img, (M - iw * k) / 2, (M - ih * k) / 2, iw * k, ih * k);
+        const d = x.getImageData(0, 0, M, M), a = d.data; let transp = 0; for (let i = 3; i < a.length; i += 4) if (a[i] < 128) transp++;
+        const useA = transp > M * M * 0.05, cc = hex(col);
+        for (let i = 0; i < a.length; i += 4) { const l = (a[i] * 0.2126 + a[i + 1] * 0.7152 + a[i + 2] * 0.0722) / 255, on = useA ? a[i + 3] / 255 : (a[i + 3] > 128 && l < 0.5 ? 1 : 0); a[i] = cc[0]; a[i + 1] = cc[1]; a[i + 2] = cc[2]; a[i + 3] = on * 255; }
+        x.putImageData(d, 0, 0);
+      } else { x.fillStyle = col; x.beginPath(); x.arc(80, 80, 70, 0, TAU); x.arc(80, 80, 40, 0, TAU, true); x.fill('evenodd'); x.fillRect(70, 6, 20, 148); }
+      logoSpr = c; return c;
+    }
+
+    // ——— Construction ———
+    function build() {
+      const { w, h } = app.size, key = [w, h, p.forme, p.nombre, p.taille, p.corde, p.queue, p.sol, app.seed].join();
+      if (key === kKey) return; kKey = key;
+      const S = Math.min(w, h), gy = groundY(), n = p.nombre;
+      kites = [];
+      const kinds = p.forme === 'mixte' ? ['losange', 'delta', 'logo'] : [p.forme];
+      for (let i = 0; i < n; i++) {
+        const u = n === 1 ? 0.3 : 0.06 + 0.52 * i / (n - 1) + (hash(i + 3) - 0.5) * 0.05;
+        const ax = dir() > 0 ? w * u : w * (1 - u), s = S * p.taille * (0.75 + hash(i + 5) * 0.5);
+        const L = Math.min(h * 0.95, Math.hypot(w, h) * 0.5) * p.corde * (0.65 + hash(i + 7) * 0.45);
+        const nt = 22, tl = S * 0.5 * p.queue * (0.7 + hash(i + 9) * 0.6) * (s / (S * 0.09)) ** 0.5;
+        const ay = p.sol === 'collines' ? gy - (vnoise(ax / w * 2.5, 340) - 0.3) * S * 0.05 + S * 0.025 : p.sol === 'mer' ? gy + S * 0.04 : gy - S * 0.01;
+        const k = { i, ax, ay, s, L, Lt: L, phi: 0.6, dphi: 0, kind: kinds[i % kinds.length], ph: hash(i + 11) * 100, ci: i, tail: [], tl, nt, x: 0, y: 0, rot: 0, yaw: 0 };
+        k.x = ax + Math.sin(k.phi) * L * dir(); k.y = k.ay - Math.cos(k.phi) * L;
+        for (let j = 0; j < nt; j++) k.tail.push({ x: k.x, y: k.y + j * tl / nt, px: k.x, py: k.y + j * tl / nt });
+        kites.push(k);
+      }
+      clouds = [];
+      for (let i = 0; i < 9; i++) { const c = { x: hash(i * 3.1 + 50) * w * 1.3, y: h * (0.08 + hash(i * 5.3 + 51) * 0.45), s: S * (0.06 + hash(i + 52) * 0.08), z: 0.3 + hash(i + 53) * 0.7, puffs: [] }; const np = 5 + Math.floor(hash(i + 54) * 5); for (let j = 0; j < np; j++) c.puffs.push([(j / (np - 1) - 0.5) * c.s * 3.2 + (hash(i * 7 + j) - 0.5) * c.s, -Math.sin(j / (np - 1) * Math.PI) * c.s * (0.5 + hash(i * 9 + j) * 0.6), c.s * (0.55 + hash(i * 11 + j) * 0.55)]); clouds.push(c); }
+    }
+    function windAt(t, k) {
+      const base = p.vent, gv = (vnoise(t * 0.35 + (k ? k.i * 0.37 : 0), 70) - 0.5) * 2 * p.rafales * 0.6 + (vnoise(t * 1.3, 90) - 0.5) * p.rafales * 0.25;
+      return Math.max(0, base * (1 + gv) + gust * 0.5);
+    }
+
+    // ——— Pas de simulation ———
+    function step(dt) {
+      const { w, h } = app.size, S = Math.min(w, h), D = dir();
+      time += dt; gust *= Math.exp(-dt * 0.8);
+      for (const k of kites) {
+        const W = windAt(time, k);
+        // angle d'équilibre : vent fort → haut dans le ciel ; vent faible → la corde se couche
+        const phiEq = Math.PI / 2 * (0.92 - 0.7 * Math.min(1, W * 1.15)) + Math.sin(time * 0.7 + k.ph) * 0.12 * (0.3 + W);
+        if (drag && drag.k === k) {
+          // on tire la corde : le cerf-volant va vers la main, la corde se raccourcit si besoin
+          const dx = (drag.x - k.ax) * D, dy = k.ay - drag.y, tgt = Math.atan2(dx, Math.max(1, dy));
+          k.dphi += (tgt - k.phi) * 30 * dt; k.Lt = Math.max(S * 0.15, Math.min(k.L * 1.15, Math.hypot(dx, dy)));
+        } else k.Lt += (k.L - k.Lt) * Math.min(1, dt * 0.5);
+        k.dphi += ((phiEq - k.phi) * 5 - k.dphi * 1.6) * dt;
+        k.phi += k.dphi * dt;
+        const room = (D > 0 ? w - k.ax : k.ax) - k.s * 0.8, pmax = Math.asin(Math.max(0, Math.min(1, room / k.Lt)));
+        if (k.phi > pmax) { k.phi = pmax; if (k.dphi > 0) k.dphi *= -0.3; }
+        k.phi = Math.max(-0.9, Math.min(1.45, k.phi));
+        const R = k.Lt * (0.97 + 0.03 * Math.min(1, W));
+        k.x = k.ax + Math.sin(k.phi) * R * D; k.y = k.ay - Math.cos(k.phi) * R;
+        // rotation dans le plan et lacet (montré par un écrasement horizontal)
+        k.rot = (k.phi * 0.35 - 0.12) * D + k.dphi * 0.25 * D + (vnoise(time * 2.2 + k.ph, 13) - 0.5) * 0.12 * (0.4 + W);
+        k.yaw = Math.max(-0.9, Math.min(0.9, k.dphi * 0.8 + (vnoise(time * 0.8 + k.ph, 17) - 0.5) * 0.7));
+        k.W = W;
+        // queue : chaîne de Verlet accrochée au bas du cerf-volant
+        const bx = k.x - Math.sin(k.rot) * k.s * 0.45, by = k.y + Math.cos(k.rot) * k.s * 0.45;
+        const seg = k.tl / k.nt, gw = S * 1.2 * dt * dt, ww = W * S * 2.2 * dt * dt * D;
+        for (let j = 1; j < k.nt; j++) {
+          const t = k.tail[j], vx = (t.x - t.px) * 0.97, vy = (t.y - t.py) * 0.97;
+          t.px = t.x; t.py = t.y;
+          const fl = Math.sin(time * 9 + j * 0.7 + k.ph) * W * S * 1.6 * dt * dt;
+          t.x += vx + ww * (0.6 + j / k.nt) ; t.y += vy + gw + fl;
+        }
+        const gy = groundY() - 2; for (const t of k.tail) if (t.y > gy) { t.y = gy; t.px = t.x - (t.x - t.px) * 0.5; }
+        k.tail[0].x = bx; k.tail[0].y = by;
+        for (let it = 0; it < 3; it++) for (let j = 1; j < k.nt; j++) { const a = k.tail[j - 1], b = k.tail[j], dx = b.x - a.x, dy = b.y - a.y, d = Math.hypot(dx, dy) || 1e-6, e = (d - seg) / d; if (j === 1) { b.x -= dx * e; b.y -= dy * e; } else { a.x += dx * e * 0.5; a.y += dy * e * 0.5; b.x -= dx * e * 0.5; b.y -= dy * e * 0.5; } }
+      }
+      for (const c of clouds) { c.x += (p.vent * 0.6 + 0.1) * S * 0.03 * c.z * dt * D; if (c.x > w + c.s * 3) c.x -= w + c.s * 6; if (c.x < -c.s * 3) c.x += w + c.s * 6; }
+    }
+
+    // ——— Dessin ———
+    function sailPolys(k) {
+      // voile en repère local (axe vertical = épine), avant rotation et lacet
+      const s = k.s;
+      if (k.kind === 'delta') return { outline: [[0, -s * 0.55], [s * 0.85, s * 0.35], [0, s * 0.2], [-s * 0.85, s * 0.35]], spars: [[[0, -s * 0.55], [0, s * 0.35]], [[-s * 0.5, s * 0.02], [s * 0.5, s * 0.02]]], panels: [[[0, -s * 0.55], [s * 0.85, s * 0.35], [s * 0.4, s * 0.28], [0, -s * 0.05]], [[0, -s * 0.55], [0, -s * 0.05], [-s * 0.4, s * 0.28], [-s * 0.85, s * 0.35]], [[0, -s * 0.05], [s * 0.4, s * 0.28], [0, s * 0.2], [-s * 0.4, s * 0.28]]] };
+      const T = [0, -s * 0.62], Rt = [s * 0.42, -s * 0.18], B = [0, s * 0.5], Lf = [-s * 0.42, -s * 0.18], C = [0, -s * 0.18];
+      return { outline: [T, Rt, B, Lf], spars: [[T, B], [Lf, Rt]], panels: [[T, Rt, C], [Rt, B, C], [B, Lf, C], [Lf, T, C]] };
+    }
+    function toWorld(k, pt) { const c = Math.cos(k.rot), s = Math.sin(k.rot), x = pt[0] * Math.cos(k.yaw), y = pt[1]; return [k.x + x * c - y * s, k.y + x * s + y * c]; }
+    function drawKite(x, k) {
+      const sp = sailPolys(k), cols = p.couleurs.length ? p.couleurs : ['#e5452a'], c1 = cols[k.ci % cols.length], c2 = cols[(k.ci + 1) % cols.length], lit = 0.18 * Math.sin(k.yaw);
+      const poly = (pts) => { x.beginPath(); pts.forEach((q, i) => { const [a, b] = toWorld(k, q); if (i) x.lineTo(a, b); else x.moveTo(a, b); }); x.closePath(); };
+      // ombre légère sous la voile (épaisseur du tissu)
+      sp.panels.forEach((pn, i) => { const side = pn.reduce((a, q) => a + q[0], 0) > 0 ? 1 : -1; x.fillStyle = shadeHex(i % 2 ? c2 : c1, lit * side - (k.kind === 'delta' && i === 2 ? 0.12 : 0)); poly(pn); x.fill(); });
+      if (k.kind === 'logo') {
+        const [cx, cy] = toWorld(k, [0, -k.s * 0.08]), ls = logoSprite(lumHex(c1) > 140 ? '#111111' : '#f4f3f0'), sz = k.s * 0.62;
+        x.save(); x.translate(cx, cy); x.rotate(k.rot); x.scale(Math.cos(k.yaw), 1); x.globalAlpha = 0.95; x.drawImage(ls, -sz / 2, -sz / 2, sz, sz); x.restore(); x.globalAlpha = 1;
+      }
+      x.strokeStyle = 'rgba(20,16,12,0.55)'; x.lineWidth = Math.max(1, k.s * 0.025); x.lineJoin = 'round';
+      for (const sg of sp.spars) { x.beginPath(); const a = toWorld(k, sg[0]), b = toWorld(k, sg[1]); x.moveTo(a[0], a[1]); x.lineTo(b[0], b[1]); x.stroke(); }
+      x.lineWidth = Math.max(0.8, k.s * 0.012); poly(sp.outline); x.stroke();
+    }
+    function drawTail(x, k) {
+      const cols = p.couleurs.length ? p.couleurs : ['#e5452a'], c = cols[(k.ci + 2) % cols.length];
+      if (k.tail.length < 2 || k.tl < 2) return;
+      // ruban qui s'amincit + nœuds papillon
+      x.strokeStyle = 'rgba(30,30,30,0.5)'; x.lineWidth = Math.max(0.7, k.s * 0.012); x.beginPath(); x.moveTo(k.tail[0].x, k.tail[0].y); for (const t of k.tail) x.lineTo(t.x, t.y); x.stroke();
+      for (let j = 2; j < k.tail.length; j += 3) {
+        const a = k.tail[j - 1], b = k.tail[j], ang = Math.atan2(b.y - a.y, b.x - a.x), r = k.s * 0.09 * (1 - j / k.tail.length * 0.4);
+        x.save(); x.translate(b.x, b.y); x.rotate(ang + Math.PI / 2); x.fillStyle = (j / 3) % 2 < 1 ? c : cols[(k.ci + 3) % cols.length];
+        x.beginPath(); x.moveTo(0, 0); x.lineTo(-r, -r * 0.55); x.lineTo(-r, r * 0.55); x.closePath(); x.moveTo(0, 0); x.lineTo(r, -r * 0.55); x.lineTo(r, r * 0.55); x.closePath(); x.fill(); x.restore();
+      }
+    }
+    function stringPath(k) {
+      const mx = (k.ax + k.x) / 2, my = (k.ay + k.y) / 2, L = Math.hypot(k.x - k.ax, k.y - k.ay), sag = L * (0.14 - 0.1 * Math.min(1, k.W || 0.5));
+      return [k.ax, k.ay, mx + sag * 0.35 * dir(), my + sag, k.x, k.y];
+    }
+    function drawScene() {
+      const { w, h } = app.size, S = Math.min(w, h), gy = groundY();
+      const sky = ctx.createLinearGradient(0, 0, 0, gy); sky.addColorStop(0, p.ciel); sky.addColorStop(1, p.horizon);
+      ctx.fillStyle = sky; ctx.fillRect(0, 0, w, h);
+      // nuages
+      if (p.nuages > 0) {
+        const n = Math.round(clouds.length * p.nuages);
+        const cc = mixc(hex(p.horizon), [255, 255, 255], 0.55), cs = mixc(hex(p.ciel), hex(p.horizon), 0.5);
+        for (let i = 0; i < n; i++) {
+          const c = clouds[i];
+          // nuage : bouffées claires, base aplatie légèrement ombrée
+          ctx.save(); ctx.beginPath(); ctx.rect(c.x - c.s * 4, c.y - c.s * 3, c.s * 8, c.s * 3.25); ctx.clip();
+          ctx.fillStyle = rgb(mixc(cc, cs, 0.35)); ctx.globalAlpha = 0.5 + 0.4 * c.z; ctx.beginPath(); for (const [dx, dy, r] of c.puffs) { ctx.moveTo(c.x + dx + r, c.y + dy); ctx.arc(c.x + dx, c.y + dy, r, 0, TAU); } ctx.fill();
+          ctx.fillStyle = rgb(cc); ctx.beginPath(); for (const [dx, dy, r] of c.puffs) { ctx.moveTo(c.x + dx + r * 0.92, c.y + dy - r * 0.12); ctx.arc(c.x + dx, c.y + dy - r * 0.12, r * 0.92, 0, TAU); } ctx.fill();
+          ctx.restore(); ctx.globalAlpha = 1;
+        }
+      }
+      // sol
+      const terre = hex(p.terre);
+      if (p.sol === 'collines') {
+        const far = mixc(terre, hex(p.horizon), 0.55);
+        ctx.fillStyle = rgb(far); ctx.beginPath(); ctx.moveTo(0, h); for (let i = 0; i <= 60; i++) { const x = i / 60 * w; ctx.lineTo(x, gy - S * 0.07 - (vnoise(i / 60 * 4, 300) * 0.8 + vnoise(i / 60 * 11, 320) * 0.2) * S * 0.08); } ctx.lineTo(w, h); ctx.fill();
+        ctx.fillStyle = rgb(terre); ctx.beginPath(); ctx.moveTo(0, h); for (let i = 0; i <= 60; i++) { const x = i / 60 * w; ctx.lineTo(x, gy - (vnoise(i / 60 * 2.5, 340) - 0.3) * S * 0.05); } ctx.lineTo(w, h); ctx.fill();
+      } else if (p.sol === 'mer') {
+        ctx.fillStyle = rgb(terre); ctx.fillRect(0, gy - S * 0.08, w, S * 0.08);
+        ctx.strokeStyle = 'rgba(255,255,255,0.35)'; ctx.lineWidth = 1; for (let j = 0; j < 6; j++) { const y = gy - S * 0.075 + j * S * 0.012; ctx.beginPath(); for (let i = 0; i <= 40; i++) { const x = i / 40 * w; ctx.lineTo(x, y + Math.sin(x * 0.03 + time * 1.5 + j) * 1.2); } ctx.stroke(); }
+        ctx.fillStyle = '#e8d9b5'; ctx.fillRect(0, gy, w, h - gy);
+      }
+    }
+
+    app.loop((tt, dt) => {
+      const { w, h, dpr } = app.size;
+      dt = Math.min(1 / 30, dt || 0);
+      build();
+      if (app.thumbnail) { if (!frozen) { for (let i = 0; i < 60 * 6; i++) step(1 / 60); frozen = true; } }
+      else step(dt);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.globalAlpha = 1;
+      drawScene();
+      // cordes
+      ctx.strokeStyle = 'rgba(30,30,30,0.55)'; ctx.lineWidth = 1;
+      for (const k of kites) { const s = stringPath(k); ctx.beginPath(); ctx.moveTo(s[0], s[1]); ctx.quadraticCurveTo(s[2], s[3], s[4], s[5]); ctx.stroke(); }
+      for (const k of kites) { drawTail(ctx, k); drawKite(ctx, k); }
+      // piquets
+      ctx.fillStyle = 'rgba(30,24,18,0.8)'; for (const k of kites) ctx.fillRect(k.ax - 1.5, k.ay - 6, 3, 8);
+      app.finish(ctx);
+    });
+
+    function toSVG() {
+      const { w, h } = app.size, f = (v) => v.toFixed(1), S = Math.min(w, h), gy = groundY(), out = [];
+      const defs = `<linearGradient id="sky" x1="0" y1="0" x2="0" y2="${f(gy)}" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="${p.ciel}"/><stop offset="1" stop-color="${p.horizon}"/></linearGradient>`;
+      out.push(`<rect width="100%" height="100%" fill="url(#sky)"/>`);
+      const n = Math.round(clouds.length * p.nuages);
+      let cdefs = '';
+      for (let i = 0; i < n; i++) { const c = clouds[i]; cdefs += `<clipPath id="cl${i}"><rect x="${f(c.x - c.s * 4)}" y="${f(c.y - c.s * 3)}" width="${f(c.s * 8)}" height="${f(c.s * 3.25)}"/></clipPath>`; out.push(`<g clip-path="url(#cl${i})" fill="${rgb(mixc(hex(p.horizon), [255, 255, 255], 0.55))}" fill-opacity="${(0.5 + 0.4 * c.z).toFixed(2)}">${c.puffs.map(([dx, dy, r]) => `<circle cx="${f(c.x + dx)}" cy="${f(c.y + dy)}" r="${f(r)}"/>`).join('')}</g>`); }
+      const terre = hex(p.terre);
+      if (p.sol === 'collines') {
+        const ridge = (o, fr, amp, off) => { let d = `M0 ${h}`; for (let i = 0; i <= 60; i++) { const x = i / 60 * w; d += `L${f(x)} ${f(gy - off - (o === 300 ? (vnoise(i / 60 * 4, 300) * 0.8 + vnoise(i / 60 * 11, 320) * 0.2) : (vnoise(i / 60 * 2.5, 340) - 0.3)) * amp)}`; } return d + `L${w} ${h}Z`; };
+        out.push(`<path d="${ridge(300, 4, S * 0.08, S * 0.07)}" fill="${rgb(mixc(terre, hex(p.horizon), 0.55))}"/><path d="${ridge(340, 2.5, S * 0.05, 0)}" fill="${p.terre}"/>`);
+      } else if (p.sol === 'mer') out.push(`<rect x="0" y="${f(gy - S * 0.08)}" width="${w}" height="${f(S * 0.08)}" fill="${p.terre}"/><rect x="0" y="${f(gy)}" width="${w}" height="${f(h - gy)}" fill="#e8d9b5"/>`);
+      for (const k of kites) { const s = stringPath(k); out.push(`<path d="M${f(s[0])} ${f(s[1])}Q${f(s[2])} ${f(s[3])} ${f(s[4])} ${f(s[5])}" fill="none" stroke="#1e1e1e" stroke-opacity="0.55"/>`); }
+      const cols = p.couleurs.length ? p.couleurs : ['#e5452a'];
+      for (const k of kites) {
+        if (k.tl >= 2) {
+          out.push(`<polyline points="${k.tail.map((t) => `${f(t.x)},${f(t.y)}`).join(' ')}" fill="none" stroke="#1e1e1e" stroke-opacity="0.5" stroke-width="${f(Math.max(0.7, k.s * 0.012))}"/>`);
+          for (let j = 2; j < k.tail.length; j += 3) { const a = k.tail[j - 1], b = k.tail[j], ang = Math.atan2(b.y - a.y, b.x - a.x) * 180 / Math.PI + 90, r = k.s * 0.09 * (1 - j / k.tail.length * 0.4); out.push(`<path transform="translate(${f(b.x)} ${f(b.y)}) rotate(${f(ang)})" d="M0 0L${f(-r)} ${f(-r * 0.55)}L${f(-r)} ${f(r * 0.55)}ZM0 0L${f(r)} ${f(-r * 0.55)}L${f(r)} ${f(r * 0.55)}Z" fill="${(j / 3) % 2 < 1 ? cols[(k.ci + 2) % cols.length] : cols[(k.ci + 3) % cols.length]}"/>`); }
+        }
+        const sp = sailPolys(k), c1 = cols[k.ci % cols.length], c2 = cols[(k.ci + 1) % cols.length], lit = 0.18 * Math.sin(k.yaw), pts = (arr) => arr.map((q) => toWorld(k, q).map(f).join(',')).join(' ');
+        sp.panels.forEach((pn, i) => { const side = pn.reduce((a, q) => a + q[0], 0) > 0 ? 1 : -1; out.push(`<polygon points="${pts(pn)}" fill="${shadeHex(i % 2 ? c2 : c1, lit * side - (k.kind === 'delta' && i === 2 ? 0.12 : 0))}"/>`); });
+        for (const sg of sp.spars) { const a = toWorld(k, sg[0]), b = toWorld(k, sg[1]); out.push(`<line x1="${f(a[0])}" y1="${f(a[1])}" x2="${f(b[0])}" y2="${f(b[1])}" stroke="#14100c" stroke-opacity="0.55" stroke-width="${f(Math.max(1, k.s * 0.025))}"/>`); }
+        out.push(`<polygon points="${pts(sp.outline)}" fill="none" stroke="#14100c" stroke-opacity="0.55" stroke-width="${f(Math.max(0.8, k.s * 0.012))}" stroke-linejoin="round"/>`);
+      }
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">\n<defs>${defs}${cdefs}</defs>\n${out.join('\n')}\n</svg>`;
+    }
+  </script>
+</body>
+</html>
