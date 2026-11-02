@@ -1,0 +1,337 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Rythme BPM</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Rythme BPM : un séquenceur de 8, 12 ou 16 pas à quatre pistes, dont la partition est l'image.
+    // Chaque piste est une forme de la charte ; ses coups suivent un rythme euclidien (k coups répartis
+    // au mieux sur n pas, Toussaint 2005) qu'on retouche en touchant les cases. À chaque coup, la forme
+    // pulse selon une enveloppe attaque / relâchement et peut tourner d'un cran. Quatre mises en scène :
+    // la grille (la partition), les anneaux, le centre (formes empilées qui battent) et la mosaïque.
+    // Un son de synthèse facultatif (Web Audio) joue la partition.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2, NT = 4;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const KB = PAL('kegelbahn'), BIEN = PAL('biennale'), MENTHE = PAL('menthe'), GR = PAL('good-room'), ACIDE = PAL('acide');
+    const P60 = PAL('papier-60'), SALON = PAL('salon'), NUIT = PAL('trame-nuit'), PIX = PAL('pixels'), ORB = PAL('orbite');
+
+    // Rythme euclidien : k coups sur n pas, décalé de r, en masque de bits.
+    function euclid(k, n, r) {
+      let m = 0;
+      for (let i = 0; i < n; i++) if (((i * k) % n) < k && k > 0) m |= 1 << (((i + r) % n + n) % n);
+      return m;
+    }
+    const DEF = [[4, 0], [2, 4], [7, 0], [3, 2]];
+    const FORMES = { disque: 'Disque', carre: 'Carré', barre: 'Barre', anneau: 'Anneau', triangle: 'Triangle', logo: 'Logo' };
+    const trackParams = (i, forme) => ({
+      [`coups${i}`]: { type: 'range', label: 'Coups', min: 0, max: 16, step: 1, value: DEF[i][0] },
+      [`decalage${i}`]: { type: 'range', label: 'Décalage', min: 0, max: 15, step: 1, value: DEF[i][1] },
+      [`forme${i}`]: { type: 'select', label: 'Forme', options: FORMES, value: forme },
+      [`motif${i}`]: { type: 'range', label: 'Motif', min: 0, max: 65535, step: 1, value: euclid(DEF[i][0], 16, DEF[i][1]), show: () => false, explore: false },
+    });
+
+    let hover = null, lastStep = -1, audio = null, noiseBuf = null, manual = -1e9;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: false,
+      finish: { grain: 0.04, vignette: 0 },
+      hint: 'Touchez une case pour ajouter ou retirer un coup · au centre, touchez pour frapper · molette : tempo',
+      notes: 'Chaque piste répartit ses coups au mieux sur les pas (rythmes euclidiens : 3 sur 8 donne le tresillo, 5 sur 16 la bossa). Touchez les cases pour retoucher la partition ; le son est facultatif.',
+      params: {
+        'Rythme': {
+          tempo: { type: 'range', label: 'Tempo (BPM)', min: 50, max: 200, step: 1, value: 112 },
+          swing: { type: 'range', label: 'Swing', min: 0, max: 0.6, step: 0.01, value: 0.1 },
+          pas: { type: 'segmented', label: 'Pas', options: { 8: '8', 12: '12', 16: '16' }, value: '16' },
+          scene: { type: 'segmented', label: 'Mise en scène', options: { grille: 'Grille', anneaux: 'Anneaux', centre: 'Centre', mosaique: 'Mosaïque' }, value: 'grille' },
+          son: { type: 'segmented', label: 'Son', options: { aucun: 'Muet', clic: 'Clics', percussions: 'Percussions' }, value: 'aucun' },
+        },
+        'Piste 1': trackParams(0, 'disque'),
+        'Piste 2': trackParams(1, 'carre'),
+        'Piste 3': trackParams(2, 'barre'),
+        'Piste 4': trackParams(3, 'anneau'),
+        'Pulsation': {
+          attaque: { type: 'range', label: 'Attaque (s)', min: 0.005, max: 0.3, step: 0.005, value: 0.02 },
+          relachement: { type: 'range', label: 'Relâchement (s)', min: 0.05, max: 1.5, step: 0.01, value: 0.32 },
+          amplitude: { type: 'range', label: 'Amplitude', min: 0, max: 1.5, step: 0.01, value: 0.55 },
+          tourne: { type: 'range', label: 'Rotation par coup', min: 0, max: 1, step: 0.01, value: 0.25 },
+          taille: { type: 'range', label: 'Taille des formes', min: 0.3, max: 1.4, step: 0.01, value: 1 },
+          silences: { type: 'range', label: 'Présence des silences', min: 0, max: 1, step: 0.01, value: 0.22 },
+        },
+        'Couleur': {
+          fond: { type: 'color', label: 'Fond', value: KB[0] },
+          couleurs: { type: 'palette', label: 'Couleurs des pistes', value: [KB[1], KB[2], KB[3], KB[5]] },
+        },
+      },
+      presets: {
+        'Quatre temps': {},
+        'Clave': { scene: 'anneaux', tempo: 104, swing: 0, coups0: 5, decalage0: 0, coups1: 4, decalage1: 0, coups2: 3, decalage2: 2, coups3: 9, decalage3: 1, forme0: 'disque', forme1: 'anneau', forme2: 'triangle', forme3: 'disque', fond: BIEN[0], couleurs: [BIEN[2], BIEN[1], BIEN[3], BIEN[4]], silences: 0.15 },
+        'Pouls': { scene: 'centre', tempo: 96, coups0: 4, decalage0: 0, coups1: 3, decalage1: 0, coups2: 5, decalage2: 1, coups3: 7, decalage3: 3, forme0: 'disque', forme1: 'carre', forme2: 'anneau', forme3: 'disque', fond: MENTHE[0], couleurs: [MENTHE[1], MENTHE[3], MENTHE[2], '#f7fbfa'], amplitude: 0.35, relachement: 0.45, tourne: 0.5 },
+        'Tableau': { scene: 'mosaique', tempo: 124, coups0: 4, coups1: 6, decalage1: 1, coups2: 5, decalage2: 3, coups3: 11, decalage3: 0, forme0: 'carre', forme1: 'carre', forme2: 'carre', forme3: 'carre', fond: GR[0], couleurs: [GR[1], GR[2], GR[3], GR[4]], relachement: 0.6, silences: 0.08 },
+        'Polyrythme': { scene: 'anneaux', pas: '12', tempo: 90, swing: 0, coups0: 3, decalage0: 0, coups1: 4, decalage1: 0, coups2: 5, decalage2: 0, coups3: 7, decalage3: 0, forme0: 'triangle', forme1: 'carre', forme2: 'disque', forme3: 'barre', fond: ACIDE[1], couleurs: [ACIDE[2], ACIDE[3], ACIDE[0], '#8b8b80'] },
+        'Minimal': { scene: 'grille', tempo: 120, coups0: 4, coups1: 2, decalage1: 4, coups2: 8, decalage2: 2, coups3: 5, decalage3: 0, forme0: 'disque', forme1: 'disque', forme2: 'disque', forme3: 'disque', fond: P60[0], couleurs: [P60[1], P60[1], P60[1], '#e5452a'], silences: 0.12, amplitude: 0.4, tourne: 0 },
+        'Logo': { scene: 'centre', tempo: 100, coups0: 4, coups1: 2, decalage1: 4, coups2: 6, decalage2: 1, coups3: 3, decalage3: 3, forme0: 'logo', forme1: 'anneau', forme2: 'anneau', forme3: 'disque', fond: ORB[0], couleurs: [ORB[2], ORB[1], ORB[2], ORB[1]], amplitude: 0.3, tourne: 0 },
+        'Salon': { scene: 'mosaique', pas: '8', tempo: 132, coups0: 3, coups1: 2, decalage1: 2, coups2: 5, decalage2: 1, coups3: 4, decalage3: 1, forme0: 'disque', forme1: 'carre', forme2: 'triangle', forme3: 'anneau', fond: SALON[0], couleurs: [SALON[1], SALON[2], SALON[3], SALON[4]], silences: 0.1 },
+        'Nuit': { scene: 'anneaux', tempo: 140, swing: 0.2, coups0: 4, coups1: 3, decalage1: 3, coups2: 11, decalage2: 0, coups3: 5, decalage3: 2, forme0: 'disque', forme1: 'barre', forme2: 'disque', forme3: 'anneau', fond: NUIT[0], couleurs: [NUIT[1], NUIT[2], '#5a5a5a', NUIT[1]], silences: 0.3 },
+        'Pixels': { scene: 'grille', pas: '12', tempo: 150, coups0: 5, coups1: 7, decalage1: 2, coups2: 4, decalage2: 1, coups3: 9, decalage3: 3, forme0: 'carre', forme1: 'carre', forme2: 'carre', forme3: 'carre', fond: PIX[0], couleurs: [PIX[1], PIX[2], PIX[3], PIX[4]], tourne: 0, amplitude: 0.3 },
+      },
+      brand(colors) {
+        const rest = colors.slice(1), c = rest.length ? rest : ['#ffffff'];
+        return { fond: colors[0], couleurs: [0, 1, 2, 3].map((i) => c[i % c.length]) };
+      },
+      pointer: {
+        move: (q) => { hover = hit(q.x, q.y); },
+        down: (q) => {
+          const h = hit(q.x, q.y);
+          if (h) { const k = `motif${h.i}`; app.set(k, p[k] ^ (1 << h.j)); }
+          else if (p.scene === 'centre') { manual = clock; voice(-1); }
+        },
+        wheel: (q, dy) => app.set('tempo', Math.max(50, Math.min(200, Math.round(p.tempo - dy * 0.05)))),
+      },
+      onChange(k) {
+        const m = /^(coups|decalage)(\d)$/.exec(k);
+        if (m) setMotif(+m[2]);
+        if (k === '*' || k === 'pas') for (let i = 0; i < NT; i++) setMotif(i);
+        if (k === 'son' && p.son !== 'aucun') ensureAudio();
+      },
+      export: { name: 'rythme', svg: () => toSVG() },
+    });
+    const p = app.params;
+    canvas.addEventListener('pointerleave', () => { hover = null; });
+    function setMotif(i) {
+      const n = +p.pas;
+      app.set(`motif${i}`, euclid(Math.min(n, p[`coups${i}`]), n, p[`decalage${i}`] % n), true);
+    }
+
+    // ——— Horloge ———
+    let clock = 0;
+    const stepDur = () => 60 / p.tempo / 4;
+    // Le swing retarde les pas impairs.
+    const stepTime = (s) => (s + (((s % 2) + 2) % 2 ? p.swing * 0.5 : 0)) * stepDur();
+    function current(t) { const s = Math.floor(t / stepDur()); return t < stepTime(s) ? s - 1 : s; }
+    const on = (i, j) => (p[`motif${i}`] >> j) & 1;
+    const env = (tau) => (tau < 0 ? 0 : tau < p.attaque ? tau / p.attaque : Math.exp(-(tau - p.attaque) / p.relachement));
+    // Temps écoulé depuis le dernier coup de la piste, et nombre de coups depuis le début.
+    function trackState(i, t, cur) {
+      const n = +p.pas;
+      let tau = 1e9, count = 0;
+      for (let b = 0; b < n; b++) { const s = cur - b, j = ((s % n) + n) % n; if (on(i, j)) { tau = t - stepTime(s); break; } }
+      let pop = 0;
+      for (let j = 0; j < n; j++) pop += on(i, j);
+      const bar = Math.floor(cur / n), r = ((cur % n) + n) % n;
+      count = bar * pop;
+      for (let j = 0; j <= r; j++) count += on(i, j);
+      return { tau, count };
+    }
+    function cellTau(j, t, cur) { const n = +p.pas, s = cur - ((((cur - j) % n) + n) % n); return t - stepTime(s); }
+
+    // ——— Géométrie des mises en scène (partagée par le dessin et le toucher) ———
+    function cells(w, h) {
+      const n = +p.pas, U = Math.min(w, h), out = [];
+      if (p.scene === 'grille') {
+        const cw = (w * 0.86) / n, rh = (h * 0.66) / NT, x0 = w * 0.07 + cw / 2, y0 = h * 0.17 + rh / 2;
+        const sz = Math.min(cw, rh) * 0.78 * p.taille;
+        for (let i = 0; i < NT; i++) for (let j = 0; j < n; j++) out.push({ i, j, x: x0 + j * cw, y: y0 + i * rh, s: sz, hw: cw / 2, hh: rh / 2 });
+      } else if (p.scene === 'anneaux') {
+        for (let i = 0; i < NT; i++) {
+          const R = U * 0.43 * (1 - i * 0.21), sz = Math.min(TAU * R / n * 0.62, U * 0.09) * p.taille;
+          for (let j = 0; j < n; j++) {
+            const a = -Math.PI / 2 + j / n * TAU;
+            out.push({ i, j, x: w / 2 + Math.cos(a) * R, y: h / 2 + Math.sin(a) * R, s: sz, a, hw: sz * 0.75, hh: sz * 0.75 });
+          }
+        }
+      } else if (p.scene === 'mosaique') {
+        const g = U * 0.012, cw = (w - g) / n, rh = (h - g) / NT;
+        for (let i = 0; i < NT; i++) for (let j = 0; j < n; j++) out.push({ i, j, x: g + cw * j + (cw - g) / 2, y: g + rh * i + (rh - g) / 2, s: Math.min(cw, rh) * 0.7 * p.taille, hw: (cw - g) / 2, hh: (rh - g) / 2 });
+      }
+      return out;
+    }
+    function hit(x, y) {
+      const { w, h } = app.size;
+      for (const c of cells(w, h)) if (Math.abs(x - c.x) <= c.hw && Math.abs(y - c.y) <= c.hh) return c;
+      return null;
+    }
+
+    // ——— Primitives (rendues en canvas ou en SVG) ———
+    function shape(out, kind, x, y, s, rot, color, a) {
+      if (a <= 0.003 || s <= 0.2) return;
+      const poly = (pts) => out.push({ k: 'p', pts: pts.map(([u, v]) => [x + u * Math.cos(rot) - v * Math.sin(rot), y + u * Math.sin(rot) + v * Math.cos(rot)]), color, a });
+      const h = s / 2;
+      if (kind === 'disque') out.push({ k: 'c', x, y, r: h, color, a });
+      else if (kind === 'anneau') out.push({ k: 'r', x, y, r: h * 0.84, w: s * 0.16, color, a });
+      else if (kind === 'carre') { const q = h * 0.86; poly([[-q, -q], [q, -q], [q, q], [-q, q]]); }
+      else if (kind === 'barre') { const q = h * 0.24; poly([[-q, -h], [q, -h], [q, h], [-q, h]]); }
+      else if (kind === 'triangle') poly([0, 1, 2].map((k) => [Math.cos(-Math.PI / 2 + k * TAU / 3) * h * 1.08, Math.sin(-Math.PI / 2 + k * TAU / 3) * h * 1.08 + h * 0.14]));
+      else if (kind === 'logo') {
+        if (app.logoImg) out.push({ k: 'i', x, y, s, rot, color, a });
+        else { out.push({ k: 'r', x, y, r: h * 0.8, w: s * 0.13, color, a }); out.push({ k: 'c', x, y, r: h * 0.26, color, a }); }
+      }
+    }
+    const ease = (x) => 1 - Math.pow(1 - Math.min(1, Math.max(0, x)), 3);
+    function scene(t, w, h) {
+      const out = [], n = +p.pas, U = Math.min(w, h), cur = current(t), pal = p.couleurs && p.couleurs.length ? p.couleurs : ['#ffffff'];
+      const col = (i) => pal[i % pal.length], frac = Math.min(1, Math.max(0, (t - stepTime(cur)) / stepDur()));
+      const states = [0, 1, 2, 3].map((i) => trackState(i, t, cur));
+      const playJ = ((cur % n) + n) % n;
+      if (p.scene === 'centre') {
+        // Formes empilées au centre ; chaque piste bat sur ses coups et tourne d'un cran.
+        const R = U * 0.47;
+        for (let j = 0; j < n; j++) {
+          const a = -Math.PI / 2 + j / n * TAU, isNow = j === playJ;
+          out.push({ k: 'c', x: w / 2 + Math.cos(a) * R, y: h / 2 + Math.sin(a) * R, r: U * (isNow ? 0.009 : 0.005), color: col(NT - 1), a: isNow ? 1 : 0.25 + p.silences * 0.5 });
+        }
+        const manualEnv = env(clock - manual);
+        for (let i = 0; i < NT; i++) {
+          const { tau, count } = states[i], e = Math.max(env(tau), manualEnv);
+          const s = U * 0.74 * (1 - i * 0.215) * p.taille * (1 + p.amplitude * 0.22 * e);
+          const rot = p.tourne * Math.PI / 2 * (count - 1 + ease(tau / Math.max(0.05, p.relachement)));
+          shape(out, p[`forme${i}`], w / 2, h / 2, s, rot, col(i), 1);
+        }
+      } else {
+        const C = cells(w, h);
+        if (p.scene === 'anneaux') {
+          // Aiguille qui balaie les anneaux.
+          const a = -Math.PI / 2 + (cur + frac) / n * TAU;
+          out.push({ k: 'l', x1: w / 2, y1: h / 2, x2: w / 2 + Math.cos(a) * U * 0.47, y2: h / 2 + Math.sin(a) * U * 0.47, w: Math.max(1, U * 0.004), color: col(NT - 1), a: 0.55 });
+        } else if (p.scene === 'grille') {
+          // Tête de lecture : un trait sous la colonne en cours.
+          const c0 = C.find((c) => c.j === playJ && c.i === NT - 1);
+          if (c0) out.push({ k: 'l', x1: c0.x - c0.hw * 0.7, y1: h * 0.88, x2: c0.x + c0.hw * 0.7, y2: h * 0.88, w: Math.max(2, U * 0.008), color: col(NT - 1), a: 1 });
+        }
+        for (const c of C) {
+          const hit1 = on(c.i, c.j), tau = cellTau(c.j, t, cur), e = hit1 ? env(tau) : 0;
+          const hov = hover && hover.i === c.i && hover.j === c.j;
+          const base = c.s, kind = p[`forme${c.i}`];
+          if (p.scene === 'mosaique') {
+            // Tuiles : le fond de la case s'allume au passage, la forme bat.
+            out.push({ k: 'p', pts: [[c.x - c.hw, c.y - c.hh], [c.x + c.hw, c.y - c.hh], [c.x + c.hw, c.y + c.hh], [c.x - c.hw, c.y + c.hh]], color: col(c.i), a: hit1 ? 0.12 + 0.88 * e : p.silences * 0.25 });
+            if (hit1) shape(out, kind, c.x, c.y, base * (0.75 + p.amplitude * 0.3 * e), p.tourne * Math.PI / 4 * e, e > 0.5 ? p.fond : col(c.i), 1);
+          } else if (hit1) {
+            const rot = (c.a !== undefined ? c.a + Math.PI / 2 : 0) + p.tourne * Math.PI / 2 * e;
+            shape(out, kind, c.x, c.y, base * (1 + p.amplitude * e), rot, col(c.i), 1);
+          } else {
+            out.push({ k: 'c', x: c.x, y: c.y, r: base * 0.11, color: col(c.i), a: p.silences });
+          }
+          if (hov) out.push({ k: 'r', x: c.x, y: c.y, r: Math.min(c.hw, c.hh) * 0.92, w: Math.max(1, U * 0.003), color: col(c.i), a: 0.6 });
+        }
+      }
+      return out;
+    }
+
+    // ——— Rendu canvas ———
+    const tinted = new Map();
+    function logoTint(color) {
+      const img = app.logoImg;
+      if (!img) return null;
+      const key = color, hit2 = tinted.get(key);
+      if (hit2 && hit2.img === img) return hit2.cv;
+      const N = 512, iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height, k = N / Math.max(iw, ih);
+      const cv = document.createElement('canvas'); cv.width = Math.max(1, Math.round(iw * k)); cv.height = Math.max(1, Math.round(ih * k));
+      const x = cv.getContext('2d');
+      x.drawImage(img, 0, 0, cv.width, cv.height);
+      x.globalCompositeOperation = 'source-in'; x.fillStyle = color; x.fillRect(0, 0, cv.width, cv.height);
+      tinted.set(key, { img, cv });
+      return cv;
+    }
+    function drawPrims(c, prims) {
+      for (const q of prims) {
+        c.globalAlpha = Math.min(1, q.a);
+        if (q.k === 'c') { c.fillStyle = q.color; c.beginPath(); c.arc(q.x, q.y, q.r, 0, TAU); c.fill(); }
+        else if (q.k === 'r') { c.strokeStyle = q.color; c.lineWidth = q.w; c.beginPath(); c.arc(q.x, q.y, q.r, 0, TAU); c.stroke(); }
+        else if (q.k === 'p') { c.fillStyle = q.color; c.beginPath(); q.pts.forEach(([x, y], i) => (i ? c.lineTo(x, y) : c.moveTo(x, y))); c.closePath(); c.fill(); }
+        else if (q.k === 'l') { c.strokeStyle = q.color; c.lineWidth = q.w; c.lineCap = 'round'; c.beginPath(); c.moveTo(q.x1, q.y1); c.lineTo(q.x2, q.y2); c.stroke(); }
+        else if (q.k === 'i') {
+          const L = logoTint(q.color); if (!L) continue;
+          const k = q.s / Math.max(L.width, L.height);
+          c.save(); c.translate(q.x, q.y); c.rotate(q.rot); c.drawImage(L, -L.width * k / 2, -L.height * k / 2, L.width * k, L.height * k); c.restore();
+        }
+      }
+      c.globalAlpha = 1;
+    }
+
+    // ——— Son (facultatif) : une voix de synthèse par piste ———
+    function ensureAudio() {
+      if (audio) { audio.resume?.(); return; }
+      try {
+        audio = new (window.AudioContext || window.webkitAudioContext)();
+        noiseBuf = audio.createBuffer(1, audio.sampleRate * 0.5, audio.sampleRate);
+        const d = noiseBuf.getChannelData(0);
+        for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+      } catch { audio = null; }
+    }
+    function voice(i) {
+      if (!audio || p.son === 'aucun' || audio.state !== 'running') return;
+      const t0 = audio.currentTime + 0.005, g = audio.createGain();
+      g.connect(audio.destination);
+      const dec = Math.min(0.6, 0.06 + p.relachement * 0.4);
+      if (p.son === 'clic' || i < 0) {
+        const o = audio.createOscillator(); o.type = 'sine';
+        o.frequency.value = i < 0 ? 520 : [880, 1320, 1760, 660][i];
+        g.gain.setValueAtTime(0.18, t0); g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.05);
+        o.connect(g); o.start(t0); o.stop(t0 + 0.06);
+        return;
+      }
+      if (i === 0 || i === 3) {
+        // Grosse caisse et tom : un sinus dont la hauteur tombe.
+        const o = audio.createOscillator(); o.type = 'sine';
+        const f = i === 0 ? 150 : 260;
+        o.frequency.setValueAtTime(f, t0); o.frequency.exponentialRampToValueAtTime(f * 0.33, t0 + dec * 0.6);
+        g.gain.setValueAtTime(0.7, t0); g.gain.exponentialRampToValueAtTime(0.0001, t0 + dec);
+        o.connect(g); o.start(t0); o.stop(t0 + dec + 0.02);
+      } else {
+        // Caisse claire et charleston : du bruit filtré.
+        const s = audio.createBufferSource(); s.buffer = noiseBuf;
+        const f = audio.createBiquadFilter(); f.type = i === 1 ? 'bandpass' : 'highpass'; f.frequency.value = i === 1 ? 1800 : 7000;
+        const d2 = i === 1 ? dec * 0.5 : 0.05;
+        g.gain.setValueAtTime(i === 1 ? 0.45 : 0.22, t0); g.gain.exponentialRampToValueAtTime(0.0001, t0 + d2);
+        s.connect(f); f.connect(g); s.start(t0); s.stop(t0 + d2 + 0.02);
+      }
+    }
+
+    app.loop((t, dt) => {
+      clock = t;
+      const { w, h, dpr } = app.size;
+      const cur = current(t);
+      if (dt > 0 && cur !== lastStep) {
+        const j = ((cur % +p.pas) + +p.pas) % +p.pas;
+        if (lastStep >= 0) for (let i = 0; i < NT; i++) if (on(i, j)) voice(i);
+        lastStep = cur;
+      }
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = p.fond; ctx.fillRect(0, 0, w, h);
+      drawPrims(ctx, scene(t, w, h));
+      app.finish(ctx);
+    });
+
+    // ——— Export SVG : l'image en cours, forme pour forme ———
+    function toSVG() {
+      const { w, h } = app.size, prims = scene(clock, w, h), f = (v) => +v.toFixed(2);
+      const op = (a) => (a < 1 ? ` fill-opacity="${f(a)}"` : '');
+      let defs = '', body = '';
+      const filt = new Map();
+      for (const q of prims) {
+        if (q.k === 'c') body += `<circle cx="${f(q.x)}" cy="${f(q.y)}" r="${f(q.r)}" fill="${q.color}"${op(q.a)}/>\n`;
+        else if (q.k === 'r') body += `<circle cx="${f(q.x)}" cy="${f(q.y)}" r="${f(q.r)}" fill="none" stroke="${q.color}" stroke-width="${f(q.w)}"${q.a < 1 ? ` stroke-opacity="${f(q.a)}"` : ''}/>\n`;
+        else if (q.k === 'p') body += `<polygon points="${q.pts.map(([x, y]) => `${f(x)},${f(y)}`).join(' ')}" fill="${q.color}"${op(q.a)}/>\n`;
+        else if (q.k === 'l') body += `<line x1="${f(q.x1)}" y1="${f(q.y1)}" x2="${f(q.x2)}" y2="${f(q.y2)}" stroke="${q.color}" stroke-width="${f(q.w)}" stroke-linecap="round"${q.a < 1 ? ` stroke-opacity="${f(q.a)}"` : ''}/>\n`;
+        else if (q.k === 'i' && app.logoImg) {
+          // Logo teinté par un filtre (couleur de la piste dans la forme du logo).
+          if (!filt.has(q.color)) { const id = `t${filt.size}`; filt.set(q.color, id); defs += `<filter id="${id}"><feFlood flood-color="${q.color}"/><feComposite in2="SourceAlpha" operator="in"/></filter>`; }
+          const img = app.logoImg, iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height, k = q.s / Math.max(iw, ih);
+          body += `<image href="${img.src}" x="${f(-iw * k / 2)}" y="${f(-ih * k / 2)}" width="${f(iw * k)}" height="${f(ih * k)}" transform="translate(${f(q.x)} ${f(q.y)}) rotate(${f(q.rot * 180 / Math.PI)})" filter="url(#${filt.get(q.color)})"/>\n`;
+        }
+      }
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">\n${defs ? `<defs>${defs}</defs>\n` : ''}<rect width="100%" height="100%" fill="${p.fond}"/>\n${body}</svg>`;
+    }
+  </script>
+</body>
+</html>
