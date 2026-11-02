@@ -1,0 +1,15 @@
+{
+  "slug": "wfc",
+  "title": "Wave Function Collapse",
+  "type": "pattern",
+  "description": "Une grille de tuiles qui raccordent leurs bords, résolue case par case par Wave Function Collapse ; les réseaux prennent les couleurs de la charte.",
+  "tags": ["wfc", "tuiles", "reseau", "procedural", "svg", "logo"],
+  "inspiration": [
+    "Maxim Gumin (mxgmn), WaveFunctionCollapse",
+    "Oskar Stålberg, Townscaper et les tuiles à raccords",
+    "references/techniques.md ; palettes papier-60, code, kegelbahn, good-room, pixels, luzern"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
