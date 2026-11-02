@@ -1,0 +1,15 @@
+{
+  "slug": "pendule-double",
+  "title": "Pendule double",
+  "type": "motion",
+  "description": "Des centaines de pendules doubles lâchés presque ensemble divergent en gerbe ; la carte des basculements révèle la fractale du chaos, pixel par pixel.",
+  "tags": ["chaos", "pendule", "physique", "fractale", "trajectoires", "svg"],
+  "inspiration": [
+    "Edward Lorenz, Deterministic Nonperiodic Flow (1963), la sensibilité aux conditions initiales",
+    "Cartes du temps de basculement du pendule double (Heyl, 2008)",
+    "Photographies à longue pose de pendules lumineux"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
