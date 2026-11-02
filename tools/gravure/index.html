@@ -1,0 +1,277 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Gravure</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Gravure : un relief (sphères, vagues, logo embossé ou image) est éclairé par une lumière
+    // tournante, puis traduit en tailles parallèles dont l'épaisseur gonfle dans les ombres,
+    // comme une taille-douce. Plusieurs couches croisées assombrissent les creux.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const P60 = PAL('papier-60'), BIEN = PAL('biennale'), MENTHE = PAL('menthe'), KB = PAL('kegelbahn'), THER = PAL('thermique'), PHOTO = PAL('photocopie');
+    const NUIT = PAL('trame-nuit'), LUZ = PAL('luzern'), SALON = PAL('salon'), EVT = PAL('eventail'), ORB = PAL('orbite'), CODE = PAL('code');
+    const G = 4; // pas de la grille de relief, en px
+
+    let gw = 0, gh = 0, H = null, A = null, T = null, base = null, baseKey = '', hover = null, drag = null, ripples = [], az = 0.6, el = 0.7, angleOff = 0;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.04, vignette: 0 },
+      hint: 'Le pointeur tient la lumière · glissez pour tourner les tailles · touchez pour une onde · molette : espacement',
+      notes: 'Le relief est éclairé (Lambert) puis chaque taille gonfle là où la surface est sombre. Les couches suivantes, croisées, ne s’ajoutent que dans les tons les plus profonds.',
+      params: {
+        'Sujet': {
+          sujet: { type: 'select', label: 'Sujet', options: { spheres: 'Sphères', vagues: 'Vagues', logo: 'Logo en relief', image: 'Image' }, value: 'spheres' },
+          image: { type: 'file', label: 'Image', accept: 'image/*', show: (q) => q.sujet === 'image' || q.sujet === 'logo' },
+          relief: { type: 'range', label: 'Relief', min: 0.2, max: 3, step: 0.05, value: 1 },
+          mouvement: { type: 'range', label: 'Mouvement du sujet', min: 0, max: 2, step: 0.05, value: 0.6 },
+        },
+        'Tailles': {
+          espacement: { type: 'range', label: 'Espacement', min: 3, max: 20, step: 0.5, value: 7 },
+          angle: { type: 'range', label: 'Angle', min: -90, max: 90, step: 1, value: -30 },
+          couches: { type: 'range', label: 'Couches croisées', min: 1, max: 4, step: 1, value: 2 },
+          croisement: { type: 'range', label: 'Angle de croisement', min: 15, max: 90, step: 1, value: 60 },
+          epaisseur: { type: 'range', label: 'Épaisseur maximale', min: 0.1, max: 1, step: 0.01, value: 0.62 },
+          ondulation: { type: 'range', label: 'Ondulation sur le relief', min: 0, max: 1, step: 0.01, value: 0.25 },
+          contraste: { type: 'range', label: 'Contraste', min: 0.4, max: 3, step: 0.05, value: 1.2 },
+          defile: { type: 'range', label: 'Défilement', min: -2, max: 2, step: 0.05, value: 0.3 },
+        },
+        'Lumière': {
+          hauteur: { type: 'range', label: 'Hauteur de la lumière', min: 0.1, max: 1.4, step: 0.01, value: 0.55 },
+          rotation: { type: 'range', label: 'Rotation de la lumière', min: -1.5, max: 1.5, step: 0.05, value: 0.35 },
+          ambiance: { type: 'range', label: 'Lumière ambiante', min: 0, max: 0.8, step: 0.01, value: 0.12 },
+          blancs: { type: 'range', label: 'Ton des surfaces planes', min: 0.5, max: 1.2, step: 0.01, value: 0.8 },
+        },
+        'Couleur': {
+          fond: { type: 'color', label: 'Fond', value: P60[0] },
+          encre: { type: 'palette', label: 'Encre (une par couche)', value: [P60[1]] },
+        },
+      },
+      presets: {
+        'Taille-douce': {},
+        'Biennale': { fond: BIEN[0], encre: [BIEN[1], BIEN[2]], couches: 2, espacement: 6, angle: 20, croisement: 90 },
+        'Vagues': { sujet: 'vagues', fond: MENTHE[0], encre: [MENTHE[1], MENTHE[3]], couches: 2, espacement: 6, ondulation: 0.6, angle: 0, croisement: 70, relief: 1.2 },
+        'Logo': { sujet: 'logo', fond: P60[0], encre: [P60[1], '#e5452a'], couches: 2, espacement: 5, ondulation: 0.5, angle: -45, relief: 2 },
+        'Billet': { sujet: 'logo', fond: '#e9e4d6', encre: [EVT[4], EVT[1]], couches: 2, espacement: 5, epaisseur: 0.7, ondulation: 0.8, angle: 0, croisement: 45, relief: 2 },
+        'Nuit': { fond: NUIT[0], encre: [NUIT[1], NUIT[2]], couches: 2, espacement: 6, contraste: 0.9, hauteur: 0.35, angle: 45 },
+        'Thermique': { sujet: 'vagues', fond: THER[0], encre: [THER[1], THER[2]], couches: 2, espacement: 9, epaisseur: 0.8, ondulation: 0.9, croisement: 50, relief: 1.6 },
+        'Kegelbahn': { fond: KB[0], encre: [KB[1], KB[2], KB[3]], couches: 3, espacement: 7, epaisseur: 0.55, angle: -60, croisement: 60 },
+        'Luzern': { sujet: 'spheres', fond: LUZ[0], encre: [LUZ[3], LUZ[1]], couches: 2, espacement: 9, epaisseur: 0.85, ondulation: 0.5, angle: 10, croisement: 80 },
+        'Photocopie': { sujet: 'image', fond: PHOTO[0], encre: [PHOTO[1], PHOTO[2]], couches: 2, espacement: 6, ondulation: 0.2, angle: -20, relief: 0.6, contraste: 1.4 },
+        'Salon': { sujet: 'vagues', fond: SALON[0], encre: [SALON[2], SALON[1], SALON[3]], couches: 3, espacement: 10, epaisseur: 0.9, angle: 90, croisement: 30, ondulation: 0.4 },
+        'Orbite': { sujet: 'spheres', fond: ORB[2], encre: [ORB[0], ORB[1]], couches: 2, espacement: 5, epaisseur: 0.6, ondulation: 1, rotation: -0.8, angle: -10 },
+      },
+      brand(colors) {
+        const c = colors.slice(1).length ? colors.slice(1) : ['#111111'];
+        return { fond: colors[0], encre: c.slice(0, 4) };
+      },
+      pointer: {
+        move: (q) => { hover = { x: q.x, y: q.y }; },
+        down: (q) => { drag = { x: q.x, y: q.y, lx: q.x, moved: false }; },
+        drag: (q) => {
+          hover = { x: q.x, y: q.y };
+          if (!drag) return;
+          if (Math.hypot(q.x - drag.x, q.y - drag.y) > 6) drag.moved = true;
+          if (!drag.moved) return;
+          angleOff += (q.x - drag.lx) * 0.25; drag.lx = q.x;
+        },
+        up: (q) => {
+          if (drag && !drag.moved) { ripples.push({ x: q.x, y: q.y, t: 0 }); if (ripples.length > 5) ripples.shift(); }
+          if (drag && drag.moved) { app.set('angle', Math.round(((p.angle + angleOff + 90) % 180 + 180) % 180 - 90)); angleOff = 0; }
+          drag = null;
+        },
+        wheel: (q, dy) => app.set('espacement', Math.max(3, Math.min(20, Math.round((p.espacement + (dy > 0 ? 0.5 : -0.5)) * 2) / 2))),
+      },
+      onChange(k) { if (['sujet', 'image', '*'].includes(k)) baseKey = ''; },
+      export: { name: 'gravure', svg: () => toSVG() },
+    });
+    const p = app.params;
+    canvas.addEventListener('pointerleave', () => { hover = null; });
+
+    // ——— Relief de base (logo ou image), calculé une fois par taille ———
+    function boxBlur(a, w, h, r, passes) {
+      const tmp = new Float32Array(a.length);
+      for (let k = 0; k < passes; k++) {
+        for (let y = 0; y < h; y++) { let s = 0; const o = y * w; for (let x = -r; x <= r; x++) s += a[o + Math.min(w - 1, Math.max(0, x))]; for (let x = 0; x < w; x++) { tmp[o + x] = s / (2 * r + 1); s += a[o + Math.min(w - 1, x + r + 1)] - a[o + Math.max(0, x - r)]; } }
+        for (let x = 0; x < w; x++) { let s = 0; for (let y = -r; y <= r; y++) s += tmp[Math.min(h - 1, Math.max(0, y)) * w + x]; for (let y = 0; y < h; y++) { a[y * w + x] = s / (2 * r + 1); s += tmp[Math.min(h - 1, y + r + 1) * w + x] - tmp[Math.max(0, y - r) * w + x]; } }
+      }
+    }
+    function buildBase(w, h) {
+      const img = p.sujet === 'image' ? p.image : (p.image || app.logoImg), key = [p.sujet, gw, gh, img ? (img.src || 'c') : 'demo'].join('|');
+      if (key === baseKey && base) return;
+      baseKey = key;
+      const c = document.createElement('canvas'); c.width = gw; c.height = gh; const x = c.getContext('2d', { willReadFrequently: true });
+      const S = Math.min(gw, gh), hgt = new Float32Array(gw * gh), alb = new Float32Array(gw * gh).fill(1);
+      if (p.sujet === 'logo') {
+        x.fillStyle = '#fff'; x.fillRect(0, 0, gw, gh);
+        const Z = S * 0.74;
+        if (img) {
+          const iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height, k = Z / Math.max(iw, ih);
+          x.drawImage(img, (gw - iw * k) / 2, (gh - ih * k) / 2, iw * k, ih * k);
+        } else {
+          x.fillStyle = '#000'; x.beginPath(); x.arc(gw / 2, gh / 2, Z * 0.47, 0, TAU); x.arc(gw / 2, gh / 2, Z * 0.25, 0, TAU, true); x.fill('evenodd');
+          x.fillRect(gw / 2 - Z * 0.06, gh / 2 - Z * 0.5, Z * 0.12, Z);
+        }
+        const d = x.getImageData(0, 0, gw, gh).data;
+        let transp = 0; for (let i = 3; i < d.length; i += 16) if (d[i] < 128) transp++;
+        const useA = img && transp > d.length / 16 * 0.05;
+        for (let i = 0; i < gw * gh; i++) { const l = (d[i * 4] * 0.2126 + d[i * 4 + 1] * 0.7152 + d[i * 4 + 2] * 0.0722) / 255; hgt[i] = useA ? d[i * 4 + 3] / 255 : 1 - l; }
+        // Le logo est légèrement teinté pour se lire même sous une lumière rasante.
+        for (let i = 0; i < gw * gh; i++) alb[i] = 1 - 0.28 * hgt[i];
+        // Bombé : le masque flouté donne des flancs arrondis ; on garde un plateau net.
+        const sharp = hgt.slice(); boxBlur(hgt, gw, gh, Math.max(1, Math.round(S * 0.018)), 3);
+        for (let i = 0; i < hgt.length; i++) hgt[i] = (hgt[i] * 0.9 + sharp[i] * 0.1) * S * G * 0.018;
+      } else if (p.sujet === 'image') {
+        if (img) {
+          const iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height, k = Math.max(gw / iw, gh / ih);
+          x.drawImage(img, (gw - iw * k) / 2, (gh - ih * k) / 2, iw * k, ih * k);
+          const d = x.getImageData(0, 0, gw, gh).data;
+          for (let i = 0; i < gw * gh; i++) alb[i] = (d[i * 4] * 0.2126 + d[i * 4 + 1] * 0.7152 + d[i * 4 + 2] * 0.0722) / 255;
+        } else {
+          // Sans image : la marque de démonstration, sombre sur fond clair, adoucie.
+          x.fillStyle = '#fff'; x.fillRect(0, 0, gw, gh); x.fillStyle = '#000';
+          const Z = S * 0.74; x.beginPath(); x.arc(gw / 2, gh / 2, Z * 0.47, 0, TAU); x.arc(gw / 2, gh / 2, Z * 0.25, 0, TAU, true); x.fill('evenodd'); x.fillRect(gw / 2 - Z * 0.06, gh / 2 - Z * 0.5, Z * 0.12, Z);
+          const d = x.getImageData(0, 0, gw, gh).data;
+          for (let i = 0; i < gw * gh; i++) alb[i] = d[i * 4] / 255;
+          boxBlur(alb, gw, gh, Math.max(1, Math.round(S * 0.03)), 2);
+          for (let y = 0; y < gh; y++) for (let xx = 0; xx < gw; xx++) { const i = y * gw + xx; alb[i] = 0.15 + 0.8 * alb[i] * (0.75 + 0.25 * xx / gw); }
+        }
+        for (let i = 0; i < hgt.length; i++) hgt[i] = alb[i];
+        boxBlur(hgt, gw, gh, 2, 2);
+        for (let i = 0; i < hgt.length; i++) hgt[i] *= S * G * 0.04;
+      }
+      base = { hgt, alb };
+    }
+
+    // ——— Relief animé + éclairage → ton (0 noir, 1 blanc) ———
+    function tone(w, h, t) {
+      const ngw = Math.ceil(w / G) + 2, ngh = Math.ceil(h / G) + 2;
+      if (ngw !== gw || ngh !== gh) { gw = ngw; gh = ngh; H = new Float32Array(gw * gh); A = new Float32Array(gw * gh); T = new Float32Array(gw * gh); baseKey = ''; }
+      const S = Math.min(w, h), m = p.mouvement, rel = p.relief;
+      if (p.sujet === 'spheres') {
+        A.fill(4); H.fill(0);
+        const sp = [[0.5, 0.5, 0.3, 0], [0.24, 0.3, 0.15, 1.7], [0.78, 0.68, 0.19, 3.1], [0.8, 0.22, 0.09, 4.4], [0.2, 0.78, 0.11, 5.6]];
+        for (const [sx, sy, sr, ph] of sp) {
+          const cx = w / 2 + (sx - 0.5) * w * 0.92 + Math.sin(t * 0.37 * m + ph) * S * 0.05 * m, cy = h / 2 + (sy - 0.5) * h * 0.92 + Math.cos(t * 0.29 * m + ph * 1.3) * S * 0.05 * m, R = sr * S;
+          const x0 = Math.max(0, Math.floor((cx - R) / G)), x1 = Math.min(gw - 1, Math.ceil((cx + R) / G)), y0 = Math.max(0, Math.floor((cy - R) / G)), y1 = Math.min(gh - 1, Math.ceil((cy + R) / G));
+          for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) { const dx = x * G - cx, dy = y * G - cy, q = R * R - dx * dx - dy * dy; if (q > 0) { const z = Math.sqrt(q) * rel; const i = y * gw + x; if (z > H[i]) { H[i] = z; A[i] = 1; } } }
+        }
+      } else if (p.sujet === 'vagues') {
+        A.fill(1);
+        const k1 = TAU / (S * 0.42), k2 = TAU / (S * 0.27), k3 = TAU / (S * 0.6), ph = t * m, amp = S * 0.016 * rel;
+        const cx = new Float32Array(gw), sx = new Float32Array(gw);
+        for (let x = 0; x < gw; x++) { cx[x] = Math.sin(x * G * k1 + ph); sx[x] = Math.sin(x * G * k3 * 0.7 - ph * 0.6); }
+        for (let y = 0; y < gh; y++) { const sy = Math.sin(y * G * k2 * 0.8 + ph * 0.8); for (let x = 0; x < gw; x++) H[y * gw + x] = amp * (cx[x] * 0.9 + Math.sin((x * 0.6 + y) * G * k2 + ph * 1.3) * 0.6 + sx[x] * sy * 0.8); }
+      } else {
+        buildBase(w, h);
+        const b = base, k = rel * (1 + (p.sujet === 'logo' ? Math.sin(t * 0.8 * m) * 0.25 * Math.min(1, m) : 0));
+        for (let i = 0; i < H.length; i++) { H[i] = b.hgt[i] * k; A[i] = b.alb[i]; }
+      }
+      // Ondes déposées au toucher.
+      for (const r of ripples) {
+        const R = S * 0.5, x0 = Math.max(0, Math.floor((r.x - R) / G)), x1 = Math.min(gw - 1, Math.ceil((r.x + R) / G)), y0 = Math.max(0, Math.floor((r.y - R) / G)), y1 = Math.min(gh - 1, Math.ceil((r.y + R) / G));
+        const front = r.t * S * 0.35, amp = S * 0.035 * Math.exp(-r.t * 0.8), lam = S * 0.05;
+        for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) { const d = Math.hypot(x * G - r.x, y * G - r.y), e = (d - front) / lam; if (e > -3 && e < 3) H[y * gw + x] += amp * Math.cos(e * Math.PI) * Math.exp(-e * e * 0.5); }
+      }
+      // Lambert, normalisé pour qu'une surface plane reste blanche.
+      // Sphères : éclairage brut (le fond reste blanc) ; ailleurs, une surface plane prend le ton « blancs ».
+      const lx = Math.cos(az) * Math.cos(el), ly = Math.sin(az) * Math.cos(el), lz = Math.sin(el), sph = p.sujet === 'spheres', ilz = 1 / Math.max(0.05, lz), bl = p.blancs, amb = p.ambiance, gam = p.contraste;
+      for (let y = 0; y < gh; y++) for (let x = 0; x < gw; x++) {
+        const i = y * gw + x, hx = (H[i + (x < gw - 1 ? 1 : 0)] - H[i - (x > 0 ? 1 : 0)]) / (2 * G), hy = (H[i + (y < gh - 1 ? gw : 0)] - H[i - (y > 0 ? gw : 0)]) / (2 * G);
+        const n = 1 / Math.sqrt(hx * hx + hy * hy + 1), dot = Math.max(0, (-hx * lx - hy * ly + lz) * n);
+        // Les pentes éclairées montent doucement vers le blanc sans le saturer : il reste un trait fin.
+        let s; if (sph) s = dot * 1.05; else { const r = dot * ilz; s = r < 1 ? bl * r : bl + (1 - bl) * 0.75 * Math.tanh((r - 1) * 1.5); }
+        T[i] = Math.pow(Math.min(1, A[i] * (amb + (1 - amb) * Math.min(1, s))), gam);
+      }
+    }
+
+    // ——— Tailles : un polygone par trait, épaisseur selon l'ombre ———
+    function engrave(w, h, t) {
+      const n = Math.round(p.couches), sp = p.espacement, ds = 4, R = Math.hypot(w, h) / 2 + sp, maxW = sp * p.epaisseur;
+      const ond = p.ondulation * (p.sujet === 'spheres' ? 0.35 : 0.9), layers = [], cols = p.encre.length ? p.encre : ['#111'];
+      // Chaque trait : abscisses u, épaisseurs et décalages (tableaux réutilisés), aplatis en polygone à la fin.
+      const U = [], W = [], O = [];
+      for (let k = 0; k < n; k++) {
+        const ang = (p.angle + angleOff + k * p.croisement) * Math.PI / 180, dx = Math.cos(ang), dy = Math.sin(ang), nx = -dy, ny = dx;
+        const lo = k * 0.75 / n, span = 1 - lo, polys = [];
+        const shift = ((t * p.defile * sp * 0.5 * (k % 2 ? -1 : 1)) % sp + sp) % sp;
+        const sw = (k ? 0.8 : 1) * maxW; // les couches croisées sont un peu plus fines
+        for (let v = -R + shift; v < R; v += sp) {
+          const ox = w / 2 + nx * v, oy = h / 2 + ny * v;
+          const flush = () => {
+            const L = U.length;
+            if (L > 1) {
+              const f = new Float32Array(L * 4);
+              for (let i = 0; i < L; i++) {
+                const bx = ox + dx * U[i] + nx * O[i], by = oy + dy * U[i] + ny * O[i], hw = W[i] / 2, j = (2 * L - 1 - i) * 2;
+                f[i * 2] = bx + nx * hw; f[i * 2 + 1] = by + ny * hw; f[j] = bx - nx * hw; f[j + 1] = by - ny * hw;
+              }
+              polys.push(f);
+            }
+            U.length = 0; W.length = 0; O.length = 0;
+          };
+          for (let u = -R; u <= R; u += ds) {
+            const bx = ox + dx * u, by = oy + dy * u;
+            if (bx < -2 || by < -2 || bx > w + 2 || by > h + 2) { if (U.length) flush(); continue; }
+            const gx = Math.min(gw - 1, Math.max(0, Math.round(bx / G))), gy = Math.min(gh - 1, Math.max(0, Math.round(by / G))), gi = gy * gw + gx;
+            const D = 1 - T[gi], wk = Math.min(1, Math.max(0, (D - lo) / span)) * sw;
+            if (wk < 0.3) { if (U.length) flush(); continue; }
+            const off = -H[gi] * ond, L = U.length;
+            // Un point qui prolonge linéairement les deux précédents est remplacé : tracé allégé.
+            if (L >= 2 && Math.abs(W[L - 1] * 2 - W[L - 2] - wk) < 0.16 && Math.abs(O[L - 1] * 2 - O[L - 2] - off) < 0.16) { U[L - 1] = u; W[L - 1] = wk; O[L - 1] = off; continue; }
+            U.push(u); W.push(wk); O.push(off);
+          }
+          flush();
+        }
+        layers.push({ col: cols[k % cols.length], polys });
+      }
+      return layers;
+    }
+
+    app.loop((t, dt) => {
+      const { w, h, dpr } = app.size, S = Math.min(w, h);
+      dt = Math.min(0.05, dt || 0);
+      // Lumière : suit le pointeur, sinon tourne seule.
+      let taz, tel;
+      if (hover) { const ddx = hover.x - w / 2, ddy = hover.y - h / 2, d = Math.hypot(ddx, ddy) / (S * 0.6); taz = Math.atan2(ddy, ddx); tel = 0.28 + (1 - Math.min(1, d)) * 1.15; }
+      else { taz = az + p.rotation * dt; tel = p.hauteur; }
+      let da = ((taz - az + Math.PI) % TAU + TAU) % TAU - Math.PI; az += da * Math.min(1, hover ? dt * 6 : 1); el += (tel - el) * Math.min(1, dt * 3);
+      for (const r of ripples) r.t += dt;
+      ripples = ripples.filter((r) => r.t < 5);
+      tone(w, h, t);
+      const L = engrave(w, h, t);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = p.fond; ctx.fillRect(0, 0, w, h);
+      for (const l of L) {
+        ctx.fillStyle = l.col; ctx.beginPath();
+        for (const f of l.polys) { ctx.moveTo(f[0], f[1]); for (let i = 2; i < f.length; i += 2) ctx.lineTo(f[i], f[i + 1]); ctx.closePath(); }
+        ctx.fill();
+      }
+      app.finish(ctx);
+    });
+
+    function toSVG() {
+      const { w, h } = app.size, f = (v) => Math.round(v * 10) / 10, t = app.time || 0;
+      tone(w, h, t);
+      const L = engrave(w, h, t), out = [];
+      for (const l of L) {
+        let d = '';
+        for (const q of l.polys) { d += 'M' + f(q[0]) + ' ' + f(q[1]); for (let i = 2; i < q.length; i += 2) d += 'L' + f(q[i]) + ' ' + f(q[i + 1]); d += 'Z'; }
+        out.push(`<path fill="${l.col}" d="${d}"/>`);
+      }
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">\n<rect width="100%" height="100%" fill="${p.fond}"/>\n${out.join('\n')}\n</svg>`;
+    }
+  </script>
+</body>
+</html>

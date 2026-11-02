@@ -1,0 +1,15 @@
+{
+  "slug": "gravure",
+  "title": "Gravure",
+  "type": "filter",
+  "description": "Sphères, vagues, logo en relief ou image éclairés par une lumière mobile, traduits en tailles parallèles qui gonflent dans les ombres.",
+  "tags": ["gravure", "hachures", "relief", "lumiere", "logo", "svg"],
+  "inspiration": [
+    "Taille-douce et gravure au burin des billets de banque",
+    "Éclairage de Lambert sur une carte de hauteurs",
+    "references/techniques.md ; palettes papier-60, biennale, menthe, éventail"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
