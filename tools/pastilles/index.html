@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Grille de pastilles</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Grille de pastilles (d'après l'affiche du Salon Skug, moodboard 19) : on tape le texte d'une affiche,
+    // chaque ligne devient une rangée de carrés arrondis, une lettre par pastille, et la taille des
+    // modules s'adapte à la longueur de la ligne. Chaque bloc de texte (séparé par une ligne vide) a sa
+    // couleur ; les pastilles sans lettre sont à l'encre et peuvent se subdiviser en quatre, puis encore
+    // (grille récursive). L'espace restant devient des rangées de petites pastilles. En mouvement : les
+    // cases vides clignotent, une vague traverse la grille, les lettres apparaissent en cascade.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const SALON = PAL('salon'), BIEN = PAL('biennale'), KB = PAL('kegelbahn'), MENTHE = PAL('menthe'), P60 = PAL('papier-60');
+    const GR = PAL('good-room'), PIX = PAL('pixels'), GLY = PAL('glyphes'), ORB = PAL('orbite'), CODE = PAL('code');
+    const FONTS = {
+      grotesque: "'Helvetica Neue', Helvetica, Arial, sans-serif",
+      serif: "Georgia, 'Times New Roman', Times, serif",
+      mono: "'Courier New', Courier, monospace",
+      arrondie: "'Arial Rounded MT Bold', 'Helvetica Rounded', 'Nunito', 'Varela Round', 'Helvetica Neue', Arial, sans-serif",
+    };
+
+    let hover = null, layoutCache = null, overrides = new Map();
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.03, vignette: 0 },
+      hint: 'Survol : la pastille se soulève · touchez pour changer sa couleur · molette : arrondi',
+      notes: 'Une ligne de texte = une rangée de pastilles, une lettre par pastille. Une ligne vide sépare deux blocs, chacun avec sa couleur. Les cases sans lettre se subdivisent et clignotent.',
+      params: {
+        'Texte': {
+          texte: { type: 'textarea', label: 'Texte de l’affiche (ligne vide = nouveau bloc)', value: 'SALON\nDU\nMOTIF\n\nNOV\n2026\n\nENTRÉE\nLIBRE', rows: 7 },
+          police: { type: 'font', label: 'Police', options: { grotesque: 'Grotesque', arrondie: 'Arrondie', serif: 'Sérif', mono: 'Machine' }, value: 'grotesque' },
+          graisse: { type: 'segmented', label: 'Graisse', options: { 400: 'Normale', 700: 'Grasse', 900: 'Noire' }, value: '700' },
+          majuscules: { type: 'toggle', label: 'Majuscules', value: true },
+          corps: { type: 'range', label: 'Corps de la lettre', min: 0.3, max: 1, step: 0.01, value: 0.66 },
+        },
+        'Grille': {
+          tailles: { type: 'segmented', label: 'Tailles des lignes', options: { adaptees: 'Adaptées', egales: 'Égales' }, value: 'adaptees' },
+          alignement: { type: 'segmented', label: 'Alignement', options: { gauche: 'Gauche', centre: 'Centre', droite: 'Droite', hasard: 'Hasard' }, value: 'gauche' },
+          colonnesMin: { type: 'range', label: 'Colonnes minimum', min: 1, max: 16, step: 1, value: 5 },
+          subdivision: { type: 'range', label: 'Subdivision des cases vides', min: 0, max: 1, step: 0.01, value: 0.35 },
+          arrondi: { type: 'range', label: 'Arrondi', min: 0, max: 0.5, step: 0.01, value: 0.22 },
+          ecart: { type: 'range', label: 'Écart', min: 0, max: 0.3, step: 0.005, value: 0.07 },
+          marge: { type: 'range', label: 'Marge', min: 0, max: 0.2, step: 0.005, value: 0.04 },
+        },
+        'Mouvement': {
+          clignotement: { type: 'range', label: 'Clignotement des cases vides', min: 0, max: 1, step: 0.01, value: 0.3 },
+          vague: { type: 'range', label: 'Vague', min: 0, max: 1, step: 0.01, value: 0.2 },
+          cascade: { type: 'toggle', label: 'Lettres en cascade', value: true },
+          cycle: { type: 'range', label: 'Durée d’un cycle (s)', min: 3, max: 30, step: 0.5, value: 9 },
+        },
+        'Couleur': {
+          fond: { type: 'color', label: 'Fond', value: SALON[0] },
+          encre: { type: 'color', label: 'Cases vides', value: SALON[1] },
+          lettre: { type: 'color', label: 'Lettres', value: SALON[1] },
+          couleurs: { type: 'palette', label: 'Couleurs des blocs', value: [SALON[2], SALON[3], SALON[4]] },
+        },
+      },
+      presets: {
+        'Salon': {},
+        'Biennale': { texte: 'BIENNALE\n\nDES\nFORMES\n\n12—27\nJUIN', fond: BIEN[0], encre: BIEN[1], lettre: BIEN[1], couleurs: [BIEN[2], BIEN[3], BIEN[4]], arrondi: 0.5, alignement: 'centre', subdivision: 0.2 },
+        'Nuit': { texte: 'NUIT\nBLANCHE\n\nOUVERT\nJUSQU’À\n4H', fond: '#0a0a0a', encre: '#1d1d1d', lettre: '#0a0a0a', couleurs: [KB[1], KB[2], KB[3]], arrondi: 0.3, clignotement: 0.5, alignement: 'hasard' },
+        'Égales': { tailles: 'egales', texte: 'UN\nDEUX\nTROIS\nQUATRE\nCINQ', fond: P60[0], encre: P60[1], lettre: P60[0], couleurs: [P60[1]], arrondi: 0.12, subdivision: 0.6, vague: 0.35 },
+        'Menthe': { texte: 'jardin\nd’été\n\nsoirée\nfraîche', majuscules: false, police: 'arrondie', graisse: '700', fond: MENTHE[0], encre: MENTHE[1], lettre: MENTHE[1], couleurs: [MENTHE[2], MENTHE[3]], arrondi: 0.5, ecart: 0.1 },
+        'Pixels': { texte: 'PIXEL\nPARTY\n\n8BIT', police: 'mono', graisse: '700', fond: PIX[0], encre: '#3a3a3a', lettre: '#f2f2f2', couleurs: [PIX[1], PIX[2], PIX[3], PIX[4]], arrondi: 0, ecart: 0.04, subdivision: 0.7, clignotement: 0.6 },
+        'Good Room': { texte: 'GOOD\nROOM\n\nCLUB\n\nVEN\nSAM', fond: GR[0], encre: '#262626', lettre: GR[0], couleurs: [GR[1], GR[2], GR[3], GR[4]], arrondi: 0.4, alignement: 'droite' },
+        'Glyphes': { texte: 'A\nBC\nDEF\nGHIJ', tailles: 'adaptees', colonnesMin: 4, fond: GLY[1], encre: GLY[0], lettre: GLY[1], couleurs: [GLY[2], GLY[3], GLY[4], GLY[5], GLY[6]], arrondi: 0.18, subdivision: 0.5 },
+        'Orbite': { texte: 'CONFÉRENCE\n\nESPACE\nTEMPS', police: 'serif', graisse: '400', majuscules: false, fond: ORB[2], encre: ORB[1], lettre: ORB[2], couleurs: [ORB[0]], arrondi: 0.5, ecart: 0.05, vague: 0.4, clignotement: 0.15 },
+        'Code': { texte: 'git\npush\n\n--force', police: 'mono', majuscules: false, fond: CODE[0], encre: CODE[6], lettre: CODE[6], couleurs: [CODE[1], CODE[2], CODE[3], CODE[4], CODE[5]], arrondi: 0.08, subdivision: 0.55, alignement: 'gauche' },
+      },
+      brand(colors) {
+        const rest = colors.slice(1);
+        return { fond: colors[0], encre: rest[0] || '#111111', lettre: rest[0] || '#111111', couleurs: (rest.length > 1 ? rest.slice(1) : rest.length ? rest : ['#ffffff']).slice(0, 6) };
+      },
+      pointer: {
+        move: (q) => { hover = pick(q.x, q.y); },
+        down: (q) => {
+          const c = pick(q.x, q.y);
+          if (!c) return;
+          // Toucher : la pastille passe à la couleur suivante (encre, puis chaque couleur de bloc).
+          const n = (p.couleurs || []).length + 1, cur = overrides.has(c.id) ? overrides.get(c.id) : c.color;
+          overrides.set(c.id, (cur + 1) % n);
+        },
+        wheel: (q, dy) => app.set('arrondi', Math.max(0, Math.min(0.5, Math.round((p.arrondi - dy * 0.0006) * 100) / 100))),
+      },
+      onChange(k) {
+        if (k === '*' || ['texte', 'tailles', 'alignement', 'colonnesMin', 'subdivision', 'marge', 'majuscules'].includes(k)) overrides = new Map();
+        layoutCache = null;
+      },
+      onSeed() { layoutCache = null; overrides = new Map(); },
+      export: { name: 'pastilles', svg: () => toSVG() },
+    });
+    const p = app.params;
+    canvas.addEventListener('pointerleave', () => { hover = null; });
+
+    // ——— Mise en page : rangées de modules ———
+    // Une cellule : x, y, taille, lettre (ou ''), couleur (−1 = encre, sinon indice de bloc), ordre d'apparition.
+    function layout(w, h) {
+      const key = [w, h, p.texte, p.tailles, p.alignement, p.colonnesMin, p.subdivision, p.marge, p.majuscules, app.seed].join('|');
+      if (layoutCache && layoutCache.key === key) return layoutCache;
+      const r = app.rng(9);
+      const raw = String(p.texte || '').split('\n').map((s) => s.trim());
+      // Blocs : une ligne vide en sépare deux.
+      const lines = [];
+      let block = 0, sawText = false;
+      for (const s of raw) {
+        if (!s) { if (sawText) { block++; sawText = false; } continue; }
+        lines.push({ text: p.majuscules ? s.toUpperCase() : s, block });
+        sawText = true;
+      }
+      const mx = w * p.marge, my = h * p.marge, AW = w - 2 * mx, AH = h - 2 * my;
+      const cells = [];
+      if (!lines.length) { layoutCache = { key, cells, order: 0 }; return layoutCache; }
+      const len = (s) => [...s].length;
+      const maxLen = Math.max(...lines.map((l) => len(l.text)));
+      // Taille des modules par ligne : la ligne remplit la largeur, sauf « égales » (toutes à la plus longue).
+      for (const l of lines) l.m = AW / Math.max(p.colonnesMin, p.tailles === 'egales' ? maxLen : len(l.text));
+      let sum = lines.reduce((a, l) => a + l.m, 0);
+      if (sum > AH) { const k = AH / sum; for (const l of lines) l.m *= k; sum = AH; }
+      // L'espace restant devient des rangées de petites pastilles, glissées entre les blocs.
+      const mMin = Math.min(...lines.map((l) => l.m));
+      const fill = mMin * 0.5;
+      let spare = AH - sum;
+      const nFill = Math.floor(spare / fill + 1e-6);
+      const gaps = [];
+      for (let i = 0; i < lines.length - 1; i++) if (lines[i + 1].block !== lines[i].block) gaps.push(i + 1);
+      const slots = gaps.length ? [...gaps, 0, lines.length] : [0, lines.length];
+      const fillAt = new Map();
+      for (let k = 0; k < nFill; k++) { const s = slots[k < slots.length ? k : Math.floor(r() * slots.length)]; fillAt.set(s, (fillAt.get(s) || 0) + 1); }
+      spare -= nFill * fill;
+      let y = my + spare / 2, order = 0, id = 0;
+      const row = (m, letters, blk) => {
+        const cols = Math.max(1, Math.floor(AW / m + 1e-6)), x0 = mx + (AW - cols * m) / 2;
+        const n = letters.length;
+        let off = 0;
+        if (n) {
+          const free = Math.max(0, cols - n);
+          off = p.alignement === 'centre' ? Math.floor(free / 2) : p.alignement === 'droite' ? free : p.alignement === 'hasard' ? Math.floor(r() * (free + 1)) : 0;
+        }
+        for (let c = 0; c < cols; c++) {
+          const ch = c >= off && c < off + n ? letters[c - off] : '';
+          const x = x0 + c * m;
+          if (ch && ch !== ' ') cells.push({ id: id++, x, y, s: m, ch, color: blk, ord: order++ });
+          else if (r() < p.subdivision && m > 10) {
+            // Grille récursive : la case vide se divise en quatre, et parfois encore.
+            const sub = (sx, sy, ss, depth) => {
+              if (depth < 2 && r() < p.subdivision * 0.6 && ss > 12) { const hh = ss / 2; sub(sx, sy, hh, depth + 1); sub(sx + hh, sy, hh, depth + 1); sub(sx, sy + hh, hh, depth + 1); sub(sx + hh, sy + hh, hh, depth + 1); }
+              else cells.push({ id: id++, x: sx, y: sy, s: ss, ch: '', color: -1, ord: -1, ph: r(), rate: 0.4 + r() * 1.6, alt: Math.floor(r() * 8) });
+            };
+            const hh = m / 2;
+            sub(x, y, hh, 1); sub(x + hh, y, hh, 1); sub(x, y + hh, hh, 1); sub(x + hh, y + hh, hh, 1);
+          } else cells.push({ id: id++, x, y, s: m, ch: '', color: -1, ord: -1, ph: r(), rate: 0.4 + r() * 1.6, alt: Math.floor(r() * 8) });
+        }
+        y += m;
+      };
+      for (let i = 0; i <= lines.length; i++) {
+        for (let k = 0; k < (fillAt.get(i) || 0); k++) row(fill, [], -1);
+        if (i < lines.length) row(lines[i].m, [...lines[i].text], lines[i].block);
+      }
+      layoutCache = { key, cells, order };
+      return layoutCache;
+    }
+    function pick(x, y) {
+      const L = layout(app.size.w, app.size.h);
+      for (const c of L.cells) if (x >= c.x && x < c.x + c.s && y >= c.y && y < c.y + c.s) return c;
+      return null;
+    }
+
+    // ——— État animé de chaque pastille ———
+    const hash = (a, b) => { let n = (a * 374761393 + b * 668265263) | 0; n = (n ^ (n >>> 13)) * 1274126177 | 0; return ((n ^ (n >>> 16)) >>> 0) / 4294967295; };
+    function look(c, t, L, w, h) {
+      const pal = p.couleurs && p.couleurs.length ? p.couleurs : ['#ffffff'];
+      let ci = overrides.has(c.id) ? overrides.get(c.id) - 1 : c.color;
+      let color = ci < 0 ? p.encre : pal[ci % pal.length], scale = 1, show = 1, letterShow = 1;
+      // Vague diagonale.
+      if (p.vague > 0) scale *= 1 - p.vague * 0.35 * (0.5 + 0.5 * Math.sin(t * 2.2 - (c.x / w * 5 + c.y / h * 3)));
+      if (!c.ch) {
+        // Clignotement : chaque case vide a son rythme ; elle s'allume d'une couleur de bloc ou s'efface.
+        if (p.clignotement > 0 && !overrides.has(c.id)) {
+          const k = Math.floor(t * c.rate + c.ph * 10);
+          if (hash(c.id, k) < p.clignotement * 0.35) {
+            const pick2 = hash(c.id + 7, k);
+            if (pick2 < 0.6) color = pal[(c.alt + k) % pal.length]; else show = 0.0;
+          }
+        }
+      } else if (p.cascade && L.order > 0) {
+        // Cascade : les lettres apparaissent l'une après l'autre, tiennent, puis s'effacent avant le cycle suivant.
+        // Le cycle démarre au tiers : l'affiche est déjà presque entière à l'ouverture.
+        const u = ((t + p.cycle * 0.3) % p.cycle) / p.cycle, a = c.ord / L.order;
+        const tin = a * 0.28, tout = 0.84 + a * 0.1;
+        const e = (x) => Math.max(0, Math.min(1, x));
+        letterShow = e((u - tin) / 0.04) * (1 - e((u - tout) / 0.04));
+        scale *= 0.25 + 0.75 * (1 - Math.pow(1 - e((u - tin) / 0.06), 3)) * (1 - 0.6 * e((u - tout) / 0.05));
+      }
+      if (hover && hover.id === c.id) scale *= 1.12;
+      return { color, scale, show, letterShow };
+    }
+    function family() { return p.police === 'AtelierBrand' ? "'AtelierBrand', sans-serif" : (FONTS[p.police] || FONTS.grotesque); }
+    function forEachPastille(t, w, h, fn) {
+      const L = layout(w, h);
+      for (const c of L.cells) {
+        const s = look(c, t, L, w, h);
+        if (s.show <= 0) continue;
+        const g = c.s * p.ecart / 2, size = (c.s - 2 * g) * s.scale, cx = c.x + c.s / 2, cy = c.y + c.s / 2;
+        fn(c, s, cx, cy, size);
+      }
+    }
+
+    app.loop((t) => {
+      const { w, h, dpr } = app.size;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = p.fond; ctx.fillRect(0, 0, w, h);
+      const fam = family();
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      forEachPastille(t, w, h, (c, s, cx, cy, size) => {
+        if (size < 0.5) return;
+        ctx.fillStyle = s.color;
+        ctx.beginPath(); ctx.roundRect(cx - size / 2, cy - size / 2, size, size, size * p.arrondi); ctx.fill();
+        if (c.ch && s.letterShow > 0.01) {
+          ctx.globalAlpha = s.letterShow;
+          ctx.fillStyle = p.lettre;
+          ctx.font = `${p.graisse} ${size * p.corps}px ${fam}`;
+          ctx.fillText(c.ch, cx, cy + size * 0.04);
+          ctx.globalAlpha = 1;
+        }
+      });
+      app.finish(ctx);
+    });
+
+    // ——— Export SVG : la grille telle qu'elle est à cet instant ———
+    function toSVG() {
+      const { w, h } = app.size, t = app.time || 0, f = (v) => +v.toFixed(2);
+      const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      const fam = family().replace(/"/g, "'");
+      let body = '';
+      forEachPastille(t, w, h, (c, s, cx, cy, size) => {
+        if (size < 0.5) return;
+        body += `<rect x="${f(cx - size / 2)}" y="${f(cy - size / 2)}" width="${f(size)}" height="${f(size)}" rx="${f(size * p.arrondi)}" fill="${s.color}"/>\n`;
+        if (c.ch && s.letterShow > 0.01) body += `<text x="${f(cx)}" y="${f(cy + size * 0.04)}" font-size="${f(size * p.corps)}"${s.letterShow < 1 ? ` fill-opacity="${f(s.letterShow)}"` : ''}>${esc(c.ch)}</text>\n`;
+      });
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">\n<rect width="100%" height="100%" fill="${p.fond}"/>\n<g font-family="${fam}" font-weight="${p.graisse}" fill="${p.lettre}" text-anchor="middle" dominant-baseline="central">\n${body}</g>\n</svg>`;
+    }
+  </script>
+</body>
+</html>
