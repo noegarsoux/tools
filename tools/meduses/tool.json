@@ -1,0 +1,15 @@
+{
+  "slug": "meduses",
+  "title": "Méduses",
+  "type": "motion",
+  "description": "Des méduses translucides aux couleurs de la marque nagent par battements dans l'eau sombre, tentacules souples, motif de l'ombrelle en logo.",
+  "tags": ["meduses", "nature", "simulation", "lumiere", "logo", "svg"],
+  "inspiration": [
+    "Ernst Haeckel, Kunstformen der Natur (1904), planches de méduses",
+    "Aquarium de Monterey, bassin des méduses",
+    "references/physique-maths.md ; palettes kegelbahn, good-room, menthe, thermique"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
