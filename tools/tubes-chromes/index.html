@@ -1,0 +1,400 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tubes chromés</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Tubes chromés : des tubes et des formes gonflées en chrome sur un aplat.
+    // La scène est un champ de distance 2D (capsules, disques, anneau, logo) uni par un minimum lisse ;
+    // on le gonfle en relief (profil circulaire au bord, dôme à l'intérieur), ce qui donne une normale
+    // par pixel. Le chrome est une réflexion de ce relief dans un environnement en dégradé de marque
+    // (un ciel clair, un horizon sombre, un sol coloré), qu'on fait tourner lentement : les reflets glissent.
+    // Le gradient du champ est calculé avec la distance (pas de différences finies) : un seul passage par pixel.
+    const canvas = document.querySelector('canvas');
+    const gl = canvas.getContext('webgl2', { alpha: false, antialias: false, depth: false, stencil: false, preserveDrawingBuffer: false });
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const LU = PAL('luzern'), KB = PAL('kegelbahn'), ACIDE = PAL('acide'), MENTHE = PAL('menthe'), NUIT = PAL('trame-nuit');
+    const BIEN = PAL('biennale'), ORB = PAL('orbite');
+    const MAXS = 72, MAXB = 8, MAXC = 6;
+
+    let ready = false, tubes = [], blobs = [], drawn = [], cur = null, light = null, lastT = 0;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.05, vignette: 0 },
+      hint: 'Glissez pour dessiner un tube · survol : la lumière suit le pointeur · molette : épaisseur',
+      notes: 'Le relief vient d’un champ de distance gonflé ; le chrome est le reflet de ce relief dans un ciel en dégradé de marque. Les tubes que vous dessinez fusionnent avec les autres formes.',
+      params: {
+        'Composition': {
+          composition: { type: 'segmented', label: 'Composition', options: { tubes: 'Tubes', noeud: 'Nœud', bulles: 'Bulles', logo: 'Logo' }, value: 'tubes' },
+          nombre: { type: 'range', label: 'Nombre de tubes', min: 1, max: 6, step: 1, value: 3 },
+          epaisseur: { type: 'range', label: 'Épaisseur', min: 0.01, max: 0.09, step: 0.001, value: 0.042 },
+          fusion: { type: 'range', label: 'Fusion des formes', min: 0, max: 1, step: 0.01, value: 0.35 },
+          ombre: { type: 'range', label: 'Ombre portée', min: 0, max: 1, step: 0.01, value: 0.45 },
+        },
+        'Chrome': {
+          gonflement: { type: 'range', label: 'Gonflement', min: 0, max: 1, step: 0.01, value: 0.5 },
+          horizon: { type: 'range', label: 'Horizon', min: 0.2, max: 0.8, step: 0.01, value: 0.5 },
+          contraste: { type: 'range', label: 'Contraste du reflet', min: 0, max: 1, step: 0.01, value: 0.65 },
+          bandes: { type: 'range', label: 'Bandes (0 = lisse)', min: 0, max: 10, step: 1, value: 0 },
+          reflet: { type: 'range', label: 'Éclat', min: 0, max: 1, step: 0.01, value: 0.6 },
+        },
+        'Mouvement': {
+          boucle: { type: 'range', label: 'Boucle (s)', min: 4, max: 30, step: 1, value: 10 },
+          ondulation: { type: 'range', label: 'Ondulation des tubes', min: 0, max: 1, step: 0.01, value: 0.4 },
+          tours: { type: 'range', label: 'Balancement du ciel', min: 0, max: 1, step: 0.01, value: 0.4 },
+        },
+        'Couleur': {
+          fond: { type: 'color', label: 'Fond', value: LU[0] },
+          chrome: { type: 'palette', label: 'Ciel du chrome (sombre → clair)', value: [LU[3], LU[1], LU[2], LU[4]] },
+        },
+      },
+      presets: {
+        'Luzern': {},
+        'Miroir': { fond: '#111111', chrome: ['#050505', '#5d5d66', '#c9ccd6', '#ffffff'], contraste: 0.85, epaisseur: 0.035 },
+        'Nœud': { composition: 'noeud', epaisseur: 0.05, fusion: 0.5, gonflement: 0.6 },
+        'Bulles': { composition: 'bulles', nombre: 2, gonflement: 0.9, fusion: 0.8, fond: MENTHE[0], chrome: [MENTHE[1], MENTHE[3], MENTHE[2], '#ffffff'] },
+        'Or': { fond: '#16352a', chrome: ['#2a1606', '#9a5a12', '#f2c35a', '#fff6d8'], nombre: 4, epaisseur: 0.03 },
+        'Kegelbahn': { fond: KB[0], chrome: [KB[0], KB[2], KB[1], KB[3]], composition: 'noeud', contraste: 0.9, bandes: 5 },
+        'Acide': { fond: ACIDE[2], chrome: [ACIDE[1], '#6a6a66', ACIDE[0], ACIDE[3]], nombre: 5, epaisseur: 0.028, ombre: 0.7 },
+        'Rétro': { bandes: 6, contraste: 1, fond: BIEN[0], chrome: [BIEN[1], BIEN[2], BIEN[3], BIEN[4]], composition: 'bulles', nombre: 3 },
+        'Nuit': { fond: NUIT[0], chrome: ['#000000', '#2a2a2a', NUIT[2], NUIT[1]], ombre: 0, nombre: 6, epaisseur: 0.02, fusion: 0.6, reflet: 0.9 },
+        'Logo': { composition: 'logo', nombre: 2, epaisseur: 0.03, gonflement: 0.7 },
+      },
+      brand(colors) {
+        const sorted = colors.slice(1).sort((a, b) => lum(a) - lum(b));
+        return { fond: colors[0], chrome: sorted.length ? sorted.concat(['#ffffff']).slice(0, MAXC) : ['#111111', '#ffffff'] };
+      },
+      pointer: {
+        move: (q) => { light = { x: q.x, y: q.y }; },
+        down: (q) => { cur = [{ x: q.x, y: q.y }]; },
+        drag: (q) => { light = { x: q.x, y: q.y }; if (cur) { const l = cur[cur.length - 1]; if (Math.hypot(q.x - l.x, q.y - l.y) > 10) cur.push({ x: q.x, y: q.y }); } },
+        up: () => { if (cur && cur.length > 2) { drawn.push(cur.map((c) => ({ x: c.x / app.size.w, y: c.y / app.size.h }))); if (drawn.length > 3) drawn.shift(); } cur = null; },
+        wheel: (q, dy) => app.set('epaisseur', Math.max(0.01, Math.min(0.09, +(p.epaisseur - dy * 0.00003).toFixed(3)))),
+      },
+      onChange(k) {
+        if (!ready) return;
+        if (k === '*' || k === 'composition' || k === 'nombre') compose();
+        if (k === '*' || k === '_logo' || k === 'composition') logoDirty = true;
+      },
+      onSeed() { if (ready) { drawn = []; compose(); } },
+      export: { name: 'tubes-chromes' },
+    });
+    const p = app.params;
+    canvas.addEventListener('pointerleave', () => { light = null; });
+    function lum(hex) { const n = parseInt(String(hex).slice(1, 7), 16) || 0; return 0.2126 * (n >> 16) + 0.7152 * ((n >> 8) & 255) + 0.0722 * (n & 255); }
+
+    // ——— Composition : des tubes (courbes de contrôle), des disques, un nœud de Lissajous ———
+    function compose() {
+      const r = app.rng(41), n = p.nombre, comp = p.composition;
+      tubes = []; blobs = [];
+      const curve = (k) => {
+        // Une courbe qui traverse la scène : départ sur un bord, arrivée sur un autre, deux ou trois inflexions.
+        const pts = [], m = 4 + Math.floor(r() * 2), a = r() * TAU, cx = 0.5 + (r() - 0.5) * 0.3, cy = 0.5 + (r() - 0.5) * 0.3;
+        for (let i = 0; i < m; i++) {
+          const u = i / (m - 1) - 0.5, side = (r() - 0.5) * 0.5;
+          pts.push({ x: cx + Math.cos(a) * u * 1.25 - Math.sin(a) * side, y: cy + Math.sin(a) * u * 1.0 + Math.cos(a) * side, ph: r() * TAU });
+        }
+        return { pts, w: 0.75 + r() * 0.5, closed: false };
+      };
+      if (comp === 'noeud') {
+        // Nœud de Lissajous fermé : la courbe se recroise, le chrome fond les croisements.
+        const A = 2 + Math.floor(r() * 2), B = A + 1, d = r() * TAU, pts = [];
+        for (let i = 0; i < 14; i++) { const t = i / 14 * TAU; pts.push({ x: 0.5 + Math.sin(A * t + d) * 0.3, y: 0.5 + Math.sin(B * t) * 0.32, ph: t }); }
+        tubes.push({ pts, w: 1.1, closed: true });
+        for (let i = 1; i < n; i++) blobs.push({ x: r(), y: r(), r: 0.03 + r() * 0.05, ph: r() * TAU });
+      } else if (comp === 'bulles') {
+        const nb = 4 + Math.floor(r() * 3);
+        for (let i = 0; i < nb; i++) blobs.push({ x: 0.25 + r() * 0.5, y: 0.25 + r() * 0.5, r: 0.07 + r() * 0.12, ph: r() * TAU });
+        for (let i = 0; i < n; i++) tubes.push(curve(i));
+      } else if (comp === 'logo') {
+        for (let i = 0; i < n; i++) tubes.push(curve(i));
+      } else {
+        for (let i = 0; i < n; i++) tubes.push(curve(i));
+        if (r() < 0.6) blobs.push({ x: 0.2 + r() * 0.6, y: 0.2 + r() * 0.6, r: 0.06 + r() * 0.06, ph: r() * TAU });
+      }
+    }
+    // Catmull-Rom échantillonné, puis B-spline quadratique (raccords tangents) → arcs de Bézier quadratiques
+    // en pixels : [A, B, C, rayon]. L'ondulation des points de contrôle boucle exactement.
+    function segments(t) {
+      const { w, h } = app.size, U = Math.min(w, h), ph = TAU * t / p.boucle, segs = [];
+      const R0 = p.epaisseur * U;
+      const sample = (pts, closed, wr, per) => {
+        const n = pts.length, get = (i) => closed ? pts[((i % n) + n) % n] : pts[Math.max(0, Math.min(n - 1, i))];
+        const P = (i) => { const q = get(i); const o = (q.ph === undefined ? 0 : 1) * p.ondulation * 0.05; return [q.x * w + Math.cos(ph + (q.ph || 0)) * o * U, q.y * h + Math.sin(ph * 1 + (q.ph || 0) * 1.7) * o * U]; };
+        const spans = closed ? n : n - 1, out = [];
+        for (let i = 0; i < spans; i++) {
+          const p0 = P(i - 1), p1 = P(i), p2 = P(i + 1), p3 = P(i + 2);
+          for (let k = 0; k < per; k++) {
+            const s = k / per, s2 = s * s, s3 = s2 * s;
+            out.push([0, 1].map((c) => 0.5 * (2 * p1[c] + (-p0[c] + p2[c]) * s + (2 * p0[c] - 5 * p1[c] + 4 * p2[c] - p3[c]) * s2 + (-p0[c] + 3 * p1[c] - 3 * p2[c] + p3[c]) * s3)));
+          }
+        }
+        if (!closed) out.push(P(n - 1));
+        const m = out.length, mid = (a, b) => [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2], q = [];
+        if (closed) for (let i = 0; i < m; i++) q.push([mid(out[i], out[(i + 1) % m]), out[(i + 1) % m], mid(out[(i + 1) % m], out[(i + 2) % m])]);
+        else if (m === 2) q.push([out[0], mid(out[0], out[1]), out[1]]);
+        else for (let i = 0; i + 2 < m; i++) q.push([i === 0 ? out[0] : mid(out[i], out[i + 1]), out[i + 1], i + 3 === m ? out[m - 1] : mid(out[i + 1], out[i + 2])]);
+        q.forEach((c, i) => segs.push([...c[0], ...c[1], ...c[2], R0 * wr * (i === 0 ? -1 : 1)]));
+      };
+      for (const T of tubes) sample(T.pts, T.closed, T.w, 2);
+      for (const D of drawn) {
+        // Un tracé à main levée : on garde au plus 14 points répartis, puis on lisse.
+        const step = Math.max(1, Math.ceil(D.length / 14)), pts = D.filter((_, i) => i % step === 0 || i === D.length - 1);
+        sample(pts, false, 1, 1);
+      }
+      if (cur && cur.length > 1) sample(cur.map((c) => ({ x: c.x / w, y: c.y / h })), false, 1, 1);
+      return segs.slice(0, MAXS);
+    }
+
+    // ——— Logo : champ de distance signé (transformée en distance, deux passes de chanfrein) ———
+    let logoDirty = true, logoW = 1, logoH = 1, logoOk = false;
+    function logoSDF() {
+      const img = app.logoImg, N = 192;
+      const cv = document.createElement('canvas'); cv.width = cv.height = N;
+      const x = cv.getContext('2d', { willReadFrequently: true });
+      x.fillStyle = '#fff'; x.fillRect(0, 0, N, N);
+      if (img) {
+        const iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height, k = N * 0.78 / Math.max(iw, ih);
+        x.drawImage(img, (N - iw * k) / 2, (N - ih * k) / 2, iw * k, ih * k);
+      } else {
+        // Sans logo : un anneau ouvert, pour que la forme gonflée reste lisible.
+        x.strokeStyle = '#000'; x.lineWidth = N * 0.13; x.lineCap = 'round';
+        x.beginPath(); x.arc(N / 2, N / 2, N * 0.3, 0.6, TAU - 0.2); x.stroke();
+      }
+      const d = x.getImageData(0, 0, N, N).data, inside = new Uint8Array(N * N);
+      for (let i = 0; i < N * N; i++) inside[i] = (d[i * 4] * 0.2126 + d[i * 4 + 1] * 0.7152 + d[i * 4 + 2] * 0.0722) < 128 ? 1 : 0;
+      const edt = (mask) => {
+        const D = new Float32Array(N * N).fill(1e9), a = 1, b = Math.SQRT2;
+        for (let i = 0; i < N * N; i++) if (!mask[i]) D[i] = 0;
+        for (let y = 0; y < N; y++) for (let xx = 0; xx < N; xx++) {
+          const i = y * N + xx; let v = D[i];
+          if (xx > 0) v = Math.min(v, D[i - 1] + a);
+          if (y > 0) { v = Math.min(v, D[i - N] + a); if (xx > 0) v = Math.min(v, D[i - N - 1] + b); if (xx < N - 1) v = Math.min(v, D[i - N + 1] + b); }
+          D[i] = v;
+        }
+        for (let y = N - 1; y >= 0; y--) for (let xx = N - 1; xx >= 0; xx--) {
+          const i = y * N + xx; let v = D[i];
+          if (xx < N - 1) v = Math.min(v, D[i + 1] + a);
+          if (y < N - 1) { v = Math.min(v, D[i + N] + a); if (xx < N - 1) v = Math.min(v, D[i + N + 1] + b); if (xx > 0) v = Math.min(v, D[i + N - 1] + b); }
+          D[i] = v;
+        }
+        return D;
+      };
+      const din = edt(inside), dout = edt(inside.map((v) => 1 - v)), sdf = new Float32Array(N * N);
+      for (let i = 0; i < N * N; i++) sdf[i] = (inside[i] ? -din[i] + 0.5 : dout[i] - 0.5) / N;
+      // Deux flous 3×3 : la distance de chanfrein est en marches, le relief doit être lisse.
+      for (let pass = 0; pass < 2; pass++) {
+        const src = sdf.slice();
+        for (let y = 1; y < N - 1; y++) for (let xx = 1; xx < N - 1; xx++) {
+          let acc = 0; for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) acc += src[(y + dy) * N + xx + dx];
+          sdf[y * N + xx] = acc / 9;
+        }
+      }
+      logoW = logoH = N; logoOk = true;
+      return sdf;
+    }
+
+    // ——— Shader ———
+    const VS = `#version 300 es
+    layout(location = 0) in vec2 a;
+    void main() { gl_Position = vec4(a, 0., 1.); }`;
+    const FS = `#version 300 es
+    precision highp float;
+    out vec4 o;
+    uniform vec2 uSize; uniform float uDpr, uT, uFrame;
+    uniform vec4 uS[${MAXS * 2}]; uniform int uNS;
+    uniform vec3 uB[${MAXB}]; uniform int uNB;
+    uniform sampler2D uLogo; uniform float uHasLogo; uniform vec3 uLogoP;
+    uniform float uK, uR, uDome, uHor, uCon, uBands, uSpec, uShadow, uSway, uGrain, uVig;
+    uniform vec3 uBg; uniform vec3 uC[${MAXC}]; uniform int uNC; uniform vec3 uL;
+
+    float hash(vec2 p) { uvec2 q = uvec2(ivec2(p)) * uvec2(1597334673u, 3812015801u); uint n = (q.x ^ q.y) * 1597334673u; n ^= n >> 16; n *= 2246822519u; n ^= n >> 13; return float(n) / 4294967295.; }
+    // Minimum lisse avec gradient : d.x = distance, d.yz = gradient.
+    vec3 smin(vec3 a, vec3 b, float k) {
+      if (k <= 0.) return a.x < b.x ? a : b;
+      float h = clamp(0.5 + 0.5 * (b.x - a.x) / k, 0., 1.);
+      return vec3(mix(b.x, a.x, h) - k * h * (1. - h), mix(b.yz, a.yz, h));
+    }
+    // Vecteur du point p vers le point le plus proche d'une Bézier quadratique (méthode exacte d'Inigo Quilez).
+    vec2 bez(vec2 pos, vec2 A, vec2 B, vec2 C) {
+      vec2 a = B - A, b = A - 2. * B + C, c = a * 2., d = A - pos;
+      if (dot(b, b) < 1e-3) { vec2 ba = C - A, pa = pos - A; float h = clamp(dot(pa, ba) / max(dot(ba, ba), 1e-4), 0., 1.); return A + ba * h - pos; }
+      float kk = 1. / dot(b, b), kx = kk * dot(a, b), ky = kk * (2. * dot(a, a) + dot(d, b)) / 3., kz = kk * dot(d, a);
+      float pp = ky - kx * kx, p3 = pp * pp * pp, qq = kx * (2. * kx * kx - 3. * ky) + kz, h = qq * qq + 4. * p3;
+      if (h >= 0.) {
+        h = sqrt(h); vec2 x = (vec2(h, -h) - qq) / 2.;
+        vec2 uv = sign(x) * pow(abs(x), vec2(1. / 3.));
+        float t = clamp(uv.x + uv.y - kx, 0., 1.);
+        return d + (c + b * t) * t;
+      }
+      float z = sqrt(-pp), v = acos(clamp(qq / (pp * z * 2.), -1., 1.)) / 3., m = cos(v), n = sin(v) * 1.732050808;
+      vec2 t = clamp(vec2(m + m, -n - m) * z - kx, 0., 1.);
+      vec2 q1 = d + (c + b * t.x) * t.x, q2 = d + (c + b * t.y) * t.y;
+      return dot(q1, q1) < dot(q2, q2) ? q1 : q2;
+    }
+    vec3 scene(vec2 p) {
+      // Dans un même tube, les arcs se raccordent en tangence : un minimum franc suffit, sans arête ni bourrelet.
+      // Les tubes entre eux fusionnent par un minimum lisse. Un rayon négatif marque le début d'un tube.
+      vec3 d = vec3(1e5, 0., 0.), dt = vec3(1e5, 0., 0.); float rt = 0.;
+      for (int i = 0; i < ${MAXS}; i++) {
+        if (i >= uNS) break;
+        vec4 s0 = uS[i * 2], s1 = uS[i * 2 + 1]; float r = s1.z;
+        if (r < 0.) { d = smin(d, dt, uK * rt); dt = vec3(1e5, 0., 0.); r = -r; rt = r; }
+        // La courbe tient dans l'enveloppe de ses trois points : si la boîte est plus loin que le meilleur, on passe.
+        vec2 mn = min(min(s0.xy, s0.zw), s1.xy), mx = max(max(s0.xy, s0.zw), s1.xy);
+        if (length(max(max(mn - p, p - mx), 0.)) - r > dt.x) continue;
+        vec2 q = bez(p, s0.xy, s0.zw, s1.xy); float l = max(length(q), 1e-4);
+        if (l - r < dt.x) dt = vec3(l - r, -q / l);
+      }
+      d = smin(d, dt, uK * rt);
+      for (int i = 0; i < ${MAXB}; i++) {
+        if (i >= uNB) break;
+        vec2 q = p - uB[i].xy; float l = max(length(q), 1e-4);
+        d = smin(d, vec3(l - uB[i].z, q / l), uK * uR * 1.5);
+      }
+      if (uHasLogo > 0.5) {
+        vec2 lp = (p - uLogoP.xy) / uLogoP.z + 0.5;
+        if (lp.x > 0.002 && lp.y > 0.002 && lp.x < 0.998 && lp.y < 0.998) {
+          float e = 2. / 192.;
+          float v = texture(uLogo, lp).r * uLogoP.z;
+          vec2 g = vec2(texture(uLogo, lp + vec2(e, 0.)).r - texture(uLogo, lp - vec2(e, 0.)).r, texture(uLogo, lp + vec2(0., e)).r - texture(uLogo, lp - vec2(0., e)).r);
+          float gl2 = length(g); g = gl2 > 1e-6 ? g / gl2 : vec2(0.);
+          d = smin(d, vec3(v, g), uK * uR);
+        }
+      }
+      return d;
+    }
+    // Ciel du chrome : dégradé de marque, horizon sombre et net, bandes optionnelles.
+    vec3 sky(float t) {
+      if (uBands > 0.5) t = (floor(t * uBands) + 0.5) / uBands;
+      float x = clamp(t, 0., 1.) * float(uNC - 1);
+      int i = int(floor(x)); float f = fract(x);
+      vec3 a = uC[0], b = uC[0];
+      for (int k = 0; k < ${MAXC}; k++) { if (k == i) a = uC[k]; if (k == min(i + 1, uNC - 1)) b = uC[k]; }
+      return mix(a, b, uBands > 0.5 ? 0. : smoothstep(0., 1., f));
+    }
+    vec3 env(vec3 r) {
+      // Le ciel se balance : l'axe vertical tourne un peu, en boucle.
+      float an = sin(uT) * uSway * 0.6;
+      float y = -(r.y * cos(an) + r.x * sin(an));
+      float hz = (uHor - 0.5) * 1.2;
+      // Au-dessus de l'horizon : du milieu vers le plus clair ; en dessous : du plus sombre vers le milieu.
+      float s = y - hz;
+      float sharp = mix(1.5, 7., uCon);
+      float t = s > 0. ? 0.5 + 0.5 * (1. - exp(-s * sharp * 0.6)) : 0.5 * exp(s * sharp);
+      vec3 c = sky(t);
+      // Un liseré sombre juste sous l'horizon, signature du chrome.
+      c *= 1. - uCon * 0.55 * exp(-pow(s * 14., 2.));
+      return c;
+    }
+    void main() {
+      vec2 px = vec2(gl_FragCoord.x, uSize.y * uDpr - gl_FragCoord.y) / uDpr;
+      float U = min(uSize.x, uSize.y);
+      vec3 d = scene(px);
+      // Ombre portée : le même champ, décalé vers le bas-droite et adouci.
+      vec2 so = vec2(0.5, 1.) * uR * 0.9;
+      // (inutile sous une forme opaque : on ne la calcule qu'autour)
+      float sh = 0.;
+      if (uShadow > 0. && d.x > -1.5) { float sd = scene(px - so).x; sh = uShadow * 0.55 * (1. - smoothstep(-uR * 0.4, uR * 0.9, sd)); }
+      vec3 col = uBg * (1. - sh);
+      if (d.x < 1.) {
+        // Relief : bord en quart de cercle (rayon R), dôme plus large à l'intérieur.
+        float R = uR, s = clamp(-d.x / R, 0., 1.);
+        float dh = (1. - s) / max(sqrt(max(1. - (1. - s) * (1. - s), 1e-4)), 0.02);
+        float R2 = R * (1. + uDome * 5.), s2 = clamp(-d.x / R2, 0., 1.);
+        dh += uDome * 0.8 * (1. - s2) / max(sqrt(max(1. - (1. - s2) * (1. - s2), 1e-4)), 0.05) * (R / R2);
+        vec2 g = -d.yz * dh;
+        vec3 n = normalize(vec3(-g, 1.));
+        vec3 I = vec3(0., 0., -1.), r = reflect(I, n);
+        vec3 c = env(r);
+        // Éclat : la lumière vient du pointeur (ou d'en haut à gauche).
+        float spec = pow(max(dot(r, uL), 0.), 80.) * 1.4 + pow(max(dot(r, uL), 0.), 12.) * 0.18;
+        c += uSpec * spec;
+        // Fresnel : le bord reflète le plus clair, puis s'assombrit à l'extrême limite.
+        float fr = pow(1. - n.z, 4.);
+        c = mix(c, uC[uNC - 1], fr * 0.25);
+        float aa = clamp(-d.x * uDpr + 0.5, 0., 1.);
+        col = mix(col, c, aa);
+      }
+      vec2 uv = (px - uSize * 0.5) / (uSize * 0.5);
+      col *= 1. - uVig * 0.85 * smoothstep(0.35, 1.25, length(uv));
+      col += (hash(gl_FragCoord.xy + uFrame * 17.31) - 0.5) * uGrain * 0.22;
+      o = vec4(col, 1.);
+    }`;
+    function sh(type, src) { const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s); if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s)); return s; }
+    const prog = gl.createProgram();
+    gl.attachShader(prog, sh(gl.VERTEX_SHADER, VS)); gl.attachShader(prog, sh(gl.FRAGMENT_SHADER, FS));
+    gl.linkProgram(prog);
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
+    const UL = {}, u = (n) => (UL[n] ??= gl.getUniformLocation(prog, n));
+    const vao = gl.createVertexArray(); gl.bindVertexArray(vao);
+    const buf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+    const tLogo = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, tLogo);
+    for (const k of [gl.TEXTURE_MIN_FILTER, gl.TEXTURE_MAG_FILTER]) gl.texParameteri(gl.TEXTURE_2D, k, gl.LINEAR);
+    for (const k of [gl.TEXTURE_WRAP_S, gl.TEXTURE_WRAP_T]) gl.texParameteri(gl.TEXTURE_2D, k, gl.CLAMP_TO_EDGE);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.R16F, 1, 1, 0, gl.RED, gl.FLOAT, new Float32Array([1]));
+    // R16F se filtre partout en WebGL2 : le champ du logo reste lisse entre les texels.
+    const rgbf = (hx) => { const n = parseInt(String(hx).slice(1, 7), 16) || 0; return [(n >> 16 & 255) / 255, (n >> 8 & 255) / 255, (n & 255) / 255]; };
+    let frame = 0;
+
+    function render(t) {
+      const { w, h } = app.size, U = Math.min(w, h), ph = TAU * t / p.boucle;
+      const segs = segments(t), S = new Float32Array(MAXS * 8);
+      segs.forEach((s, i) => S.set([s[0], s[1], s[2], s[3], s[4], s[5], s[6], 0], i * 8));
+      const B = new Float32Array(MAXB * 3);
+      blobs.slice(0, MAXB).forEach((b, i) => {
+        const br = b.r * U * (1 + 0.12 * p.ondulation * Math.sin(ph + b.ph));
+        B.set([b.x * w + Math.cos(ph + b.ph) * p.ondulation * 0.03 * U, b.y * h + Math.sin(ph + b.ph) * p.ondulation * 0.03 * U, br], i * 3);
+      });
+      gl.viewport(0, 0, canvas.width, canvas.height);
+      gl.useProgram(prog);
+      gl.uniform2f(u('uSize'), w, h); gl.uniform1f(u('uDpr'), canvas.width / w);
+      gl.uniform1f(u('uT'), ph); gl.uniform1f(u('uFrame'), (frame++) % 997);
+      gl.uniform4fv(u('uS[0]'), S); gl.uniform1i(u('uNS'), segs.length);
+      gl.uniform3fv(u('uB[0]'), B); gl.uniform1i(u('uNB'), Math.min(MAXB, blobs.length));
+      const R = p.epaisseur * U;
+      gl.uniform1f(u('uR'), R); gl.uniform1f(u('uK'), p.fusion * 1.6);
+      gl.uniform1f(u('uDome'), p.gonflement); gl.uniform1f(u('uHor'), p.horizon); gl.uniform1f(u('uCon'), p.contraste);
+      gl.uniform1f(u('uBands'), p.bandes); gl.uniform1f(u('uSpec'), p.reflet); gl.uniform1f(u('uShadow'), p.ombre); gl.uniform1f(u('uSway'), p.tours);
+      gl.uniform3fv(u('uBg'), rgbf(p.fond));
+      const pal = (p.chrome.length ? p.chrome : ['#000', '#fff']).slice(0, MAXC), flat = [];
+      for (let i = 0; i < MAXC; i++) flat.push(...rgbf(pal[Math.min(i, pal.length - 1)]));
+      gl.uniform3fv(u('uC[0]'), flat); gl.uniform1i(u('uNC'), Math.max(2, pal.length));
+      // Lumière : vers le pointeur s'il survole, sinon en haut à gauche, qui tourne doucement.
+      let L;
+      if (light) { const lx = (light.x - w / 2) / U, ly = (light.y - h / 2) / U; L = [lx * 1.6, -ly * 1.6, 0.9]; }
+      else L = [-0.55 + Math.sin(ph) * 0.15, 0.6 + Math.cos(ph) * 0.1, 0.75];
+      const ln = Math.hypot(...L); gl.uniform3f(u('uL'), L[0] / ln, -L[1] / ln, L[2] / ln);
+      // Logo : champ de distance en unités du carré du logo, placé au centre.
+      const useLogo = p.composition === 'logo';
+      if (useLogo && logoDirty) {
+        const sdf = logoSDF(); logoDirty = false;
+        gl.bindTexture(gl.TEXTURE_2D, tLogo); gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.R16F, logoW, logoH, 0, gl.RED, gl.FLOAT, sdf);
+      }
+      gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, tLogo); gl.uniform1i(u('uLogo'), 0);
+      gl.uniform1f(u('uHasLogo'), useLogo && logoOk ? 1 : 0);
+      gl.uniform3f(u('uLogoP'), w / 2, h / 2, U * 0.82 * (1 + 0.03 * p.ondulation * Math.sin(ph)));
+      gl.uniform1f(u('uGrain'), p.grain ?? 0); gl.uniform1f(u('uVig'), p.vignette ?? 0);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+    }
+
+    ready = true;
+    compose();
+    app.loop((t) => { lastT = t; render(t); });
+  </script>
+</body>
+</html>

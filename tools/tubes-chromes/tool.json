@@ -1,0 +1,15 @@
+{
+  "slug": "tubes-chromes",
+  "title": "Tubes chromés",
+  "type": "webgl",
+  "description": "Des tubes et des formes gonflées en chrome sur un aplat : champ de distance gonflé, reflet d'un ciel en dégradé de marque, tubes dessinés au pointeur.",
+  "tags": ["chrome", "3d", "sdf", "reflet", "shader", "logo"],
+  "inspiration": [
+    "Moodboard de Noé, fiche 27 : Hochschule Luzern, chrome violet",
+    "Chrome Y2K et matcaps, champs de distance signés (Inigo Quilez)",
+    "Palettes luzern, menthe, kegelbahn, acide, biennale, trame-nuit"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
