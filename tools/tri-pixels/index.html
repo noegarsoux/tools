@@ -1,0 +1,282 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tri de pixels</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Tri de pixels : un sujet en mouvement (dégradé déformé, formes, logo ou image) est rendu
+    // en basse définition ; sur chaque ligne, les plages dont la luminance tombe dans l'intervalle
+    // choisi sont triées (par luminance, teinte ou saturation) : coulures et traînées de glitch.
+    // Le pointeur force le tri autour de lui ; glisser peint une zone de tri qui s'efface lentement.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const KB = PAL('kegelbahn'), BIEN = PAL('biennale'), THER = PAL('thermique'), LUZ = PAL('luzern'), GR = PAL('good-room'), MENTHE = PAL('menthe');
+    const ACIDE = PAL('acide'), PYR = PAL('pyramides'), PIX = PAL('pixels'), NUIT = PAL('trame-nuit'), ORB = PAL('orbite');
+
+    let hover = null, painting = false, mask = null, maskW = 0, maskH = 0, lastOut = null;
+    const srcC = document.createElement('canvas'), sctx = srcC.getContext('2d', { willReadFrequently: true });
+    const outC = document.createElement('canvas'), octx = outC.getContext('2d');
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0, vignette: 0 },
+      hint: 'Survolez pour faire couler les pixels · glissez pour peindre une zone de tri · touchez pour changer de sens · molette : taille des pixels',
+      notes: 'Le tri se fait sur une image réduite (taille des pixels) : chaque ligne est découpée en plages par l’intervalle de luminance, puis chaque plage est triée. L’export SVG embarque l’image triée en pixels nets.',
+      params: {
+        'Sujet': {
+          sujet: { type: 'select', label: 'Sujet', options: { degrade: 'Dégradé déformé', formes: 'Formes', bandes: 'Bandes', logo: 'Logo', image: 'Image' }, value: 'degrade' },
+          image: { type: 'file', label: 'Image', accept: 'image/*', show: (q) => q.sujet === 'image' },
+          echelle: { type: 'range', label: 'Échelle', min: 0.3, max: 2.5, step: 0.01, value: 1 },
+          vitesse: { type: 'range', label: 'Vitesse', min: 0, max: 2, step: 0.01, value: 0.4 },
+        },
+        'Tri': {
+          direction: { type: 'segmented', label: 'Sens', options: { droite: '→', gauche: '←', bas: '↓', haut: '↑' }, value: 'bas' },
+          critere: { type: 'segmented', label: 'Trier par', options: { lum: 'Luminance', teinte: 'Teinte', sat: 'Saturation' }, value: 'lum' },
+          bas: { type: 'range', label: 'Seuil bas', min: 0, max: 1, step: 0.01, value: 0.4 },
+          haut: { type: 'range', label: 'Seuil haut', min: 0, max: 1, step: 0.01, value: 0.85 },
+          longueur: { type: 'range', label: 'Longueur max des coulures', min: 0.02, max: 1, step: 0.01, value: 0.5 },
+          respiration: { type: 'range', label: 'Seuil qui respire', min: 0, max: 0.4, step: 0.01, value: 0.12 },
+        },
+        'Pinceau': {
+          zone: { type: 'segmented', label: 'Zone de tri', options: { partout: 'Partout', pinceau: 'Pinceau seul' }, value: 'partout' },
+          rayon: { type: 'range', label: 'Rayon', min: 0.03, max: 0.4, step: 0.005, value: 0.12 },
+          memoire: { type: 'range', label: 'Mémoire (s)', min: 0.5, max: 20, step: 0.5, value: 6 },
+        },
+        'Rendu': {
+          pixel: { type: 'range', label: 'Taille des pixels', min: 1, max: 16, step: 1, value: 3 },
+          lisse: { type: 'toggle', label: 'Lisser', value: false },
+        },
+        'Couleur': {
+          fond: { type: 'color', label: 'Fond', value: KB[0] },
+          couleurs: { type: 'palette', label: 'Couleurs du sujet', value: [KB[1], KB[2], KB[3], KB[5], KB[4]] },
+        },
+      },
+      presets: {
+        'Kegelbahn': {},
+        'Biennale': { sujet: 'formes', direction: 'droite', fond: BIEN[0], couleurs: [BIEN[1], BIEN[2], BIEN[3], BIEN[4]], bas: 0.1, haut: 0.9, longueur: 0.8, pixel: 3 },
+        'Thermique': { sujet: 'degrade', direction: 'haut', critere: 'teinte', fond: THER[0], couleurs: [THER[1], THER[4], THER[2], THER[3], THER[5]], bas: 0.2, haut: 0.95, longueur: 0.8, echelle: 0.7 },
+        'Luzern': { sujet: 'bandes', direction: 'bas', fond: LUZ[3], couleurs: [LUZ[0], LUZ[1], LUZ[2], LUZ[4]], bas: 0.15, haut: 0.7, longueur: 0.35, pixel: 4 },
+        'Good Room': { sujet: 'formes', direction: 'gauche', critere: 'sat', fond: GR[0], couleurs: [GR[1], GR[2], GR[3], GR[4]], bas: 0.05, haut: 0.6, longueur: 1, pixel: 2 },
+        'Menthe': { sujet: 'degrade', direction: 'droite', fond: MENTHE[0], couleurs: [MENTHE[1], MENTHE[3], MENTHE[2], MENTHE[0]], bas: 0.3, haut: 0.9, longueur: 0.5, pixel: 5, lisse: true },
+        'Acide': { sujet: 'bandes', direction: 'haut', fond: ACIDE[1], couleurs: [ACIDE[2], ACIDE[3], ACIDE[0]], bas: 0.4, haut: 1, longueur: 0.25, pixel: 6, echelle: 1.6 },
+        'Pyramides': { sujet: 'formes', direction: 'bas', critere: 'teinte', fond: PYR[0], couleurs: [PYR[1], PYR[2], PYR[3], PYR[4], PYR[5]], bas: 0.2, haut: 0.85, longueur: 0.7, pixel: 3, echelle: 1.3 },
+        'Pixels': { sujet: 'degrade', direction: 'gauche', fond: PIX[0], couleurs: [PIX[1], PIX[2], PIX[3], PIX[4], PIX[5]], bas: 0.1, haut: 0.6, longueur: 0.3, pixel: 8 },
+        'Pinceau': { sujet: 'degrade', zone: 'pinceau', direction: 'bas', fond: NUIT[0], couleurs: [ORB[0], NUIT[1], ORB[1], NUIT[2]], bas: 0, haut: 1, longueur: 1, rayon: 0.18, memoire: 10, pixel: 2 },
+        'Logo': { sujet: 'logo', direction: 'bas', fond: BIEN[0], couleurs: [BIEN[2], BIEN[3], BIEN[4], BIEN[1]], bas: 0.32, haut: 1, longueur: 0.3, pixel: 3 },
+      },
+      brand(colors) {
+        const c = colors.slice(1).length ? colors.slice(1) : ['#111111'];
+        return { fond: colors[0], couleurs: c.slice(0, 7) };
+      },
+      pointer: {
+        move: (q) => { hover = { x: q.x, y: q.y }; },
+        down: (q) => { painting = { x: q.x, y: q.y, moved: false }; },
+        drag: (q) => {
+          hover = { x: q.x, y: q.y };
+          if (!painting) return;
+          if (Math.hypot(q.x - painting.x, q.y - painting.y) > 6) painting.moved = true;
+          if (painting.moved) paint(q.x, q.y);
+        },
+        up: () => {
+          if (painting && !painting.moved) { const ks = ['droite', 'bas', 'gauche', 'haut']; app.set('direction', ks[(ks.indexOf(p.direction) + 1) % 4]); }
+          painting = false;
+        },
+        wheel: (q, dy) => app.set('pixel', Math.max(1, Math.min(16, p.pixel + (dy > 0 ? 1 : -1)))),
+      },
+      onChange(k) { if (k === '*' || k === 'pixel') mask = null; },
+      onSeed() { reseed(); },
+      export: { name: 'tri-de-pixels', svg: () => toSVG() },
+    });
+    const p = app.params;
+    canvas.addEventListener('pointerleave', () => { hover = null; });
+
+    let ph = [0, 0, 0, 0, 0, 0], blobs = [];
+    function reseed() {
+      const r = app.rng(5);
+      ph = ph.map(() => r() * TAU);
+      blobs = [];
+      for (let i = 0; i < 9; i++) blobs.push({ x: r(), y: r(), r: 0.12 + r() * 0.22, fx: 0.3 + r() * 0.8, fy: 0.3 + r() * 0.8, p: r() * TAU, c: i, sq: r() < 0.35 });
+    }
+    reseed();
+
+    const hex2 = (h) => { const n = parseInt(h.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; };
+    function palRGB() { return (p.couleurs && p.couleurs.length ? p.couleurs : ['#111111']).map(hex2); }
+    // Dégradé continu à travers la palette (boucle), t ∈ R.
+    function grad(P, t, out) {
+      const n = P.length; t = ((t % 1) + 1) % 1 * n;
+      const i = Math.floor(t), f = t - i, A = P[i % n], B = P[(i + 1) % n], s = f * f * (3 - 2 * f);
+      out[0] = A[0] + (B[0] - A[0]) * s; out[1] = A[1] + (B[1] - A[1]) * s; out[2] = A[2] + (B[2] - A[2]) * s;
+    }
+
+    // ——— Sujet en basse définition ———
+    let logoFallback = null;
+    function subjectImage() {
+      if (p.sujet === 'image' && p.image) return p.image;
+      if (app.logoImg) return app.logoImg;
+      if (!logoFallback) {
+        const c = document.createElement('canvas'); c.width = c.height = 400; const x = c.getContext('2d');
+        x.fillStyle = '#000'; x.beginPath(); x.arc(200, 200, 170, 0, TAU); x.arc(200, 200, 95, 0, TAU, true); x.fill('evenodd');
+        x.fillRect(178, 10, 44, 380);
+        logoFallback = c;
+      }
+      return logoFallback;
+    }
+    const lowC = document.createElement('canvas'), lctx = lowC.getContext('2d');
+    function fieldInto(cx, W, H, S, P, sp, e) {
+      const img = cx.createImageData(W, H), d = img.data, c = [0, 0, 0];
+      for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+        const u = (x - W / 2) / S / e, v = (y - H / 2) / S / e;
+        let k;
+        if (p.sujet === 'degrade') {
+          const wx = u + 0.35 * Math.sin(v * 3.1 + sp * 0.9 + ph[0]) + 0.18 * Math.sin(v * 7.3 - sp * 1.3 + ph[1]);
+          const wy = v + 0.35 * Math.sin(u * 2.7 - sp * 0.7 + ph[2]) + 0.18 * Math.sin(u * 6.1 + sp * 1.1 + ph[3]);
+          k = wx * 0.55 + wy * 0.35 + 0.15 * Math.sin(Math.hypot(wx, wy) * 6 - sp * 2);
+        } else {
+          const a = 0.6 + 0.25 * Math.sin(sp * 0.3 + ph[4]);
+          k = (u * Math.cos(a) + v * Math.sin(a)) * 1.6 + 0.12 * Math.sin(v * 9 + sp * 2 + ph[5]) + sp * 0.15;
+          k = Math.floor(k * 4) / 4 + (k * 4 - Math.floor(k * 4)) * 0.25 * 0.6; // bandes avec un léger dégradé interne
+        }
+        grad(P, k, c);
+        const i4 = (y * W + x) * 4; d[i4] = c[0]; d[i4 + 1] = c[1]; d[i4 + 2] = c[2]; d[i4 + 3] = 255;
+      }
+      cx.putImageData(img, 0, 0);
+    }
+    function renderSubject(W, H, t) {
+      if (srcC.width !== W || srcC.height !== H) { srcC.width = W; srcC.height = H; }
+      const P = palRGB(), sp = t * p.vitesse, S = Math.min(W, H), e = p.echelle;
+      if (p.sujet === 'degrade' || p.sujet === 'bandes') {
+        // Champ lisse : calculé au plus sur ~18 000 points, puis agrandi.
+        const q = Math.max(1, Math.sqrt((W * H) / 18000)), Wq = Math.ceil(W / q), Hq = Math.ceil(H / q);
+        if (q > 1) {
+          if (lowC.width !== Wq || lowC.height !== Hq) { lowC.width = Wq; lowC.height = Hq; }
+          fieldInto(lctx, Wq, Hq, Math.min(Wq, Hq), P, sp, e);
+          sctx.imageSmoothingEnabled = true; sctx.drawImage(lowC, 0, 0, W, H);
+        } else fieldInto(sctx, W, H, S, P, sp, e);
+        return;
+      }
+      sctx.setTransform(1, 0, 0, 1, 0, 0);
+      sctx.fillStyle = p.fond; sctx.fillRect(0, 0, W, H);
+      const cols = p.couleurs && p.couleurs.length ? p.couleurs : ['#111111'];
+      if (p.sujet === 'formes') {
+        for (const b of blobs) {
+          const x = (0.5 + (b.x - 0.5) * 0.9 + 0.22 * Math.sin(sp * b.fx + b.p)) * W, y = (0.5 + (b.y - 0.5) * 0.9 + 0.22 * Math.cos(sp * b.fy + b.p * 1.3)) * H, r = b.r * S * e;
+          const c = cols[b.c % cols.length], c2 = cols[(b.c + 2) % cols.length];
+          const g = sctx.createRadialGradient(x - r * 0.3, y - r * 0.3, r * 0.05, x, y, r);
+          g.addColorStop(0, c2); g.addColorStop(1, c);
+          sctx.fillStyle = g;
+          if (b.sq) { sctx.save(); sctx.translate(x, y); sctx.rotate(sp * 0.4 + b.p); sctx.fillRect(-r * 0.8, -r * 0.8, r * 1.6, r * 1.6); sctx.restore(); }
+          else { sctx.beginPath(); sctx.arc(x, y, r, 0, TAU); sctx.fill(); }
+        }
+        return;
+      }
+      // Logo / image : sur un dégradé de la palette, qui respire lentement.
+      const g = sctx.createLinearGradient(0, 0, W * (0.6 + 0.4 * Math.sin(sp * 0.4)), H);
+      cols.forEach((c, i) => g.addColorStop(cols.length > 1 ? i / (cols.length - 1) : 0, c));
+      sctx.fillStyle = p.sujet === 'image' ? p.fond : g; sctx.fillRect(0, 0, W, H);
+      const img = subjectImage(), iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height;
+      const k = (p.sujet === 'image' ? Math.max(W / iw, H / ih) : (S * 0.62) / Math.max(iw, ih)) * e * (1 + 0.04 * Math.sin(sp * 0.8));
+      const ox = Math.sin(sp * 0.5 + ph[0]) * W * 0.03, oy = Math.cos(sp * 0.4 + ph[1]) * H * 0.03;
+      if (p.sujet === 'logo' && !app.logoImg) {
+        // Marque de repli : teinte au fond (première encre la plus sombre).
+        const t2 = document.createElement('canvas'); t2.width = iw; t2.height = ih; const x2 = t2.getContext('2d');
+        x2.drawImage(img, 0, 0); x2.globalCompositeOperation = 'source-in'; x2.fillStyle = p.fond; x2.fillRect(0, 0, iw, ih);
+        sctx.drawImage(t2, W / 2 - iw * k / 2 + ox, H / 2 - ih * k / 2 + oy, iw * k, ih * k);
+      } else sctx.drawImage(img, W / 2 - iw * k / 2 + ox, H / 2 - ih * k / 2 + oy, iw * k, ih * k);
+    }
+
+    // ——— Masque du pinceau (en cellules) ———
+    function ensureMask(W, H) { if (!mask || maskW !== W || maskH !== H) { mask = new Float32Array(W * H); maskW = W; maskH = H; } }
+    function paint(x, y) {
+      const { w, h } = app.size, px = p.pixel; if (!mask) return;
+      const cx = x / px, cy = y / px, R = (p.rayon * Math.min(w, h)) / px;
+      for (let j = Math.max(0, Math.floor(cy - R)); j <= Math.min(maskH - 1, Math.ceil(cy + R)); j++)
+        for (let i = Math.max(0, Math.floor(cx - R)); i <= Math.min(maskW - 1, Math.ceil(cx + R)); i++) {
+          const d = Math.hypot(i - cx, j - cy) / R; if (d < 1) mask[j * maskW + i] = Math.max(mask[j * maskW + i], 1 - d * d * 0.5);
+        }
+    }
+
+    // ——— Le tri ———
+    const hash = (n) => { n = (n ^ 61) ^ (n >>> 16); n = n + (n << 3); n = n ^ (n >>> 4); n = Math.imul(n, 0x27d4eb2d); n = n ^ (n >>> 15); return (n >>> 0) / 4294967296; };
+    function sortImage(d, W, H, t) {
+      const N = W * H, lum = new Float32Array(N), key = new Float32Array(N);
+      for (let i = 0; i < N; i++) {
+        const r = d[i * 4], g = d[i * 4 + 1], b = d[i * 4 + 2], L = (r * 0.2126 + g * 0.7152 + b * 0.0722) / 255;
+        lum[i] = L;
+        if (p.critere === 'lum') key[i] = L;
+        else {
+          const mx = Math.max(r, g, b), mn = Math.min(r, g, b), c = mx - mn;
+          if (p.critere === 'sat') key[i] = mx ? c / mx : 0;
+          else { let hh = 0; if (c) { if (mx === r) hh = ((g - b) / c + 6) % 6; else if (mx === g) hh = (b - r) / c + 2; else hh = (r - g) / c + 4; } key[i] = hh / 6 + L * 0.001; }
+        }
+      }
+      const br = p.respiration * Math.sin(t * 0.9), lo = p.bas - br * 0.5, hi = p.haut + br, horiz = p.direction === 'droite' || p.direction === 'gauche';
+      const asc = p.direction === 'droite' || p.direction === 'bas';
+      const lines = horiz ? H : W, len = horiz ? W : H, maxL = Math.max(2, Math.round(p.longueur * len));
+      const { w, h } = app.size, px = p.pixel, hr = hover ? (p.rayon * Math.min(w, h)) / px : 0, hx = hover ? hover.x / px : -1e9, hy = hover ? hover.y / px : -1e9;
+      const brush = p.zone === 'pinceau', idx = new Int32Array(len), tmp = new Uint8ClampedArray(len * 4), packed = new Float64Array(len);
+      // Sélection : intervalle de luminance (sauf en mode pinceau), zone peinte, disque du pointeur.
+      const sel = new Uint8Array(N);
+      for (let i = 0; i < N; i++) sel[i] = (!brush && lum[i] >= lo && lum[i] <= hi) || mask[i] > 0.15 ? 1 : 0;
+      if (hover) {
+        for (let y = Math.max(0, Math.floor(hy - hr)); y <= Math.min(H - 1, Math.ceil(hy + hr)); y++)
+          for (let x = Math.max(0, Math.floor(hx - hr)); x <= Math.min(W - 1, Math.ceil(hx + hr)); x++)
+            if ((x - hx) * (x - hx) + (y - hy) * (y - hy) < hr * hr) sel[y * W + x] = 1;
+      }
+      for (let l = 0; l < lines; l++) {
+        const phase = Math.floor(hash(l * 7919 + 13) * maxL);
+        let s = 0;
+        for (let k = 0; k < len; k++) idx[k] = horiz ? l * W + k : k * W + l;
+        const ok = (k) => sel[idx[k]] === 1;
+        while (s < len) {
+          if (!ok(s)) { s++; continue; }
+          let e = s + 1;
+          while (e < len && ok(e) && (e + phase) % maxL !== 0) e++;
+          if (e - s > 1) {
+            // Tri natif d'entiers : clé sur 16 bits, position dans la plage sur les 16 bits bas.
+            const n = e - s, pk = packed.subarray(0, n);
+            for (let k = 0; k < n; k++) { const kq = Math.min(65535, Math.max(0, Math.round(key[idx[s + k]] * 65535))); pk[k] = ((asc ? kq : 65535 - kq) * 65536) + k; }
+            pk.sort();
+            for (let k = 0; k < n; k++) { const o = idx[s + (pk[k] % 65536)] * 4; tmp[k * 4] = d[o]; tmp[k * 4 + 1] = d[o + 1]; tmp[k * 4 + 2] = d[o + 2]; }
+            for (let k = s; k < e; k++) { const o = idx[k] * 4, q = (k - s) * 4; d[o] = tmp[q]; d[o + 1] = tmp[q + 1]; d[o + 2] = tmp[q + 2]; }
+          }
+          s = e;
+        }
+      }
+    }
+
+    app.loop((t, dt) => {
+      const { w, h, dpr } = app.size, px = Math.max(1, Math.round(p.pixel)), W = Math.ceil(w / px), H = Math.ceil(h / px);
+      dt = Math.min(0.05, dt || 0);
+      ensureMask(W, H);
+      if (dt > 0) { const k = Math.exp(-dt / p.memoire); for (let i = 0; i < mask.length; i++) mask[i] *= k; }
+      renderSubject(W, H, t);
+      const img = sctx.getImageData(0, 0, W, H);
+      sortImage(img.data, W, H, t);
+      if (outC.width !== W || outC.height !== H) { outC.width = W; outC.height = H; }
+      octx.putImageData(img, 0, 0);
+      lastOut = img;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.imageSmoothingEnabled = !!p.lisse; ctx.imageSmoothingQuality = 'high';
+      ctx.drawImage(outC, 0, 0, W * px, H * px);
+      ctx.imageSmoothingEnabled = true;
+      app.finish(ctx);
+    });
+
+    function toSVG() {
+      const { w, h } = app.size, px = Math.max(1, Math.round(p.pixel)), W = outC.width, H = outC.height;
+      const style = p.lisse ? '' : ' style="image-rendering:pixelated" image-rendering="optimizeSpeed"';
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">\n<rect width="100%" height="100%" fill="${p.fond}"/>\n<image href="${outC.toDataURL('image/png')}" x="0" y="0" width="${W * px}" height="${H * px}" preserveAspectRatio="none"${style}/>\n</svg>`;
+    }
+  </script>
+</body>
+</html>

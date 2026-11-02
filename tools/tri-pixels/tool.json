@@ -1,0 +1,15 @@
+{
+  "slug": "tri-pixels",
+  "title": "Tri de pixels",
+  "type": "filter",
+  "description": "Un dégradé, des formes, le logo ou une image dont les pixels sont triés par plages de luminance : coulures de glitch qui respirent, pinceau de tri au pointeur.",
+  "tags": ["glitch", "tri-de-pixels", "filtre", "image", "logo", "motion"],
+  "inspiration": [
+    "Pixel sorting de Kim Asendorf (ASDFPixelSort, 2010) et l’esthétique glitch",
+    "Traînées de balayage des scanners et photocopies déplacées pendant la copie",
+    "references/techniques.md ; palettes kegelbahn, biennale, thermique, luzern, good-room"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
