@@ -1,0 +1,15 @@
+{
+  "slug": "typo-elastique",
+  "title": "Typo élastique",
+  "type": "typography",
+  "description": "Un texte en grille dont chaque lettre s’étire pour remplir sa case ; colonnes et rangées montées sur ressorts suivent une onde, le hasard ou le pointeur.",
+  "tags": ["typographie", "grille", "elastique", "ressorts", "svg", "motion"],
+  "inspiration": [
+    "Typographies élastiques sur grille de DIA Studio",
+    "Lettres étirées à la case des affiches suisses et de la typo variable",
+    "references/techniques.md ; palettes biennale, kegelbahn, salon, good-room, luzern, pixels"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
