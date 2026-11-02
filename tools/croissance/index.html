@@ -1,0 +1,281 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Croissance</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Croissance : colonisation de l'espace (Runions et al., 2007). Des points d'attraction
+    // remplissent une enveloppe (couronne, cercle, cadre ou logo) ; des branches poussent vers eux
+    // pas à pas et les consomment. L'épaisseur suit le modèle des tuyaux (Léonard de Vinci),
+    // le vent courbe l'arbre, et l'on peut dessiner de nouveaux attracteurs au pointeur.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const P60 = PAL('papier-60'), BIEN = PAL('biennale'), MENTHE = PAL('menthe'), KB = PAL('kegelbahn'), GR = PAL('good-room'), THER = PAL('thermique');
+    const NUIT = PAL('trame-nuit'), LUZ = PAL('luzern'), SALON = PAL('salon'), ACIDE = PAL('acide'), PYR = PAL('pyramides');
+
+    let stall = 0, nodes = [], attr = [], done = false, doneT = 0, fade = 1, hover = null, drag = null, gen = 0, wind = 0, windT = 0, maskCache = null, maskKey = null;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.03, vignette: 0 },
+      hint: 'Glissez pour semer des attracteurs · touchez pour planter une racine · le pointeur souffle le vent · molette : nombre d’attracteurs',
+      notes: 'Chaque attracteur tire le nœud le plus proche dans son rayon d’influence ; il disparaît quand une branche l’atteint. Épaisseur : modèle des tuyaux, rᵉ = Σ rᵢᵉ des branches filles.',
+      params: {
+        'Forme': {
+          enveloppe: { type: 'select', label: 'Enveloppe', options: { couronne: 'Couronne', cercle: 'Corail (depuis le centre)', cadre: 'Tout le cadre', logo: 'Logo' }, value: 'couronne' },
+          image: { type: 'file', label: 'Logo', accept: 'image/*', show: (q) => q.enveloppe === 'logo' },
+          attracteurs: { type: 'range', label: 'Attracteurs', min: 100, max: 3000, step: 10, value: 900 },
+          racines: { type: 'range', label: 'Racines', min: 1, max: 6, step: 1, value: 1 },
+        },
+        'Croissance': {
+          pas: { type: 'range', label: 'Pas de croissance', min: 0.003, max: 0.03, step: 0.001, value: 0.009 },
+          influence: { type: 'range', label: 'Rayon d’influence', min: 0.03, max: 0.5, step: 0.005, value: 0.14 },
+          elimination: { type: 'range', label: 'Distance d’élimination', min: 0.5, max: 4, step: 0.1, value: 1.6 },
+          vitesse: { type: 'range', label: 'Vitesse', min: 1, max: 12, step: 1, value: 3 },
+          boucle: { type: 'toggle', label: 'Recommencer à la fin', value: true },
+        },
+        'Rendu': {
+          epaisseur: { type: 'range', label: 'Épaisseur des pointes', min: 0.3, max: 4, step: 0.1, value: 1.4 },
+          exposant: { type: 'range', label: 'Exposant des tuyaux', min: 1.6, max: 3.5, step: 0.05, value: 2.05 },
+          feuilles: { type: 'range', label: 'Feuilles', min: 0, max: 12, step: 0.5, value: 3 },
+          vent: { type: 'range', label: 'Vent', min: 0, max: 1, step: 0.01, value: 0.3 },
+        },
+        'Couleur': {
+          fond: { type: 'color', label: 'Fond', value: P60[0] },
+          couleurs: { type: 'palette', label: 'Du tronc aux pointes, puis feuilles', value: [P60[1], P60[1], '#e5452a'] },
+        },
+      },
+      presets: {
+        'Encre': {},
+        'Biennale': { enveloppe: 'couronne', attracteurs: 1400, fond: BIEN[0], couleurs: [BIEN[1], BIEN[2], BIEN[3], BIEN[4]], feuilles: 5, epaisseur: 1.2 },
+        'Corail': { enveloppe: 'cercle', attracteurs: 1600, racines: 1, fond: KB[0], couleurs: [KB[5], KB[1], KB[3]], feuilles: 2.5, pas: 0.007, influence: 0.1, vent: 0 },
+        'Menthe': { enveloppe: 'cadre', racines: 4, attracteurs: 1800, fond: MENTHE[0], couleurs: [MENTHE[1], MENTHE[3], MENTHE[2]], feuilles: 4, vent: 0.4 },
+        'Logo': { enveloppe: 'logo', racines: 1, attracteurs: 2200, fond: P60[0], couleurs: [P60[1], P60[1], '#e5452a'], feuilles: 2, pas: 0.007, influence: 0.08, epaisseur: 0.8, vent: 0.1 },
+        'Good Room': { enveloppe: 'cercle', attracteurs: 2400, fond: GR[0], couleurs: [GR[3], GR[4], GR[1], GR[2]], feuilles: 3, pas: 0.006, influence: 0.07, epaisseur: 0.7, vent: 0 },
+        'Thermique': { enveloppe: 'couronne', attracteurs: 700, fond: THER[0], couleurs: [THER[1], THER[4], THER[2], THER[3]], feuilles: 9, epaisseur: 1.8, exposant: 1.9 },
+        'Nuit': { enveloppe: 'cadre', racines: 6, attracteurs: 2600, fond: NUIT[0], couleurs: [NUIT[2], NUIT[1]], feuilles: 0, pas: 0.006, influence: 0.06, epaisseur: 0.6, vent: 0.2 },
+        'Luzern': { enveloppe: 'couronne', attracteurs: 300, fond: LUZ[0], couleurs: [LUZ[3], LUZ[3], LUZ[4]], feuilles: 11, pas: 0.016, influence: 0.25, epaisseur: 2.4, exposant: 2.2 },
+        'Salon': { enveloppe: 'logo', attracteurs: 1500, racines: 3, fond: SALON[0], couleurs: [SALON[1], SALON[2], SALON[3], SALON[4]], feuilles: 4, pas: 0.008, influence: 0.1 },
+        'Acide': { enveloppe: 'cercle', attracteurs: 900, fond: ACIDE[1], couleurs: [ACIDE[2], ACIDE[3]], feuilles: 0, pas: 0.012, influence: 0.3, epaisseur: 1.5, exposant: 1.9, vent: 0 },
+      },
+      brand(colors) {
+        const c = colors.slice(1).length ? colors.slice(1) : ['#111111'];
+        return { fond: colors[0], couleurs: c.slice(0, 7) };
+      },
+      pointer: {
+        move: (q) => { hover = { x: q.x, y: q.y }; },
+        down: (q) => { drag = { x: q.x, y: q.y, moved: false, lx: q.x, ly: q.y }; },
+        drag: (q) => {
+          hover = { x: q.x, y: q.y };
+          if (!drag) return;
+          if (Math.hypot(q.x - drag.x, q.y - drag.y) > 6) drag.moved = true;
+          if (!drag.moved) return;
+          // Sème des attracteurs le long du geste : les branches viendront les chercher.
+          const { w, h } = app.size, S = Math.min(w, h), r = app.random, d = Math.hypot(q.x - drag.lx, q.y - drag.ly), n = Math.ceil(d / (S * 0.006));
+          for (let i = 0; i < n; i++) { const t = (i + 1) / n, a = r() * TAU, rr = Math.sqrt(r()) * S * 0.04; attr.push({ x: drag.lx + (q.x - drag.lx) * t + Math.cos(a) * rr, y: drag.ly + (q.y - drag.ly) * t + Math.sin(a) * rr }); }
+          drag.lx = q.x; drag.ly = q.y; done = false;
+        },
+        up: (q) => {
+          if (drag && !drag.moved) { nodes.push({ x: q.x, y: q.y, p: -1, d: 0, r: 0, kids: 0, born: performance.now() }); done = false; }
+          drag = null;
+        },
+        wheel: (q, dy) => app.set('attracteurs', Math.max(100, Math.min(3000, Math.round(p.attracteurs * (dy > 0 ? 0.9 : 1.1) / 10) * 10))),
+      },
+      onChange(k) { if (['enveloppe', 'image', 'attracteurs', 'racines', 'pas', 'influence', 'elimination', '*'].includes(k)) reset(); },
+      onSeed() { gen = 0; reset(); },
+      export: { name: 'croissance', svg: () => toSVG() },
+    });
+    const p = app.params;
+    canvas.addEventListener('pointerleave', () => { hover = null; });
+
+    // ——— Enveloppes ———
+    function logoMask() {
+      const img = p.image || app.logoImg, key = img ? (img.src || 'c') : 'demo';
+      if (key === maskKey) return maskCache;
+      maskKey = key;
+      const M = 240, c = document.createElement('canvas'); c.width = c.height = M; const x = c.getContext('2d', { willReadFrequently: true });
+      if (img) { const iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height, k = M * 0.92 / Math.max(iw, ih); x.drawImage(img, (M - iw * k) / 2, (M - ih * k) / 2, iw * k, ih * k); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(120, 120, 100, 0, TAU); x.arc(120, 120, 56, 0, TAU, true); x.fill('evenodd'); x.fillRect(107, 8, 26, 224); }
+      const d = x.getImageData(0, 0, M, M).data, a = new Uint8Array(M * M);
+      let transp = 0; for (let i = 3; i < d.length; i += 16) if (d[i] < 128) transp++;
+      const useA = transp > d.length / 16 * 0.05;
+      let lowest = -1;
+      for (let i = 0; i < M * M; i++) { const l = (d[i * 4] * 0.2126 + d[i * 4 + 1] * 0.7152 + d[i * 4 + 2] * 0.0722) / 255; a[i] = (useA ? d[i * 4 + 3] > 128 : d[i * 4 + 3] > 128 && l < 0.5) ? 1 : 0; if (a[i]) lowest = i; }
+      maskCache = { M, a, lowest };
+      return maskCache;
+    }
+    function inside(x, y, w, h) {
+      const S = Math.min(w, h);
+      switch (p.enveloppe) {
+        case 'cercle': return Math.hypot(x - w / 2, y - h / 2) < S * 0.46;
+        case 'cadre': return x > S * 0.04 && x < w - S * 0.04 && y > S * 0.04 && y < h * 0.86;
+        case 'logo': { const L = logoMask(), Z = S * 0.86, u = (x - (w - Z) / 2) / Z, v = (y - (h - Z) / 2) / Z; if (u < 0 || v < 0 || u >= 1 || v >= 1) return false; return L.a[Math.floor(v * L.M) * L.M + Math.floor(u * L.M)] === 1; }
+        default: { const ex = (x - w / 2) / (S * 0.46), ey = (y - h * 0.4) / (S * 0.34); return ex * ex + ey * ey < 1; }
+      }
+    }
+    function reset() {
+      const { w, h } = app.size; if (!w) return;
+      const r = app.rng(31 + gen * 977), S = Math.min(w, h), n = Math.round(p.attracteurs);
+      attr = []; nodes = []; done = false; doneT = 0; fade = 1;
+      let guard = 0;
+      while (attr.length < n && guard++ < n * 60) { const x = r() * w, y = r() * h; if (inside(x, y, w, h)) attr.push({ x, y }); }
+      const R = Math.round(p.racines);
+      for (let i = 0; i < R; i++) {
+        let x, y;
+        switch (p.enveloppe) {
+          case 'cercle': { const a = (i / R) * TAU; x = w / 2 + (R > 1 ? Math.cos(a) * S * 0.08 : 0); y = h / 2 + (R > 1 ? Math.sin(a) * S * 0.08 : 0); break; }
+          case 'logo': {
+            // Racines au bas du logo (point le plus bas du masque), ou réparties dessous.
+            const L = logoMask(), Z = S * 0.86, li = L.lowest, lx = li >= 0 ? (li % L.M) / L.M : 0.5, ly = li >= 0 ? Math.floor(li / L.M) / L.M : 1;
+            x = (w - Z) / 2 + (R > 1 ? (i + 0.5) / R : lx) * Z; y = R > 1 ? h * 0.97 : (h - Z) / 2 + ly * Z; break;
+          }
+          default: x = R > 1 ? w * (i + 0.5) / R + (r() - 0.5) * w * 0.06 : w / 2; y = h * 0.98;
+        }
+        nodes.push({ x, y, p: -1, d: 0, r: 0, kids: 0 });
+      }
+      // Tronc : on monte droit jusqu'à l'enveloppe (sinon les attracteurs sont hors de portée).
+      if (p.enveloppe !== 'cercle') for (let i = 0; i < R; i++) {
+        let k = i, guard2 = 0;
+        const D = S * p.pas, di = S * p.influence;
+        while (guard2++ < 400) {
+          const nd = nodes[k]; let near = false;
+          for (const a of attr) if ((a.x - nd.x) ** 2 + (a.y - nd.y) ** 2 < di * di) { near = true; break; }
+          if (near) break;
+          nodes.push({ x: nd.x, y: nd.y - D, p: k, d: nd.d + 1, r: 0, kids: 0 }); nodes[k].kids++; k = nodes.length - 1;
+          if (nodes[k].y < 0) break;
+        }
+      }
+    }
+
+    // ——— Une itération de colonisation (grille de hachage pour le plus proche nœud) ———
+    function grow(w, h) {
+      if (done || !attr.length) { if (!done) { done = true; doneT = 0; } return; }
+      const S = Math.min(w, h), D = S * p.pas, di = S * p.influence, dk = D * p.elimination, cell = di, gw = Math.ceil(w / cell) + 2;
+      const grid = new Map();
+      nodes.forEach((n, i) => { const k = Math.floor(n.x / cell) + Math.floor(n.y / cell) * gw; (grid.get(k) || grid.set(k, []).get(k)).push(i); });
+      const pull = new Map();
+      const keep = [];
+      for (const a of attr) {
+        const cx = Math.floor(a.x / cell), cy = Math.floor(a.y / cell);
+        let best = -1, bd = di * di, killed = false;
+        for (let j = -1; j <= 1 && !killed; j++) for (let i = -1; i <= 1; i++) {
+          const L = grid.get(cx + i + (cy + j) * gw); if (!L) continue;
+          for (const ni of L) { const n = nodes[ni], d2 = (n.x - a.x) ** 2 + (n.y - a.y) ** 2; if (d2 < dk * dk) { killed = true; break; } if (d2 < bd) { bd = d2; best = ni; } }
+          if (killed) break;
+        }
+        if (killed) continue;
+        keep.push(a);
+        if (best >= 0) { const n = nodes[best], d = Math.sqrt(bd) || 1, v = pull.get(best) || [0, 0, 0]; v[0] += (a.x - n.x) / d; v[1] += (a.y - n.y) / d; v[2]++; pull.set(best, v); }
+      }
+      attr = keep;
+      if (!pull.size) { done = true; doneT = 0; return; }
+      let added = 0;
+      for (const [ni, v] of pull) {
+        const n = nodes[ni], l = Math.hypot(v[0], v[1]);
+        if (l < 1e-6) continue;
+        const x = n.x + (v[0] / l) * D, y = n.y + (v[1] / l) * D;
+        // Pas de doublon : si un nœud occupe déjà la place, la branche est bloquée (évite les nœuds empilés).
+        const cx = Math.floor(x / cell), cy = Math.floor(y / cell);
+        let taken = false;
+        for (let j = -1; j <= 1 && !taken; j++) for (let i = -1; i <= 1 && !taken; i++) { const L = grid.get(cx + i + (cy + j) * gw); if (L) for (const m of L) if ((nodes[m].x - x) ** 2 + (nodes[m].y - y) ** 2 < (D * 0.45) ** 2) { taken = true; break; } }
+        if (taken) continue;
+        nodes.push({ x, y, p: ni, d: n.d + 1, r: 0, kids: 0 }); n.kids++; added++;
+        const k = cx + cy * gw; (grid.get(k) || grid.set(k, []).get(k)).push(nodes.length - 1);
+      }
+      if (!added) { stall++; if (stall > 3) { done = true; doneT = 0; } } else stall = 0;
+    }
+
+    // ——— Épaisseurs (tuyaux) et positions avec le vent ———
+    function layout(w, h, t) {
+      const e = p.exposant, base = p.epaisseur, N = nodes.length;
+      const acc = new Float64Array(N);
+      for (let i = N - 1; i >= 0; i--) { const n = nodes[i]; if (!acc[i]) acc[i] = Math.pow(base, e); if (n.p >= 0) acc[n.p] += acc[i]; }
+      const maxD = nodes.reduce((m, n) => Math.max(m, n.d), 1), X = new Float64Array(N), Y = new Float64Array(N), A = new Float64Array(N);
+      for (let i = 0; i < N; i++) {
+        const n = nodes[i]; n.r = Math.pow(acc[i], 1 / e);
+        if (n.p < 0) { X[i] = n.x; Y[i] = n.y; A[i] = 0; continue; }
+        // Le vent fait pivoter chaque segment autour de son parent, plus fort vers les pointes.
+        const q = nodes[n.p], ang = A[n.p] + wind * 0.0006 * Math.pow(n.d / maxD, 1.5) * (1 + 0.3 * Math.sin(t * 2.3 + n.d * 0.2)) / Math.max(1, Math.sqrt(n.r));
+        const dx = n.x - q.x, dy = n.y - q.y, c = Math.cos(ang), s = Math.sin(ang);
+        X[i] = X[n.p] + dx * c - dy * s; Y[i] = Y[n.p] + dx * s + dy * c; A[i] = ang;
+      }
+      return { X, Y, maxD };
+    }
+    const hex2 = (h) => { const n = parseInt(h.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; };
+    function colAt(u) {
+      const P = (p.couleurs && p.couleurs.length ? p.couleurs : ['#111111']), B = P.length > 2 ? P.slice(0, -1) : P;
+      const t = Math.max(0, Math.min(1, u)) * (B.length - 1), i = Math.min(B.length - 2, Math.floor(t)), f = t - i;
+      if (B.length < 2) return B[0];
+      const a = hex2(B[i]), b = hex2(B[i + 1]);
+      return '#' + a.map((v, k) => Math.round(v + (b[k] - v) * f).toString(16).padStart(2, '0')).join('');
+    }
+    const leafCol = () => { const P = p.couleurs && p.couleurs.length ? p.couleurs : ['#111111']; return P[P.length - 1]; };
+
+    // Dessin commun (canvas / SVG) : segments groupés par couleur et largeur arrondie.
+    function strokes(w, h, t) {
+      const L = layout(w, h, t), groups = new Map(), leaves = [];
+      for (let i = 0; i < nodes.length; i++) {
+        const n = nodes[i]; if (n.p < 0) continue;
+        const wd = Math.max(0.4, Math.round(n.r * 4) / 4), col = colAt(n.d / L.maxD), key = col + '|' + wd;
+        (groups.get(key) || groups.set(key, { col, wd, seg: [] }).get(key)).seg.push(L.X[n.p], L.Y[n.p], L.X[i], L.Y[i]);
+        if (!n.kids && p.feuilles > 0) leaves.push(L.X[i], L.Y[i]);
+      }
+      return { groups: [...groups.values()].sort((a, b) => b.wd - a.wd), leaves };
+    }
+
+    app.loop((t, dt) => {
+      const { w, h, dpr } = app.size;
+      dt = Math.min(0.05, dt || 0);
+      if (!nodes.length) reset();
+      for (let k = 0; k < Math.round(p.vitesse); k++) grow(w, h);
+      if (done) {
+        doneT += dt;
+        if (p.boucle && doneT > 5) { fade -= dt * 1.2; if (fade <= 0) { gen++; reset(); } }
+      }
+      // Vent : souffle propre + pointeur (plus il est à droite, plus il pousse à droite).
+      windT += dt;
+      const target = (hover ? ((hover.x / w) * 2 - 1) * 1.6 : 0) + Math.sin(windT * 0.7) * 0.6 + Math.sin(windT * 1.9) * 0.25;
+      wind += (target * p.vent * 60 - wind) * Math.min(1, dt * 2);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = p.fond; ctx.fillRect(0, 0, w, h);
+      ctx.globalAlpha = Math.max(0, fade);
+      const S = strokes(w, h, t);
+      ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+      for (const g of S.groups) {
+        ctx.strokeStyle = g.col; ctx.lineWidth = g.wd; ctx.beginPath();
+        for (let i = 0; i < g.seg.length; i += 4) { ctx.moveTo(g.seg[i], g.seg[i + 1]); ctx.lineTo(g.seg[i + 2], g.seg[i + 3]); }
+        ctx.stroke();
+      }
+      if (p.feuilles > 0) {
+        ctx.fillStyle = leafCol(); ctx.beginPath();
+        const r = p.feuilles * 0.5;
+        for (let i = 0; i < S.leaves.length; i += 2) { ctx.moveTo(S.leaves[i] + r, S.leaves[i + 1]); ctx.arc(S.leaves[i], S.leaves[i + 1], r, 0, TAU); }
+        ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+      app.finish(ctx);
+    });
+
+    function toSVG() {
+      const { w, h } = app.size, f = (v) => Math.round(v * 10) / 10, S = strokes(w, h, app.time || 0), out = [];
+      for (const g of S.groups) {
+        let d = ''; for (let i = 0; i < g.seg.length; i += 4) d += `M${f(g.seg[i])} ${f(g.seg[i + 1])}L${f(g.seg[i + 2])} ${f(g.seg[i + 3])}`;
+        out.push(`<path d="${d}" stroke="${g.col}" stroke-width="${g.wd}"/>`);
+      }
+      let leaves = '';
+      if (p.feuilles > 0) { const r = p.feuilles * 0.5; let d = ''; for (let i = 0; i < S.leaves.length; i += 2) d += `<circle cx="${f(S.leaves[i])}" cy="${f(S.leaves[i + 1])}" r="${r}"/>`; leaves = `<g fill="${leafCol()}">${d}</g>`; }
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">\n<rect width="100%" height="100%" fill="${p.fond}"/>\n<g fill="none" stroke-linecap="round" stroke-linejoin="round">\n${out.join('\n')}\n</g>\n${leaves}\n</svg>`;
+    }
+  </script>
+</body>
+</html>

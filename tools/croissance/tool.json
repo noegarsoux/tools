@@ -1,0 +1,15 @@
+{
+  "slug": "croissance",
+  "title": "Croissance",
+  "type": "generative",
+  "description": "Des branches poussent vers des points d’attraction qui remplissent une couronne, un cercle, le cadre ou le logo ; le vent les courbe, on sème au pointeur.",
+  "tags": ["arbre", "croissance", "colonisation", "branches", "logo", "svg"],
+  "inspiration": [
+    "Colonisation de l’espace pour la modélisation des arbres (Runions, Lane, Prusinkiewicz, 2007)",
+    "Règle des tuyaux de Léonard de Vinci sur l’épaisseur des branches",
+    "references/techniques.md ; palettes papier-60, biennale, kegelbahn, menthe, thermique"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
