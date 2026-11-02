@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Phyllotaxie</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Phyllotaxie : le modèle de Vogel, r = c·√n et θ = n·α. À l'angle d'or (137,508°), les éléments se
+    // rangent en spirales entrelacées dont les nombres sont ceux de Fibonacci, comme les graines d'un
+    // tournesol. L'angle dérive doucement autour de sa valeur : les familles de spirales se défont et se
+    // recomposent. Les éléments peuvent être des points, des pétales orientés, des carrés, des anneaux
+    // ou le logo, colorés par famille de spirales.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2, GOLD = 180 * (3 - Math.sqrt(5));
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const P60 = PAL('papier-60'), NUIT = PAL('trame-nuit'), KB = PAL('kegelbahn'), BIEN = PAL('biennale'), LU = PAL('luzern');
+    const MENTHE = PAL('menthe'), GR = PAL('good-room'), ORB = PAL('orbite'), ACIDE = PAL('acide');
+
+    let ready = false, hover = null, drag = null, logo = null, lastT = 0;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.04, vignette: 0 },
+      hint: 'Survol : une loupe grossit les éléments · glissez horizontalement pour affiner l’angle · molette : nombre d’éléments',
+      notes: 'Chaque élément est placé à r = c·√n et tourné de n fois l’angle. À l’angle d’or, les spirales qu’on voit vont par nombres de Fibonacci ; un dixième de degré de plus et elles se recomposent.',
+      params: {
+        'Spirale': {
+          nombre: { type: 'range', label: 'Éléments', min: 30, max: 4000, step: 10, value: 900 },
+          angle: { type: 'range', label: 'Angle (°)', min: 90, max: 180, step: 0.001, value: +GOLD.toFixed(3) },
+          derive: { type: 'range', label: 'Dérive de l’angle (°)', min: 0, max: 3, step: 0.01, value: 0.12 },
+          coeur: { type: 'range', label: 'Cœur vide', min: 0, max: 0.6, step: 0.01, value: 0.04 },
+          etendue: { type: 'range', label: 'Étendue', min: 0.2, max: 1.4, step: 0.01, value: 0.92 },
+        },
+        'Éléments': {
+          forme: { type: 'segmented', label: 'Forme', options: { point: 'Point', petale: 'Pétale', carre: 'Carré', anneau: 'Anneau', logo: 'Logo' }, value: 'petale' },
+          taille: { type: 'range', label: 'Taille', min: 0.1, max: 2, step: 0.01, value: 0.95 },
+          croissance: { type: 'range', label: 'Croissance vers le bord', min: -1, max: 1, step: 0.01, value: 0.35 },
+          allongement: { type: 'range', label: 'Allongement des pétales', min: 1, max: 4, step: 0.01, value: 2.2 },
+          orientation: { type: 'range', label: 'Orientation (°)', min: -90, max: 90, step: 1, value: 0 },
+        },
+        'Mouvement': {
+          vitesse: { type: 'range', label: 'Vitesse de la dérive', min: 0, max: 1, step: 0.01, value: 0.15 },
+          rotation: { type: 'range', label: 'Rotation (tours par minute)', min: -4, max: 4, step: 0.05, value: 0.5 },
+          pulsation: { type: 'range', label: 'Pulsation de croissance', min: 0, max: 1, step: 0.01, value: 0.2 },
+        },
+        'Couleur': {
+          fond: { type: 'color', label: 'Fond', value: P60[0] },
+          couleurs: { type: 'palette', label: 'Couleurs', value: [P60[1], '#e5452a', '#f2b0c8'] },
+          mode: { type: 'segmented', label: 'Coloration', options: { spirales: 'Spirales', rayon: 'Rayon', uni: 'Uni' }, value: 'spirales' },
+          famille: { type: 'segmented', label: 'Famille de spirales', options: { 5: '5', 8: '8', 13: '13', 21: '21', 34: '34' }, value: '13' },
+        },
+      },
+      presets: {
+        'Tournesol': {},
+        'Graines': { forme: 'point', nombre: 2400, taille: 0.85, croissance: 0, fond: NUIT[0], couleurs: [NUIT[1], NUIT[2]], mode: 'rayon', derive: 0.1 },
+        'Kegelbahn': { forme: 'petale', nombre: 500, taille: 1.2, fond: KB[0], couleurs: [KB[1], KB[2], KB[3], KB[5]], famille: '8', allongement: 2.8 },
+        'Carrés': { forme: 'carre', nombre: 700, taille: 0.9, croissance: 0.6, fond: BIEN[0], couleurs: [BIEN[1], BIEN[2]], famille: '21', orientation: 45 },
+        'Anneaux': { forme: 'anneau', nombre: 400, taille: 1, croissance: 0.8, fond: MENTHE[0], couleurs: [MENTHE[1], MENTHE[3]], mode: 'uni' },
+        'Logo': { forme: 'logo', nombre: 260, taille: 1.3, croissance: 0.7, coeur: 0.1, fond: P60[0], couleurs: [P60[1]], mode: 'uni', derive: 0.2 },
+        'Luzern': { forme: 'petale', nombre: 1000, taille: 1.15, fond: LU[3], couleurs: [LU[0], LU[1], LU[2], LU[4]], famille: '21', mode: 'spirales' },
+        'Décalé': { angle: 137.3, derive: 1.2, forme: 'point', nombre: 1800, fond: GR[0], couleurs: [GR[1], GR[2], GR[3], GR[4]], mode: 'spirales', famille: '34' },
+        'Orbite': { forme: 'anneau', nombre: 900, taille: 0.8, fond: ORB[0], couleurs: [ORB[1], ORB[2]], famille: '5', croissance: -0.3 },
+        'Acide': { forme: 'petale', nombre: 320, taille: 1.05, allongement: 3, fond: ACIDE[2], couleurs: [ACIDE[1], ACIDE[3]], famille: '8', coeur: 0.2 },
+      },
+      brand(colors) {
+        const rest = colors.slice(1);
+        return { fond: colors[0], couleurs: (rest.length ? rest : ['#000000']).slice(0, 6) };
+      },
+      pointer: {
+        move: (q) => { hover = { x: q.x, y: q.y }; },
+        down: (q) => { drag = { x: q.x, a: p.angle }; },
+        drag: (q) => { if (drag) app.set('angle', Math.max(90, Math.min(180, +(drag.a + (q.x - drag.x) * 0.002).toFixed(3)))); hover = { x: q.x, y: q.y }; },
+        up: () => { drag = null; },
+        wheel: (q, dy) => app.set('nombre', Math.max(30, Math.min(4000, Math.round((p.nombre + dy) / 10) * 10))),
+      },
+      onChange(k) { if (k === '_logo' || k === '*' || k === 'forme') logo = null; },
+      export: { name: 'phyllotaxie', svg: () => toSVG() },
+    });
+    const p = app.params;
+    canvas.addEventListener('pointerleave', () => { hover = null; });
+
+    // Logo : un tracé SVG s'il est vectoriel, sinon l'image en tampon (teinte par masque).
+    function logoStamp(col) {
+      const img = app.logoImg;
+      logo ??= {};
+      if (logo[col]) return logo[col];
+      const S = 128, cv = document.createElement('canvas'); cv.width = cv.height = S;
+      const x = cv.getContext('2d');
+      if (img) {
+        const iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height, k = S / Math.max(iw, ih);
+        x.drawImage(img, (S - iw * k) / 2, (S - ih * k) / 2, iw * k, ih * k);
+        x.globalCompositeOperation = 'source-in';
+        x.fillStyle = col; x.fillRect(0, 0, S, S);
+      } else {
+        // Sans logo : un disque percé d'un anneau, la marque par défaut de l'atelier.
+        x.fillStyle = col;
+        x.beginPath(); x.arc(S / 2, S / 2, S * 0.48, 0, TAU); x.arc(S / 2, S / 2, S * 0.34, 0, TAU, true); x.fill();
+        x.beginPath(); x.arc(S / 2, S / 2, S * 0.2, 0, TAU); x.fill();
+      }
+      logo[col] = cv;
+      return cv;
+    }
+
+    // Les éléments : position, taille, angle, couleur.
+    function elements(t) {
+      const { w, h } = app.size, U = Math.min(w, h), N = p.nombre;
+      const a = (p.angle + p.derive * Math.sin(t * p.vitesse * 0.6)) * Math.PI / 180;
+      const R = U * 0.5 * p.etendue, c = R / Math.sqrt(N), rot = t * p.rotation / 60 * TAU;
+      const cols = p.couleurs.length ? p.couleurs : ['#000000'], fam = +p.famille;
+      const n0 = Math.floor(N * p.coeur * p.coeur);
+      const out = [];
+      for (let n = n0; n < N; n++) {
+        const r = c * Math.sqrt(n + 0.5), th = n * a + rot, u = r / R;
+        const x = w / 2 + Math.cos(th) * r, y = h / 2 + Math.sin(th) * r;
+        // Taille : l'espacement local (≈ c), modulé vers le bord et par une pulsation qui part du centre.
+        let s = c * 0.5 * p.taille * Math.pow(Math.max(0.05, u), p.croissance) * (1 + p.pulsation * 0.35 * Math.sin(t * 1.6 - u * 6));
+        if (hover) { const d = Math.hypot(x - hover.x, y - hover.y), L = U * 0.14; s *= 1 + 1.2 * Math.exp(-(d * d) / (L * L)); }
+        let col;
+        if (p.mode === 'spirales') col = cols[Math.floor((n % fam) / fam * cols.length)];
+        else if (p.mode === 'rayon') col = cols[Math.min(cols.length - 1, Math.floor(u * cols.length))];
+        else col = cols[0];
+        out.push({ x, y, s, th: th + p.orientation * Math.PI / 180, col });
+      }
+      return out;
+    }
+
+    function draw(t) {
+      const { w, h, dpr } = app.size;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = p.fond; ctx.fillRect(0, 0, w, h);
+      const els = elements(t);
+      // Regroupés par couleur : un seul remplissage par couleur.
+      const groups = new Map();
+      for (const e of els) { if (!groups.has(e.col)) groups.set(e.col, []); groups.get(e.col).push(e); }
+      for (const [col, list] of groups) {
+        if (p.forme === 'logo') {
+          const st = logoStamp(col);
+          for (const e of list) {
+            ctx.save(); ctx.translate(e.x, e.y); ctx.rotate(e.th + Math.PI / 2);
+            ctx.drawImage(st, -e.s, -e.s, e.s * 2, e.s * 2); ctx.restore();
+          }
+          continue;
+        }
+        const path = new Path2D();
+        for (const e of list) shape(path, e);
+        if (p.forme === 'anneau') { ctx.fillStyle = col; ctx.fill(path, 'evenodd'); }
+        else { ctx.fillStyle = col; ctx.fill(path); }
+      }
+    }
+    function shape(path, e) {
+      const { x, y, s, th } = e;
+      if (p.forme === 'point') { path.moveTo(x + s, y); path.arc(x, y, s, 0, TAU); }
+      else if (p.forme === 'anneau') { path.moveTo(x + s, y); path.arc(x, y, s, 0, TAU); path.moveTo(x + s * 0.6, y); path.arc(x, y, s * 0.6, 0, TAU); }
+      else if (p.forme === 'carre') {
+        const c = Math.cos(th) * s * 0.9, si = Math.sin(th) * s * 0.9;
+        path.moveTo(x + c - si, y + si + c); path.lineTo(x - c - si, y - si + c); path.lineTo(x - c + si, y - si - c); path.lineTo(x + c + si, y + si - c); path.closePath();
+      } else {
+        // Pétale : une amande orientée selon le rayon.
+        const L = s * p.allongement * 0.7, W = s * 0.7, c = Math.cos(th), si = Math.sin(th);
+        const ax = x - c * L, ay = y - si * L, bx = x + c * L, by = y + si * L;
+        path.moveTo(ax, ay);
+        path.quadraticCurveTo(x - si * W * 1.6, y + c * W * 1.6, bx, by);
+        path.quadraticCurveTo(x + si * W * 1.6, y - c * W * 1.6, ax, ay);
+      }
+    }
+    function toSVG() {
+      const { w, h } = app.size, f = (v) => v.toFixed(2), els = elements(lastT), groups = new Map(), out = [];
+      for (const e of els) { if (!groups.has(e.col)) groups.set(e.col, []); groups.get(e.col).push(e); }
+      for (const [col, list] of groups) {
+        if (p.forme === 'logo') {
+          // Logo : la marque par défaut en tracé (les logos importés restent dans l'export image).
+          for (const e of list) out.push(`<g transform="translate(${f(e.x)} ${f(e.y)})"><circle r="${f(e.s * 0.96)}" fill="none" stroke="${col}" stroke-width="${f(e.s * 0.28)}"/><circle r="${f(e.s * 0.4)}" fill="${col}"/></g>`);
+          continue;
+        }
+        let d = '';
+        for (const e of list) {
+          const { x, y, s, th } = e;
+          if (p.forme === 'point') d += `M${f(x - s)} ${f(y)}a${f(s)} ${f(s)} 0 1 0 ${f(2 * s)} 0a${f(s)} ${f(s)} 0 1 0 ${f(-2 * s)} 0`;
+          else if (p.forme === 'anneau') { const s2 = s * 0.6; d += `M${f(x - s)} ${f(y)}a${f(s)} ${f(s)} 0 1 0 ${f(2 * s)} 0a${f(s)} ${f(s)} 0 1 0 ${f(-2 * s)} 0M${f(x - s2)} ${f(y)}a${f(s2)} ${f(s2)} 0 1 0 ${f(2 * s2)} 0a${f(s2)} ${f(s2)} 0 1 0 ${f(-2 * s2)} 0`; }
+          else if (p.forme === 'carre') { const c = Math.cos(th) * s * 0.9, si = Math.sin(th) * s * 0.9; d += `M${f(x + c - si)} ${f(y + si + c)}L${f(x - c - si)} ${f(y - si + c)}L${f(x - c + si)} ${f(y - si - c)}L${f(x + c + si)} ${f(y + si - c)}Z`; }
+          else {
+            const L = s * p.allongement * 0.7, W = s * 0.7, c = Math.cos(th), si = Math.sin(th);
+            d += `M${f(x - c * L)} ${f(y - si * L)}Q${f(x - si * W * 1.6)} ${f(y + c * W * 1.6)} ${f(x + c * L)} ${f(y + si * L)}Q${f(x + si * W * 1.6)} ${f(y - c * W * 1.6)} ${f(x - c * L)} ${f(y - si * L)}Z`;
+          }
+        }
+        out.push(`<path d="${d}" fill="${col}"${p.forme === 'anneau' ? ' fill-rule="evenodd"' : ''}/>`);
+      }
+      return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}"><rect width="100%" height="100%" fill="${p.fond}"/>${out.join('')}</svg>`;
+    }
+
+    ready = true;
+    app.loop((t) => { lastT = t; draw(t); app.finish(ctx); });
+  </script>
+</body>
+</html>

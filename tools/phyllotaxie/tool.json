@@ -1,0 +1,15 @@
+{
+  "slug": "phyllotaxie",
+  "title": "Phyllotaxie",
+  "type": "shapes",
+  "description": "Des éléments placés à l'angle d'or comme les graines d'un tournesol : spirales de Fibonacci qui se défont quand l'angle dérive, en SVG.",
+  "tags": ["phyllotaxie", "angle-d-or", "fibonacci", "spirale", "svg", "logo"],
+  "inspiration": [
+    "Helmut Vogel, A better way to construct the sunflower head (1979)",
+    "Prusinkiewicz et Lindenmayer, The Algorithmic Beauty of Plants",
+    "references/palettes.md ; palettes kegelbahn, luzern, orbite, biennale"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
