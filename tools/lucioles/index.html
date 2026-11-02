@@ -1,0 +1,337 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Lucioles</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Lucioles : un essaim de lucioles dans un pré, une forêt ou la nuit. Chacune est un oscillateur
+    // qui s'allume à la fin de son cycle ; un éclair voisin avance ou retarde son horloge (couplage
+    // par impulsions), si bien que des vagues naissent puis tout l'essaim finit par clignoter ensemble.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const BIEN = PAL('biennale'), MENTHE = PAL('menthe'), THER = PAL('thermique'), KB = PAL('kegelbahn'), GR = PAL('good-room'), LUZ = PAL('luzern'), PYR = PAL('pyramides');
+
+    let flies = [], fKey = '', scene = null, sKey = '', time = 0, mask = null, maskKey = null, spr = null, sprKey = '', lc = null, tc = null, trailKey = '', drag = null, frozen = false;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.07, vignette: 0.4 },
+      hint: 'Touchez pour déclencher une vague d’éclairs · glissez pour disperser l’essaim · molette : couplage',
+      notes: 'Chaque luciole est une horloge qui s’allume en fin de cycle. Quand une voisine s’allume, son horloge est avancée si elle allait bientôt briller, retardée si elle venait de le faire (couplage par impulsions, à la Mirollo et Strogatz). Avec assez de couplage, les éclairs s’alignent : d’abord des vagues locales, puis tout l’essaim d’un coup. En rafales, chaque cycle enchaîne plusieurs éclairs puis une longue pause, comme les lucioles synchrones des Appalaches.',
+      params: {
+        'Essaim': {
+          decor: { type: 'select', label: 'Décor', options: { pre: 'Pré', foret: 'Forêt', nuit: 'Nuit', logo: 'Logo' }, value: 'pre' },
+          image: { type: 'file', label: 'Logo', accept: 'image/*', show: (q) => q.decor === 'logo' },
+          nombre: { type: 'range', label: 'Nombre', min: 20, max: 700, step: 10, value: 260 },
+          taille: { type: 'range', label: 'Halo', min: 0.3, max: 2.5, step: 0.05, value: 1 },
+          lumiere: { type: 'color', label: 'Lumière', value: '#d6ff4a' },
+        },
+        'Rythme': {
+          periode: { type: 'range', label: 'Période (s)', min: 0.4, max: 3, step: 0.05, value: 1.3 },
+          couplage: { type: 'range', label: 'Couplage', min: 0, max: 1, step: 0.01, value: 0.45 },
+          portee: { type: 'range', label: 'Portée', min: 0.05, max: 1, step: 0.01, value: 0.2 },
+          dispersion: { type: 'range', label: 'Dispersion des horloges', min: 0, max: 1, step: 0.01, value: 0.35 },
+          duree: { type: 'range', label: 'Durée de l’éclair', min: 0.05, max: 0.6, step: 0.01, value: 0.2 },
+          motif: { type: 'segmented', label: 'Motif', options: { simple: 'Simple', rafales: 'Rafales' }, value: 'simple' },
+        },
+        'Vol': {
+          vol: { type: 'range', label: 'Vitesse', min: 0, max: 1, step: 0.01, value: 0.35 },
+          crochet: { type: 'toggle', label: 'Montée en J pendant l’éclair', value: true },
+          pose: { type: 'range', label: 'Pose longue', min: 0, max: 1, step: 0.01, value: 0 },
+        },
+        'Décor': {
+          ciel: { type: 'color', label: 'Ciel', value: '#0b1020' },
+          herbe: { type: 'color', label: 'Végétation', value: '#05080a' },
+          vent: { type: 'range', label: 'Vent dans l’herbe', min: 0, max: 1, step: 0.01, value: 0.35 },
+          etoiles: { type: 'toggle', label: 'Étoiles', value: true },
+        },
+      },
+      presets: {
+        'Pré': {},
+        'Synchrones': { couplage: 0.8, portee: 1, dispersion: 0.15, nombre: 320 },
+        'Désaccordées': { couplage: 0, dispersion: 0.8, nombre: 300 },
+        'Rafales en forêt': { decor: 'foret', motif: 'rafales', periode: 0.55, couplage: 0.8, portee: 0.5, duree: 0.12, lumiere: '#f2f08a', ciel: '#070b0c', herbe: '#020403', etoiles: false, nombre: 360 },
+        'Logo': { decor: 'logo', couplage: 0.9, portee: 0.6, nombre: 420, vol: 0.2, pose: 0.35, taille: 0.8 },
+        'Pose longue': { pose: 0.85, vol: 0.6, nombre: 160, couplage: 0.2, taille: 0.7 },
+        'Nuit d’été': { decor: 'nuit', nombre: 500, couplage: 0.6, portee: 0.15, lumiere: '#ffe06a', ciel: '#05060f' },
+        'Menthe': { lumiere: MENTHE[2], ciel: '#0c1716', herbe: MENTHE[1], couplage: 0.7 },
+        'Biennale': { lumiere: BIEN[4], ciel: '#16080a', herbe: BIEN[1], decor: 'foret', couplage: 0.5 },
+        'Kegelbahn': { lumiere: KB[1], ciel: KB[0], herbe: '#0c0306', decor: 'nuit', etoiles: false, couplage: 0.85, portee: 0.35 },
+        'Good Room': { lumiere: GR[1], ciel: '#0b0f08', herbe: GR[0], motif: 'rafales', periode: 0.6, couplage: 0.9, portee: 1 },
+        'Thermique': { lumiere: THER[3], ciel: THER[1], herbe: '#14123a', couplage: 0.5, pose: 0.4 },
+        'Essaim dense': { nombre: 700, taille: 0.6, portee: 0.08, couplage: 0.75 },
+      },
+      brand(colors) {
+        const lum = (h) => { const n = parseInt(h.slice(1), 16); return ((n >> 16) & 255) * 0.299 + ((n >> 8) & 255) * 0.587 + (n & 255) * 0.114; };
+        const sat = (h) => { const n = parseInt(h.slice(1), 16), r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255; return Math.max(r, g, b) - Math.min(r, g, b); };
+        const all = colors.slice().sort((a, b) => lum(a) - lum(b));
+        const bright = colors.slice().sort((a, b) => (sat(b) + lum(b) * 0.6) - (sat(a) + lum(a) * 0.6))[0];
+        return { ciel: all[0], herbe: all[1] && lum(all[1]) < 90 ? all[1] : all[0], lumiere: bright };
+      },
+      pointer: {
+        down: (q) => { drag = { x: q.x, y: q.y, x0: q.x, y0: q.y, moved: false }; },
+        drag: (q) => {
+          if (!drag) return;
+          if (Math.hypot(q.x - drag.x0, q.y - drag.y0) > 8) drag.moved = true;
+          const vx = q.x - drag.x, vy = q.y - drag.y, R = Math.min(app.size.w, app.size.h) * 0.12;
+          for (const f of flies) { const dx = f.x - q.x, dy = f.y - q.y, d2 = dx * dx + dy * dy; if (d2 < R * R) { const k = (1 - Math.sqrt(d2) / R) * 6; f.kx += vx * k + dx * 0.4 * k; f.ky += vy * k + dy * 0.4 * k; } }
+          drag.x = q.x; drag.y = q.y;
+        },
+        up: (q) => { if (drag && !drag.moved) ignite(q.x, q.y); drag = null; },
+        wheel: (q, dy) => app.set('couplage', Math.max(0, Math.min(1, +(p.couplage + (dy > 0 ? -0.05 : 0.05)).toFixed(2)))),
+      },
+      onChange(k) { if (k === 'image') maskKey = null; if (['decor', 'image', 'nombre'].includes(k)) fKey = ''; if (k === 'decor') sKey = ''; frozen = false; },
+      onSeed() { fKey = ''; sKey = ''; frozen = false; },
+      export: { name: 'lucioles', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    const hex = (h) => { const n = parseInt(h.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; };
+    const rgb = (c) => `rgb(${c[0]},${c[1]},${c[2]})`;
+    const rgba = (c, a) => `rgba(${c[0]},${c[1]},${c[2]},${a})`;
+    const mixc = (a, b, t) => [Math.round(a[0] + (b[0] - a[0]) * t), Math.round(a[1] + (b[1] - a[1]) * t), Math.round(a[2] + (b[2] - a[2]) * t)];
+    function hash(n) { const s = Math.sin(n * 127.1 + app.seed * 0.0131) * 43758.5453; return s - Math.floor(s); }
+    function vnoise(x, o) { const i = Math.floor(x), f = x - i, u = f * f * (3 - 2 * f); return hash(i + o) * (1 - u) + hash(i + 1 + o) * u; }
+    function smooth1(x, o) { return vnoise(x, o) * 0.65 + vnoise(x * 2.3 + 11, o + 50) * 0.35; }
+
+    // ——— Logo ———
+    function logoMask() {
+      const img = p.image || app.logoImg, key = img ? (img.src || 'c') : 'demo';
+      if (key === maskKey && mask) return mask;
+      maskKey = key;
+      const M = 160, c = document.createElement('canvas'); c.width = c.height = M; const x = c.getContext('2d', { willReadFrequently: true });
+      if (img) { const iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height, k = M * 0.96 / Math.max(iw, ih); x.drawImage(img, (M - iw * k) / 2, (M - ih * k) / 2, iw * k, ih * k); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(80, 80, 74, 0, TAU); x.arc(80, 80, 44, 0, TAU, true); x.fill('evenodd'); x.beginPath(); x.arc(80, 80, 20, 0, TAU); x.fill(); }
+      const d = x.getImageData(0, 0, M, M).data, inside = [];
+      let transp = 0; for (let i = 3; i < d.length; i += 16) if (d[i] < 128) transp++;
+      const useA = transp > d.length / 16 * 0.05;
+      for (let i = 0; i < M * M; i++) { const l = (d[i * 4] * 0.2126 + d[i * 4 + 1] * 0.7152 + d[i * 4 + 2] * 0.0722) / 255; if (useA ? d[i * 4 + 3] > 128 : d[i * 4 + 3] > 128 && l < 0.5) inside.push(i); }
+      mask = { M, inside }; return mask;
+    }
+
+    // ——— Essaim ———
+    function zone() {
+      const { w, h } = app.size;
+      if (p.decor === 'nuit') return { y0: h * 0.08, y1: h * 0.92 };
+      if (p.decor === 'foret') return { y0: h * 0.3, y1: h * 0.9 };
+      return { y0: h * 0.3, y1: h * 0.93 };
+    }
+    function build() {
+      const { w, h } = app.size, key = [w, h, p.decor, p.nombre, app.seed, maskKey].join();
+      if (key === fKey) return; fKey = key;
+      const n = p.nombre, z = zone(), S = Math.min(w, h);
+      let homes = null;
+      if (p.decor === 'logo') {
+        const m = logoMask(), L = Math.min(w * 0.7, h * 0.62);
+        homes = [];
+        for (let i = 0; i < n; i++) { const id = m.inside.length ? m.inside[Math.floor(hash(i * 3.1 + 5) * m.inside.length)] : 0, u = (id % m.M + hash(i + 9)) / m.M, v = (Math.floor(id / m.M) + hash(i + 19)) / m.M; homes.push([w / 2 + (u - 0.5) * L, h * 0.46 + (v - 0.5) * L]); }
+      }
+      flies = [];
+      for (let i = 0; i < n; i++) {
+        const hx = homes ? homes[i][0] : hash(i * 1.7 + 1) * w, hy = homes ? homes[i][1] : z.y0 + Math.pow(hash(i * 2.3 + 2), 0.8) * (z.y1 - z.y0);
+        flies.push({ x: hx, y: hy, hx, hy, z: hash(i * 5.1 + 3), ph: hash(i * 7.7 + 4) * 100, phase: hash(i * 3.3 + 6), rate: hash(i * 9.1 + 7) - 0.5, last: -10, kx: 0, ky: 0, nb: 1, burst: 0 });
+      }
+      for (const f of flies) f.s = 0.55 + f.z * 0.9;
+      frozen = false;
+    }
+    // un toucher : tout ce qui est proche s'allume, la vague part de là
+    function ignite(x, y) {
+      const R = Math.min(app.size.w, app.size.h) * 0.16;
+      const fired = [];
+      for (const f of flies) if ((f.x - x) ** 2 + (f.y - y) ** 2 < R * R) { f.phase = 1; fired.push(f); }
+      pulse(fired);
+    }
+
+    // couplage par impulsions : chaque éclair pousse l'horloge des voisines (avance si proche de la fin, retard si elle vient de briller)
+    let grid = new Map(), cell = 1;
+    function rebuildGrid() {
+      const { w, h } = app.size, S = Math.max(w, h);
+      cell = Math.max(20, p.portee * S); grid = new Map();
+      for (const f of flies) { const k = Math.floor(f.x / cell) * 4096 + Math.floor(f.y / cell); let a = grid.get(k); if (!a) grid.set(k, a = []); a.push(f); }
+      const R2 = cell * cell;
+      for (const f of flies) { let n = 0; const cx = Math.floor(f.x / cell), cy = Math.floor(f.y / cell); for (let i = -1; i <= 1; i++) for (let j = -1; j <= 1; j++) { const a = grid.get((cx + i) * 4096 + cy + j); if (a) for (const o of a) if ((o.x - f.x) ** 2 + (o.y - f.y) ** 2 < R2) n++; } f.nb = Math.max(1, n - 1); }
+    }
+    function cycleLen() { return p.motif === 'rafales' ? 5 : 1; }
+    function flash(f) { f.last = time; }
+    function pulse(queue) {
+      if (!queue.length) return;
+      const R2 = cell * cell, eps = p.couplage * p.couplage * 0.3, stamp = Math.random();
+      for (const f of queue) f.fired = stamp;
+      while (queue.length) {
+        const f = queue.pop();
+        f.phase = 0; f.burst = 0; flash(f);
+        if (eps <= 0) continue;
+        const cx = Math.floor(f.x / cell), cy = Math.floor(f.y / cell);
+        for (let i = -1; i <= 1; i++) for (let j = -1; j <= 1; j++) {
+          const a = grid.get((cx + i) * 4096 + cy + j); if (!a) continue;
+          for (const o of a) {
+            if (o.fired === stamp || (o.x - f.x) ** 2 + (o.y - f.y) ** 2 >= R2) continue;
+            o.phase -= eps / o.nb * Math.sin(TAU * o.phase);
+            if (o.phase < 0) o.phase = 0;
+            if (o.phase >= 1) { o.fired = stamp; queue.push(o); }
+          }
+        }
+      }
+    }
+    function step(dt) {
+      const { w, h } = app.size, S = Math.min(w, h), z = zone();
+      time += dt;
+      if (!flies.length) return;
+      rebuildGrid();
+      // horloges
+      const T = p.periode * cycleLen(), fired = [];
+      for (const f of flies) {
+        f.phase += dt / (T * (1 + f.rate * p.dispersion * 0.45));
+        // en rafales : éclairs secondaires sur la première moitié du cycle
+        if (p.motif === 'rafales') { const b = Math.floor(f.phase * 10); if (b > f.burst && b < 5) { f.burst = b; flash(f); } }
+        if (f.phase >= 1) fired.push(f);
+      }
+      pulse(fired);
+      // vol
+      const sp = p.vol * S * 0.06;
+      for (const f of flies) {
+        const a = smooth1(time * 0.18 + f.ph, 31) * TAU * 2.2, tf = time - f.last;
+        let vx = Math.cos(a) * sp, vy = Math.sin(a) * sp * 0.55;
+        if (p.crochet && tf < 0.7) vy -= sp * 2.2 * Math.sin(Math.min(1, tf / 0.7) * Math.PI) + S * 0.01;
+        vy += (f.hy - f.y) * 0.5;
+        if (p.decor === 'logo') { vx = vx * 0.35 + (f.hx - f.x) * 1.2; vy = vy * 0.35 + (f.hy - f.y) * 1.2; }
+        f.x += (vx + f.kx) * dt; f.y += (vy + f.ky) * dt;
+        const dk = Math.exp(-dt * 2.5); f.kx *= dk; f.ky *= dk;
+        if (p.decor !== 'logo') {
+          if (f.x < -20) f.x += w + 40; else if (f.x > w + 20) f.x -= w + 40;
+          if (f.y < z.y0) f.y += (z.y0 - f.y) * Math.min(1, dt * 1.5); else if (f.y > z.y1) f.y += (z.y1 - f.y) * Math.min(1, dt * 1.5);
+        }
+      }
+    }
+    function bright(f) {
+      const tf = time - f.last, d = p.duree;
+      if (tf < 0) return 0;
+      if (tf < 0.05) return tf / 0.05;
+      return Math.exp(-(tf - 0.05) / (d * 0.55)) ;
+    }
+
+    // ——— Décor ———
+    function buildScene() {
+      const { w, h } = app.size, key = [w, h, p.decor, app.seed].join();
+      if (key === sKey) return; sKey = key;
+      const S = Math.min(w, h);
+      const stars = []; for (let i = 0; i < 260; i++) stars.push([hash(i * 4.4 + 100) * w, Math.pow(hash(i * 6.2 + 101), 1.6) * h * 0.7, 0.4 + hash(i + 102) * 1.2, hash(i + 103)]);
+      const ridge = []; const ry = p.decor === 'nuit' ? h * 1.2 : h * (p.decor === 'foret' ? 0.4 : 0.56);
+      for (let i = 0; i <= 120; i++) { const x = i / 120 * w, u = i / 120 * 9; ridge.push([x, ry - (smooth1(u, 200) * 0.7 + smooth1(u * 4, 230) * 0.3) * h * 0.09 - h * 0.02 * Math.pow(smooth1(u * 12, 260), 3)]); }
+      const blades = (n, yb, hmin, hmax, wd, o) => { const a = []; for (let i = 0; i < n; i++) a.push({ x: hash(i * 1.3 + o) * (w + 40) - 20, y: yb + hash(i * 2.1 + o + 1) * S * 0.03, h: hmin + Math.pow(hash(i * 3.7 + o + 2), 2) * (hmax - hmin), wd: wd * (0.6 + hash(i + o + 3) * 0.8), lean: (hash(i * 5.3 + o + 4) - 0.5) * 0.5, ph: hash(i + o + 5) * TAU }); return a; };
+      const mid = p.decor === 'nuit' ? [] : blades(Math.round(w / 3), h * 0.74, S * 0.02, S * 0.07, S * 0.004, 300);
+      const front = p.decor === 'nuit' ? [] : blades(Math.round(w / 4.5), h * 0.97, S * 0.06, S * 0.26, S * 0.008, 500);
+      const trunks = [];
+      if (p.decor === 'foret') for (let i = 0; i < 26; i++) { const z = hash(i * 7.1 + 600); trunks.push({ x: hash(i * 3.3 + 601) * w, wd: S * (0.008 + z * z * 0.06), z }); }
+      trunks.sort((a, b) => a.z - b.z);
+      scene = { stars, ridge, mid, front, trunks };
+    }
+    function grassPath(x, list, k, swayAmp) {
+      x.beginPath();
+      for (const b of list) {
+        const sw = (Math.sin(time * 1.4 + b.ph + b.x * 0.004) * 0.6 + Math.sin(time * 0.6 + b.x * 0.002) * 0.4) * swayAmp * b.h, bend = b.lean * b.h + sw;
+        x.moveTo(b.x - b.wd, b.y); x.quadraticCurveTo(b.x - b.wd * 0.4 + bend * 0.4, b.y - b.h * 0.55, b.x + bend, b.y - b.h); x.quadraticCurveTo(b.x + b.wd * 0.4 + bend * 0.4, b.y - b.h * 0.55, b.x + b.wd, b.y);
+      }
+    }
+    function glowSprite() {
+      const key = p.lumiere; if (spr && sprKey === key) return spr; sprKey = key;
+      const c = document.createElement('canvas'); c.width = c.height = 64; const x = c.getContext('2d'), col = hex(p.lumiere), g = x.createRadialGradient(32, 32, 0, 32, 32, 32), core = mixc(col, [255, 255, 255], 0.6);
+      g.addColorStop(0, rgba(core, 1)); g.addColorStop(0.08, rgba(core, 0.9)); g.addColorStop(0.16, rgba(col, 0.55)); g.addColorStop(0.4, rgba(col, 0.14)); g.addColorStop(1, rgba(col, 0));
+      x.fillStyle = g; x.fillRect(0, 0, 64, 64); spr = c; return c;
+    }
+
+    app.loop((tt, dt) => {
+      const { w, h, dpr } = app.size, S = Math.min(w, h);
+      dt = Math.min(0.05, dt || 0);
+      build(); buildScene();
+      if (app.thumbnail) {
+        // aperçu : on laisse l'essaim se synchroniser puis on fige un instant où beaucoup brillent
+        if (!frozen) { for (let i = 0; i < 900; i++) step(1 / 30); let g = 0; while (g++ < 300) { step(1 / 60); let n = 0; for (const f of flies) if (bright(f) > 0.5) n++; if (n > flies.length * 0.35 && n < flies.length * 0.8) break; } frozen = true; }
+      } else step(dt);
+
+      const sky = hex(p.ciel), veg = hex(p.herbe), lum = hex(p.lumiere);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over';
+      const gs = ctx.createLinearGradient(0, 0, 0, h); gs.addColorStop(0, rgb(mixc(sky, [0, 0, 0], 0.35))); gs.addColorStop(0.6, rgb(sky)); gs.addColorStop(1, rgb(mixc(sky, lum, 0.06)));
+      ctx.fillStyle = gs; ctx.fillRect(0, 0, w, h);
+      if (p.etoiles) { for (const s of scene.stars) { ctx.fillStyle = rgba([235, 238, 255], (0.25 + 0.5 * s[3]) * (0.7 + 0.3 * Math.sin(time * (1 + s[3] * 3) + s[3] * 50))); ctx.fillRect(s[0], s[1], s[2], s[2]); } }
+      // lueur d'ensemble : quand l'essaim clignote d'un bloc, toute la scène s'éclaire un instant
+      let B = 0; for (const f of flies) B += bright(f) * f.s; B /= Math.max(1, flies.length);
+      // lisière
+      const farCol = mixc(veg, sky, 0.45);
+      ctx.fillStyle = rgb(farCol); ctx.beginPath(); ctx.moveTo(0, h); for (const [x, y] of scene.ridge) ctx.lineTo(x, y); ctx.lineTo(w, h); ctx.closePath(); ctx.fill();
+      // troncs lointains (brume)
+      for (const t of scene.trunks) if (t.z < 0.6) { ctx.fillStyle = rgb(mixc(veg, sky, 0.6 - t.z * 0.6)); ctx.fillRect(t.x - t.wd / 2, 0, t.wd, h); }
+      // herbe du milieu et sol
+      if (scene.mid.length) { const ym = h * 0.74; ctx.fillStyle = rgb(mixc(veg, sky, 0.22)); ctx.fillRect(0, ym + S * 0.015, w, h); grassPath(ctx, scene.mid, 1, p.vent * 0.35); ctx.fill(); }
+
+      // lumière des lucioles : halos peints à mi-résolution
+      const q = 0.5, lw = Math.ceil(w * q), lh = Math.ceil(h * q);
+      if (!lc) lc = document.createElement('canvas');
+      if (lc.width !== lw || lc.height !== lh) { lc.width = lw; lc.height = lh; }
+      const lx = lc.getContext('2d'); lx.setTransform(1, 0, 0, 1, 0, 0); lx.clearRect(0, 0, lw, lh);
+      lx.setTransform(q, 0, 0, q, 0, 0); lx.globalCompositeOperation = 'lighter';
+      const sg = glowSprite(), pz = p.pose > 0.01 ? p.pose : 0, base = S * 0.05 * p.taille, pk = 1 - 0.45 * pz;
+      for (const f of flies) {
+        const b = bright(f); if (b < 0.01) continue;
+        const r = base * f.s * (0.6 + 0.4 * b); lx.globalAlpha = Math.min(1, b * (0.45 + 0.55 * f.z) * pk);
+        lx.drawImage(sg, f.x - r, f.y - r, r * 2, r * 2);
+      }
+      lx.globalAlpha = 1;
+      // pose longue : les éclairs laissent un trait qui s'efface lentement, comme sur une photo de nuit
+      if (pz) {
+        if (!tc) tc = document.createElement('canvas');
+        if (tc.width !== Math.ceil(w * dpr) || tc.height !== Math.ceil(h * dpr)) { tc.width = Math.ceil(w * dpr); tc.height = Math.ceil(h * dpr); }
+        const tx = tc.getContext('2d'); tx.setTransform(1, 0, 0, 1, 0, 0);
+        if (trailKey !== fKey) { tx.clearRect(0, 0, tc.width, tc.height); trailKey = fKey; }
+        tx.globalCompositeOperation = 'destination-out'; tx.globalAlpha = 1;
+        tx.fillStyle = `rgba(0,0,0,${app.thumbnail ? 0 : Math.min(1, 1 - Math.exp(-dt / (pz * pz * 8)))})`; tx.fillRect(0, 0, tc.width, tc.height);
+        tx.setTransform(dpr, 0, 0, dpr, 0, 0); tx.globalCompositeOperation = 'lighter'; tx.lineCap = 'round';
+        const core = mixc(lum, [255, 255, 255], 0.35);
+        for (const f of flies) {
+          const b = bright(f); if (b < 0.03 || f.px === undefined || Math.abs(f.x - f.px) > S * 0.1) continue;
+          tx.strokeStyle = rgba(core, Math.min(1, b * (0.35 + 0.65 * f.z))); tx.lineWidth = Math.max(0.8, S * 0.0035 * f.s * p.taille);
+          tx.beginPath(); tx.moveTo(f.px, f.py); tx.lineTo(f.x + 0.01, f.y); tx.stroke();
+        }
+      }
+      for (const f of flies) { f.px = f.x; f.py = f.y; }
+      if (B > 0.002) { ctx.globalCompositeOperation = 'lighter'; ctx.fillStyle = rgba(lum, Math.min(0.12, B * 0.25)); ctx.fillRect(0, 0, w, h); }
+      ctx.globalCompositeOperation = 'lighter';
+      if (pz && tc) { ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.drawImage(tc, 0, 0); ctx.setTransform(dpr, 0, 0, dpr, 0, 0); }
+      ctx.globalCompositeOperation = 'lighter'; ctx.drawImage(lc, 0, 0, w, h); ctx.globalCompositeOperation = 'source-over';
+      // corps sombres des lucioles proches
+      ctx.fillStyle = rgba(mixc(veg, [0, 0, 0], 0.3), 0.8);
+      for (const f of flies) if (f.z > 0.75 && bright(f) < 0.2) { ctx.beginPath(); ctx.arc(f.x, f.y, Math.max(0.6, S * 0.0015 * f.s), 0, TAU); ctx.fill(); }
+      // troncs proches, herbe de devant
+      for (const t of scene.trunks) if (t.z >= 0.6) { const gt = ctx.createLinearGradient(t.x - t.wd / 2, 0, t.x + t.wd / 2, 0); gt.addColorStop(0, rgb(mixc(veg, [0, 0, 0], 0.3))); gt.addColorStop(0.7, rgb(mixc(veg, lum, Math.min(0.12, B * 0.8)))); gt.addColorStop(1, rgb(veg)); ctx.fillStyle = gt; ctx.fillRect(t.x - t.wd / 2, 0, t.wd, h); }
+      if (scene.front.length) { ctx.fillStyle = rgb(veg); grassPath(ctx, scene.front, 1, p.vent * 0.25); ctx.fill(); }
+      app.finish(ctx);
+    });
+
+    function toSVG() {
+      const { w, h } = app.size, f = (v) => v.toFixed(1), S = Math.min(w, h), sky = hex(p.ciel), veg = hex(p.herbe), lum = hex(p.lumiere), core = mixc(lum, [255, 255, 255], 0.6), out = [];
+      const defs = `<linearGradient id="ciel" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="${rgb(mixc(sky, [0, 0, 0], 0.35))}"/><stop offset="0.6" stop-color="${rgb(sky)}"/><stop offset="1" stop-color="${rgb(mixc(sky, lum, 0.06))}"/></linearGradient><radialGradient id="l"><stop offset="0" stop-color="${rgb(core)}"/><stop offset="0.08" stop-color="${rgb(core)}" stop-opacity="0.9"/><stop offset="0.16" stop-color="${rgb(lum)}" stop-opacity="0.55"/><stop offset="0.4" stop-color="${rgb(lum)}" stop-opacity="0.14"/><stop offset="1" stop-color="${rgb(lum)}" stop-opacity="0"/></radialGradient>`;
+      out.push(`<rect width="100%" height="100%" fill="url(#ciel)"/>`);
+      if (p.etoiles) out.push(`<g fill="#ebeeff">${scene.stars.map((s) => `<rect x="${f(s[0])}" y="${f(s[1])}" width="${f(s[2])}" height="${f(s[2])}" fill-opacity="${(0.25 + 0.5 * s[3]).toFixed(2)}"/>`).join('')}</g>`);
+      out.push(`<path d="M0 ${h}${scene.ridge.map(([x, y]) => `L${f(x)} ${f(y)}`).join('')}L${w} ${h}Z" fill="${rgb(mixc(veg, sky, 0.45))}"/>`);
+      for (const t of scene.trunks) if (t.z < 0.6) out.push(`<rect x="${f(t.x - t.wd / 2)}" y="0" width="${f(t.wd)}" height="${h}" fill="${rgb(mixc(veg, sky, 0.6 - t.z * 0.6))}"/>`);
+      const bl = (list, sway) => list.map((b) => { const sw = (Math.sin(time * 1.4 + b.ph + b.x * 0.004) * 0.6 + Math.sin(time * 0.6 + b.x * 0.002) * 0.4) * sway * b.h, bend = b.lean * b.h + sw; return `M${f(b.x - b.wd)} ${f(b.y)}Q${f(b.x - b.wd * 0.4 + bend * 0.4)} ${f(b.y - b.h * 0.55)} ${f(b.x + bend)} ${f(b.y - b.h)}Q${f(b.x + b.wd * 0.4 + bend * 0.4)} ${f(b.y - b.h * 0.55)} ${f(b.x + b.wd)} ${f(b.y)}Z`; }).join('');
+      if (scene.mid.length) out.push(`<rect x="0" y="${f(h * 0.74 + S * 0.015)}" width="${w}" height="${f(h * 0.26)}" fill="${rgb(mixc(veg, sky, 0.22))}"/><path d="${bl(scene.mid, p.vent * 0.35)}" fill="${rgb(mixc(veg, sky, 0.22))}"/>`);
+      const base = S * 0.05 * p.taille;
+      out.push(`<g style="mix-blend-mode:screen">${flies.map((fl) => { const b = bright(fl); if (b < 0.02) return ''; const r = base * fl.s * (0.6 + 0.4 * b); return `<circle cx="${f(fl.x)}" cy="${f(fl.y)}" r="${f(r)}" fill="url(#l)" fill-opacity="${Math.min(1, b * (0.45 + 0.55 * fl.z)).toFixed(2)}"/>`; }).join('')}</g>`);
+      for (const t of scene.trunks) if (t.z >= 0.6) out.push(`<rect x="${f(t.x - t.wd / 2)}" y="0" width="${f(t.wd)}" height="${h}" fill="${rgb(veg)}"/>`);
+      if (scene.front.length) out.push(`<path d="${bl(scene.front, p.vent * 0.25)}" fill="${rgb(veg)}"/>`);
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">\n<defs>${defs}</defs>\n${out.join('\n')}\n</svg>`;
+    }
+  </script>
+</body>
+</html>
