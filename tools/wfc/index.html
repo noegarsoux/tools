@@ -1,0 +1,331 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Wave Function Collapse</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Wave Function Collapse : chaque case commence par pouvoir être n'importe quelle tuile. On fixe
+    // la case la plus contrainte, puis on propage : ses voisines perdent les tuiles dont les bords ne
+    // raccordent pas. Le jeu ici a les 16 tuiles de connexion possibles (vide, bout, droit, coude,
+    // branche, croix) : il n'y a jamais d'impasse, et les poids de chaque famille règlent le caractère
+    // du réseau. Une fois la grille résolue, une zone s'efface et se recompose, sans fin.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const P60 = PAL('papier-60'), KB = PAL('kegelbahn'), CODE = PAL('code'), GR = PAL('good-room'), BIEN = PAL('biennale');
+    const PIX = PAL('pixels'), NUIT = PAL('trame-nuit'), MENTHE = PAL('menthe'), LU = PAL('luzern'), SAL = PAL('salon');
+
+    // Bits des bords : 1 haut, 2 droite, 4 bas, 8 gauche.
+    const DIRS = [[0, -1, 1, 4], [1, 0, 2, 8], [0, 1, 4, 1], [-1, 0, 8, 2]];
+    const HAS = DIRS.map(([, , b]) => { let m = 0; for (let t = 0; t < 16; t++) if (t & b) m |= 1 << t; return m; });
+    const ALL = 0xffff, popc = (v) => { let c = 0; while (v) { v &= v - 1; c++; } return c; };
+    const FAMILY = Array.from({ length: 16 }, (_, t) => { const n = popc(t); return n === 0 ? 'vide' : n === 1 ? 'bouts' : n === 3 ? 'branches' : n === 4 ? 'croix' : (t === 5 || t === 10 ? 'droits' : 'coudes'); });
+
+    let W = 0, Hh = 0, cell = 0, ox = 0, oy = 0, wave = null, done = null, order = 0, rng = Math.random, holdUntil = 0, ptr = null, painting = false;
+    let lastT = 0, stamps = {}, comp = null;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.03, vignette: 0 },
+      hint: 'Glissez pour effacer une zone, elle se recompose · molette : taille des cases · le dé relance la grille',
+      notes: 'Les tuiles se raccordent par leurs bords. La case suivante est la plus contrainte (le moins de tuiles encore possibles), départagée au hasard. Chaque réseau connexe reçoit une couleur de la palette.',
+      params: {
+        'Grille': {
+          cases: { type: 'range', label: 'Cases sur le petit côté', min: 5, max: 48, step: 1, value: 16 },
+          vitesse: { type: 'range', label: 'Cases fixées par image', min: 1, max: 40, step: 1, value: 4 },
+          bords: { type: 'toggle', label: 'Bords fermés', value: true },
+          erosion: { type: 'range', label: 'Taille des zones recomposées', min: 0.1, max: 0.6, step: 0.01, value: 0.25 },
+        },
+        'Poids des tuiles': {
+          vide: { type: 'range', label: 'Vides', min: 0, max: 4, step: 0.05, value: 1.6 },
+          bouts: { type: 'range', label: 'Bouts', min: 0, max: 4, step: 0.05, value: 0.6 },
+          droits: { type: 'range', label: 'Droits', min: 0, max: 4, step: 0.05, value: 1 },
+          coudes: { type: 'range', label: 'Coudes', min: 0, max: 4, step: 0.05, value: 1.4 },
+          branches: { type: 'range', label: 'Branches', min: 0, max: 4, step: 0.05, value: 0.5 },
+          croix: { type: 'range', label: 'Croix', min: 0, max: 4, step: 0.05, value: 0.2 },
+        },
+        'Dessin': {
+          style: { type: 'segmented', label: 'Style', options: { tuyaux: 'Tuyaux', arcs: 'Arcs', blocs: 'Blocs', logo: 'Logo aux bouts' }, value: 'arcs' },
+          epaisseur: { type: 'range', label: 'Épaisseur', min: 0.05, max: 0.7, step: 0.01, value: 0.28 },
+          flux: { type: 'range', label: 'Flux le long des tracés', min: 0, max: 1, step: 0.01, value: 0.3 },
+          coloration: { type: 'segmented', label: 'Coloration', options: { reseaux: 'Par réseau', familles: 'Par famille de tuile', zones: 'Par zone' }, value: 'reseaux' },
+        },
+        'Couleur': {
+          fond: { type: 'color', label: 'Fond', value: P60[0] },
+          couleurs: { type: 'palette', label: 'Couleurs des réseaux', value: [P60[1], '#e5452a', '#486cfc', '#edd14b'] },
+        },
+      },
+      presets: {
+        'Réseaux': {},
+        'Circuit': { style: 'tuyaux', epaisseur: 0.16, coloration: 'zones', cases: 30, fond: CODE[6], couleurs: [CODE[1], CODE[2], CODE[3], CODE[4], CODE[5]], vide: 0.6, branches: 1, croix: 0.4, flux: 0.8 },
+        'Labyrinthe': { style: 'blocs', epaisseur: 0.5, cases: 22, vide: 0.1, bouts: 0.2, coudes: 1.5, droits: 1, branches: 0.6, croix: 0.1, fond: P60[0], couleurs: [P60[1]], flux: 0 },
+        'Kegelbahn': { style: 'arcs', epaisseur: 0.42, cases: 10, fond: KB[0], couleurs: [KB[1], KB[2], KB[3], KB[5]], vide: 0.4, croix: 0.6 },
+        'Good Room': { style: 'tuyaux', epaisseur: 0.34, cases: 14, fond: GR[0], couleurs: [GR[1], GR[2], GR[3], GR[4]], bouts: 1, vide: 1.5 },
+        'Logo': { style: 'logo', epaisseur: 0.18, cases: 12, bouts: 1.6, vide: 1, fond: P60[0], couleurs: [P60[1], '#e5452a'] },
+        'Pixels': { style: 'blocs', epaisseur: 0.34, cases: 36, coloration: 'familles', fond: PIX[0], couleurs: PIX.slice(1), vitesse: 25, vide: 1.8 },
+        'Nuit': { style: 'arcs', epaisseur: 0.08, cases: 40, fond: NUIT[0], couleurs: [NUIT[1], NUIT[2]], coudes: 3, droits: 0.4, vide: 0.2, vitesse: 30, flux: 0.6 },
+        'Biennale': { style: 'arcs', epaisseur: 0.6, cases: 8, fond: BIEN[0], couleurs: [BIEN[1], BIEN[2], BIEN[3], BIEN[4]], vide: 0.8, croix: 0 },
+        'Luzern': { style: 'tuyaux', epaisseur: 0.22, cases: 20, coloration: 'zones', fond: LU[3], couleurs: [LU[0], LU[1], LU[2], LU[4]], branches: 1.2, flux: 0.5 },
+      },
+      brand(colors) {
+        const rest = colors.slice(1);
+        return { fond: colors[0], couleurs: (rest.length ? rest : ['#000000']).slice(0, 6) };
+      },
+      pointer: {
+        move: (q) => { ptr = { x: q.x, y: q.y }; },
+        down: (q) => { painting = true; erase(q.x, q.y, 1.6); },
+        drag: (q) => { if (painting) erase(q.x, q.y, 1.6); ptr = { x: q.x, y: q.y }; },
+        up: () => { painting = false; },
+        wheel: (q, dy) => app.set('cases', Math.max(5, Math.min(48, p.cases + Math.sign(dy)))),
+      },
+      onChange(k) {
+        if (k === '*' || k === 'cases' || k === 'bords') setup();
+        if (k === '*' || k === '_logo') stamps = {};
+      },
+      onSeed() { setup(); },
+      onResize() { setup(); },
+      export: { name: 'wfc', svg: () => toSVG() },
+    });
+    const p = app.params;
+    canvas.addEventListener('pointerleave', () => { ptr = null; });
+
+    function weightOf(t) { return Math.max(0, p[FAMILY[t]]) + 1e-4; }
+
+    // ——— Grille et propagation ———
+    function setup() {
+      const { w, h } = app.size, n = Math.round(p.cases);
+      cell = Math.min(w, h) / n;
+      W = Math.ceil(w / cell); Hh = Math.ceil(h / cell);
+      ox = (w - W * cell) / 2; oy = (h - Hh * cell) / 2;
+      wave = new Int32Array(W * Hh).fill(ALL); done = new Uint8Array(W * Hh);
+      rng = app.rng(order++ * 13 + 1);
+      if (p.bords) {
+        for (let y = 0; y < Hh; y++) for (let x = 0; x < W; x++) {
+          let m = ALL;
+          if (y === 0) m &= ~HAS[0]; if (x === W - 1) m &= ~HAS[1]; if (y === Hh - 1) m &= ~HAS[2]; if (x === 0) m &= ~HAS[3];
+          wave[y * W + x] = m;
+        }
+      }
+      holdUntil = 0;
+      // Démarrage : une partie de la grille déjà résolue, pour ne pas partir d'une page vide.
+      const pre = app.thumbnail ? W * Hh : Math.floor(W * Hh * 0.35);
+      for (let i = 0; i < pre; i++) if (!observe()) break;
+    }
+
+    function propagate(stack) {
+      while (stack.length) {
+        const i = stack.pop(), x = i % W, y = (i / W) | 0, m = wave[i];
+        for (let d = 0; d < 4; d++) {
+          const [dx, dy] = DIRS[d], nx = x + dx, ny = y + dy;
+          if (nx < 0 || ny < 0 || nx >= W || ny >= Hh) continue;
+          const j = ny * W + nx, opp = (d + 2) % 4;
+          const on = (m & HAS[d]) !== 0, off = (m & ~HAS[d] & ALL) !== 0;
+          const allowed = (on ? HAS[opp] : 0) | (off ? ~HAS[opp] & ALL : 0);
+          const nm = wave[j] & allowed;
+          if (nm !== wave[j]) { wave[j] = nm || wave[j]; stack.push(j); }
+        }
+      }
+    }
+
+    // Fixe la case la plus contrainte ; renvoie faux quand tout est résolu.
+    function observe() {
+      let best = -1, be = Infinity;
+      for (let i = 0; i < wave.length; i++) {
+        if (done[i]) continue;
+        const m = wave[i];
+        let sw = 0, swl = 0;
+        for (let t = 0; t < 16; t++) if (m >> t & 1) { const w = weightOf(t); sw += w; swl += w * Math.log(w); }
+        const e = Math.log(sw) - swl / sw + rng() * 1e-3;
+        if (e < be) { be = e; best = i; }
+      }
+      if (best < 0) return false;
+      const m = wave[best];
+      let sw = 0;
+      for (let t = 0; t < 16; t++) if (m >> t & 1) sw += weightOf(t);
+      let r = rng() * sw, pick = -1;
+      for (let t = 0; t < 16; t++) if (m >> t & 1) { r -= weightOf(t); if (r <= 0) { pick = t; break; } }
+      if (pick < 0) for (let t = 15; t >= 0; t--) if (m >> t & 1) { pick = t; break; }
+      wave[best] = 1 << pick; done[best] = 1;
+      propagate([best]);
+      // Les cases réduites à une seule tuile sont résolues d'office.
+      return true;
+    }
+
+    // Efface un disque de cases (en unités de case) et rétablit les contraintes des voisines.
+    function erase(px, py, rad) {
+      if (!wave) return;
+      const cx = (px - ox) / cell, cy = (py - oy) / cell, stack = [];
+      for (let y = Math.max(0, Math.floor(cy - rad - 1)); y < Math.min(Hh, Math.ceil(cy + rad + 1)); y++) {
+        for (let x = Math.max(0, Math.floor(cx - rad - 1)); x < Math.min(W, Math.ceil(cx + rad + 1)); x++) {
+          if ((x + 0.5 - cx) ** 2 + (y + 0.5 - cy) ** 2 > rad * rad) continue;
+          const i = y * W + x;
+          let m = ALL;
+          if (p.bords) { if (y === 0) m &= ~HAS[0]; if (x === W - 1) m &= ~HAS[1]; if (y === Hh - 1) m &= ~HAS[2]; if (x === 0) m &= ~HAS[3]; }
+          wave[i] = m; done[i] = 0;
+        }
+      }
+      // Les cases résolues autour contraignent de nouveau la zone.
+      for (let i = 0; i < wave.length; i++) if (done[i]) stack.push(i);
+      propagate(stack);
+      holdUntil = 0;
+    }
+
+    // ——— Réseaux connexes : union-find sur les raccords ———
+    function components() {
+      const N = W * Hh, par = new Int32Array(N).map((_, i) => i);
+      const find = (a) => { while (par[a] !== a) { par[a] = par[par[a]]; a = par[a]; } return a; };
+      for (let y = 0; y < Hh; y++) for (let x = 0; x < W; x++) {
+        const i = y * W + x;
+        if (!done[i]) continue;
+        const t = 31 - Math.clz32(wave[i]);
+        if (x < W - 1 && (t & 2) && done[i + 1]) par[find(i)] = find(i + 1);
+        if (y < Hh - 1 && (t & 4) && done[i + W]) par[find(i)] = find(i + W);
+      }
+      const out = new Int32Array(N);
+      for (let i = 0; i < N; i++) out[i] = find(i);
+      return out;
+    }
+
+    // Couleur d'une case : par réseau connexe, par famille de tuile, ou par grande zone (bruit lent).
+    const FAMS = ['vide', 'bouts', 'droits', 'coudes', 'branches', 'croix'];
+    function colorOf(i, C, cols) {
+      const n = cols.length;
+      if (p.coloration === 'familles') return cols[FAMS.indexOf(FAMILY[31 - Math.clz32(wave[i])]) % n];
+      if (p.coloration === 'zones') {
+        const x = (i % W) / Math.max(W, Hh), y = ((i / W) | 0) / Math.max(W, Hh);
+        const v = Math.sin(x * 5.1 + 1.3) + Math.sin(y * 4.3 + x * 2.2) + Math.sin((x - y) * 3.7 + 0.4);
+        return cols[Math.min(n - 1, Math.floor((v + 3) / 6 * n))];
+      }
+      return cols[(C[i] * 2654435761 >>> 0) % n];
+    }
+
+    function logoStamp(col) {
+      if (stamps[col]) return stamps[col];
+      const S = 128, cv = document.createElement('canvas'); cv.width = cv.height = S;
+      const x = cv.getContext('2d'), img = app.logoImg;
+      if (img) {
+        const iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height, k = S / Math.max(iw, ih);
+        x.drawImage(img, (S - iw * k) / 2, (S - ih * k) / 2, iw * k, ih * k);
+        x.globalCompositeOperation = 'source-in'; x.fillStyle = col; x.fillRect(0, 0, S, S);
+      } else {
+        x.fillStyle = col;
+        x.beginPath(); x.arc(S / 2, S / 2, S * 0.48, 0, TAU); x.arc(S / 2, S / 2, S * 0.32, 0, TAU, true); x.fill();
+        x.beginPath(); x.arc(S / 2, S / 2, S * 0.18, 0, TAU); x.fill();
+      }
+      return (stamps[col] = cv);
+    }
+
+    // Tracé d'une tuile dans un contexte (canvas ou enregistreur SVG).
+    function tilePath(c, t, X, Y, s) {
+      const mx = X + s / 2, my = Y + s / 2, ends = [[mx, Y], [X + s, my], [mx, Y + s], [X, my]];
+      const bits = [0, 1, 2, 3].filter((d) => t & (1 << d));
+      if (p.style === 'arcs' && bits.length === 2 && t !== 5 && t !== 10) {
+        // Coude : un quart de cercle centré sur le coin commun.
+        const corner = { 3: [X + s, Y], 6: [X + s, Y + s], 12: [X, Y + s], 9: [X, Y] }[t];
+        const a0 = Math.atan2(ends[bits[0]][1] - corner[1], ends[bits[0]][0] - corner[0]);
+        const a1 = Math.atan2(ends[bits[1]][1] - corner[1], ends[bits[1]][0] - corner[0]);
+        let da = a1 - a0; while (da > Math.PI) da -= TAU; while (da < -Math.PI) da += TAU;
+        c.moveTo(ends[bits[0]][0], ends[bits[0]][1]); c.arc(corner[0], corner[1], s / 2, a0, a1, da < 0);
+        return;
+      }
+      if (p.style === 'arcs' && bits.length === 3) {
+        // Branche : le droit plus deux quarts de cercle qui s'y raccordent en douceur.
+        const miss = [0, 1, 2, 3].find((d) => !(t & (1 << d))), opp = (miss + 2) % 4;
+        const a = ends[(opp + 1) % 4], b = ends[(opp + 3) % 4];
+        c.moveTo(a[0], a[1]); c.lineTo(b[0], b[1]);
+        c.moveTo(mx, my); c.lineTo(ends[opp][0], ends[opp][1]);
+        return;
+      }
+      for (const d of bits) { c.moveTo(mx, my); c.lineTo(ends[d][0], ends[d][1]); }
+    }
+
+    function draw(t) {
+      const { w, h, dpr } = app.size;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = p.fond; ctx.fillRect(0, 0, w, h);
+      const cols = p.couleurs.length ? p.couleurs : ['#000000'], C = components(), lw = cell * p.epaisseur;
+      // Cases encore ouvertes : un point discret dont la taille dit le nombre de tuiles possibles.
+      ctx.fillStyle = cols[0]; ctx.globalAlpha = 0.18;
+      for (let i = 0; i < wave.length; i++) if (!done[i]) {
+        const x = i % W, y = (i / W) | 0, r = cell * 0.06 * Math.sqrt(popc(wave[i]));
+        ctx.beginPath(); ctx.arc(ox + (x + 0.5) * cell, oy + (y + 0.5) * cell, r, 0, TAU); ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+      // Un tracé par couleur ; la couleur d'un réseau dépend de son représentant.
+      const byCol = new Map();
+      for (let i = 0; i < wave.length; i++) {
+        if (!done[i]) continue;
+        const col = colorOf(i, C, cols);
+        if (!byCol.has(col)) byCol.set(col, []);
+        byCol.get(col).push(i);
+      }
+      ctx.lineCap = p.style === 'blocs' ? 'square' : 'round'; ctx.lineJoin = 'round';
+      const dash = p.flux > 0 && p.style !== 'blocs' && p.style !== 'logo';
+      for (const [col, list] of byCol) {
+        ctx.strokeStyle = col; ctx.fillStyle = col; ctx.lineWidth = lw;
+        ctx.beginPath();
+        for (const i of list) tilePath(ctx, 31 - Math.clz32(wave[i]), ox + (i % W) * cell, oy + ((i / W) | 0) * cell, cell);
+        ctx.stroke();
+        if (dash) {
+          // Le flux : des tirets clairs qui glissent le long des tracés.
+          ctx.save(); ctx.globalAlpha = 0.55 * p.flux; ctx.strokeStyle = p.fond; ctx.lineWidth = lw * 0.35;
+          ctx.setLineDash([cell * 0.12, cell * 0.38]); ctx.lineDashOffset = -t * cell * 0.9;
+          ctx.stroke(); ctx.restore();
+        }
+        // Bouts : un disque (ou le logo) au bout de chaque impasse.
+        for (const i of list) {
+          const tt = 31 - Math.clz32(wave[i]);
+          if (popc(tt) !== 1) continue;
+          const cx = ox + (i % W + 0.5) * cell, cy = oy + (((i / W) | 0) + 0.5) * cell;
+          if (p.style === 'logo') { const s = cell * 0.42; ctx.drawImage(logoStamp(col), cx - s, cy - s, s * 2, s * 2); }
+          else { ctx.beginPath(); ctx.arc(cx, cy, lw * 0.9, 0, TAU); ctx.fill(); }
+        }
+      }
+    }
+
+    function toSVG() {
+      const { w, h } = app.size, cols = p.couleurs.length ? p.couleurs : ['#000000'], C = components(), f = (v) => +v.toFixed(2), lw = f(cell * p.epaisseur);
+      const rec = { d: '', moveTo(x, y) { this.d += `M${f(x)} ${f(y)}`; }, lineTo(x, y) { this.d += `L${f(x)} ${f(y)}`; },
+        arc(cx, cy, r, a0, a1, ccw) { const x1 = cx + Math.cos(a1) * r, y1 = cy + Math.sin(a1) * r; this.d += `A${f(r)} ${f(r)} 0 0 ${ccw ? 0 : 1} ${f(x1)} ${f(y1)}`; } };
+      let s = `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">\n<rect width="100%" height="100%" fill="${p.fond}"/>\n`;
+      const byCol = new Map();
+      for (let i = 0; i < wave.length; i++) if (done[i]) { const col = colorOf(i, C, cols); if (!byCol.has(col)) byCol.set(col, []); byCol.get(col).push(i); }
+      for (const [col, list] of byCol) {
+        rec.d = '';
+        for (const i of list) tilePath(rec, 31 - Math.clz32(wave[i]), ox + (i % W) * cell, oy + ((i / W) | 0) * cell, cell);
+        s += `<path fill="none" stroke="${col}" stroke-width="${lw}" stroke-linecap="${p.style === 'blocs' ? 'square' : 'round'}" stroke-linejoin="round" d="${rec.d}"/>\n`;
+        for (const i of list) if (popc(31 - Math.clz32(wave[i])) === 1) s += `<circle cx="${f(ox + (i % W + 0.5) * cell)}" cy="${f(oy + (((i / W) | 0) + 0.5) * cell)}" r="${f(cell * (p.style === 'logo' ? 0.3 : p.epaisseur * 0.9))}" fill="${col}"/>\n`;
+      }
+      return s + '</svg>';
+    }
+
+    setup();
+    app.loop((t, dt) => {
+      lastT = t;
+      if (dt > 0) {
+        let n = Math.round(p.vitesse), any = false;
+        while (n-- > 0) { if (observe()) any = true; else break; }
+        // Résolue : une pause, puis une zone s'efface et se recompose.
+        if (!any) {
+          if (!holdUntil) holdUntil = t + 1.6;
+          else if (t > holdUntil) {
+            const { w, h } = app.size, U = Math.min(W, Hh);
+            erase(ox + rng() * W * cell, oy + rng() * Hh * cell, Math.max(1.2, U * p.erosion));
+          }
+        }
+      }
+      draw(t);
+      app.finish(ctx);
+    });
+  </script>
+</body>
+</html>
