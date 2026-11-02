@@ -1,0 +1,15 @@
+{
+  "slug": "physarum",
+  "title": "Physarum",
+  "type": "generative",
+  "description": "Une moisissure de centaines de milliers d’agents sur le GPU : des réseaux de filaments qui se tissent, se repoussent entre espèces et se nourrissent du logo.",
+  "tags": ["physarum", "agents", "reseau", "webgl", "simulation", "logo"],
+  "inspiration": [
+    "Sage Jenson, Physarum (simulations de matière vivante)",
+    "Jeff Jones (2010), Characteristics of pattern formation and evolution in approximations of Physarum transport networks",
+    "Palettes kegelbahn, luzern, biennale, menthe, acide, thermique, good-room"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
