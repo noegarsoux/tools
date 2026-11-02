@@ -1,0 +1,336 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>String art</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // String art : des fils pointillés tendus entre des nœuds. Chaque fil est une corde vibrante :
+    // y(x, t) = Σ aₙ sin(nπx) cos(ωₙt), ωₙ = n·ω₁ et ω₁ ∝ 1 / longueur (même tension pour tous).
+    // Pincer un fil au point x₀ donne aₙ ∝ sin(nπx₀) / (n² x₀(1 − x₀)) (corde pincée triangulaire).
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2, MODES = 10;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const PAP = PAL('papier'), NUIT = PAL('trame-nuit'), ORB = PAL('orbite'), KB = PAL('kegelbahn'), ACIDE = PAL('acide');
+    const PHOTO = PAL('photocopie'), LUZ = PAL('luzern'), MENTHE = PAL('menthe'), BIEN = PAL('biennale');
+
+    const LAYOUT = new Set(['disposition', 'noeuds', 'centres', 'dispersion', 'etendue', 'liaison', 'fils', 'pas', 'portee', 'image']);
+    let ready = false, N = [], S = [], laidKey = '', last = null, autoClock = 0;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: 12,
+      finish: true,
+      hint: 'Glissez à travers les fils pour les pincer · Maj + clic : ajouter un nœud · molette : tension',
+      notes: 'Tous les fils ont la même tension : un fil court sonne plus aigu (il vibre plus vite) qu’un fil long. Le pincement est décomposé sur dix modes propres, les aigus s’amortissent plus vite que le fondamental, comme sur une vraie corde.',
+      params: {
+        'Nœuds': {
+          disposition: { type: 'segmented', label: 'Disposition', options: { etoiles: 'Étoiles', cercle: 'Cercle', grille: 'Grille', hasard: 'Hasard', logo: 'Logo' }, value: 'etoiles' },
+          image: { type: 'file', label: 'Logo ou image', accept: 'image/*', show: (q) => q.disposition === 'logo' },
+          noeuds: { type: 'range', label: 'Nœuds', min: 4, max: 240, step: 1, value: 70 },
+          centres: { type: 'range', label: 'Étoiles (centres)', min: 1, max: 12, step: 1, value: 5, show: (q) => q.disposition === 'etoiles' },
+          dispersion: { type: 'range', label: 'Dispersion', min: 0, max: 1, step: 0.01, value: 0.35 },
+          etendue: { type: 'range', label: 'Étendue', min: 0.3, max: 1.4, step: 0.01, value: 1 },
+        },
+        'Fils': {
+          liaison: { type: 'segmented', label: 'Liaison', options: { faisceaux: 'Faisceaux', hasard: 'Hasard', modulaire: 'Modulaire', voisins: 'Voisins' }, value: 'faisceaux' },
+          fils: { type: 'range', label: 'Fils', min: 10, max: 900, step: 1, value: 260 },
+          pas: { type: 'range', label: 'Multiplicateur (modulaire)', min: 2, max: 60, step: 1, value: 2, show: (q) => q.liaison === 'modulaire' },
+          portee: { type: 'range', label: 'Portée maximale', min: 0.1, max: 2, step: 0.01, value: 1.2 },
+        },
+        'Corde': {
+          tension: { type: 'range', label: 'Tension (hauteur du son)', min: 0.2, max: 4, step: 0.01, value: 1.2 },
+          amortissement: { type: 'range', label: 'Amortissement', min: 0.05, max: 3, step: 0.01, value: 0.55 },
+          amplitude: { type: 'range', label: 'Force du pincement', min: 0.1, max: 3, step: 0.01, value: 1 },
+          agitation: { type: 'range', label: 'Pincements spontanés', min: 0, max: 30, step: 0.1, value: 4 },
+          flux: { type: 'range', label: 'Défilement des tirets', min: -3, max: 3, step: 0.01, value: 0.4 },
+        },
+        'Rendu': {
+          tiret: { type: 'range', label: 'Longueur des tirets', min: 0, max: 30, step: 0.5, value: 5 },
+          ecart: { type: 'range', label: 'Écart des tirets', min: 0.5, max: 30, step: 0.5, value: 4 },
+          epaisseur: { type: 'range', label: 'Épaisseur', min: 0.2, max: 5, step: 0.05, value: 1 },
+          variation: { type: 'range', label: 'Variation d’épaisseur', min: 0, max: 1, step: 0.01, value: 0.6 },
+          opacite: { type: 'range', label: 'Opacité des fils', min: 0.05, max: 1, step: 0.01, value: 0.85 },
+          points: { type: 'range', label: 'Taille des nœuds', min: 0, max: 0.03, step: 0.0005, value: 0.004 },
+        },
+        'Couleur': {
+          fond: { type: 'color', label: 'Fond', value: PAP[0] },
+          palette: { type: 'palette', label: 'Fils', value: [PAP[1]] },
+          noeud: { type: 'color', label: 'Nœuds', value: PAP[1] },
+          vibration: { type: 'color', label: 'Fil qui vibre', value: ORB[0] },
+          eclat: { type: 'range', label: 'Coloration à la vibration', min: 0, max: 1, step: 0.01, value: 0.8 },
+        },
+      },
+      presets: {
+        'Fils tendus': {},
+        'Nuit': { disposition: 'etoiles', centres: 8, noeuds: 120, fils: 520, dispersion: 0.5, tiret: 2, ecart: 3, epaisseur: 0.8, opacite: 0.7, fond: NUIT[0], palette: [NUIT[1], NUIT[2]], noeud: NUIT[1], vibration: ACIDE[2], points: 0.003 },
+        'Cardioïde': { disposition: 'cercle', dispersion: 0, noeuds: 200, liaison: 'modulaire', pas: 2, fils: 200, tiret: 0, epaisseur: 0.7, variation: 0, etendue: 1.05, opacite: 0.75, points: 0.002, agitation: 2, fond: ORB[0], palette: [ORB[1]], noeud: ORB[1], vibration: ORB[2] },
+        'Néphroïde': { disposition: 'cercle', dispersion: 0, noeuds: 180, liaison: 'modulaire', pas: 3, fils: 180, tiret: 3, ecart: 2, epaisseur: 1, variation: 0.3, etendue: 1.05, fond: PHOTO[0], palette: [PHOTO[1], PHOTO[2]], noeud: PHOTO[1], vibration: LUZ[0] },
+        'Kegelbahn': { disposition: 'grille', noeuds: 36, liaison: 'hasard', fils: 120, portee: 0.8, tiret: 10, ecart: 7, epaisseur: 2.6, variation: 0.4, opacite: 1, points: 0.01, fond: KB[0], palette: KB.slice(1), noeud: KB[3], vibration: KB[3], eclat: 0.5 },
+        'Voisins': { disposition: 'hasard', noeuds: 160, liaison: 'voisins', fils: 520, portee: 0.3, tiret: 0, epaisseur: 0.9, variation: 0.5, points: 0.006, fond: MENTHE[0], palette: [MENTHE[1], MENTHE[3]], noeud: MENTHE[1], vibration: MENTHE[3], agitation: 8 },
+        'Biennale': { disposition: 'etoiles', centres: 3, noeuds: 40, fils: 140, dispersion: 0.2, tiret: 14, ecart: 6, epaisseur: 2.2, variation: 0.8, opacite: 1, points: 0.012, fond: BIEN[0], palette: [BIEN[1], BIEN[2]], noeud: BIEN[1], vibration: BIEN[2], flux: 1 },
+        'Logo': { disposition: 'logo', noeuds: 90, liaison: 'hasard', fils: 420, portee: 0.9, tiret: 3, ecart: 3, epaisseur: 0.8, points: 0.003 },
+      },
+      brand(colors) {
+        return { fond: colors[0], palette: colors.length > 1 ? colors.slice(1, 3) : colors, noeud: colors[1] || colors[0], vibration: colors[2] || colors[1] || colors[0] };
+      },
+      pointer: {
+        down: (q) => {
+          if (q.shift) { addNode(q.x, q.y); last = null; return; }
+          last = { x: q.x, y: q.y, t: performance.now() };
+        },
+        drag: (q) => { pluckAlong(q); },
+        up: () => { last = null; },
+        wheel: (q, dy) => app.set('tension', Math.min(4, Math.max(0.2, p.tension * Math.exp(-dy * 0.0015)))),
+      },
+      onChange: (key) => { if (ready && (key === '*' || LAYOUT.has(key))) layout(true); },
+      onSeed: () => { if (ready) layout(true); },
+      export: { name: 'string-art', svg: () => exportSVG() },
+    });
+    const p = app.params;
+
+    // ——— Nœuds ———
+    const frameHalf = () => { const { w, h } = app.size, u = Math.min(w, h); return { ax: w / u / 2, ay: h / u / 2 }; };
+    let imgSrc = null, edge = null;
+    function logoEdge() {
+      const img = p.image || app.logoImg;
+      if (!img) return null;
+      if (img === imgSrc) return edge;
+      imgSrc = img;
+      const M = 220, iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height, k = M / Math.max(iw, ih);
+      const cw = Math.max(2, Math.round(iw * k)), ch = Math.max(2, Math.round(ih * k));
+      const cv = document.createElement('canvas'); cv.width = cw; cv.height = ch;
+      const x = cv.getContext('2d', { willReadFrequently: true });
+      x.fillStyle = '#fff'; x.fillRect(0, 0, cw, ch); x.drawImage(img, 0, 0, cw, ch);
+      const d = x.getImageData(0, 0, cw, ch).data;
+      const ink = (i, j) => { if (i < 0 || j < 0 || i >= cw || j >= ch) return false; const o = (j * cw + i) * 4; return (d[o] * 0.2126 + d[o + 1] * 0.7152 + d[o + 2] * 0.0722) < 128; };
+      const pts = [], mx = Math.max(cw, ch);
+      for (let j = 0; j < ch; j++) for (let i = 0; i < cw; i++) if (ink(i, j) && (!ink(i + 1, j) || !ink(i - 1, j) || !ink(i, j + 1) || !ink(i, j - 1))) pts.push([(i + 0.5 - cw / 2) / mx, (j + 0.5 - ch / 2) / mx]);
+      edge = pts.length ? pts : null;
+      return edge;
+    }
+    function farthest(pts, n, r) {
+      const pick = [pts[Math.floor(r() * pts.length)]], dmin = new Float32Array(pts.length).fill(1e9);
+      while (pick.length < n) {
+        const lp = pick[pick.length - 1]; let bi = 0, bd = -1;
+        for (let i = 0; i < pts.length; i++) { const d = (pts[i][0] - lp[0]) ** 2 + (pts[i][1] - lp[1]) ** 2; if (d < dmin[i]) dmin[i] = d; if (dmin[i] > bd) { bd = dmin[i]; bi = i; } }
+        pick.push(pts[bi]);
+      }
+      return pick;
+    }
+
+    function layout(force) {
+      const { ax, ay } = frameHalf();
+      const key = [p.disposition, p.noeuds, p.centres, p.dispersion, p.etendue, p.liaison, p.fils, p.pas, p.portee, app.seed, ax.toFixed(3), ay.toFixed(3), !!(p.image || app.logoImg)].join('|');
+      if (!force && key === laidKey) return;
+      laidKey = key;
+      const r = app.rng(7), E = p.etendue, n = p.noeuds;
+      N = []; // { x, y, hub }
+      const gauss = () => Math.sqrt(-2 * Math.log(1 - r() * 0.999)) * Math.cos(TAU * r());
+      if (p.disposition === 'cercle') {
+        const R = 0.44 * E;
+        for (let i = 0; i < n; i++) { const a = TAU * i / n - Math.PI / 2, j = (r() - 0.5) * p.dispersion * 0.04; N.push({ x: Math.cos(a) * (R + j), y: Math.sin(a) * (R + j), hub: false }); }
+      } else if (p.disposition === 'grille') {
+        const cols = Math.max(2, Math.round(Math.sqrt(n * ax / ay))), rows = Math.max(2, Math.round(n / cols));
+        for (let j = 0; j < rows; j++) for (let i = 0; i < cols; i++) {
+          N.push({ x: ((i + 0.5) / cols - 0.5) * 2 * ax * 0.86 * E + (r() - 0.5) * p.dispersion * 0.08, y: ((j + 0.5) / rows - 0.5) * 2 * ay * 0.86 * E + (r() - 0.5) * p.dispersion * 0.08, hub: false });
+        }
+      } else if (p.disposition === 'logo' && logoEdge()) {
+        for (const q of farthest(logoEdge(), Math.min(n, logoEdge().length), r)) N.push({ x: q[0] * E * 0.86, y: q[1] * E * 0.86, hub: false });
+      } else if (p.disposition === 'etoiles') {
+        // Quelques centres en étoile ; les autres nœuds se dispersent autour ou sur tout le cadre.
+        const H = Math.min(p.centres, n);
+        // Centres écartés les uns des autres (meilleur de quelques tirages).
+        for (let k = 0; k < H; k++) {
+          let best = null, bd = -1;
+          for (let tr = 0; tr < 12; tr++) {
+            const c = { x: (r() - 0.5) * 2 * ax * 0.68 * E, y: (r() - 0.5) * 2 * ay * 0.68 * E };
+            const d = N.length ? Math.min(...N.map((q) => Math.hypot(q.x - c.x, q.y - c.y))) : 1;
+            if (d > bd) { bd = d; best = c; }
+          }
+          N.push({ x: best.x, y: best.y, hub: true, g: k, s: (0.008 + 0.07 * r() ** 2) * E });
+        }
+        for (let i = H; i < n; i++) {
+          if (r() < p.dispersion) N.push({ x: (r() - 0.5) * 2 * ax * 0.92 * E, y: (r() - 0.5) * 2 * ay * 0.92 * E, hub: false, g: -1 });
+          else { const k = Math.floor(r() * H), h = N[k], s = h.s; N.push({ x: h.x + gauss() * s, y: h.y + gauss() * s, hub: false, g: k }); }
+        }
+      } else {
+        for (let i = 0; i < n; i++) N.push({ x: (r() - 0.5) * 2 * ax * 0.9 * E, y: (r() - 0.5) * 2 * ay * 0.9 * E, hub: false });
+      }
+      for (const q of N) { q.x = Math.max(-ax * 0.98, Math.min(ax * 0.98, q.x)); q.y = Math.max(-ay * 0.98, Math.min(ay * 0.98, q.y)); }
+      link(r);
+    }
+
+    // ——— Fils ———
+    function makeString(a, b, r) {
+      const A = N[a], B = N[b], len = Math.hypot(B.x - A.x, B.y - A.y);
+      if (len < 1e-3) return null;
+      return { a, b, len, w: 1 - p.variation * r(), c: Math.floor(r() * 1e6), re: new Float32Array(MODES), im: new Float32Array(MODES), e: 0 };
+    }
+    function link(r) {
+      S = [];
+      const n = N.length, seen = new Set(), maxL = p.portee, F = p.fils;
+      const add = (a, b) => {
+        if (a === b) return false; const k = a < b ? a * 4096 + b : b * 4096 + a; if (seen.has(k)) return false;
+        if (Math.hypot(N[a].x - N[b].x, N[a].y - N[b].y) > maxL) return false;
+        const s = makeString(a, b, r); if (!s) return false; seen.add(k); S.push(s); return true;
+      };
+      if (p.liaison === 'modulaire') {
+        for (let i = 0; i < n && S.length < F; i++) add(i, (i * p.pas) % n);
+      } else if (p.liaison === 'voisins') {
+        const kN = Math.max(1, Math.round(F / n));
+        for (let i = 0; i < n; i++) {
+          const d = N.map((q, j) => [Math.hypot(q.x - N[i].x, q.y - N[i].y), j]).sort((x, y) => x[0] - y[0]);
+          for (let m = 1, got = 0; m < d.length && got < kN; m++) if (add(i, d[m][1])) got++;
+        }
+      } else if (p.liaison === 'faisceaux') {
+        // Depuis les centres (ou des nœuds tirés au hasard) vers des nœuds éloignés : des faisceaux qui se croisent.
+        // Groupes : nœuds rattachés à un centre (disposition en étoiles) ou, sinon, regroupés par proximité.
+        let G = N.map((q) => (q.g !== undefined ? q.g : -1));
+        if (!G.some((g) => g >= 0)) {
+          const K = Math.max(2, Math.round(n / 10)), C = farthest(N.map((q) => [q.x, q.y]), Math.min(K, n), r);
+          G = N.map((q) => { let bi = 0, bd = 1e9; C.forEach((c, i) => { const d = (c[0] - q.x) ** 2 + (c[1] - q.y) ** 2; if (d < bd) { bd = d; bi = i; } }); return bi; });
+        }
+        const groups = []; G.forEach((g, i) => { if (g >= 0) (groups[g] = groups[g] || []).push(i); });
+        const gl = groups.map((_, i) => i).filter((i) => groups[i] && groups[i].length);
+        const loose = G.map((g, i) => (g < 0 ? i : -1)).filter((i) => i >= 0);
+        // Chaque groupe est relié à deux ou trois autres : des faisceaux de fils presque parallèles qui se croisent.
+        const pairs = [];
+        for (const i of gl) { const k = 2 + Math.floor(r() * 2); for (let m = 0; m < k; m++) { const j = gl[Math.floor(r() * gl.length)]; if (j !== i) pairs.push([i, j]); } }
+        let guard = 0;
+        while (S.length < F && guard++ < F * 30) {
+          if (loose.length && r() < 0.18) { const pr = gl[Math.floor(r() * gl.length)]; add(groups[pr][Math.floor(r() * groups[pr].length)], loose[Math.floor(r() * loose.length)]); continue; }
+          if (!pairs.length) { add(Math.floor(r() * n), Math.floor(r() * n)); continue; }
+          const [i, j] = pairs[Math.floor(r() * pairs.length)], A = groups[i], B = groups[j];
+          add(A[Math.floor(r() * A.length)], B[Math.floor(r() * B.length)]);
+        }
+      } else {
+        let guard = 0;
+        while (S.length < F && guard++ < F * 30) add(Math.floor(r() * n), Math.floor(r() * n));
+      }
+    }
+    function addNode(sx, sy) {
+      const { w, h } = app.size, u = Math.min(w, h), x = (sx - w / 2) / u, y = (sy - h / 2) / u;
+      N.push({ x, y, hub: true });
+      const r = Math.random, i = N.length - 1, k = Math.max(3, Math.round(p.fils / Math.max(8, N.length) * 2));
+      for (let m = 0, guard = 0; m < k && guard < 200; guard++) { const j = Math.floor(r() * (N.length - 1)); const s = makeString(i, j, r); if (s && s.len <= p.portee) { S.push(s); m++; } }
+    }
+
+    // ——— Physique des cordes ———
+    function pluck(s, x0, h) {
+      x0 = Math.min(0.97, Math.max(0.03, x0));
+      for (let n = 1; n <= MODES; n++) s.re[n - 1] += 2 * h * Math.sin(n * Math.PI * x0) / (n * n * Math.PI * Math.PI * x0 * (1 - x0));
+      s.e = 1;
+    }
+    function toPlane(sx, sy) { const { w, h } = app.size, u = Math.min(w, h); return [(sx - w / 2) / u, (sy - h / 2) / u]; }
+    function pluckAlong(q) {
+      if (!last) { last = { x: q.x, y: q.y, t: performance.now() }; return; }
+      const now = performance.now(), [px, py] = toPlane(last.x, last.y), [qx, qy] = toPlane(q.x, q.y);
+      const dx = qx - px, dy = qy - py, dt = Math.max(8, now - last.t) / 1000, speed = Math.hypot(dx, dy) / dt;
+      if (Math.hypot(dx, dy) < 1e-5) return;
+      for (const s of S) {
+        const A = N[s.a], B = N[s.b], ex = B.x - A.x, ey = B.y - A.y, den = dx * ey - dy * ex;
+        if (Math.abs(den) < 1e-12) continue;
+        const t1 = ((A.x - px) * ey - (A.y - py) * ex) / den, t2 = ((A.x - px) * dy - (A.y - py) * dx) / den;
+        if (t1 < 0 || t1 > 1 || t2 < 0 || t2 > 1) continue;
+        // Le fil part dans le sens du geste (côté de la normale).
+        const side = Math.sign(dx * -ey + dy * ex) || 1;
+        pluck(s, t2, side * Math.min(0.1, 0.012 + speed * 0.02) * p.amplitude * Math.min(1, s.len * 1.5));
+      }
+      last = { x: q.x, y: q.y, t: now };
+    }
+    function step(dt) {
+      for (const s of S) {
+        if (s.e < 1e-4) continue;
+        const w1 = p.tension * 9 / Math.max(0.05, s.len);
+        let e = 0;
+        for (let n = 1; n <= MODES; n++) {
+          const om = w1 * n * dt, damp = Math.exp(-p.amortissement * (1 + 0.35 * (n - 1)) * dt), c = Math.cos(om) * damp, sn = Math.sin(om) * damp;
+          const re = s.re[n - 1], im = s.im[n - 1];
+          s.re[n - 1] = re * c - im * sn; s.im[n - 1] = re * sn + im * c;
+          e += Math.abs(s.re[n - 1]) + Math.abs(s.im[n - 1]);
+        }
+        s.e = e / 0.03;
+        if (s.e < 1e-4) { s.re.fill(0); s.im.fill(0); }
+      }
+      // Pincements spontanés : un processus de Poisson (agitation par seconde).
+      autoClock += dt * p.agitation;
+      const r = Math.random;
+      while (autoClock > 1 && S.length) { autoClock -= 1 + (r() - 0.5) * 0.6; const s = S[Math.floor(r() * S.length)]; pluck(s, 0.15 + r() * 0.7, (r() < 0.5 ? -1 : 1) * (0.008 + r() * 0.02) * p.amplitude * Math.min(1, s.len * 1.5)); }
+    }
+
+    // ——— Dessin ———
+    const rgbOf = (c) => { const h = String(c).replace('#', ''); const v = parseInt(h.length === 3 ? h.replace(/./g, '$&$&') : h.slice(0, 6), 16); return [v >> 16 & 255, v >> 8 & 255, v & 255]; };
+    const mixHex = (a, b, k) => { const A = rgbOf(a), B = rgbOf(b); return '#' + A.map((v, i) => Math.round(v + (B[i] - v) * k).toString(16).padStart(2, '0')).join(''); };
+    const SEG = 28, SINE = []; for (let n = 1; n <= MODES; n++) { const row = []; for (let i = 0; i <= SEG; i++) row.push(Math.sin(n * Math.PI * i / SEG)); SINE.push(row); }
+
+    function draw(t, sink) {
+      const { w, h } = app.size, u = Math.min(w, h), cx = w / 2, cy = h / 2;
+      const pal = p.palette, dashOff = -t * p.flux * 30;
+      for (const s of S) {
+        const A = N[s.a], B = N[s.b], ax = cx + A.x * u, ay = cy + A.y * u, bx = cx + B.x * u, by = cy + B.y * u;
+        const L = Math.hypot(bx - ax, by - ay), nx = -(by - ay) / L, ny = (bx - ax) / L;
+        const base = pal[s.c % pal.length], vib = Math.min(1, s.e);
+        const col = p.eclat > 0 && vib > 0.02 ? mixHex(base, p.vibration, Math.min(1, vib * p.eclat * 1.5)) : base;
+        const lw = p.epaisseur * (0.25 + 0.75 * s.w);
+        let pts;
+        if (s.e >= 1e-4) {
+          pts = [];
+          for (let i = 0; i <= SEG; i++) {
+            let d = 0; for (let n = 0; n < MODES; n++) d += s.re[n] * SINE[n][i];
+            const f = i / SEG, off = Math.max(-0.2, Math.min(0.2, d / Math.max(0.02, s.len))) * s.len * u;
+            pts.push([ax + (bx - ax) * f + nx * off, ay + (by - ay) * f + ny * off]);
+          }
+        } else pts = [[ax, ay], [bx, by]];
+        sink.string(pts, col, lw, p.opacite, dashOff * (0.5 + s.w));
+      }
+      if (p.points > 0) for (const q of N) sink.node(cx + q.x * u, cy + q.y * u, p.points * u * (q.hub ? 1.8 : 1), p.noeud);
+    }
+
+    const canvasSink = {
+      string(pts, col, lw, a, off) {
+        ctx.globalAlpha = a; ctx.strokeStyle = col; ctx.lineWidth = lw;
+        if (p.tiret > 0) { ctx.setLineDash([p.tiret, p.ecart]); ctx.lineDashOffset = off; } else ctx.setLineDash([]);
+        ctx.beginPath(); ctx.moveTo(pts[0][0], pts[0][1]); for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]); ctx.stroke();
+      },
+      node(x, y, r, col) { ctx.globalAlpha = 1; ctx.setLineDash([]); ctx.fillStyle = col; ctx.beginPath(); ctx.arc(x, y, r, 0, TAU); ctx.fill(); },
+    };
+
+    layout(true);
+    ready = true;
+
+    app.loop((t, dt) => {
+      const { w, h, dpr } = app.size;
+      layout(false);
+      step(Math.min(0.05, dt || 0));
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.globalAlpha = 1; ctx.fillStyle = p.fond; ctx.fillRect(0, 0, w, h);
+      ctx.lineCap = 'butt';
+      draw(t, canvasSink);
+      ctx.setLineDash([]); ctx.globalAlpha = 1;
+      app.finish(ctx);
+    });
+
+    function exportSVG() {
+      const { w, h } = app.size, f = (v) => Math.round(v * 100) / 100;
+      const out = [`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}">`, `<rect width="${w}" height="${h}" fill="${p.fond}"/>`];
+      draw(app.time, {
+        string(pts, col, lw, a, off) {
+          const dash = p.tiret > 0 ? ` stroke-dasharray="${f(p.tiret)} ${f(p.ecart)}" stroke-dashoffset="${f(off)}"` : '';
+          out.push(`<path d="M${pts.map((q) => `${f(q[0])} ${f(q[1])}`).join('L')}" fill="none" stroke="${col}" stroke-width="${f(lw)}"${a < 1 ? ` stroke-opacity="${f(a)}"` : ''}${dash}/>`);
+        },
+        node(x, y, r, col) { out.push(`<circle cx="${f(x)}" cy="${f(y)}" r="${f(r)}" fill="${col}"/>`); },
+      });
+      out.push('</svg>');
+      return out.join('\n');
+    }
+  </script>
+</body>
+</html>
