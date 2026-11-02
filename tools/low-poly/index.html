@@ -1,0 +1,273 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Low poly vivant</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Low poly vivant : des points qui dérivent sont triangulés (Delaunay, Bowyer-Watson) à chaque
+    // image ; chaque facette prend une couleur — dégradé, relief éclairé, tirage ou logo.
+    // Le pointeur écarte les points, toucher les fait éclater, molette : nombre de points.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2, DEG = Math.PI / 180;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const BIEN = PAL('biennale'), KB = PAL('kegelbahn'), MENTHE = PAL('menthe'), THER = PAL('thermique'), LUZ = PAL('luzern'), GR = PAL('good-room');
+    const P60 = PAL('papier-60'), NUIT = PAL('trame-nuit'), ACIDE = PAL('acide'), PYR = PAL('pyramides'), CODE = PAL('code'), ORB = PAL('orbite');
+
+    let pts = [], hover = null, drag = null, bursts = [], logoMask = null, logoKey = null;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.03, vignette: 0 },
+      hint: 'Survolez pour écarter les points · glissez pour les rassembler · touchez pour un éclat · molette : nombre de points',
+      notes: 'La triangulation est recalculée à chaque image : les arêtes basculent quand les points se croisent. En mode relief, chaque point a une altitude ; la facette est éclairée selon sa pente.',
+      params: {
+        'Points': {
+          nombre: { type: 'range', label: 'Nombre de points', min: 20, max: 700, step: 1, value: 180 },
+          derive: { type: 'range', label: 'Dérive', min: 0, max: 2, step: 0.01, value: 0.4 },
+          agitation: { type: 'range', label: 'Agitation', min: 0, max: 1, step: 0.01, value: 0.3 },
+          rayon: { type: 'range', label: 'Rayon du pointeur', min: 0.05, max: 0.5, step: 0.01, value: 0.2 },
+        },
+        'Facettes': {
+          coloration: { type: 'select', label: 'Coloration', options: { degrade: 'Dégradé', relief: 'Relief éclairé', hasard: 'Tirage', logo: 'Logo' }, value: 'degrade' },
+          image: { type: 'file', label: 'Logo', accept: 'image/*', show: (q) => q.coloration === 'logo' },
+          angle: { type: 'range', label: 'Angle du dégradé / de la lumière', min: 0, max: 360, step: 1, value: 300 },
+          relief: { type: 'range', label: 'Contraste des facettes', min: 0, max: 1, step: 0.01, value: 0.4 },
+          echelle: { type: 'range', label: 'Échelle du relief', min: 0.3, max: 3, step: 0.01, value: 1 },
+        },
+        'Traits': {
+          arete: { type: 'range', label: 'Arêtes', min: 0, max: 4, step: 0.1, value: 0 },
+          couleurArete: { type: 'color', label: 'Couleur des arêtes', value: '#ffffff', show: (q) => q.arete > 0 },
+          sommets: { type: 'range', label: 'Sommets', min: 0, max: 8, step: 0.5, value: 0 },
+        },
+        'Couleur': {
+          fond: { type: 'color', label: 'Fond', value: BIEN[0] },
+          couleurs: { type: 'palette', label: 'Couleurs', value: [BIEN[1], BIEN[2], BIEN[3], BIEN[4]] },
+        },
+      },
+      presets: {
+        'Biennale': {},
+        'Kegelbahn': { coloration: 'hasard', nombre: 120, fond: KB[0], couleurs: [KB[1], KB[2], KB[3], KB[4], KB[5]], arete: 1.5, couleurArete: KB[0], derive: 0.3 },
+        'Menthe': { coloration: 'relief', nombre: 260, fond: MENTHE[0], couleurs: [MENTHE[2], MENTHE[3]], relief: 0.4, angle: 220 },
+        'Thermique': { coloration: 'degrade', nombre: 300, fond: THER[0], couleurs: [THER[1], THER[4], THER[2], THER[3]], angle: 90, relief: 0.15 },
+        'Constellation': { coloration: 'degrade', nombre: 140, fond: NUIT[0], couleurs: [NUIT[0], '#1d1d1d'], relief: 0.05, arete: 0.8, couleurArete: NUIT[2], sommets: 3, derive: 0.25 },
+        'Luzern': { coloration: 'relief', nombre: 90, fond: LUZ[0], couleurs: [LUZ[1], LUZ[2]], relief: 0.7, angle: 40, echelle: 0.6 },
+        'Good Room': { coloration: 'hasard', nombre: 400, fond: GR[0], couleurs: [GR[1], GR[2], GR[3], GR[4], GR[0]], derive: 0.6, agitation: 0.6 },
+        'Logo': { coloration: 'logo', nombre: 420, fond: P60[0], couleurs: [P60[1], '#e5452a'], relief: 0.25, arete: 0.6, couleurArete: P60[0] },
+        'Acide': { coloration: 'relief', nombre: 500, fond: ACIDE[1], couleurs: [ACIDE[2]], relief: 0.9, angle: 120, echelle: 1.8 },
+        'Pyramides': { coloration: 'degrade', nombre: 60, fond: PYR[0], couleurs: [PYR[2], PYR[3], PYR[4], PYR[5]], angle: 20, relief: 0.35, arete: 2, couleurArete: PYR[1] },
+        'Code': { coloration: 'hasard', nombre: 220, fond: CODE[0], couleurs: [CODE[1], CODE[2], CODE[3], CODE[4], CODE[5], CODE[0], CODE[0]], arete: 1, couleurArete: CODE[0], sommets: 2 },
+      },
+      brand(colors) {
+        const c = colors.slice(1).length ? colors.slice(1) : ['#111111'];
+        return { fond: colors[0], couleurs: c.slice(0, 7) };
+      },
+      pointer: {
+        move: (q) => { hover = { x: q.x, y: q.y }; },
+        down: (q) => { drag = { x: q.x, y: q.y, moved: false }; },
+        drag: (q) => { hover = { x: q.x, y: q.y }; if (drag && Math.hypot(q.x - drag.x, q.y - drag.y) > 6) drag.moved = true; },
+        up: (q) => { if (drag && !drag.moved) bursts.push({ x: q.x, y: q.y, t: 0 }); drag = null; },
+        wheel: (q, dy) => app.set('nombre', Math.max(20, Math.min(700, Math.round(p.nombre * (dy > 0 ? 0.92 : 1.08))))),
+      },
+      onChange(k) { if (k === 'nombre' || k === '*') sync(); if (k === 'image' || k === '*') logoKey = null; },
+      onSeed() { pts = []; sync(); },
+      export: { name: 'low-poly', svg: () => toSVG() },
+    });
+    const p = app.params;
+    canvas.addEventListener('pointerleave', () => { hover = null; });
+
+    // ——— Points : coordonnées normalisées [0,1]², ancre qui dérive + décalage élastique ———
+    function sync() {
+      const n = Math.round(p.nombre), r = app.rng(pts.length * 13 + 5);
+      while (pts.length < n) pts.push({ u: r(), v: r(), fu: 0.2 + r(), fv: 0.2 + r(), ph: r() * TAU, z: r(), dx: 0, dy: 0, vx: 0, vy: 0 });
+      if (pts.length > n) pts.length = n;
+    }
+    sync();
+
+    // ——— Bruit de valeur 2D lisse (altitude du relief) ———
+    const h2 = (x, y) => { let n = Math.imul(x, 374761393) + Math.imul(y, 668265263) + app.seed * 97 | 0; n = Math.imul(n ^ (n >>> 13), 1274126177); return ((n ^ (n >>> 16)) >>> 0) / 4294967296; };
+    function vn(x, y) {
+      const X = Math.floor(x), Y = Math.floor(y), fx = x - X, fy = y - Y, sx = fx * fx * (3 - 2 * fx), sy = fy * fy * (3 - 2 * fy);
+      const a = h2(X, Y), b = h2(X + 1, Y), c = h2(X, Y + 1), d = h2(X + 1, Y + 1);
+      return a + (b - a) * sx + (c - a) * sy + (a - b - c + d) * sx * sy;
+    }
+    const height = (x, y, t) => vn(x * 3 + t * 0.05, y * 3) * 0.65 + vn(x * 7, y * 7 - t * 0.04) * 0.35;
+
+    // ——— Logo : masque (ou marque de repli géométrique) ———
+    function logoSample(w, h) {
+      const img = p.image || app.logoImg, key = w + 'x' + h + (img ? (img.src || 'c') : 'demo');
+      if (key === logoKey) return logoMask;
+      logoKey = key;
+      const M = 200, c = document.createElement('canvas'); c.width = c.height = M; const x = c.getContext('2d', { willReadFrequently: true });
+      if (img) {
+        const iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height, k = M * 0.9 / Math.max(iw, ih);
+        x.drawImage(img, (M - iw * k) / 2, (M - ih * k) / 2, iw * k, ih * k);
+      } else {
+        x.fillStyle = '#000'; x.beginPath(); x.arc(100, 100, 84, 0, TAU); x.arc(100, 100, 46, 0, TAU, true); x.fill('evenodd'); x.fillRect(89, 6, 22, 188);
+      }
+      const d = x.getImageData(0, 0, M, M).data, a = new Uint8Array(M * M);
+      let transp = 0; for (let i = 3; i < d.length; i += 16) if (d[i] < 128) transp++;
+      const useA = transp > d.length / 16 * 0.05;
+      for (let i = 0; i < M * M; i++) { const l = (d[i * 4] * 0.2126 + d[i * 4 + 1] * 0.7152 + d[i * 4 + 2] * 0.0722) / 255; a[i] = (useA ? d[i * 4 + 3] > 128 : d[i * 4 + 3] > 128 && l < 0.5) ? 1 : 0; }
+      // Cellules de bord : on y accroche une partie des points pour que les facettes dessinent la forme.
+      const edges = [];
+      for (let y = 1; y < M - 1; y++) for (let x0 = 1; x0 < M - 1; x0++) { const i = y * M + x0; if (a[i] && (!a[i - 1] || !a[i + 1] || !a[i - M] || !a[i + M])) edges.push((x0 + 0.5) / M, (y + 0.5) / M); }
+      logoMask = { M, a, edges };
+      return logoMask;
+    }
+    function inLogo(x, y, w, h) {
+      const L = logoSample(w, h), S = Math.min(w, h) * 0.78, u = (x - (w - S) / 2) / S, v = (y - (h - S) / 2) / S;
+      if (u < 0 || v < 0 || u >= 1 || v >= 1) return false;
+      return L.a[Math.floor(v * L.M) * L.M + Math.floor(u * L.M)] === 1;
+    }
+
+    // ——— Delaunay (Bowyer-Watson) ———
+    function delaunay(P) {
+      const n = P.length / 2;
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      for (let i = 0; i < n; i++) { minX = Math.min(minX, P[i * 2]); maxX = Math.max(maxX, P[i * 2]); minY = Math.min(minY, P[i * 2 + 1]); maxY = Math.max(maxY, P[i * 2 + 1]); }
+      const dm = Math.max(maxX - minX, maxY - minY) * 20, mx = (minX + maxX) / 2, my = (minY + maxY) / 2;
+      const X = Array.from(P); X.push(mx - dm, my - dm, mx + dm, my - dm, mx, my + dm);
+      const tri = [];
+      const mk = (a, b, c) => {
+        const ax = X[a * 2], ay = X[a * 2 + 1], bx = X[b * 2], by = X[b * 2 + 1], cx = X[c * 2], cy = X[c * 2 + 1];
+        const d = 2 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by)) || 1e-12;
+        const ux = ((ax * ax + ay * ay) * (by - cy) + (bx * bx + by * by) * (cy - ay) + (cx * cx + cy * cy) * (ay - by)) / d;
+        const uy = ((ax * ax + ay * ay) * (cx - bx) + (bx * bx + by * by) * (ax - cx) + (cx * cx + cy * cy) * (bx - ax)) / d;
+        return { a, b, c, x: ux, y: uy, r: (ax - ux) ** 2 + (ay - uy) ** 2 };
+      };
+      tri.push(mk(n, n + 1, n + 2));
+      for (let i = 0; i < n; i++) {
+        const px = X[i * 2], py = X[i * 2 + 1], edges = new Map();
+        for (let j = tri.length - 1; j >= 0; j--) {
+          const t = tri[j];
+          if ((px - t.x) ** 2 + (py - t.y) ** 2 < t.r) {
+            for (const [u, v] of [[t.a, t.b], [t.b, t.c], [t.c, t.a]]) { const k = u < v ? u * 100000 + v : v * 100000 + u; if (edges.has(k)) edges.delete(k); else edges.set(k, [u, v]); }
+            tri[j] = tri[tri.length - 1]; tri.pop();
+          }
+        }
+        for (const [u, v] of edges.values()) tri.push(mk(u, v, i));
+      }
+      return tri.filter((t) => t.a < n && t.b < n && t.c < n);
+    }
+
+    // ——— Scène : positions en pixels, triangles et couleurs ———
+    const hex2 = (h) => { const n = parseInt(h.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; };
+    const rgb = (c) => '#' + c.map((v) => Math.round(Math.max(0, Math.min(255, v))).toString(16).padStart(2, '0')).join('');
+    function gradAt(P, t) { t = Math.max(0, Math.min(1, t)) * (P.length - 1); const i = Math.min(P.length - 2, Math.floor(t)), f = t - i; return P.length < 2 ? P[0] : P[i].map((v, k) => v + (P[i + 1][k] - v) * f); }
+    function shadeC(c, k) { return k >= 0 ? c.map((v) => v + (255 - v) * k) : c.map((v) => v * (1 + k)); }
+
+    // Ancre d'un point : dérive libre, ou (mode logo, 45 % des points) accroché au bord du logo.
+    function anchor(q, i, w, h) {
+      if (p.coloration === 'logo' && i % 20 < 9) {
+        const L = logoSample(w, h), ne = L.edges.length / 2;
+        if (ne) { const S = Math.min(w, h) * 0.78, j = Math.floor(h2(i, 11) * ne); return [(w - S) / 2 + L.edges[j * 2] * S, (h - S) / 2 + L.edges[j * 2 + 1] * S]; }
+      }
+      return [q.u * w, q.v * h];
+    }
+    let scene = null;
+    function build(w, h, t) {
+      const n = pts.length, P = new Float64Array((n + 4 + 2 * 8) * 2), Z = new Float32Array(n + 4 + 16);
+      const m = Math.min(w, h) * 0.03;
+      let k = 0;
+      // Points des bords et des coins : la triangulation couvre tout le cadre.
+      const edge = [];
+      for (let i = 0; i <= 8; i++) { edge.push([(i / 8) * w, -m], [(i / 8) * w, h + m]); }
+      for (let i = 1; i < 6; i++) { edge.push([-m, (i / 6) * h], [w + m, (i / 6) * h]); }
+      const all = new Float64Array((n + edge.length) * 2), Zs = new Float32Array(n + edge.length);
+      const sc = p.echelle;
+      for (const q of pts) {
+        const [ax0, ay0] = anchor(q, k, w, h), x = ax0 + q.dx, y = ay0 + q.dy;
+        all[k * 2] = x; all[k * 2 + 1] = y; Zs[k] = height((x / Math.min(w, h)) / sc * 0.6, (y / Math.min(w, h)) / sc * 0.6, t); k++;
+      }
+      for (const [x, y] of edge) { all[k * 2] = x; all[k * 2 + 1] = y; Zs[k] = height((x / Math.min(w, h)) / sc * 0.6, (y / Math.min(w, h)) / sc * 0.6, t); k++; }
+      const T = delaunay(all), pal = (p.couleurs && p.couleurs.length ? p.couleurs : ['#111111']).map(hex2);
+      const ga = p.angle * DEG, gx = Math.cos(ga), gy = Math.sin(ga), L = [Math.cos(ga) * 0.6, Math.sin(ga) * 0.6, 0.55];
+      const half = (Math.abs(gx) * w + Math.abs(gy) * h) / 2, S = Math.min(w, h);
+      const tris = T.map((tr) => {
+        const ax = all[tr.a * 2], ay = all[tr.a * 2 + 1], bx = all[tr.b * 2], by = all[tr.b * 2 + 1], cx = all[tr.c * 2], cy = all[tr.c * 2 + 1];
+        const mx = (ax + bx + cx) / 3, my = (ay + by + cy) / 3;
+        // Normale de la facette (altitude du relief) → éclairage.
+        const hz = S * 0.35 * p.relief;
+        const ux = bx - ax, uy = by - ay, uz = (Zs[tr.b] - Zs[tr.a]) * hz, vx = cx - ax, vy = cy - ay, vz = (Zs[tr.c] - Zs[tr.a]) * hz;
+        let nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx; if (nz < 0) { nx = -nx; ny = -ny; nz = -nz; }
+        const nl = Math.hypot(nx, ny, nz) || 1, lit = (nx * L[0] + ny * L[1] + nz * L[2]) / nl / Math.hypot(...L);
+        let col;
+        switch (p.coloration) {
+          case 'hasard': { const id = Math.min(tr.a, tr.b, tr.c) * 7 + Math.max(tr.a, tr.b, tr.c) * 13 + (tr.a + tr.b + tr.c); col = shadeC(pal[Math.floor(h2(id, 3) * pal.length)], (lit - 0.85) * p.relief * 0.8); break; }
+          case 'logo': { const inside = inLogo(mx, my, w, h); col = shadeC(inside ? pal[Math.min(1, pal.length - 1)] : pal[0], (lit - 0.85) * p.relief); break; }
+          case 'degrade': { const g = ((mx - w / 2) * gx + (my - h / 2) * gy) / (half || 1) * 0.5 + 0.5; col = shadeC(gradAt(pal, g), (lit - 0.85) * p.relief); break; }
+          default: { const z = (Zs[tr.a] + Zs[tr.b] + Zs[tr.c]) / 3; col = shadeC(gradAt(pal, Math.min(1, Math.max(0, (z - 0.2) / 0.6))), (lit - 0.8) * 1.4 * p.relief); }
+        }
+        return [ax, ay, bx, by, cx, cy, rgb(col)];
+      });
+      scene = { tris, all, n };
+      return scene;
+    }
+
+    app.loop((t, dt) => {
+      const { w, h, dpr } = app.size;
+      dt = Math.min(0.05, dt || 0);
+      const S = Math.min(w, h), R = p.rayon * S;
+      for (const b of bursts) b.t += dt;
+      bursts = bursts.filter((b) => b.t < 1.2);
+      for (let qi = 0; qi < pts.length; qi++) {
+        const q = pts[qi];
+        // Dérive lente des ancres (tore) + agitation locale.
+        q.u = (q.u + Math.sin(t * 0.13 * q.fu + q.ph) * 0.0006 * p.derive + 1) % 1;
+        q.v = (q.v + Math.cos(t * 0.11 * q.fv + q.ph) * 0.0006 * p.derive + 1) % 1;
+        let fx = -q.dx * 18 - q.vx * 5, fy = -q.dy * 18 - q.vy * 5;
+        fx += Math.sin(t * q.fu * 2 + q.ph) * S * 0.5 * p.agitation; fy += Math.cos(t * q.fv * 2 + q.ph * 1.7) * S * 0.5 * p.agitation;
+        const [ax0, ay0] = anchor(q, qi, w, h), x = ax0 + q.dx, y = ay0 + q.dy;
+        if (hover) {
+          const ddx = x - hover.x, ddy = y - hover.y, d = Math.hypot(ddx, ddy) || 1;
+          if (d < R) { const f = (1 - d / R) * S * (drag && drag.moved ? -40 : 60); fx += (ddx / d) * f; fy += (ddy / d) * f; }
+        }
+        for (const b of bursts) {
+          const ddx = x - b.x, ddy = y - b.y, d = Math.hypot(ddx, ddy) || 1, ring = b.t * S * 0.9;
+          if (Math.abs(d - ring) < S * 0.12) { const f = (1 - Math.abs(d - ring) / (S * 0.12)) * S * 45 * (1 - b.t / 1.2); fx += (ddx / d) * f; fy += (ddy / d) * f; }
+        }
+        q.vx += fx * dt; q.vy += fy * dt; q.dx += q.vx * dt; q.dy += q.vy * dt;
+      }
+      const sc = build(w, h, t);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = p.fond; ctx.fillRect(0, 0, w, h);
+      ctx.lineJoin = 'round';
+      for (const tr of sc.tris) {
+        ctx.beginPath(); ctx.moveTo(tr[0], tr[1]); ctx.lineTo(tr[2], tr[3]); ctx.lineTo(tr[4], tr[5]); ctx.closePath();
+        ctx.fillStyle = tr[6]; ctx.fill();
+        if (p.arete === 0) { ctx.strokeStyle = tr[6]; ctx.lineWidth = 0.6; ctx.stroke(); } // ferme les jours entre facettes
+      }
+      if (p.arete > 0) {
+        const path = new Path2D();
+        for (const tr of sc.tris) { path.moveTo(tr[0], tr[1]); path.lineTo(tr[2], tr[3]); path.lineTo(tr[4], tr[5]); path.closePath(); }
+        ctx.strokeStyle = p.couleurArete; ctx.lineWidth = p.arete; ctx.stroke(path);
+      }
+      if (p.sommets > 0) {
+        ctx.fillStyle = p.arete > 0 ? p.couleurArete : (p.couleurs[0] || '#111');
+        ctx.beginPath();
+        for (let i = 0; i < sc.n; i++) { const x = sc.all[i * 2], y = sc.all[i * 2 + 1]; ctx.moveTo(x + p.sommets, y); ctx.arc(x, y, p.sommets, 0, TAU); }
+        ctx.fill();
+      }
+      app.finish(ctx);
+    });
+
+    function toSVG() {
+      const { w, h } = app.size, f = (v) => Math.round(v * 100) / 100, sc = scene || build(w, h, app.time || 0), out = [];
+      for (const tr of sc.tris) out.push(`<polygon points="${f(tr[0])},${f(tr[1])} ${f(tr[2])},${f(tr[3])} ${f(tr[4])},${f(tr[5])}" fill="${tr[6]}"${p.arete === 0 ? ` stroke="${tr[6]}" stroke-width="0.6" stroke-linejoin="round"` : ''}/>`);
+      let extra = '';
+      if (p.arete > 0) extra += `<g fill="none" stroke="${p.couleurArete}" stroke-width="${p.arete}" stroke-linejoin="round">${sc.tris.map((tr) => `<polygon points="${f(tr[0])},${f(tr[1])} ${f(tr[2])},${f(tr[3])} ${f(tr[4])},${f(tr[5])}"/>`).join('')}</g>\n`;
+      if (p.sommets > 0) { const c = p.arete > 0 ? p.couleurArete : (p.couleurs[0] || '#111'); let d = ''; for (let i = 0; i < sc.n; i++) d += `<circle cx="${f(sc.all[i * 2])}" cy="${f(sc.all[i * 2 + 1])}" r="${p.sommets}"/>`; extra += `<g fill="${c}">${d}</g>\n`; }
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">\n<rect width="100%" height="100%" fill="${p.fond}"/>\n${out.join('\n')}\n${extra}</svg>`;
+    }
+  </script>
+</body>
+</html>

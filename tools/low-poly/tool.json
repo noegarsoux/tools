@@ -1,0 +1,15 @@
+{
+  "slug": "low-poly",
+  "title": "Low poly vivant",
+  "type": "generative",
+  "description": "Des points qui dérivent, triangulés à chaque image (Delaunay) : facettes en dégradé, en relief éclairé, tirées dans la palette ou dessinant le logo.",
+  "tags": ["low-poly", "delaunay", "triangles", "facettes", "logo", "svg"],
+  "inspiration": [
+    "Triangulation de Delaunay (1934) et algorithme de Bowyer-Watson",
+    "Illustrations et fonds « low poly » des identités numériques des années 2010",
+    "references/techniques.md ; palettes biennale, kegelbahn, menthe, thermique, trame-nuit"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
