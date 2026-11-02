@@ -1,0 +1,310 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Harmonographe</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Harmonographe à trois pendules amortis : deux pendules latéraux (X et Y) et un pendule rotatif
+    // qui fait tourner le papier. Pour un temps s mesuré en oscillations du pendule de référence :
+    //   x(s) = sin(2π·nx·s + φ)·e^(−γs) + R·sin(2π·nr·(1+δr)·s + φr)·e^(−γr·s)
+    //   y(s) = sin(2π·ny·(1+δ)·s)·e^(−γs) ± R·cos(2π·nr·(1+δr)·s + φr)·e^(−γr·s)
+    // Le désaccord δ fait tourner lentement la figure (rosace), l'amortissement γ la referme vers le centre.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const NUIT = PAL('trame-nuit'), PAP = PAL('papier'), P60 = PAL('papier-60'), PGRIS = PAL('papier-gris');
+    const ORB = PAL('orbite'), ACIDE = PAL('acide'), KB = PAL('kegelbahn'), MENTHE = PAL('menthe'), LUZ = PAL('luzern');
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: 7,
+      finish: { grain: 0.06, vignette: 0.14 },
+      hint: 'Glissez pour pousser les pendules (phase, désaccord) · Maj : pendule rotatif et amortissement · molette : zoom',
+      notes: 'Harmonographe à trois pendules amortis. Les harmoniques fixent le rapport des fréquences (2:3 donne un trèfle, 3:4 une étoile). Le désaccord δ, en pour cent, écarte légèrement ce rapport : la figure tourne et se tisse en rosace. L’amortissement γ est la perte d’amplitude par oscillation : la plume revient vers le centre. Le pendule rotatif fait décrire des cercles au papier. La durée est comptée en oscillations du pendule X.',
+      params: {
+        'Pendules': {
+          nx: { type: 'range', label: 'Harmonique X', min: 1, max: 8, step: 1, value: 3 },
+          ny: { type: 'range', label: 'Harmonique Y', min: 1, max: 8, step: 1, value: 2 },
+          desaccord: { type: 'range', label: 'Désaccord δ (%)', min: -4, max: 4, step: 0.01, value: 0.3 },
+          phase: { type: 'range', label: 'Phase φ (°)', min: 0, max: 360, step: 1, value: 90 },
+          amortissement: { type: 'range', label: 'Amortissement γ', min: 0, max: 0.1, step: 0.0005, value: 0.02 },
+          duree: { type: 'range', label: 'Durée (oscillations)', min: 4, max: 400, step: 1, value: 100 },
+        },
+        'Pendule rotatif': {
+          rotatif: { type: 'range', label: 'Amplitude R', min: 0, max: 1.2, step: 0.01, value: 0.2 },
+          nr: { type: 'range', label: 'Harmonique', min: 1, max: 8, step: 1, value: 1, show: (q) => q.rotatif > 0 },
+          dr: { type: 'range', label: 'Désaccord δr (%)', min: -4, max: 4, step: 0.01, value: -0.6, show: (q) => q.rotatif > 0 },
+          sens: { type: 'segmented', label: 'Sens', options: { direct: 'Direct', inverse: 'Inverse' }, value: 'inverse', show: (q) => q.rotatif > 0 },
+          gr: { type: 'range', label: 'Amortissement γr', min: 0, max: 0.1, step: 0.0005, value: 0.02, show: (q) => q.rotatif > 0 },
+        },
+        'Mouvement': {
+          animation: { type: 'segmented', label: 'Animation', options: { trace: 'Tracé', derive: 'Dérive', deux: 'Les deux' }, value: 'derive' },
+          boucle: { type: 'range', label: 'Boucle (s)', min: 3, max: 40, step: 0.5, value: 14 },
+          tours: { type: 'range', label: 'Tours de phase', min: -4, max: 4, step: 1, value: 1, show: (q) => q.animation !== 'trace' },
+          fondu: { type: 'range', label: 'Fondu final', min: 0.02, max: 0.5, step: 0.01, value: 0.16, show: (q) => q.animation !== 'derive' },
+          plume: { type: 'toggle', label: 'Plume visible', value: true, show: (q) => q.animation !== 'derive' },
+        },
+        'Trait': {
+          style: { type: 'segmented', label: 'Style', options: { ligne: 'Ligne', tirets: 'Tirets', points: 'Points' }, value: 'ligne' },
+          epaisseur: { type: 'range', label: 'Épaisseur', min: 0.2, max: 12, step: 0.1, value: 1 },
+          modulation: { type: 'segmented', label: 'Pression', options: { aucune: 'Égale', vitesse: 'Encre', amorti: 'Usure' }, value: 'vitesse' },
+          contraste: { type: 'range', label: 'Contraste de pression', min: 0, max: 1, step: 0.01, value: 0.55, show: (q) => q.modulation !== 'aucune' },
+          espacement: { type: 'range', label: 'Espacement', min: 1, max: 40, step: 0.5, value: 7, show: (q) => q.style !== 'ligne' },
+          opacite: { type: 'range', label: 'Opacité', min: 0.05, max: 1, step: 0.01, value: 0.9 },
+          passes: { type: 'range', label: 'Passes', min: 1, max: 7, step: 1, value: 1 },
+          ecart: { type: 'range', label: 'Écart des passes (°)', min: 0, max: 120, step: 0.5, value: 9, show: (q) => q.passes > 1 },
+          retrait: { type: 'range', label: 'Retrait des passes', min: -0.12, max: 0.12, step: 0.002, value: 0, show: (q) => q.passes > 1 },
+          qualite: { type: 'range', label: 'Points par oscillation', min: 12, max: 96, step: 1, value: 40 },
+        },
+        'Cadre': {
+          zoom: { type: 'range', label: 'Zoom', min: 0.2, max: 1.6, step: 0.01, value: 0.86 },
+          cadrage: { type: 'segmented', label: 'Cadrage', options: { carre: 'Carré', remplir: 'Remplir' }, value: 'carre' },
+          rotation: { type: 'range', label: 'Rotation (°)', min: -180, max: 180, step: 1, value: 0 },
+        },
+        'Couleur': {
+          fond: { type: 'color', label: 'Fond', value: NUIT[0] },
+          encre: { type: 'color', label: 'Encre', value: NUIT[1] },
+          coloration: { type: 'segmented', label: 'Coloration', options: { une: 'Une', passes: 'Passes', degrade: 'Dégradé', vitesse: 'Vitesse' }, value: 'degrade' },
+          palette: { type: 'palette', label: 'Palette', value: [NUIT[1], NUIT[2], ACIDE[2]], show: (q) => q.coloration !== 'une' },
+        },
+      },
+      presets: {
+        'Rosace nuit': {},
+        'Encre sur papier': { nx: 3, ny: 4, desaccord: 0.3, phase: 40, amortissement: 0.012, duree: 150, rotatif: 0.18, nr: 1, dr: 0.8, sens: 'direct', gr: 0.01, animation: 'trace', boucle: 16, style: 'ligne', epaisseur: 1.6, modulation: 'vitesse', contraste: 0.85, opacite: 0.92, passes: 1, coloration: 'une', fond: PAP[0], encre: PAP[1], zoom: 0.9 },
+        'Pointillés': { nx: 1, ny: 2, desaccord: 0.9, phase: 70, amortissement: 0.04, duree: 30, rotatif: 0.4, nr: 3, dr: -0.2, sens: 'inverse', gr: 0.04, animation: 'derive', tours: 1, style: 'points', epaisseur: 4, espacement: 14, modulation: 'amorti', contraste: 0.8, opacite: 1, passes: 1, coloration: 'une', fond: P60[0], encre: P60[1], zoom: 0.9 },
+        'Orbite': { nx: 1, ny: 1, desaccord: 1.2, phase: 90, amortissement: 0.025, duree: 70, rotatif: 0.9, nr: 4, dr: 0.1, sens: 'inverse', gr: 0.02, animation: 'deux', tours: -1, style: 'ligne', epaisseur: 0.9, modulation: 'vitesse', contraste: 0.5, opacite: 0.95, passes: 1, coloration: 'une', fond: ORB[0], encre: ORB[1], zoom: 0.84 },
+        'Ruban acide': { nx: 1, ny: 1, desaccord: 2, phase: 90, amortissement: 0.06, duree: 14, rotatif: 0.5, nr: 1, dr: -0.6, sens: 'inverse', gr: 0.03, animation: 'derive', tours: 1, style: 'ligne', epaisseur: 5, modulation: 'aucune', opacite: 1, passes: 3, ecart: 0, retrait: 0.04, coloration: 'passes', fond: ACIDE[0], encre: ACIDE[1], palette: [ACIDE[1], ACIDE[2], ACIDE[3]], zoom: 1.25 },
+        'Kegelbahn': { nx: 2, ny: 3, desaccord: 0.3, phase: 90, amortissement: 0.08, duree: 10, rotatif: 0.3, nr: 1, dr: -0.6, sens: 'inverse', gr: 0.06, animation: 'derive', tours: 1, style: 'ligne', epaisseur: 7, modulation: 'aucune', opacite: 1, passes: 5, ecart: 0, retrait: 0.03, coloration: 'passes', fond: KB[0], encre: KB[1], palette: KB.slice(1), zoom: 0.95 },
+        'Fil menthe': { nx: 4, ny: 3, desaccord: 0.08, phase: 120, amortissement: 0.008, duree: 240, rotatif: 0.06, nr: 1, dr: 1.5, sens: 'inverse', gr: 0.004, animation: 'trace', boucle: 20, style: 'ligne', epaisseur: 0.5, modulation: 'amorti', contraste: 0.6, opacite: 0.75, passes: 1, coloration: 'degrade', fond: MENTHE[1], encre: MENTHE[2], palette: [MENTHE[2], MENTHE[3], MENTHE[0]], zoom: 0.9 },
+        'Tirets Luzern': { nx: 2, ny: 3, desaccord: 0.5, phase: 60, amortissement: 0.04, duree: 40, rotatif: 0.4, nr: 2, dr: 0.5, sens: 'direct', gr: 0.04, animation: 'deux', tours: 1, style: 'tirets', espacement: 6, epaisseur: 2.2, modulation: 'vitesse', contraste: 0.7, opacite: 1, passes: 2, ecart: 0, retrait: 0.02, coloration: 'passes', fond: LUZ[0], encre: LUZ[3], palette: [LUZ[3], LUZ[4]], zoom: 0.9 },
+        'Lissajous plein cadre': { nx: 5, ny: 6, desaccord: 0, phase: 90, amortissement: 0, duree: 4, rotatif: 0, animation: 'derive', tours: 1, style: 'ligne', epaisseur: 0.9, modulation: 'aucune', opacite: 1, passes: 7, ecart: 3, retrait: 0, coloration: 'degrade', fond: PGRIS[0], encre: PGRIS[1], palette: [PGRIS[1], PGRIS[2]], zoom: 0.92, cadrage: 'remplir' },
+      },
+      brand(colors) {
+        return { fond: colors[0], encre: colors[1] || colors[0], palette: colors.length > 1 ? colors.slice(1) : colors };
+      },
+      pointer: {
+        down: (q) => { drag = { x: q.x, y: q.y, phase: p.phase, desaccord: p.desaccord, rotatif: p.rotatif, amortissement: p.amortissement }; },
+        drag: (q) => {
+          if (!drag) return;
+          const { w, h } = app.size, u = Math.min(w, h);
+          const dx = (q.x - drag.x) / u, dy = (q.y - drag.y) / u;
+          if (q.shift) {
+            app.set('rotatif', clamp(drag.rotatif + dx * 1.2, 0, 1.2));
+            app.set('amortissement', clamp(drag.amortissement - dy * 0.05, 0, 0.1));
+          } else {
+            app.set('phase', Math.round((((drag.phase + dx * 360) % 360) + 360) % 360));
+            app.set('desaccord', Math.round(clamp(drag.desaccord - dy * 3, -4, 4) * 100) / 100);
+          }
+        },
+        up: () => { drag = null; },
+        wheel: (q, dy) => app.set('zoom', clamp(p.zoom * Math.exp(-dy * 0.0012), 0.2, 1.6)),
+      },
+      export: { name: 'harmonographe', svg: () => exportSVG() },
+    });
+    const p = app.params;
+    let drag = null;
+
+    function clamp(v, a, b) { return v < a ? a : v > b ? b : v; }
+    const hex = (c) => { const n = parseInt(c.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; };
+    const rgb = (a) => `rgb(${a[0] | 0},${a[1] | 0},${a[2] | 0})`;
+    function ramp(pal, u) {
+      if (pal.length === 1) return hex(pal[0]);
+      const f = clamp(u, 0, 1) * (pal.length - 1), i = Math.min(pal.length - 2, Math.floor(f)), k = f - i;
+      const a = hex(pal[i]), b = hex(pal[i + 1]);
+      return [a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k, a[2] + (b[2] - a[2]) * k];
+    }
+
+    // ——— Modèle ———
+    // Petit décalage de phase du pendule rotatif tiré de la graine (lancer à la main n'est jamais exact).
+    let seedPhase = 0, seedOf = null;
+    function reseed() { const r = app.rng(3); seedPhase = r() * TAU; seedOf = app.seed; }
+
+    // Échantillonne une passe : tableaux x, y (en unités du pendule), vitesse et enveloppe.
+    function sample(phaseOffset, cache) {
+      const nmax = Math.max(p.nx, p.ny * (1 + Math.abs(p.desaccord) / 100), p.rotatif > 0 ? p.nr : 0);
+      const N = Math.max(400, Math.min(160000, Math.ceil(p.duree * nmax * p.qualite)));
+      if (!cache.x || cache.x.length < N) { cache.x = new Float32Array(N); cache.y = new Float32Array(N); cache.v = new Float32Array(N); cache.e = new Float32Array(N); }
+      const { x, y, v, e } = cache;
+      const T = p.duree, fx = p.nx, fy = p.ny * (1 + p.desaccord / 100);
+      const fr = p.nr * (1 + p.dr / 100), R = p.rotatif, sg = p.sens === 'direct' ? 1 : -1;
+      const phx = p.phase * Math.PI / 180 + phaseOffset, phr = seedPhase + phaseOffset * 0.5;
+      const g = p.amortissement, gr = p.gr;
+      for (let i = 0; i < N; i++) {
+        const s = T * i / (N - 1);
+        const a = Math.exp(-g * s), b = R * Math.exp(-gr * s);
+        const ar = TAU * fr * s + phr;
+        x[i] = Math.sin(TAU * fx * s + phx) * a + Math.sin(ar) * b;
+        y[i] = Math.sin(TAU * fy * s) * a + sg * Math.cos(ar) * b;
+        e[i] = (a + b) / (1 + R);
+      }
+      let vm = 0;
+      for (let i = 0; i < N; i++) {
+        const j = i === 0 ? 1 : i, dx = x[j] - x[j - 1], dy = y[j] - y[j - 1];
+        v[i] = Math.hypot(dx, dy); vm += v[i];
+      }
+      cache.n = N; cache.vm = vm / N || 1;
+      return cache;
+    }
+    const caches = [];
+
+    // Transforme les unités du pendule en pixels selon le cadre.
+    function frame(w, h) {
+      const k = 1 / (1 + p.rotatif);
+      const sx = (p.cadrage === 'remplir' ? w : Math.min(w, h)) * 0.5 * p.zoom * k;
+      const sy = (p.cadrage === 'remplir' ? h : Math.min(w, h)) * 0.5 * p.zoom * k;
+      const r = p.rotation * Math.PI / 180, c = Math.cos(r), s = Math.sin(r);
+      return { cx: w / 2, cy: h / 2, sx, sy, c, s };
+    }
+
+    // État de l'animation pour un temps t : décalage de phase, portion tracée, opacité globale.
+    function state(t) {
+      const L = p.boucle, u = ((t % L) + L) % L / L;
+      const drift = p.animation === 'trace' ? 0 : TAU * p.tours * u;
+      let end = 1, fade = 1;
+      if (p.animation !== 'derive') {
+        const f = p.fondu, d = 1 - f;
+        if (u < d) { const k = u / d; end = 1 - Math.pow(1 - k, 1.6); }
+        else { end = 1; fade = 1 - (u - d) / f; fade = fade * fade * (3 - 2 * fade); }
+      }
+      return { drift, end, fade };
+    }
+
+    // Produit le dessin sous forme de lots (même largeur, même couleur) consommés par le canvas ou le SVG.
+    function emit(t, w, h, sink) {
+      if (seedOf !== app.seed) reseed();
+      const u = Math.min(w, h), F = frame(w, h), st = state(t);
+      const base = p.epaisseur * u / 1000;
+      const passes = p.passes, pal = p.palette && p.palette.length ? p.palette : [p.encre];
+      const LV = 24;   // paliers de largeur et de couleur par passe
+      // Les passes sont tressées : le tracé est découpé en tronçons (une demi-oscillation) et chaque
+      // tronçon est dessiné pour toutes les passes avant le suivant, comme plusieurs plumes en même temps.
+      const items = [], out = sink;
+      let chunk = 1, k = 0;
+      const push = (kind, obj, i) => items.push({ kind, obj, key: Math.floor(i / chunk) * passes + k });
+      sink = { line: (L) => push('line', L, L.a), dots: (B) => push('dots', B, B.i0 || 0) };
+      for (k = 0; k < passes; k++) {
+        const off = (k - (passes - 1) / 2) * p.ecart * Math.PI / 180 + st.drift;
+        const sc = Math.max(0.05, 1 - k * p.retrait) * (p.retrait < 0 ? 1 / (1 - (passes - 1) * p.retrait) : 1);
+        const c = sample(off, caches[k] || (caches[k] = {}));
+        const n = Math.max(2, Math.floor(c.n * st.end));
+        chunk = Math.max(8, Math.floor(c.n / (p.duree * Math.max(p.nx, p.ny) * 2)));
+        const X = new Float32Array(n), Y = new Float32Array(n);
+        for (let i = 0; i < n; i++) {
+          const a = c.x[i] * F.sx * sc, b = c.y[i] * F.sy * sc;
+          X[i] = F.cx + a * F.c - b * F.s; Y[i] = F.cy + a * F.s + b * F.c;
+        }
+        const widthAt = (i) => {
+          const m = p.contraste;
+          if (p.modulation === 'vitesse') return base * clamp(1 + m * 1.6 * (Math.min(3, c.vm / (c.v[i] + 1e-6)) - 1), 0.2, 3.5);
+          if (p.modulation === 'amorti') return base * (1 - m + m * Math.min(1, c.e[i] * 1.25));
+          return base;
+        };
+        const colAt = (i) => {
+          if (p.coloration === 'une') return 0;
+          if (p.coloration === 'passes') return 0;
+          if (p.coloration === 'degrade') return Math.round(i / (c.n - 1) * (LV - 1));
+          return Math.round(clamp(c.v[i] / (c.vm * 2), 0, 1) * (LV - 1));
+        };
+        const colour = (q) => {
+          if (p.coloration === 'une') return p.encre;
+          if (p.coloration === 'passes') return pal[k % pal.length];
+          return rgb(ramp(pal, q / (LV - 1)));
+        };
+        const alpha = p.opacite * st.fade;
+        if (p.style === 'points') {
+          // Points à pas constant le long du tracé.
+          const step = p.espacement * u / 1000;
+          let acc = step, bucket = null;
+          for (let i = 1; i < n; i++) {
+            acc += Math.hypot(X[i] - X[i - 1], Y[i] - Y[i - 1]);
+            if (acc < step) continue;
+            acc = 0;
+            const r = widthAt(i) * 0.9, q = colAt(i), key = q;
+            if (!bucket || bucket.key !== key || Math.floor(i / chunk) !== Math.floor(bucket.last / chunk)) { if (bucket) sink.dots(bucket); bucket = { key, i0: i, col: colour(q), alpha, xs: [], ys: [], rs: [] }; }
+            bucket.last = i;
+            bucket.xs.push(X[i]); bucket.ys.push(Y[i]); bucket.rs.push(r);
+          }
+          if (bucket) sink.dots(bucket);
+        } else {
+          const dash = p.style === 'tirets' ? p.espacement * u / 1000 : 0;
+          const wq = (i) => Math.round(widthAt(i) / base * 8) / 8;
+          let start = 0, len = 0, startLen = 0, kw = wq(0), kc = colAt(0);
+          for (let i = 1; i < n; i++) {
+            len += Math.hypot(X[i] - X[i - 1], Y[i] - Y[i - 1]);
+            const nw = wq(i), nc = colAt(i);
+            if (nw !== kw || nc !== kc || i === n - 1 || i % chunk === 0) {
+              sink.line({ X, Y, a: start, b: i, w: Math.max(0.15, kw * base), col: colour(kc), alpha, dash, dashOffset: startLen });
+              start = i; startLen = len; kw = nw; kc = nc;
+            }
+          }
+        }
+        if (p.plume && p.animation !== 'derive' && st.end < 1) {
+          sink.dots({ i0: 1e9, col: colour(colAt(n - 1)), alpha: st.fade, xs: [X[n - 1]], ys: [Y[n - 1]], rs: [Math.max(base * 2.6, u * 0.004)] });
+        }
+      }
+      items.sort((a, b) => a.key - b.key);
+      for (const it of items) out[it.kind](it.obj);
+    }
+
+    // ——— Rendu canvas ———
+    const canvasSink = {
+      line(L) {
+        ctx.strokeStyle = L.col; ctx.globalAlpha = L.alpha; ctx.lineWidth = L.w;
+        if (L.dash) { ctx.setLineDash([L.dash, L.dash * 0.9]); ctx.lineDashOffset = -L.dashOffset; } else ctx.setLineDash([]);
+        ctx.beginPath(); ctx.moveTo(L.X[L.a], L.Y[L.a]);
+        for (let i = L.a + 1; i <= L.b; i++) ctx.lineTo(L.X[i], L.Y[i]);
+        ctx.stroke();
+      },
+      dots(B) {
+        ctx.fillStyle = B.col; ctx.globalAlpha = B.alpha; ctx.beginPath();
+        for (let i = 0; i < B.xs.length; i++) { ctx.moveTo(B.xs[i] + B.rs[i], B.ys[i]); ctx.arc(B.xs[i], B.ys[i], B.rs[i], 0, TAU); }
+        ctx.fill();
+      },
+    };
+
+    app.loop((t) => {
+      const { w, h, dpr } = app.size;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.globalAlpha = 1; ctx.setLineDash([]);
+      ctx.fillStyle = p.fond; ctx.fillRect(0, 0, w, h);
+      ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+      emit(t, w, h, canvasSink);
+      ctx.globalAlpha = 1; ctx.setLineDash([]);
+      app.finish(ctx);
+    });
+
+    // ——— Export SVG ———
+    function exportSVG() {
+      const { w, h } = app.size, f = (v) => Math.round(v * 100) / 100;
+      const out = [`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}">`, `<rect width="${w}" height="${h}" fill="${p.fond}"/>`, '<g fill="none" stroke-linecap="round" stroke-linejoin="round">'];
+      let dots = 0;
+      emit(app.time, w, h, {
+        line(L) {
+          let d = `M${f(L.X[L.a])} ${f(L.Y[L.a])}`;
+          for (let i = L.a + 1; i <= L.b; i++) d += `L${f(L.X[i])} ${f(L.Y[i])}`;
+          const dash = L.dash ? ` stroke-dasharray="${f(L.dash)} ${f(L.dash * 0.9)}" stroke-dashoffset="${f(-L.dashOffset)}"` : '';
+          out.push(`<path d="${d}" stroke="${L.col}" stroke-width="${f(L.w)}" stroke-opacity="${f(L.alpha)}"${dash}/>`);
+        },
+        dots(B) {
+          if (dots > 80000) return;
+          dots += B.xs.length;
+          let s = `<g fill="${B.col}" fill-opacity="${f(B.alpha)}" stroke="none">`;
+          for (let i = 0; i < B.xs.length; i++) s += `<circle cx="${f(B.xs[i])}" cy="${f(B.ys[i])}" r="${f(B.rs[i])}"/>`;
+          out.push(s + '</g>');
+        },
+      });
+      out.push('</g></svg>');
+      return out.join('\n');
+    }
+  </script>
+</body>
+</html>

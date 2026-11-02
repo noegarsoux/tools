@@ -1,0 +1,17 @@
+{
+  "slug": "harmonographe",
+  "title": "Harmonographe",
+  "type": "pattern",
+  "description": "Trois pendules amortis tracent des rosaces : rapports d'harmoniques, désaccord, pendule rotatif, trait à l'encre, tirets ou points, passes colorées, export SVG.",
+  "tags": ["pendule", "lissajous", "rosace", "trait", "svg", "boucle"],
+  "inspiration": [
+    "physique-maths.md — Lissajous et harmonographe (pendules amortis couplés)",
+    "Anthony Ashton — Harmonograph: A Visual Guide to the Mathematics of Music",
+    "Paul Bourke — Harmonograph (paulbourke.net)",
+    "Moodboard de Noé, fiche 12 — fils tendus et pointillés",
+    "Palettes trame-nuit, papier, orbite, acide, kegelbahn, menthe, luzern"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
