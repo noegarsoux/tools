@@ -1,0 +1,15 @@
+{
+  "slug": "tissage",
+  "title": "Tissage",
+  "type": "motion",
+  "description": "Une étoffe tissée passée après passée sur un métier à cadres : sergés, chevrons, satins, écossais ou damassé du logo, armure modifiable au toucher.",
+  "tags": ["tissage", "textile", "armure", "motif", "logo", "svg"],
+  "inspiration": [
+    "Anni Albers, On Weaving (1965), et les tissages du Bauhaus",
+    "Métier Jacquard (1804) et mises en carte des tisserands",
+    "references/techniques.md ; palettes biennale, kegelbahn, menthe, good-room"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
