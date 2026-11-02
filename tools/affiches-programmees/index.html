@@ -1,0 +1,286 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Affiches programmées</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Affiches programmées : une grille de modules (colonnes, marges, gouttières) porte un titre,
+    // un bloc d'infos, des formes (disques, anneaux, quarts, barres, demi-disques) et une image.
+    // Toutes les quelques secondes la composition se recompose : chaque élément glisse de sa
+    // place à la nouvelle. Les positions sont en modules, converties en pixels au dessin.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const SALON = PAL('salon'), BIEN = PAL('biennale'), KB = PAL('kegelbahn'), LUZ = PAL('luzern'), ORB = PAL('orbite');
+    const P60 = PAL('papier-60'), ACIDE = PAL('acide'), GR = PAL('good-room'), MENTHE = PAL('menthe'), PYR = PAL('pyramides');
+    const FONTS = {
+      grotesque: "'Helvetica Neue', Helvetica, Arial, sans-serif",
+      serif: "Georgia, 'Times New Roman', Times, serif",
+      mono: "'Courier New', Courier, monospace",
+      arrondie: "'Arial Rounded MT Bold', 'Helvetica Rounded', 'Nunito', 'Varela Round', 'Helvetica Neue', Arial, sans-serif",
+    };
+    const MODES = ['libre', 'diagonale', 'colonne', 'centre'];
+    const TYPES = ['disque', 'anneau', 'quart', 'barre', 'demi'];
+
+    let k = 0, layA = null, layB = null, tSwitch = -99, hover = null, pressed = null, clock = 0;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.05, vignette: 0 },
+      hint: 'Touchez pour recomposer · survolez les formes · molette : nombre de colonnes',
+      notes: 'Tout est posé sur la grille : titre, infos, formes et image. À chaque cycle la composition change et chaque élément glisse vers sa nouvelle place.',
+      params: {
+        'Texte': {
+          titre: { type: 'textarea', label: 'Titre (une ligne par ligne)', value: 'musica\nviva', rows: 3 },
+          infos: { type: 'textarea', label: 'Infos', value: 'Tonhalle Zürich\nSaison 2026—27\n12 novembre, 20 h\nOrchestre de chambre', rows: 4 },
+          police: { type: 'font', label: 'Police', options: { grotesque: 'Grotesque', serif: 'Sérif', mono: 'Machine', arrondie: 'Arrondie' }, value: 'grotesque' },
+          graisse: { type: 'segmented', label: 'Graisse du titre', options: { 400: 'Normale', 700: 'Grasse', 900: 'Noire' }, value: '700' },
+          casse: { type: 'segmented', label: 'Casse du titre', options: { telle: 'Telle quelle', majuscules: 'Majuscules', minuscules: 'Minuscules' }, value: 'telle' },
+        },
+        'Grille': {
+          colonnes: { type: 'range', label: 'Colonnes', min: 3, max: 12, step: 1, value: 6 },
+          marge: { type: 'range', label: 'Marge', min: 0, max: 0.14, step: 0.005, value: 0.06 },
+          gouttiere: { type: 'range', label: 'Gouttière', min: 0, max: 0.04, step: 0.001, value: 0.012 },
+          grille: { type: 'toggle', label: 'Montrer la grille', value: false },
+        },
+        'Composition': {
+          composition: { type: 'select', label: 'Composition', options: { cycle: 'Toutes, en cycle', libre: 'Libre', diagonale: 'Diagonale', colonne: 'Colonne', centre: 'Centre' }, value: 'cycle' },
+          formes: { type: 'range', label: 'Formes', min: 0, max: 14, step: 1, value: 6 },
+          cycle: { type: 'range', label: 'Durée d’une affiche (s)', min: 1.5, max: 20, step: 0.5, value: 4.5 },
+          transition: { type: 'range', label: 'Durée du glissé (s)', min: 0.1, max: 2.5, step: 0.05, value: 0.9 },
+          pulsation: { type: 'range', label: 'Pulsation des formes', min: 0, max: 1, step: 0.01, value: 0.3 },
+          image: { type: 'file', label: 'Image (facultative)', accept: 'image/*' },
+        },
+        'Couleur': {
+          fond: { type: 'color', label: 'Fond', value: SALON[0] },
+          encre: { type: 'color', label: 'Texte', value: SALON[1] },
+          couleurs: { type: 'palette', label: 'Formes', value: [SALON[2], SALON[3], SALON[4]] },
+        },
+      },
+      presets: {
+        'Musica viva': {},
+        'Biennale': { titre: 'biennale\ndes\nformes', infos: '12—27 juin 2026\nEntrée libre\nHalle aux grains', fond: BIEN[0], encre: BIEN[1], couleurs: [BIEN[2], BIEN[3], BIEN[4]], composition: 'diagonale', colonnes: 5, graisse: '900' },
+        'Kegelbahn': { titre: 'KEGEL\nBAHN', infos: 'Bowling & bar\nOuvert tous les soirs\n18 h — 2 h', casse: 'majuscules', fond: KB[0], encre: '#f2f2f2', couleurs: [KB[1], KB[2], KB[3], KB[5]], composition: 'colonne', colonnes: 4, formes: 8, graisse: '900' },
+        'Grille visible': { grille: true, colonnes: 8, gouttiere: 0.006, formes: 10, fond: P60[0], encre: P60[1], couleurs: ['#e5452a', '#9b9aa0'], titre: 'grid\nsystems', infos: 'Josef Müller-Brockmann\nRaster systeme\n1981' },
+        'Luzern': { titre: 'Luzern\nFestival', infos: 'Sommer 2026\nKKL Luzern', police: 'serif', graisse: '400', fond: LUZ[2], encre: LUZ[3], couleurs: [LUZ[0], LUZ[1], LUZ[4]], composition: 'centre', colonnes: 6 },
+        'Acide': { titre: 'RAVE\nACID\n303', infos: 'Samedi 4h\nEntrepôt 9', police: 'mono', graisse: '700', casse: 'majuscules', fond: ACIDE[1], encre: ACIDE[2], couleurs: [ACIDE[3], ACIDE[0], '#3b3b33'], composition: 'libre', formes: 12, cycle: 2, transition: 0.35, colonnes: 7 },
+        'Orbite': { titre: 'orbite', infos: 'Conférence\nEspace et temps\nAuditorium B', fond: ORB[1], encre: ORB[2], couleurs: [ORB[0], '#5a2a14'], composition: 'centre', formes: 4, graisse: '400', police: 'serif' },
+        'Good Room': { titre: 'good\nroom', infos: 'Club\nVendredi — samedi', fond: GR[0], encre: '#f2f2f2', couleurs: [GR[1], GR[2], GR[3], GR[4]], composition: 'diagonale', formes: 9, graisse: '900', colonnes: 6 },
+        'Menthe': { titre: 'jardin\nd’été', infos: 'Festival de plein air\nJuillet — août', police: 'arrondie', fond: MENTHE[0], encre: MENTHE[1], couleurs: [MENTHE[2], MENTHE[3]], composition: 'libre', formes: 7, pulsation: 0.6 },
+        'Pyramides': { titre: 'PYRA\nMIDES', infos: 'Exposition\nMusée des formes', casse: 'majuscules', fond: PYR[0], encre: PYR[6], couleurs: [PYR[2], PYR[3], PYR[4], PYR[5]], composition: 'colonne', colonnes: 5, formes: 10 },
+      },
+      brand(colors) {
+        return { fond: colors[0], encre: colors[1] || '#111111', couleurs: (colors.slice(2).length ? colors.slice(2) : [colors[1] || '#111111']).slice(0, 6) };
+      },
+      pointer: {
+        move: (q) => { hover = { x: q.x, y: q.y }; },
+        down: (q) => { pressed = { x: q.x, y: q.y, moved: false }; },
+        drag: (q) => { hover = { x: q.x, y: q.y }; if (pressed && Math.hypot(q.x - pressed.x, q.y - pressed.y) > 6) pressed.moved = true; },
+        up: () => { if (pressed && !pressed.moved) recompose(); pressed = null; },
+        wheel: (q, dy) => app.set('colonnes', Math.max(3, Math.min(12, Math.round(p.colonnes + Math.sign(dy) * (Math.abs(dy) > 30 ? 1 : 0))))),
+      },
+      onChange(key) {
+        if (key === '*' || ['colonnes', 'composition', 'formes', 'titre', 'infos', 'casse', 'police', 'graisse', 'marge', 'gouttiere'].includes(key)) { layA = null; layB = makeLayout(k); tSwitch = -99; }
+      },
+      onSeed() { k = 0; layA = null; layB = makeLayout(0); tSwitch = -99; },
+      export: { name: 'affiche', svg: () => toSVG() },
+    });
+    const p = app.params;
+    canvas.addEventListener('pointerleave', () => { if (!pressed) hover = null; });
+
+    function family() { return p.police === 'AtelierBrand' ? "'AtelierBrand', sans-serif" : (FONTS[p.police] || FONTS.grotesque); }
+    function titleLines() {
+      let t = String(p.titre || '').split('\n');
+      if (p.casse === 'majuscules') t = t.map((l) => l.toUpperCase());
+      if (p.casse === 'minuscules') t = t.map((l) => l.toLowerCase());
+      t = t.filter((l, i, a) => l.length || (i > 0 && i < a.length - 1));
+      return t.length ? t : [' '];
+    }
+
+    // ——— Grille ———
+    function grid() {
+      const { w, h } = app.size, u = Math.min(w, h);
+      const m = p.marge * u, g = p.gouttiere * u, C = p.colonnes;
+      const W = w - 2 * m, H = h - 2 * m, mw = (W - g * (C - 1)) / C;
+      const R = Math.max(3, Math.round((H + g) / (mw + g)));
+      const mh = (H - g * (R - 1)) / R;
+      return { m, g, C, R, mw, mh, x: (c) => m + c * (mw + g), y: (r) => m + r * (mh + g), wOf: (n) => n * mw + (n - 1) * g, hOf: (n) => n * mh + (n - 1) * g };
+    }
+
+    // ——— Composition (en modules) ———
+    function makeLayout(idx) {
+      const G = grid(), r = app.rng(100 + idx * 7), C = G.C, R = G.R;
+      const mode = p.composition === 'cycle' ? MODES[(idx + Math.floor(app.rng(3)() * 4)) % MODES.length] : p.composition;
+      const ri = (a, b) => a + Math.floor(r() * (b - a + 1));
+      const lines = titleLines();
+      // Titre : largeur en colonnes, en haut ou en bas.
+      const tw = Math.max(2, C - ri(0, Math.min(2, C - 2)));
+      const tc = ri(0, C - tw);
+      const top = r() < 0.6;
+      const title = { c: tc, cw: tw, top };
+      // Infos : deux colonnes (ou une si étroit), sur un bord libre.
+      const iw = Math.min(C, C >= 5 ? 2 : 1);
+      const info = { c: tc + tw <= C - iw && r() < 0.5 ? C - iw : (tc > 0 && r() < 0.5 ? 0 : ri(0, C - iw)), r: top ? R - 2 : 0, cw: iw };
+      const shapes = [];
+      const n = p.formes;
+      for (let i = 0; i < n; i++) {
+        let c, rr, size, type = TYPES[ri(0, TYPES.length - 1)];
+        switch (mode) {
+          case 'diagonale': { const tt = n > 1 ? i / (n - 1) : 0.5; c = Math.round(tt * (C - 1)); rr = Math.round((1 - tt) * (R - 1)); size = 1 + Math.round(tt * Math.min(3, C / 2)); break; }
+          case 'colonne': { c = Math.floor(C * 0.66) + (i % 2); rr = Math.round((i / Math.max(1, n)) * (R - 1)); size = ri(1, 2); type = ['disque', 'demi', 'quart', 'barre'][i % 4]; break; }
+          case 'centre': { size = Math.max(1, Math.round(Math.min(C, R) * 0.8 * (1 - i / Math.max(1, n)))); c = Math.floor((C - size) / 2); rr = Math.floor((R - size) / 2); type = i % 2 ? 'anneau' : 'disque'; break; }
+          default: { c = ri(0, C - 1); rr = ri(0, R - 1); size = ri(1, Math.max(1, Math.round(C / 2.5))); }
+        }
+        shapes.push({ type, c, r: rr, size, rot: ri(0, 3), col: i + idx, phase: r() * TAU });
+      }
+      const image = { c: ri(0, Math.max(0, C - 3)), r: ri(1, Math.max(1, R - 4)), cw: Math.min(C, 3), rh: Math.min(R - 1, 3) };
+      return { title, info, shapes, image, mode };
+    }
+    function recompose() { k++; layA = layB; layB = makeLayout(k); tSwitch = clock; }
+
+    // ——— Géométrie en pixels (pour interpoler) ———
+    function geom(L) {
+      const G = grid(), u = Math.min(app.size.w, app.size.h);
+      const lines = titleLines();
+      ctx.save(); ctx.font = `${p.graisse} 100px ${family()}`;
+      const lw = Math.max(1, ...lines.map((l) => ctx.measureText(l).width));
+      ctx.restore();
+      const W = G.wOf(L.title.cw);
+      let fs = (W / lw) * 100;
+      const lead = 0.88;
+      const maxH = G.hOf(G.R) * 0.62;
+      if (lines.length * fs * lead > maxH) fs = maxH / (lines.length * lead);
+      const th = lines.length * fs * lead;
+      const tx = G.x(L.title.c), ty = L.title.top ? G.m : G.y(0) + G.hOf(G.R) - th;
+      const ifs = Math.max(9, Math.min(26, G.mw * 0.14));
+      const info = { x: G.x(L.info.c), y: L.title.top ? G.y(G.R - 1) + G.mh - ifs * 1.25 * String(p.infos || '').split('\n').length : G.m + (L.title.top ? 0 : 0), fs: ifs };
+      if (!L.title.top) info.y = G.m;
+      const shapes = L.shapes.map((s) => {
+        const d = G.wOf(Math.min(s.size, G.C));
+        return { type: s.type, x: G.x(Math.min(s.c, G.C - 1)), y: G.y(Math.min(s.r, G.R - 1)), d, rot: s.rot * Math.PI / 2, col: s.col, phase: s.phase };
+      });
+      const im = { x: G.x(L.image.c), y: G.y(L.image.r), w: G.wOf(L.image.cw), h: G.hOf(L.image.rh) };
+      return { title: { x: tx, y: ty, fs, lead, lines }, info, shapes, image: im };
+    }
+    const ease = (x) => x < 0.5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2;
+    const lerp = (a, b, t) => a + (b - a) * t;
+    function frameGeom(t) {
+      if (!layB) layB = makeLayout(k);
+      const B = geom(layB);
+      if (!layA) return B;
+      const e = ease(Math.max(0, Math.min(1, (t - tSwitch) / p.transition)));
+      if (e >= 1) return B;
+      const A = geom(layA);
+      const out = { title: { ...B.title, x: lerp(A.title.x, B.title.x, e), y: lerp(A.title.y, B.title.y, e), fs: lerp(A.title.fs, B.title.fs, e) }, info: { ...B.info, x: lerp(A.info.x, B.info.x, e), y: lerp(A.info.y, B.info.y, e) }, image: {}, shapes: [] };
+      for (const key of ['x', 'y', 'w', 'h']) out.image[key] = lerp(A.image[key], B.image[key], e);
+      B.shapes.forEach((s, i) => {
+        const a = A.shapes[i] || { ...s, d: 0 };
+        out.shapes.push({ ...s, x: lerp(a.x, s.x, e), y: lerp(a.y, s.y, e), d: lerp(a.d, s.d, e), rot: lerp(a.rot, s.rot, e), type: e < 0.5 ? a.type : s.type, col: e < 0.5 ? a.col : s.col });
+      });
+      return out;
+    }
+
+    // ——— Scène (stylo commun canvas / SVG) ———
+    function scene(pen, t) {
+      const { w, h } = app.size, G = grid(), F = frameGeom(t);
+      const P = p.couleurs && p.couleurs.length ? p.couleurs : ['#111111'];
+      const col = (i) => P[((i % P.length) + P.length) % P.length];
+      if (p.grille) {
+        for (let c = 0; c < G.C; c++) pen.rect(G.x(c), G.m, G.mw, h - 2 * G.m, null, p.encre, 0.12);
+        for (let r = 0; r < G.R; r++) pen.rect(G.m, G.y(r), w - 2 * G.m, G.mh, null, p.encre, 0.12);
+      }
+      const img = p.image && (p.image.naturalWidth || p.image.width) ? p.image : null;
+      if (img) pen.image(img, F.image.x, F.image.y, F.image.w, F.image.h);
+      for (const s of F.shapes) {
+        let d = s.d * (1 + p.pulsation * 0.06 * Math.sin(t * 2 + s.phase));
+        if (hover) {
+          const cx = s.x + s.d / 2, cy = s.y + s.d / 2, dist = Math.hypot(hover.x - cx, hover.y - cy);
+          d *= 1 + 0.12 * Math.exp(-(dist * dist) / (G.mw * G.mw * 1.5));
+        }
+        const c = col(s.col), cx = s.x + s.d / 2, cy = s.y + s.d / 2;
+        switch (s.type) {
+          case 'disque': pen.circle(cx, cy, d / 2, c); break;
+          case 'anneau': pen.ring(cx, cy, d / 2 - Math.min(d * 0.12, G.mw * 0.2) / 2, Math.min(d * 0.12, G.mw * 0.2), c); break;
+          case 'quart': pen.sector(cx - d / 2, cy - d / 2, d, s.rot + t * p.pulsation * 0.3, c); break;
+          case 'barre': pen.rect(s.x, s.y + (s.d - G.mh * 0.5) / 2, d, G.mh * 0.5, c); break;
+          default: pen.half(cx, cy, d / 2, s.rot + t * p.pulsation * 0.2, c);
+        }
+      }
+      // Titre.
+      const T = F.title;
+      T.lines.forEach((l, i) => pen.text(l, T.x - T.fs * 0.04, T.y + T.fs * (0.76 + i * T.lead), T.fs, p.graisse, p.encre));
+      // Infos.
+      String(p.infos || '').split('\n').forEach((l, i) => pen.text(l, F.info.x, F.info.y + F.info.fs * (1 + i * 1.25), F.info.fs, '400', p.encre));
+    }
+
+    function canvasPen(c) {
+      return {
+        rect(x, y, w, h, fill, stroke, lw) {
+          if (fill) { c.fillStyle = fill; c.fillRect(x, y, w, h); }
+          if (stroke) { c.strokeStyle = stroke; c.globalAlpha = 0.35; c.lineWidth = 1; c.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1); c.globalAlpha = 1; }
+        },
+        circle(x, y, r, col) { c.fillStyle = col; c.beginPath(); c.arc(x, y, Math.max(0, r), 0, TAU); c.fill(); },
+        ring(x, y, r, lw, col) { c.strokeStyle = col; c.lineWidth = lw; c.beginPath(); c.arc(x, y, Math.max(0, r), 0, TAU); c.stroke(); },
+        sector(x, y, d, a, col) { c.save(); c.translate(x + d / 2, y + d / 2); c.rotate(a); c.fillStyle = col; c.beginPath(); c.moveTo(-d / 2, -d / 2); c.arc(-d / 2, -d / 2, d, 0, Math.PI / 2); c.closePath(); c.fill(); c.restore(); },
+        half(x, y, r, a, col) { c.save(); c.translate(x, y); c.rotate(a); c.fillStyle = col; c.beginPath(); c.arc(0, 0, Math.max(0, r), 0, Math.PI); c.closePath(); c.fill(); c.restore(); },
+        image(img, x, y, w, h) {
+          const iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height, k = Math.max(w / iw, h / ih);
+          c.save(); c.beginPath(); c.rect(x, y, w, h); c.clip();
+          c.filter = 'grayscale(1) contrast(1.1)';
+          c.drawImage(img, x + (w - iw * k) / 2, y + (h - ih * k) / 2, iw * k, ih * k);
+          c.filter = 'none'; c.restore();
+        },
+        text(s, x, y, fs, wgt, col) { c.fillStyle = col; c.font = `${wgt} ${fs}px ${family()}`; c.textBaseline = 'alphabetic'; c.textAlign = 'left'; c.fillText(s, x, y); },
+      };
+    }
+
+    app.loop((t, dt) => {
+      const { w, h, dpr } = app.size;
+      clock = t;
+      if (!layB) { layB = makeLayout(k); tSwitch = -99; }
+      if (t - tSwitch > p.cycle && tSwitch > -98) recompose();
+      if (tSwitch <= -98) tSwitch = t;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = p.fond; ctx.fillRect(0, 0, w, h);
+      scene(canvasPen(ctx), t);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      app.finish(ctx);
+    });
+
+    // ——— Export SVG ———
+    function toSVG() {
+      const { w, h } = app.size, f = (v) => Math.round(v * 100) / 100;
+      const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      const fam = family().replace(/"/g, "'");
+      let body = '';
+      const pen = {
+        rect(x, y, w2, h2, fill, stroke) {
+          if (fill) body += `<rect x="${f(x)}" y="${f(y)}" width="${f(w2)}" height="${f(h2)}" fill="${fill}"/>\n`;
+          if (stroke) body += `<rect x="${f(x + 0.5)}" y="${f(y + 0.5)}" width="${f(w2 - 1)}" height="${f(h2 - 1)}" fill="none" stroke="${stroke}" stroke-opacity="0.35" stroke-width="1"/>\n`;
+        },
+        circle(x, y, r, col) { body += `<circle cx="${f(x)}" cy="${f(y)}" r="${f(Math.max(0, r))}" fill="${col}"/>\n`; },
+        ring(x, y, r, lw, col) { body += `<circle cx="${f(x)}" cy="${f(y)}" r="${f(Math.max(0, r))}" fill="none" stroke="${col}" stroke-width="${f(lw)}"/>\n`; },
+        sector(x, y, d, a, col) { body += `<path transform="translate(${f(x + d / 2)} ${f(y + d / 2)}) rotate(${f(a * 180 / Math.PI)})" d="M${f(-d / 2)} ${f(-d / 2)}L${f(d / 2)} ${f(-d / 2)}A${f(d)} ${f(d)} 0 0 1 ${f(-d / 2)} ${f(d / 2)}Z" fill="${col}"/>\n`; },
+        half(x, y, r, a, col) { body += `<path transform="translate(${f(x)} ${f(y)}) rotate(${f(a * 180 / Math.PI)})" d="M${f(r)} 0A${f(r)} ${f(r)} 0 0 1 ${f(-r)} 0Z" fill="${col}"/>\n`; },
+        image(img, x, y, w2, h2) {
+          const cv = document.createElement('canvas'); cv.width = Math.max(1, Math.round(w2)); cv.height = Math.max(1, Math.round(h2));
+          canvasPen(cv.getContext('2d')).image(img, 0, 0, cv.width, cv.height);
+          body += `<image href="${cv.toDataURL('image/jpeg', 0.9)}" x="${f(x)}" y="${f(y)}" width="${f(w2)}" height="${f(h2)}"/>\n`;
+        },
+        text(s, x, y, fs, wgt, col) { body += `<text x="${f(x)}" y="${f(y)}" font-size="${f(fs)}" font-weight="${wgt}" fill="${col}">${esc(s)}</text>\n`; },
+      };
+      scene(pen, clock);
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">\n<rect width="100%" height="100%" fill="${p.fond}"/>\n<g font-family="${fam}">\n${body}</g>\n</svg>`;
+    }
+  </script>
+</body>
+</html>
