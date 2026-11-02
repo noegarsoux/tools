@@ -1,0 +1,15 @@
+{
+  "slug": "engrenages",
+  "title": "Engrenages",
+  "type": "motion",
+  "description": "Un train de roues dentées qui s'engrènent vraiment : rapports de dents, phases calées, moteur continu, pas à pas ou va-et-vient, et roues à ajouter au toucher.",
+  "tags": ["engrenages", "mecanique", "rotation", "rapports", "logo", "svg"],
+  "inspiration": [
+    "Planches de L'Encyclopédie de Diderot et d'Alembert (horlogerie)",
+    "Arthur Ganson, sculptures mécaniques",
+    "references/techniques.md ; palettes biennale, kegelbahn, menthe, code"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
