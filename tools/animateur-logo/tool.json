@@ -1,0 +1,15 @@
+{
+  "slug": "animateur-logo",
+  "title": "Animateur de logo",
+  "type": "motion",
+  "description": "Le logo importé est vectorisé puis animé en boucle : tracé, morphose depuis des cercles, rebond, éclat, balayage de bandes, pixels. Export SVG animé.",
+  "tags": ["logo", "motion", "identite", "vectorisation", "svg", "animation"],
+  "inspiration": [
+    "Animations de logo par tracé (stroke-dashoffset) et morphing SVG",
+    "Révélations par bandes de couleur des génériques et identités animées",
+    "references/techniques.md ; palettes biennale, kegelbahn, salon, good-room, luzern, bitmap"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
