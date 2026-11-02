@@ -1,0 +1,14 @@
+{
+  "slug": "echos",
+  "title": "Échos",
+  "type": "shapes",
+  "description": "Une forme ou un logo qui laisse ses contours passés en lignes décalées quand il bouge, avec corps flou et liseré lumineux, trajectoires en boucle et export SVG.",
+  "tags": ["echo", "contour", "lueur", "forme", "boucle", "svg"],
+  "inspiration": [
+    "Moodboard de Noé, fiche 9 — lignes d'écho et lueur menthe",
+    "Palettes menthe, trame-nuit, acide, kegelbahn, orbite, papier-60, luzern, good-room, biennale"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
