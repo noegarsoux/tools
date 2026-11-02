@@ -1,0 +1,313 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Engrenages</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Engrenages : un train de roues dentées qui s'engrènent vraiment. Chaque roue est posée au contact
+    // d'une autre (somme des rayons primitifs), sa vitesse vient du rapport des nombres de dents et sa
+    // phase est calée pour qu'une dent tombe toujours dans un creux.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const P60 = PAL('papier-60'), BIEN = PAL('biennale'), MENTHE = PAL('menthe'), KB = PAL('kegelbahn'), GR = PAL('good-room'), NUIT = PAL('trame-nuit');
+    const LUZ = PAL('luzern'), SALON = PAL('salon'), PYR = PAL('pyramides'), ACIDE = PAL('acide'), THER = PAL('thermique'), ORB = PAL('orbite'), CODE = PAL('code'), BIT = PAL('bitmap');
+
+    let gears = [], built = false, angle = 0, omega = 0, grab = null, down = null, logoKey = '', logoCv = null, tinted = new Map(), extra = [];
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.035, vignette: 0.08 },
+      hint: 'Glissez une roue pour entraîner tout le mécanisme · touchez le vide pour ajouter une roue · molette : vitesse',
+      notes: 'Deux roues engrènent quand la distance de leurs axes vaut la somme de leurs rayons primitifs (module × dents / 2). La vitesse est inversée et multipliée par le rapport des dents ; la phase de chaque roue est calée sur celle de sa voisine pour que les dents tombent dans les creux.',
+      params: {
+        'Mécanisme': {
+          roues: { type: 'range', label: 'Nombre de roues', min: 2, max: 40, step: 1, value: 14 },
+          module: { type: 'range', label: 'Taille des dents', min: 3, max: 22, step: 0.5, value: 9 },
+          dentsMin: { type: 'range', label: 'Dents (au moins)', min: 6, max: 40, step: 1, value: 10 },
+          dentsMax: { type: 'range', label: 'Dents (au plus)', min: 8, max: 90, step: 1, value: 48 },
+          debord: { type: 'range', label: 'Débord hors cadre', min: 0, max: 1, step: 0.01, value: 0.4 },
+        },
+        'Forme': {
+          dent: { type: 'select', label: 'Dents', options: { droite: 'Trapèze', pointue: 'Pointue', ronde: 'Arrondie', creneau: 'Créneau' }, value: 'droite' },
+          moyeu: { type: 'select', label: 'Moyeu', options: { mixte: 'Mélange', plein: 'Plein', rayons: 'Rayons', ajoure: 'Ajouré', logo: 'Logo' }, value: 'mixte' },
+          image: { type: 'file', label: 'Logo', accept: 'image/*', show: (q) => q.moyeu === 'logo' },
+          axe: { type: 'range', label: "Trou d'axe", min: 0, max: 0.4, step: 0.01, value: 0.12 },
+        },
+        'Mouvement': {
+          mouvement: { type: 'select', label: 'Moteur', options: { continu: 'Continu', pas: 'Pas à pas', vaetvient: 'Va-et-vient' }, value: 'continu' },
+          vitesse: { type: 'range', label: 'Vitesse', min: -3, max: 3, step: 0.05, value: 0.6 },
+        },
+        'Rendu': {
+          rendu: { type: 'select', label: 'Rendu', options: { aplats: 'Aplats', ombre: 'Aplats et ombre', trait: 'Dessin technique' }, value: 'ombre' },
+          fond: { type: 'color', label: 'Fond', value: '#efede8' },
+          couleurs: { type: 'palette', label: 'Roues', value: ['#e5452a', '#1c1b1f', '#f2c230', '#2f4fa8', '#9aa3a8'] },
+          trait: { type: 'color', label: 'Trait', value: '#1c1b1f' },
+          epaisseur: { type: 'range', label: 'Épaisseur du trait', min: 0.5, max: 4, step: 0.1, value: 1.2 },
+        },
+      },
+      presets: {
+        'Atelier': {},
+        'Épure': { rendu: 'trait', fond: '#1d3f8c', trait: '#e9eef8', couleurs: ['#e9eef8'], roues: 18, moyeu: 'rayons', epaisseur: 1 },
+        'Horlogerie': { roues: 24, module: 4.5, dentsMin: 12, dentsMax: 80, dent: 'pointue', moyeu: 'rayons', couleurs: ['#c9a24a', '#b8913d', '#d8b968', '#8f7a52'], fond: '#141414', rendu: 'ombre', mouvement: 'pas', vitesse: 1 },
+        'Logo': { moyeu: 'logo', roues: 9, module: 12, couleurs: [P60[1], '#8a8680'], fond: P60[0], rendu: 'ombre', dentsMax: 40 },
+        'Biennale': { couleurs: [BIEN[2], BIEN[3], BIEN[4], BIEN[1]], fond: BIEN[0], rendu: 'aplats', dent: 'ronde', moyeu: 'plein', axe: 0.2 },
+        'Kegelbahn': { couleurs: [KB[1], KB[2], KB[3], KB[4], KB[5]], fond: KB[0], rendu: 'aplats', dent: 'creneau', roues: 20, module: 7 },
+        'Menthe': { couleurs: [MENTHE[2], MENTHE[3], MENTHE[0]], fond: MENTHE[1], rendu: 'ombre', moyeu: 'ajoure', dent: 'ronde' },
+        'Luzern': { couleurs: [LUZ[0], LUZ[1], LUZ[2], LUZ[4]], fond: LUZ[3], rendu: 'aplats', mouvement: 'vaetvient', module: 11 },
+        'Code': { couleurs: CODE.slice(1, 6), fond: CODE[0], rendu: 'ombre', roues: 26, module: 6, dent: 'pointue' },
+        'Acide': { couleurs: [ACIDE[2], ACIDE[3]], fond: ACIDE[1], rendu: 'trait', trait: ACIDE[2], epaisseur: 1.6, roues: 22, moyeu: 'ajoure' },
+        'Thermique': { couleurs: [THER[1], THER[2], THER[3], THER[4]], fond: THER[0], rendu: 'aplats', roues: 16, dent: 'creneau', module: 10 },
+        'Pyramides': { couleurs: [PYR[2], PYR[3], PYR[4], PYR[5]], fond: PYR[0], rendu: 'ombre', moyeu: 'rayons', module: 10, dent: 'droite' },
+        'Bitmap': { couleurs: [BIT[2], BIT[3], BIT[4], BIT[1]], fond: BIT[0], rendu: 'aplats', mouvement: 'pas', dent: 'creneau', moyeu: 'plein', module: 14, roues: 10 },
+      },
+      brand(colors) {
+        const c = colors.slice(1).length ? colors.slice(1) : ['#111111'];
+        const lum = (h) => { const n = parseInt(h.slice(1), 16); return ((n >> 16) & 255) * 0.299 + ((n >> 8) & 255) * 0.587 + (n & 255) * 0.114; };
+        const dark = c.slice().sort((a, b) => lum(a) - lum(b))[0];
+        return { fond: colors[0], couleurs: c.slice(0, 6), trait: lum(colors[0]) > 128 ? dark : '#f4f3f0' };
+      },
+      pointer: {
+        down: (q) => {
+          down = { x: q.x, y: q.y, moved: false };
+          const g = gearAt(q.x, q.y);
+          if (g) grab = { g, a0: Math.atan2(q.y - g.y, q.x - g.x), base: angle, t: performance.now() };
+        },
+        drag: (q) => {
+          if (down && Math.hypot(q.x - down.x, q.y - down.y) > 6) down.moved = true;
+          if (grab) {
+            // l'angle de la roue saisie suit le pointeur ; on en déduit l'angle du moteur
+            const g = grab.g, a = Math.atan2(q.y - g.y, q.x - g.x);
+            let da = a - grab.a0; while (da > Math.PI) da -= TAU; while (da < -Math.PI) da += TAU;
+            const now = performance.now(), dtm = Math.max(1, now - grab.t) / 1000;
+            const dA = da / g.ratio;
+            angle += dA; omega = dA / dtm * 0.5 + omega * 0.5; grab.a0 = a; grab.t = now;
+          }
+        },
+        up: (q) => {
+          if (down && !down.moved && !grab) addGearNear(q.x, q.y);
+          down = null; grab = null;
+        },
+        wheel: (q, dy) => app.set('vitesse', Math.max(-3, Math.min(3, +(p.vitesse + (dy > 0 ? -0.1 : 0.1)).toFixed(2)))),
+      },
+      onChange(k) {
+        if (['roues', 'module', 'dentsMin', 'dentsMax', 'debord', 'dent', 'moyeu', 'axe', 'couleurs', '*'].includes(k)) { built = false; extra = []; }
+        if (k === 'image' || k === 'moyeu') logoKey = '';
+      },
+      onSeed() { built = false; extra = []; },
+      export: { name: 'engrenages', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    // ——— Profil d'une roue (repère local, centre en 0) ———
+    function gearShape(T, m, kind, r) {
+      const rp = m * T / 2, ra = rp + m, rf = Math.max(m * 0.6, rp - 1.25 * m), pts = [];
+      const step = TAU / T;
+      for (let k = 0; k < T; k++) {
+        const a = k * step;
+        // creux, flanc montant, sommet, flanc descendant (fractions d'un pas)
+        if (kind === 'creneau') {
+          [[-0.5, rf], [-0.25, rf], [-0.25, ra], [0.25, ra], [0.25, rf]].forEach(([f, rr]) => pts.push([Math.cos(a + f * step) * rr, Math.sin(a + f * step) * rr]));
+        } else if (kind === 'pointue') {
+          [[-0.5, rf], [-0.3, rf], [-0.04, ra], [0.04, ra], [0.3, rf]].forEach(([f, rr]) => pts.push([Math.cos(a + f * step) * rr, Math.sin(a + f * step) * rr]));
+        } else if (kind === 'ronde') {
+          pts.push([Math.cos(a - 0.5 * step) * rf, Math.sin(a - 0.5 * step) * rf]);
+          for (let q = 0; q <= 8; q++) { const u = -1 + q / 4, rr = rf + (ra - rf) * Math.sqrt(Math.max(0, 1 - u * u)) * 1, f = u * 0.26; if (Math.abs(u) <= 1) pts.push([Math.cos(a + f * step) * rr, Math.sin(a + f * step) * rr]); }
+        } else {
+          [[-0.5, rf], [-0.28, rf], [-0.13, ra], [0.13, ra], [0.28, rf]].forEach(([f, rr]) => pts.push([Math.cos(a + f * step) * rr, Math.sin(a + f * step) * rr]));
+        }
+      }
+      return { pts, rp, ra, rf };
+    }
+    function shapePath(g) {
+      const f = (v) => v.toFixed(2);
+      let d = 'M' + g.pts.map(([x, y]) => f(x) + ' ' + f(y)).join('L') + 'Z';
+      const circ = (r) => `M${f(r)} 0A${f(r)} ${f(r)} 0 1 0 ${f(-r)} 0A${f(r)} ${f(r)} 0 1 0 ${f(r)} 0Z`;
+      const rIn = g.rf - Math.max(4, g.m * 1.1), hub = g.rf * Math.max(0.18, p.axe + 0.12);
+      if (g.hub === 'rayons' && rIn > hub + 8) {
+        // évidements entre des rayons
+        const n = g.rp > 120 ? 6 : g.rp > 60 ? 5 : 4, sw = Math.min(0.5, (Math.max(5, g.m * 1.2)) / ((rIn + hub) / 2)) ;
+        for (let k = 0; k < n; k++) {
+          const a0 = k / n * TAU + sw, a1 = (k + 1) / n * TAU - sw, A = (r, a) => `${f(Math.cos(a) * r)} ${f(Math.sin(a) * r)}`;
+          d += `M${A(hub + 3, a0)}L${A(rIn, a0)}A${f(rIn)} ${f(rIn)} 0 0 1 ${A(rIn, a1)}L${A(hub + 3, a1)}A${f(hub + 3)} ${f(hub + 3)} 0 0 0 ${A(hub + 3, a0)}Z`;
+        }
+      } else if (g.hub === 'ajoure' && rIn > hub + 8) {
+        const rr = (rIn + hub) / 2, hr = Math.min((rIn - hub) * 0.36, rr * Math.sin(Math.PI / 8) * 0.8), n = Math.max(4, Math.min(12, Math.floor(TAU * rr / (hr * 2.8))));
+        for (let k = 0; k < n; k++) { const a = k / n * TAU, cx = Math.cos(a) * rr, cy = Math.sin(a) * rr; d += `M${f(cx + hr)} ${f(cy)}A${f(hr)} ${f(hr)} 0 1 0 ${f(cx - hr)} ${f(cy)}A${f(hr)} ${f(hr)} 0 1 0 ${f(cx + hr)} ${f(cy)}Z`; }
+      }
+      if (p.axe > 0) d += circ(g.rf * p.axe);
+      return d;
+    }
+
+    // ——— Construction du train ———
+    function build() {
+      const { w, h } = app.size, S = Math.min(w, h), r = app.rng(19), m = p.module;
+      const tMin = Math.round(Math.min(p.dentsMin, p.dentsMax)), tMax = Math.round(Math.max(p.dentsMin, p.dentsMax));
+      const cols = p.couleurs.length ? p.couleurs : ['#e5452a'];
+      const hubs = { mixte: ['plein', 'rayons', 'ajoure'], plein: ['plein'], rayons: ['rayons'], ajoure: ['ajoure'], logo: ['plein'] }[p.moyeu] || ['plein'];
+      gears = [];
+      const make = (T, x, y, parent) => {
+        const sh = gearShape(T, m, p.dent);
+        const g = { T, m, x, y, ...sh, parent, col: cols[gears.length % cols.length], hub: hubs[Math.floor(r() * hubs.length)] };
+        if (!parent) { g.ratio = 1; g.alpha = 0; g.off = 0; }
+        else {
+          // rapport et calage de phase par rapport au parent
+          g.alpha = Math.atan2(y - parent.y, x - parent.x);
+          g.ratio = -parent.ratio * parent.T / T;
+          g.off = 0;
+          // phi_c = (alpha + pi) + (Tp/Tc)(alpha - phi_p) - pi/Tc, écrit comme ratio·A + off
+          g.off = g.alpha + Math.PI + (parent.T / T) * (g.alpha - parent.off) - Math.PI / T;
+        }
+        g.path = new Path2D(shapePath(g)); g.d = shapePath(g);
+        gears.push(g); return g;
+      };
+      const T0 = Math.min(tMax, Math.max(tMin, Math.round(Math.min(tMax, (S * 0.36) / (m / 2)))));
+      make(T0, w / 2 + (r() - 0.5) * w * 0.15, h / 2 + (r() - 0.5) * h * 0.15, null);
+      const n = Math.round(p.roues), mg = (w + h) * 0.25 * p.debord;
+      let guard = 0;
+      while (gears.length < n && guard++ < 4000) {
+        // préférence pour les roues récentes : le train s'étend en chaîne et en branches
+        const par = gears[Math.floor(Math.pow(r(), 0.6) * gears.length)];
+        const T = Math.round(tMin + Math.pow(r(), 1.6) * (tMax - tMin)), rp = m * T / 2, ra = rp + m;
+        const a = r() * TAU, d = par.rp + rp, x = par.x + Math.cos(a) * d, y = par.y + Math.sin(a) * d;
+        if (x < -mg + ra * 0.3 || x > w + mg - ra * 0.3 || y < -mg + ra * 0.3 || y > h + mg - ra * 0.3) continue;
+        // la roue doit rester visible en partie
+        if (x + ra < 10 || x - ra > w - 10 || y + ra < 10 || y - ra > h - 10) continue;
+        let ok = true;
+        for (const o of gears) { if (o === par) continue; if (Math.hypot(o.x - x, o.y - y) < o.ra + ra + m * 0.8) { ok = false; break; } }
+        if (ok) make(T, x, y, par);
+      }
+      for (const e of extra) tryAdd(e.x, e.y, false);
+      built = true;
+    }
+    function tryAdd(x, y, remember) {
+      // cherche la roue la plus proche et place une nouvelle roue en contact, du côté du toucher
+      const m = p.module, tMin = Math.round(Math.min(p.dentsMin, p.dentsMax)), tMax = Math.round(Math.max(p.dentsMin, p.dentsMax));
+      let best = null, bd = Infinity; for (const g of gears) { const d = Math.hypot(x - g.x, y - g.y) - g.rp; if (d < bd) { bd = d; best = g; } }
+      if (!best) return false;
+      const want = Math.max(tMin, Math.min(tMax, Math.round(Math.max(bd, m * 3) * 2 / m)));
+      for (const T of [want, Math.round(want * 0.75), Math.round(want * 0.5), tMin]) {
+        if (T < 6) continue;
+        const rp = m * T / 2, ra = rp + m, a = Math.atan2(y - best.y, x - best.x), d = best.rp + rp, cx = best.x + Math.cos(a) * d, cy = best.y + Math.sin(a) * d;
+        let ok = true; for (const o of gears) { if (o === best) continue; if (Math.hypot(o.x - cx, o.y - cy) < o.ra + ra + m * 0.8) { ok = false; break; } }
+        if (ok) {
+          const sh = gearShape(T, m, p.dent), cols = p.couleurs.length ? p.couleurs : ['#e5452a'];
+          const g = { T, m, x: cx, y: cy, ...sh, parent: best, col: cols[gears.length % cols.length], hub: p.moyeu === 'mixte' ? ['plein', 'rayons', 'ajoure'][gears.length % 3] : p.moyeu === 'logo' ? 'plein' : p.moyeu };
+          g.alpha = a; g.ratio = -best.ratio * best.T / T; g.off = a + Math.PI + (best.T / T) * (a - best.off) - Math.PI / T;
+          g.d = shapePath(g); g.path = new Path2D(g.d); g.pop = 1;
+          gears.push(g); if (remember) extra.push({ x, y });
+          return true;
+        }
+      }
+      return false;
+    }
+    function addGearNear(x, y) { tryAdd(x, y, true); }
+    function gearAt(x, y) { let best = null; for (const g of gears) if (Math.hypot(x - g.x, y - g.y) < g.ra) { if (!best || g.ra < best.ra) best = g; } return best; }
+    // angle d'une roue : ratio × angle du moteur + calage
+    const rot = (g) => g.ratio * angle + g.off;
+
+    // ——— Logo au moyeu ———
+    function logoCanvas() {
+      const img = p.image || app.logoImg, key = img ? (img.src || 'c') : 'demo';
+      if (key === logoKey && logoCv) return logoCv;
+      logoKey = key; tinted.clear(); const M = 256; logoCv = document.createElement('canvas'); logoCv.width = logoCv.height = M;
+      const x = logoCv.getContext('2d');
+      if (img) { const iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height, k = M * 0.86 / Math.max(iw, ih); x.drawImage(img, (M - iw * k) / 2, (M - ih * k) / 2, iw * k, ih * k); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(128, 128, 104, 0, TAU); x.arc(128, 128, 60, 0, TAU, true); x.fill('evenodd'); x.fillRect(114, 14, 28, 228); }
+      return logoCv;
+    }
+    function logoTint(col) {
+      const base = logoCanvas(); if (tinted.has(col)) return tinted.get(col);
+      const c = document.createElement('canvas'); c.width = c.height = base.width; const x = c.getContext('2d');
+      x.drawImage(base, 0, 0); x.globalCompositeOperation = 'source-in'; x.fillStyle = col; x.fillRect(0, 0, c.width, c.height);
+      tinted.set(col, c); return c;
+    }
+    const lum = (h) => { const n = parseInt(h.slice(1), 16); return ((n >> 16) & 255) * 0.299 + ((n >> 8) & 255) * 0.587 + (n & 255) * 0.114; };
+
+    // ——— Moteur ———
+    let tPas = 0;
+    app.loop((t, dt) => {
+      const { w, h, dpr } = app.size;
+      dt = Math.min(0.05, dt || 0);
+      if (!built) build();
+      if (!grab) {
+        const v = p.vitesse * 0.5;
+        if (p.mouvement === 'continu') { omega += (v - omega) * Math.min(1, dt * 2); angle += omega * dt; }
+        else if (p.mouvement === 'pas') {
+          // pas à pas : un cran par seconde, avec un petit rebond
+          tPas += dt * Math.abs(p.vitesse) * 1.5; const k = Math.floor(tPas), f = tPas - k;
+          const e = f < 0.25 ? 1 - Math.pow(1 - f / 0.25, 3) * (1 + 0.3 * Math.sin(f / 0.25 * Math.PI)) : 1;
+          const stepA = TAU / gears[0].T * Math.sign(p.vitesse || 1);
+          const target = (k + Math.min(1, e)) * stepA;
+          omega = 0; angle = target;
+        } else { omega = 0; angle = Math.sin(t * Math.abs(p.vitesse) * 0.8) * 1.6 * Math.sign(p.vitesse || 1); }
+      } else omega *= 0.9;
+      for (const g of gears) if (g.pop) g.pop = Math.max(0, g.pop - dt * 3);
+
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = p.fond; ctx.fillRect(0, 0, w, h);
+      draw(ctx);
+      app.finish(ctx);
+    });
+
+    function draw(x) {
+      const S = Math.min(app.size.w, app.size.h), lineMode = p.rendu === 'trait';
+      // ombres portées d'abord, toutes ensemble
+      if (p.rendu === 'ombre') {
+        x.save(); x.fillStyle = 'rgba(0,0,0,0.22)';
+        const off = Math.max(3, p.module * 0.7);
+        for (const g of gears) { x.save(); x.translate(g.x + off, g.y + off * 1.3); x.rotate(rot(g)); x.fill(g.path, 'evenodd'); x.restore(); }
+        x.restore();
+      }
+      for (const g of gears) {
+        const sc = 1 + (g.pop || 0) * 0.08 * Math.sin((g.pop || 0) * Math.PI * 3);
+        x.save(); x.translate(g.x, g.y); x.rotate(rot(g)); x.scale(sc, sc);
+        if (lineMode) {
+          x.strokeStyle = p.trait; x.lineWidth = p.epaisseur; x.lineJoin = 'round'; x.stroke(g.path);
+          // cercle primitif en tirets, croix d'axe
+          x.setLineDash([6, 5]); x.lineWidth = p.epaisseur * 0.5; x.globalAlpha = 0.6; x.beginPath(); x.arc(0, 0, g.rp, 0, TAU); x.stroke(); x.setLineDash([]);
+          const c = Math.max(8, g.rf * 0.3); x.beginPath(); x.moveTo(-c, 0); x.lineTo(c, 0); x.moveTo(0, -c); x.lineTo(0, c); x.stroke(); x.globalAlpha = 1;
+        } else {
+          x.fillStyle = g.col; x.fill(g.path, 'evenodd');
+          // léger liseré intérieur pour détacher les roues qui se touchent
+          x.strokeStyle = 'rgba(0,0,0,0.18)'; x.lineWidth = 1; x.stroke(g.path);
+        }
+        if (p.moyeu === 'logo' && g === gears[0] || (p.moyeu === 'logo' && g.T >= 30 && g.hub === 'plein')) {
+          const col = lineMode ? p.trait : (lum(g.col) > 140 ? '#151515' : '#f4f3f0'), r = g.rf * 0.62;
+          x.drawImage(logoTint(col), -r, -r, r * 2, r * 2);
+        }
+        x.restore();
+      }
+    }
+
+    function toSVG() {
+      const { w, h } = app.size, out = [], f = (v) => v.toFixed(2), deg = (a) => (a * 180 / Math.PI).toFixed(3), lineMode = p.rendu === 'trait';
+      if (p.rendu === 'ombre') {
+        const off = Math.max(3, p.module * 0.7);
+        out.push(`<g fill="#000000" fill-opacity="0.22" fill-rule="evenodd">${gears.map((g) => `<path d="${g.d}" transform="translate(${f(g.x + off)} ${f(g.y + off * 1.3)}) rotate(${deg(rot(g))})"/>`).join('')}</g>`);
+      }
+      for (const g of gears) {
+        const tr = `translate(${f(g.x)} ${f(g.y)}) rotate(${deg(rot(g))})`;
+        if (lineMode) {
+          const c = Math.max(8, g.rf * 0.3);
+          out.push(`<g transform="${tr}" fill="none" stroke="${p.trait}"><path d="${g.d}" stroke-width="${p.epaisseur}" stroke-linejoin="round"/><circle r="${f(g.rp)}" stroke-width="${f(p.epaisseur * 0.5)}" stroke-dasharray="6 5" stroke-opacity="0.6"/><path d="M${f(-c)} 0H${f(c)}M0 ${f(-c)}V${f(c)}" stroke-width="${f(p.epaisseur * 0.5)}" stroke-opacity="0.6"/></g>`);
+        } else out.push(`<path d="${g.d}" transform="${tr}" fill="${g.col}" fill-rule="evenodd" stroke="#000000" stroke-opacity="0.18"/>`);
+        if (p.moyeu === 'logo' && g === gears[0] || (p.moyeu === 'logo' && g.T >= 30 && g.hub === 'plein')) {
+          const col = lineMode ? p.trait : (lum(g.col) > 140 ? '#151515' : '#f4f3f0'), r = g.rf * 0.62;
+          out.push(`<image href="${logoTint(col).toDataURL('image/png')}" x="${f(-r)}" y="${f(-r)}" width="${f(r * 2)}" height="${f(r * 2)}" transform="${tr}"/>`);
+        }
+      }
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">\n<rect width="100%" height="100%" fill="${p.fond}"/>\n${out.join('\n')}\n</svg>`;
+    }
+  </script>
+</body>
+</html>
