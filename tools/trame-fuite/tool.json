@@ -1,0 +1,15 @@
+{
+  "slug": "trame-fuite",
+  "title": "Trame en fuite",
+  "type": "pattern",
+  "description": "Une trame de points (uniforme, dégradée, logo ou image) qui file vers un point de fuite comme un zoom pendant la pose ; le centre suit le pointeur.",
+  "tags": ["trame", "zoom", "points", "perspective", "svg", "logo"],
+  "inspiration": [
+    "Moodboard de Noé, fiche 4 : trame en perspective radiale, trou blanc au centre",
+    "Flou de zoom photographique (zoom burst), trames de points en offset",
+    "Palettes papier, trame-nuit, orbite, biennale, acide, kegelbahn, photocopie"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}

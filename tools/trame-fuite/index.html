@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Trame en fuite</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Trame en fuite : une trame de points (uniforme, dégradée, logo ou image) projetée vers un point
+    // de fuite. Chaque point devient une traînée qui file vers ce point, effilée et fondue dans le
+    // papier, comme un flou de zoom photographique. Autour du point de fuite, un trou blanc.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2, SEG = 4;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const PAPIER = PAL('papier'), NUIT = PAL('trame-nuit'), ORB = PAL('orbite'), BIEN = PAL('biennale');
+    const ACIDE = PAL('acide'), KB = PAL('kegelbahn'), LUZ = PAL('luzern'), PHOTO = PAL('photocopie');
+
+    let ready = false, target = null, vp = null, lastT = 0;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.05, vignette: 0 },
+      hint: 'Le point de fuite suit le pointeur · molette : longueur des traînées',
+      notes: 'Chaque point de la trame file vers le point de fuite, d’autant plus loin qu’il en est éloigné : c’est le flou d’un zoom pendant la pose. La traînée s’effile et se fond dans le papier.',
+      params: {
+        'Trame': {
+          source: { type: 'segmented', label: 'Trame de', options: { uni: 'Uniforme', radial: 'Dégradé', logo: 'Logo', image: 'Image' }, value: 'uni' },
+          image: { type: 'file', label: 'Logo ou image', accept: 'image/*', show: (q) => q.source === 'logo' || q.source === 'image' },
+          grille: { type: 'segmented', label: 'Grille', options: { carree: 'Carrée', hexa: 'Hexagonale' }, value: 'carree' },
+          pas: { type: 'range', label: 'Pas de la trame', min: 0.015, max: 0.12, step: 0.001, value: 0.05 },
+          taille: { type: 'range', label: 'Taille des points', min: 0.1, max: 1, step: 0.01, value: 0.55 },
+          rotation: { type: 'range', label: 'Angle de la trame', min: 0, max: 90, step: 1, value: 0 },
+        },
+        'Fuite': {
+          longueur: { type: 'range', label: 'Longueur des traînées', min: 0, max: 1, step: 0.01, value: 0.32 },
+          effilement: { type: 'range', label: 'Effilement', min: 0, max: 1, step: 0.01, value: 0.85 },
+          fondu: { type: 'range', label: 'Fondu dans le papier', min: 0, max: 1, step: 0.01, value: 0.8 },
+          profondeur: { type: 'range', label: 'Profondeur', min: 0, max: 1, step: 0.01, value: 0.55 },
+          trou: { type: 'range', label: 'Trou au centre', min: 0, max: 0.5, step: 0.005, value: 0.16 },
+        },
+        'Mouvement': {
+          boucle: { type: 'range', label: 'Boucle (s)', min: 4, max: 40, step: 1, value: 10 },
+          respiration: { type: 'range', label: 'Respiration du zoom', min: 0, max: 1, step: 0.01, value: 0.55 },
+          derive: { type: 'range', label: 'Dérive du point de fuite', min: 0, max: 0.4, step: 0.005, value: 0.12 },
+          tourne: { type: 'range', label: 'Tours de la trame par boucle', min: -2, max: 2, step: 1, value: 0 },
+        },
+        'Couleur': {
+          fond: { type: 'color', label: 'Fond', value: PAPIER[0] },
+          encre: { type: 'color', label: 'Encre', value: PAPIER[1] },
+          trainee: { type: 'color', label: 'Couleur des traînées', value: PAPIER[1] },
+        },
+      },
+      presets: {
+        'Fuite': {},
+        'Explosion': { longueur: 0.62, effilement: 0.95, fondu: 0.9, profondeur: 0.7, trou: 0.22, pas: 0.045, taille: 0.55, respiration: 0.8 },
+        'Nuit': { fond: NUIT[0], encre: NUIT[1], trainee: NUIT[2], source: 'radial', pas: 0.04, taille: 0.62, longueur: 0.4, trou: 0.1 },
+        'Orbite': { fond: ORB[0], encre: ORB[1], trainee: ORB[1], grille: 'hexa', pas: 0.05, taille: 0.7, longueur: 0.4, effilement: 0.5, fondu: 0.4, derive: 0.22 },
+        'Biennale': { fond: BIEN[0], encre: BIEN[1], trainee: BIEN[2], pas: 0.06, taille: 0.85, longueur: 0.7, fondu: 0.3, effilement: 0.3, trou: 0.06, rotation: 45 },
+        'Acide': { fond: ACIDE[1], encre: ACIDE[2], trainee: ACIDE[0], grille: 'hexa', pas: 0.04, taille: 0.5, longueur: 0.7, fondu: 0.95, trou: 0.18, tourne: 1 },
+        'Kegelbahn': { fond: KB[0], encre: KB[3], trainee: KB[1], source: 'radial', pas: 0.045, taille: 0.9, longueur: 0.55, effilement: 0.6, fondu: 0.5, respiration: 0.9 },
+        'Photocopie': { fond: PHOTO[0], encre: PHOTO[1], trainee: PHOTO[2], pas: 0.032, taille: 0.62, longueur: 0.25, fondu: 1, effilement: 1, profondeur: 0.2, trou: 0.05, derive: 0.05 },
+        'Logo': { source: 'logo', pas: 0.03, taille: 0.85, longueur: 0.3, trou: 0, profondeur: 0.3, derive: 0.06 },
+      },
+      brand(colors) {
+        return { fond: colors[0], encre: colors[1] || colors[0], trainee: colors[2] || colors[1] || colors[0] };
+      },
+      pointer: {
+        move: (q) => { target = { x: q.x, y: q.y }; },
+        down: (q) => { target = { x: q.x, y: q.y }; },
+        drag: (q) => { target = { x: q.x, y: q.y }; },
+        wheel: (q, dy) => app.set('longueur', Math.max(0, Math.min(1, +(p.longueur - dy * 0.0008).toFixed(2)))),
+      },
+      onChange(k) { if (ready && (k === 'image' || k === '_logo' || k === '*' || k === 'source')) srcDirty = true; },
+      export: { name: 'trame-en-fuite', svg: () => toSVG() },
+    });
+    const p = app.params;
+    // Le pointeur qui quitte la scène rend la main à la dérive automatique.
+    canvas.addEventListener('pointerleave', () => { target = null; });
+
+    // ——— Image ou logo → carte de valeur (sombre = 1) ———
+    let srcDirty = true, src = null;
+    function buildSource() {
+      srcDirty = false; src = null;
+      let img = p.source === 'logo' ? (p.image || app.logoImg) : p.source === 'image' ? p.image : null;
+      if (!img && p.source !== 'logo') return;
+      if (!img) {
+        // Sans logo : une pastille annulaire par défaut, pour que la trame garde une forme.
+        const cv = document.createElement('canvas'); cv.width = cv.height = 200;
+        const x = cv.getContext('2d'); x.fillStyle = '#fff'; x.fillRect(0, 0, 200, 200);
+        x.filter = 'blur(2px)'; x.fillStyle = '#000';
+        x.beginPath(); x.arc(100, 100, 92, 0, TAU); x.arc(100, 100, 52, 0, TAU, true); x.fill();
+        x.beginPath(); x.arc(100, 100, 24, 0, TAU); x.fill();
+        img = cv;
+      }
+      const M = 300, iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height, k = M / Math.max(iw, ih);
+      const w = Math.max(2, Math.round(iw * k)), h = Math.max(2, Math.round(ih * k));
+      const cv = document.createElement('canvas'); cv.width = w; cv.height = h;
+      const x = cv.getContext('2d', { willReadFrequently: true });
+      x.fillStyle = '#fff'; x.fillRect(0, 0, w, h);
+      if (p.source === 'logo') x.filter = 'blur(2px)';
+      x.drawImage(img, 0, 0, w, h);
+      const d = x.getImageData(0, 0, w, h).data, v = new Float32Array(w * h);
+      for (let i = 0; i < v.length; i++) v[i] = 1 - (d[i * 4] * 0.2126 + d[i * 4 + 1] * 0.7152 + d[i * 4 + 2] * 0.0722) / 255;
+      src = { w, h, v };
+    }
+    function value(x, y, w, h) {
+      // Valeur de la trame à l'endroit (x, y) en pixels : 1 = point plein.
+      if (p.source === 'uni') return 1;
+      if (p.source === 'radial') {
+        const U = Math.min(w, h), r = Math.hypot(x - w / 2, y - h / 2) / U;
+        return Math.max(0.12, Math.min(1, 0.25 + r * 1.3));
+      }
+      if (!src) return 1;
+      const U = Math.min(w, h) * 0.86, asp = src.w / src.h, ww = asp >= 1 ? U : U * asp, hh = asp >= 1 ? U / asp : U;
+      const u = (x - w / 2) / ww + 0.5, v = (y - h / 2) / hh + 0.5;
+      if (u < 0 || v < 0 || u >= 1 || v >= 1) return 0;
+      return src.v[Math.floor(v * src.h) * src.w + Math.floor(u * src.w)];
+    }
+
+    // ——— Géométrie : pour chaque point, une traînée découpée en SEG tronçons (du plus pâle au plus net) ———
+    function streaks(t) {
+      const { w, h } = app.size, U = Math.min(w, h);
+      if (srcDirty) buildSource();
+      const T = t / p.boucle, ph = TAU * T;
+      // Point de fuite : dérive en lemniscate (boucle parfaite), ou suit le pointeur avec douceur.
+      const auto = { x: w / 2 + Math.sin(ph) * p.derive * U, y: h / 2 + Math.sin(2 * ph) * p.derive * U * 0.5 };
+      const goal = target || auto;
+      if (!vp) vp = { ...goal };
+      vp.x += (goal.x - vp.x) * 0.12; vp.y += (goal.y - vp.y) * 0.12;
+      const L = p.longueur * (1 - p.respiration * 0.5 + p.respiration * 0.5 * Math.sin(ph));
+      const s = p.pas * U, a = (p.rotation * Math.PI / 180) + TAU * p.tourne * T, ca = Math.cos(a), sa = Math.sin(a);
+      const hexa = p.grille === 'hexa', dy = hexa ? s * Math.sqrt(3) / 2 : s;
+      const R = Math.hypot(w, h) * 0.75, nI = Math.ceil(R / s) + 1, nJ = Math.ceil(R / dy) + 1;
+      const far = Math.hypot(w, h) * 0.6, hole = p.trou * U;
+      const groups = Array.from({ length: SEG }, () => []);
+      for (let j = -nJ; j <= nJ; j++) for (let i = -nI; i <= nI; i++) {
+        const gx = (i + (hexa && (j & 1) ? 0.5 : 0)) * s, gy = j * dy;
+        const x = w / 2 + gx * ca - gy * sa, y = h / 2 + gx * sa + gy * ca;
+        if (x < -s || y < -s || x > w + s || y > h + s) continue;
+        const v = value(x, y, w, h);
+        if (v < 0.03) continue;
+        const ex = x - vp.x, ey = y - vp.y, d = Math.hypot(ex, ey);
+        if (d < hole) continue;
+        // Profondeur : les points proches du centre sont plus petits (plus loin dans la scène).
+        const depth = Math.min(1, d / far), r0 = s * 0.5 * p.taille * Math.sqrt(v) * (1 - p.profondeur + p.profondeur * (0.25 + 0.75 * depth));
+        // Ouverture du trou : les points qui le bordent s'y effacent en douceur.
+        const open = hole > 0 ? Math.min(1, (d - hole) / (hole * 0.6 + 1)) : 1;
+        const r = r0 * open;
+        if (r < 0.3) continue;
+        const len = L * d * (0.35 + 0.65 * depth);
+        const ux = ex / (d || 1), uy = ey / (d || 1), nx = -uy, ny = ux;
+        for (let k = 0; k < SEG; k++) {
+          // Tronçon k : de la queue (k = 0, près du centre) vers la tête (k = SEG-1, le point lui-même).
+          const t0 = k / SEG, t1 = (k + 1) / SEG;
+          const r0k = r * (1 - p.effilement * (1 - t0)), r1k = r * (1 - p.effilement * (1 - t1));
+          const b0 = len * (1 - t0), b1 = len * (1 - t1);
+          groups[k].push([x - ux * b0, y - uy * b0, r0k, x - ux * b1, y - uy * b1, r1k, nx, ny]);
+        }
+      }
+      return { groups, vp };
+    }
+
+    const hexRgb = (hx) => { const n = parseInt(String(hx).slice(1, 7), 16); return [n >> 16 & 255, n >> 8 & 255, n & 255]; };
+    function segColor(k) {
+      // Fondu : la queue se mélange au fond, la tête garde l'encre. Couleurs opaques.
+      const head = k === SEG - 1, a = hexRgb(head ? p.encre : p.trainee), b = hexRgb(p.fond);
+      const f = head ? 0 : p.fondu * (1 - (k + 1) / SEG) * 0.95;
+      return `rgb(${a.map((v, i) => Math.round(v + (b[i] - v) * f)).join(',')})`;
+    }
+    function path(c, q, head) {
+      // Tronçon : trapèze entre deux largeurs ; la tête est en plus un disque plein.
+      const [x0, y0, r0, x1, y1, r1, nx, ny] = q;
+      c.moveTo(x0 + nx * r0, y0 + ny * r0);
+      c.lineTo(x1 + nx * r1, y1 + ny * r1);
+      c.lineTo(x1 - nx * r1, y1 - ny * r1);
+      c.lineTo(x0 - nx * r0, y0 - ny * r0);
+      c.closePath();
+      if (head) { c.moveTo(x1 + r1, y1); c.arc(x1, y1, r1, 0, TAU); }
+    }
+
+    function draw(t) {
+      const { w, h, dpr } = app.size;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = p.fond; ctx.fillRect(0, 0, w, h);
+      const { groups } = streaks(t);
+      for (let k = 0; k < SEG; k++) {
+        ctx.fillStyle = segColor(k);
+        ctx.beginPath();
+        for (const q of groups[k]) path(ctx, q, k === SEG - 1);
+        ctx.fill();
+      }
+      app.finish(ctx);
+    }
+
+    function toSVG() {
+      const { w, h } = app.size, { groups } = streaks(lastT), f = (n) => +n.toFixed(2);
+      const g = groups.map((list, k) => {
+        const d = list.map(([x0, y0, r0, x1, y1, r1, nx, ny]) => {
+          const quad = `M${f(x0 + nx * r0)} ${f(y0 + ny * r0)}L${f(x1 + nx * r1)} ${f(y1 + ny * r1)}L${f(x1 - nx * r1)} ${f(y1 - ny * r1)}L${f(x0 - nx * r0)} ${f(y0 - ny * r0)}Z`;
+          return k === SEG - 1 ? `${quad}M${f(x1 + r1)} ${f(y1)}A${f(r1)} ${f(r1)} 0 1 0 ${f(x1 - r1)} ${f(y1)}A${f(r1)} ${f(r1)} 0 1 0 ${f(x1 + r1)} ${f(y1)}Z` : quad;
+        }).join('');
+        return `<path fill="${segColor(k)}" d="${d}"/>`;
+      });
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><rect width="100%" height="100%" fill="${p.fond}"/>${g.join('')}</svg>`;
+    }
+
+    ready = true;
+    app.loop((t) => { lastT = t; draw(t); });
+  </script>
+</body>
+</html>
