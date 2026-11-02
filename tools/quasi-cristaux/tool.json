@@ -1,0 +1,16 @@
+{
+  "slug": "quasi-cristaux",
+  "title": "Quasi-cristaux",
+  "type": "pattern",
+  "description": "Somme de N ondes planes : quasi-cristaux à symétrie d'ordre 5, 7, 8… en bandes, seuil, lignes de niveau ou points, loupe au pointeur, logo, export SVG.",
+  "tags": ["quasi-cristal", "ondes", "symetrie", "shader", "motif", "boucle"],
+  "inspiration": [
+    "physique-maths.md — cymatique et ondes de Faraday, quasi-cristaux",
+    "Dan Shechtman — quasi-cristaux (prix Nobel de chimie 2011)",
+    "Pavages de Penrose et méthode de de Bruijn (superposition de N grilles)",
+    "Palettes trame-nuit, papier-60, chladni, kegelbahn, acide, thermique, good-room, photocopie"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
