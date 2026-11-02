@@ -1,0 +1,304 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Gouttes</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Gouttes : une vitre sous la pluie devant une scène de marque. La vitre embuée floute la scène ;
+    // chaque goutte agit comme une petite lentille et montre la scène nette, renversée. Les grosses
+    // gouttes glissent, avalent les petites et laissent une trace claire dans la buée.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const P60 = PAL('papier-60'), BIEN = PAL('biennale'), MENTHE = PAL('menthe'), KB = PAL('kegelbahn'), GR = PAL('good-room'), NUIT = PAL('trame-nuit');
+    const LUZ = PAL('luzern'), SALON = PAL('salon'), PYR = PAL('pyramides'), ACIDE = PAL('acide'), THER = PAL('thermique'), ORB = PAL('orbite');
+
+    let drops = [], sceneCv = null, sceneX = null, blurCv = null, blurX = null, smallCv = null, smallX = null, fogCv = null, fogX = null, mixCv = null, mixX = null;
+    let warm = false, lights = [], built = false, wipe = null, logoKey = '', logoCv = null, rainAcc = 0, time = 0, sizeKey = '';
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.05, vignette: 0.2 },
+      hint: 'Glissez pour essuyer la vitre · touchez pour poser une grosse goutte · molette : force de la pluie',
+      notes: 'Une goutte posée sur une vitre se comporte comme une lentille convergente : la scène y apparaît nette, réduite et renversée. Au-delà d’une certaine taille, son poids l’emporte sur l’adhérence et elle glisse en serpentant, fusionne avec celles qu’elle rencontre et efface la buée sur son passage.',
+      params: {
+        'Pluie': {
+          intensite: { type: 'range', label: 'Force de la pluie', min: 0, max: 1, step: 0.01, value: 0.45 },
+          taille: { type: 'range', label: 'Taille des gouttes', min: 0.4, max: 2.5, step: 0.05, value: 1 },
+          glissement: { type: 'range', label: 'Glissement', min: 0, max: 1, step: 0.01, value: 0.55 },
+          traces: { type: 'range', label: 'Gouttelettes laissées', min: 0, max: 1, step: 0.01, value: 0.5 },
+        },
+        'Vitre': {
+          buee: { type: 'range', label: 'Buée', min: 0, max: 1, step: 0.01, value: 0.55 },
+          flou: { type: 'range', label: 'Flou de la scène', min: 0, max: 1, step: 0.01, value: 0.7 },
+          loupe: { type: 'range', label: 'Effet de lentille', min: 0.2, max: 1, step: 0.01, value: 0.55 },
+        },
+        'Scène': {
+          scene: { type: 'select', label: 'Derrière la vitre', options: { lumieres: 'Lumières de ville', logo: 'Logo', bandes: 'Bandes de couleur', image: 'Image' }, value: 'lumieres' },
+          image: { type: 'file', label: 'Image ou logo', accept: 'image/*', show: (q) => q.scene === 'logo' || q.scene === 'image' },
+          fond: { type: 'color', label: 'Fond de la scène', value: '#141626' },
+          couleurs: { type: 'palette', label: 'Couleurs de la scène', value: ['#e5452a', '#f2c230', '#f2b0c8', '#4b6cf0', '#f4f3f0'] },
+          derive: { type: 'range', label: 'Mouvement de la scène', min: 0, max: 2, step: 0.05, value: 0.6 },
+        },
+      },
+      presets: {
+        'Ville': {},
+        'Logo': { scene: 'logo', fond: P60[0], couleurs: [P60[1], '#e5452a'], buee: 0.45, flou: 0.8 },
+        'Biennale': { scene: 'bandes', fond: BIEN[0], couleurs: [BIEN[2], BIEN[3], BIEN[4], BIEN[1]], buee: 0.4 },
+        'Averse': { intensite: 0.95, taille: 0.8, glissement: 0.8, traces: 0.8, buee: 0.7 },
+        'Bruine': { intensite: 0.25, taille: 0.55, glissement: 0.2, traces: 0.2, buee: 0.8, flou: 0.9 },
+        'Kegelbahn': { fond: KB[0], couleurs: [KB[1], KB[2], KB[3], KB[4], KB[5]], scene: 'lumieres' },
+        'Menthe': { scene: 'bandes', fond: MENTHE[0], couleurs: [MENTHE[2], MENTHE[3], MENTHE[1]], buee: 0.5 },
+        'Luzern': { scene: 'lumieres', fond: LUZ[3], couleurs: [LUZ[0], LUZ[1], LUZ[2], LUZ[4]], taille: 1.4 },
+        'Thermique': { scene: 'bandes', fond: THER[0], couleurs: [THER[1], THER[2], THER[3], THER[4]], flou: 0.5 },
+        'Acide': { scene: 'logo', fond: ACIDE[1], couleurs: [ACIDE[2], ACIDE[3]], taille: 1.6, buee: 0.35 },
+        'Néons': { scene: 'lumieres', fond: '#07070c', couleurs: ['#ff3b6b', '#3bd3ff', '#b45cff', '#ffe14d'], intensite: 0.6, buee: 0.35, derive: 1.2 },
+        'Pyramides': { scene: 'bandes', fond: PYR[0], couleurs: [PYR[2], PYR[3], PYR[4], PYR[5]], taille: 1.2 },
+        'Orbite': { scene: 'logo', fond: ORB[1], couleurs: [ORB[0], ORB[2]], intensite: 0.35, taille: 2 },
+      },
+      brand(colors) {
+        const c = colors.slice(1).length ? colors.slice(1) : ['#e5452a'];
+        return { fond: colors[0], couleurs: c.slice(0, 6) };
+      },
+      pointer: {
+        down: (q) => { wipe = { x: q.x, y: q.y, x0: q.x, y0: q.y, moved: false, px: q.x, py: q.y }; },
+        drag: (q) => { if (wipe) { if (Math.hypot(q.x - wipe.x0, q.y - wipe.y0) > 6) wipe.moved = true; wipe.px = wipe.x; wipe.py = wipe.y; wipe.x = q.x; wipe.y = q.y; } },
+        up: (q) => { if (wipe && !wipe.moved) { const S = Math.min(app.size.w, app.size.h); addDrop(q.x, q.y, S * 0.03 * p.taille, true); } wipe = null; },
+        wheel: (q, dy) => app.set('intensite', Math.max(0, Math.min(1, +(p.intensite + (dy > 0 ? -0.05 : 0.05)).toFixed(2)))),
+      },
+      onChange(k) { if (k === 'image' || k === 'scene') logoKey = ''; if (k === '*' || k === 'scene' || k === 'couleurs') built = false; },
+      onSeed() { built = false; drops = []; },
+      export: { name: 'gouttes', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    // ——— Scène derrière la vitre ———
+    function imageSource() {
+      const img = p.image || (p.scene === 'logo' ? app.logoImg : null), key = (img ? (img.src || 'c') : 'demo') + p.scene;
+      if (key === logoKey && logoCv) return logoCv;
+      logoKey = key; const M = 512; logoCv = document.createElement('canvas'); logoCv.width = logoCv.height = M;
+      const x = logoCv.getContext('2d');
+      if (img) {
+        const iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height;
+        if (p.scene === 'image') { const k = M / Math.min(iw, ih); x.drawImage(img, (M - iw * k) / 2, (M - ih * k) / 2, iw * k, ih * k); }
+        else { const k = M * 0.86 / Math.max(iw, ih); x.drawImage(img, (M - iw * k) / 2, (M - ih * k) / 2, iw * k, ih * k); }
+      } else { x.fillStyle = '#000'; x.beginPath(); x.arc(256, 256, 210, 0, TAU); x.arc(256, 256, 122, 0, TAU, true); x.fill('evenodd'); x.fillRect(228, 28, 56, 456); }
+      logoCv.isPhoto = !!(img && p.scene === 'image');
+      return logoCv;
+    }
+    const tintCache = new Map();
+    function tinted(col) {
+      const src = imageSource(), key = logoKey + col; if (tintCache.has(key)) return tintCache.get(key);
+      const c = document.createElement('canvas'); c.width = c.height = src.width; const x = c.getContext('2d');
+      x.drawImage(src, 0, 0); x.globalCompositeOperation = 'source-in'; x.fillStyle = col; x.fillRect(0, 0, c.width, c.height);
+      if (tintCache.size > 12) tintCache.clear(); tintCache.set(key, c); return c;
+    }
+    function buildLights() {
+      const r = app.rng(5), { w, h } = app.size, S = Math.min(w, h), cols = p.couleurs.length ? p.couleurs : ['#e5452a'];
+      lights = [];
+      for (let i = 0; i < 46; i++) lights.push({ x: r() * w, y: h * (0.25 + r() * 0.75), r: S * (0.02 + r() * r() * 0.12), col: cols[i % cols.length], ph: r() * TAU, sp: (r() - 0.5) * 0.6, a: 0.5 + r() * 0.5 });
+      built = true;
+    }
+    function drawScene(t) {
+      const { w, h } = app.size, x = sceneX, S = Math.min(w, h), cols = p.couleurs.length ? p.couleurs : ['#e5452a'];
+      x.setTransform(1, 0, 0, 1, 0, 0);
+      x.fillStyle = p.fond; x.fillRect(0, 0, w, h);
+      const d = p.derive;
+      if (p.scene === 'lumieres') {
+        // lumières de ville : disques lumineux qui dérivent et clignotent doucement
+        x.globalCompositeOperation = 'lighter';
+        for (const L of lights) {
+          const lx = ((L.x + t * d * L.sp * 60) % (w + 2 * L.r) + (w + 2 * L.r)) % (w + 2 * L.r) - L.r, ly = L.y + Math.sin(t * 0.3 * d + L.ph) * S * 0.01;
+          x.globalAlpha = L.a * (0.75 + 0.25 * Math.sin(t * 1.3 + L.ph)); x.fillStyle = L.col; x.beginPath(); x.arc(lx, ly, L.r, 0, TAU); x.fill();
+        }
+        x.globalAlpha = 1; x.globalCompositeOperation = 'source-over';
+      } else if (p.scene === 'bandes') {
+        // grandes bandes obliques qui défilent
+        const n = cols.length, bw = S * 0.22, off = (t * d * 30) % (bw * n);
+        x.save(); x.translate(w / 2, h / 2); x.rotate(-0.35);
+        for (let k = -Math.ceil((w + h) / bw) - n; k < Math.ceil((w + h) / bw) + n; k++) { x.fillStyle = cols[((k % n) + n) % n]; x.fillRect(k * bw + off - (w + h), -(w + h), bw * 0.62, 2 * (w + h)); }
+        x.restore();
+      } else {
+        const src = imageSource();
+        if (src.isPhoto) { const k = Math.max(w, h) / src.width * (1.05 + 0.03 * Math.sin(t * 0.2 * d)); x.drawImage(src, (w - src.width * k) / 2, (h - src.height * k) / 2, src.width * k, src.height * k); }
+        else {
+          const Z = S * 0.7, ox = Math.sin(t * 0.25 * d) * S * 0.04;
+          if (cols[1]) { x.globalAlpha = 0.9; x.drawImage(tinted(cols[1]), (w - Z) / 2 + ox + S * 0.025, (h - Z) / 2 + S * 0.025, Z, Z); x.globalAlpha = 1; }
+          x.drawImage(tinted(cols[0]), (w - Z) / 2 + ox, (h - Z) / 2, Z, Z);
+        }
+      }
+    }
+    // flou bon marché : réduction puis agrandissement lissé
+    function blurScene(w, h) {
+      const k = 4 + Math.round(p.flou * 12), sw = Math.max(8, Math.round(w / k)), sh = Math.max(8, Math.round(h / k));
+      if (smallCv.width !== sw || smallCv.height !== sh) { smallCv.width = sw; smallCv.height = sh; }
+      smallX.imageSmoothingQuality = 'high';
+      smallX.drawImage(sceneCv, 0, 0, sw, sh);
+      blurX.setTransform(1, 0, 0, 1, 0, 0); blurX.imageSmoothingEnabled = true; blurX.imageSmoothingQuality = 'high';
+      blurX.drawImage(smallCv, 0, 0, w, h);
+    }
+
+    // ——— Gouttes ———
+    function addDrop(x, y, r, big) { drops.push({ x, y, r, vy: 0, vx: 0, slide: false, wob: app.random() * TAU, age: 0, trailT: 0, big: !!big }); }
+    function physics(dt) {
+      const { w, h } = app.size, S = Math.min(w, h), tz = p.taille;
+      // nouvelles gouttes : beaucoup de petites, quelques moyennes
+      rainAcc += dt * p.intensite * 260;
+      while (rainAcc >= 1) {
+        rainAcc -= 1; const u = app.random();
+        const r = S * tz * (u < 0.86 ? 0.0018 + app.random() * 0.0035 : 0.006 + app.random() * app.random() * 0.016);
+        addDrop(app.random() * w, app.random() * h, r);
+      }
+      const slideR = S * tz * (0.0145 - p.glissement * 0.0075);
+      for (const d of drops) {
+        d.age += dt;
+        if (d.r > slideR) {
+          d.slide = true;
+          // glisse d'autant plus vite que la goutte est grosse, en serpentant
+          const target = (d.r / slideR - 0.6) * S * 0.25;
+          d.vy += (target - d.vy) * Math.min(1, dt * 3) + (app.random() < dt * 3 ? -d.vy * 0.6 : 0);
+          d.wob += dt * (2 + app.random() * 3);
+          d.vx = Math.sin(d.wob) * d.vy * 0.12;
+          // trace : petites gouttelettes laissées derrière
+          d.trailT += dt * d.vy;
+          if (p.traces > 0 && d.trailT > d.r * (2.5 - p.traces * 1.8)) { d.trailT = 0; if (app.random() < 0.5 + p.traces * 0.5) { const tr = d.r * (0.12 + app.random() * 0.22); drops.push({ x: d.x + (app.random() - 0.5) * d.r * 0.6, y: d.y - d.r * 1.1, r: tr, vy: 0, vx: 0, slide: false, wob: 0, age: 0, trailT: 0 }); d.r = Math.sqrt(Math.max(1e-3, d.r * d.r - tr * tr)); } }
+          fogX.globalCompositeOperation = 'destination-out'; fogX.lineCap = 'round'; fogX.strokeStyle = 'rgba(0,0,0,0.55)'; fogX.lineWidth = d.r * 1.1;
+          fogX.beginPath(); fogX.moveTo(d.x, d.y - d.r * 0.2); fogX.lineTo(d.x + d.vx * dt, d.y + d.vy * dt); fogX.stroke(); fogX.globalCompositeOperation = 'source-over';
+          d.x += d.vx * dt; d.y += d.vy * dt;
+        }
+      }
+      // fusion : grille de hachage
+      const cs = Math.max(6, S * 0.03), grid = new Map(), key = (i, j) => i * 73856093 ^ j * 19349663;
+      drops.forEach((d, i) => { const k = key(Math.floor(d.x / cs), Math.floor(d.y / cs)); let a = grid.get(k); if (!a) grid.set(k, (a = [])); a.push(i); });
+      const dead = new Uint8Array(drops.length);
+      for (let i = 0; i < drops.length; i++) {
+        if (dead[i]) continue; const d = drops[i]; if (!d.slide && d.r < S * 0.004 && !d.big) continue;
+        const ci = Math.floor(d.x / cs), cj = Math.floor(d.y / cs), span = Math.ceil(d.r * 2 / cs);
+        for (let a = -span; a <= span; a++) for (let b = -span; b <= span; b++) {
+          const lst = grid.get(key(ci + a, cj + b)); if (!lst) continue;
+          for (const j of lst) {
+            if (j === i || dead[j]) continue; const e = drops[j];
+            if (Math.hypot(e.x - d.x, e.y - d.y) < (d.r + e.r) * 0.82) {
+              // l'aire se conserve ; la plus grosse absorbe l'autre
+              const [A, B] = d.r >= e.r ? [d, e] : [e, d];
+              A.r = Math.sqrt(A.r * A.r + B.r * B.r); A.x = (A.x * 0.8 + B.x * 0.2); dead[A === d ? j : i] = 1;
+              if (B === d) break;
+            }
+          }
+        }
+      }
+      drops = drops.filter((d, i) => !dead[i] && d.y - d.r < h + 10 && d.r > 0.4);
+      if (drops.length > 2600) drops.splice(0, drops.length - 2600);
+      // essuyage
+      if (wipe && wipe.moved) {
+        const R = S * 0.06;
+        drops = drops.filter((d) => distSeg(d.x, d.y, wipe.px, wipe.py, wipe.x, wipe.y) > R);
+        fogX.globalCompositeOperation = 'destination-out'; fogX.lineCap = 'round'; fogX.strokeStyle = '#000'; fogX.lineWidth = R * 2;
+        fogX.beginPath(); fogX.moveTo(wipe.px, wipe.py); fogX.lineTo(wipe.x, wipe.y); fogX.stroke(); fogX.globalCompositeOperation = 'source-over';
+        // les bords de l'essuyage gardent des gouttelettes
+        for (let k = 0; k < 6; k++) { const a = app.random() * TAU; addDrop(wipe.x + Math.cos(a) * R, wipe.y + Math.sin(a) * R, S * 0.002 * (1 + app.random() * 2)); }
+        wipe.px = wipe.x; wipe.py = wipe.y;
+      }
+      // la buée revient peu à peu
+      fogX.globalAlpha = Math.min(1, dt * 0.22 * (0.3 + p.buee)); fogX.fillStyle = '#fff'; fogX.fillRect(0, 0, w, h); fogX.globalAlpha = 1;
+    }
+    function distSeg(px, py, ax, ay, bx, by) { const vx = bx - ax, vy = by - ay, l = vx * vx + vy * vy || 1, t = Math.max(0, Math.min(1, ((px - ax) * vx + (py - ay) * vy) / l)); return Math.hypot(px - ax - vx * t, py - ay - vy * t); }
+
+    function ensure(w, h) {
+      const key = w + 'x' + h;
+      if (key === sizeKey) return;
+      sizeKey = key;
+      const mk = () => { const c = document.createElement('canvas'); c.width = Math.max(1, Math.round(w)); c.height = Math.max(1, Math.round(h)); return c; };
+      sceneCv = mk(); sceneX = sceneCv.getContext('2d'); blurCv = mk(); blurX = blurCv.getContext('2d'); fogCv = mk(); fogX = fogCv.getContext('2d'); mixCv = mk(); mixX = mixCv.getContext('2d');
+      smallCv = document.createElement('canvas'); smallX = smallCv.getContext('2d');
+      fogX.fillStyle = '#fff'; fogX.fillRect(0, 0, w, h);
+      drops = []; built = false;
+      // vitre déjà mouillée au départ
+      const S = Math.min(w, h), r = app.rng(9);
+      for (let i = 0; i < 900; i++) { const u = r(); drops.push({ x: r() * w, y: r() * h, r: S * p.taille * (u < 0.85 ? 0.0018 + r() * 0.0035 : 0.005 + r() * r() * 0.012), vy: 0, vx: 0, slide: false, wob: r() * TAU, age: 0, trailT: 0 }); }
+    }
+
+    app.loop((t, dt) => {
+      const { w, h, dpr } = app.size;
+      dt = Math.min(0.05, dt || 0);
+      ensure(w, h);
+      if (!built) buildLights();
+      time += dt;
+      physics(dt);
+      if (app.thumbnail && !warm) { warm = true; for (let k = 0; k < 240; k++) physics(1 / 60); }
+      drawScene(time);
+      blurScene(w, h);
+      // vitre : scène floue là où il y a de la buée, scène plus nette dans les traces
+      mixX.globalCompositeOperation = 'source-over'; mixX.clearRect(0, 0, w, h);
+      mixX.drawImage(blurCv, 0, 0); mixX.globalCompositeOperation = 'destination-in'; mixX.drawImage(fogCv, 0, 0); mixX.globalCompositeOperation = 'source-over';
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      // sous la buée, la vitre essuyée montre une scène à peine adoucie
+      ctx.globalAlpha = 1; ctx.drawImage(blurCv, 0, 0, w, h);
+      ctx.globalAlpha = 0.55; ctx.drawImage(sceneCv, 0, 0, w, h); ctx.globalAlpha = 1;
+      ctx.drawImage(mixCv, 0, 0, w, h);
+      // voile laiteux de la buée
+      ctx.globalAlpha = p.buee * 0.5; ctx.drawImage(fogTint(w, h), 0, 0, w, h); ctx.globalAlpha = 1;
+      drawDrops(ctx, w, h);
+      app.finish(ctx);
+    });
+    let tintCv = null;
+    function fogTint(w, h) {
+      if (!tintCv || tintCv.width !== fogCv.width || tintCv.height !== fogCv.height) { tintCv = document.createElement('canvas'); tintCv.width = fogCv.width; tintCv.height = fogCv.height; }
+      const x = tintCv.getContext('2d'); x.globalCompositeOperation = 'source-over'; x.clearRect(0, 0, w, h);
+      x.drawImage(fogCv, 0, 0); x.globalCompositeOperation = 'source-in'; x.fillStyle = '#dfe6ec'; x.fillRect(0, 0, w, h);
+      return tintCv;
+    }
+
+    function drawDrops(x, w, h) {
+      const L = p.loupe, S = Math.min(w, h);
+      // petites gouttes : un point sombre et un reflet suffisent
+      x.fillStyle = 'rgba(0,0,0,0.15)'; x.beginPath();
+      for (const d of drops) if (d.r < 2.6) { x.moveTo(d.x + d.r, d.y + d.r * 0.2); x.arc(d.x, d.y + d.r * 0.2, d.r, 0, TAU); }
+      x.fill();
+      x.fillStyle = 'rgba(255,255,255,0.55)'; x.beginPath();
+      for (const d of drops) if (d.r < 2.6) { x.moveTo(d.x - d.r * 0.2 + d.r * 0.45, d.y - d.r * 0.3); x.arc(d.x - d.r * 0.2, d.y - d.r * 0.3, d.r * 0.45, 0, TAU); }
+      x.fill();
+      // gouttes moyennes et grosses : lentille renversée
+      for (const d of drops) {
+        if (d.r < 2.6) continue;
+        const r = d.r, ry = r * (d.slide ? 1.12 : 1), view = r * (2.2 + 6 * L);
+        x.save(); x.beginPath(); x.ellipse(d.x, d.y, r, ry, 0, 0, TAU); x.clip();
+        x.translate(d.x, d.y); x.scale(-1, -1);
+        x.drawImage(sceneCv, d.x - view, d.y - view, view * 2, view * 2, -r * 1.05, -ry * 1.05, r * 2.1, ry * 2.1);
+        x.restore();
+        // ombre en bas, liseré sombre, reflet en haut
+        x.beginPath(); x.ellipse(d.x, d.y, r, ry, 0, 0, TAU);
+        x.lineWidth = Math.max(0.8, r * 0.16); x.strokeStyle = 'rgba(0,0,0,0.3)'; x.stroke();
+        x.fillStyle = 'rgba(255,255,255,0.75)'; x.beginPath(); x.ellipse(d.x - r * 0.3, d.y - ry * 0.42, r * 0.22, ry * 0.13, -0.5, 0, TAU); x.fill();
+      }
+    }
+
+    function toSVG() {
+      const { w, h } = app.size, f = (v) => v.toFixed(1);
+      // la scène et la buée sont des images ; les gouttes restent vectorielles et contiennent la scène renversée
+      const scene = sceneCv.toDataURL('image/jpeg', 0.9);
+      const mix = document.createElement('canvas'); mix.width = sceneCv.width; mix.height = sceneCv.height;
+      const mx = mix.getContext('2d'); mx.drawImage(blurCv, 0, 0); mx.globalAlpha = 0.55; mx.drawImage(sceneCv, 0, 0); mx.globalAlpha = 1; mx.drawImage(mixCv, 0, 0); mx.globalAlpha = p.buee * 0.5; mx.drawImage(fogTint(w, h), 0, 0); mx.globalAlpha = 1;
+      const out = [`<image href="${mix.toDataURL('image/jpeg', 0.9)}" width="${w}" height="${h}"/>`, `<defs><image id="scene" href="${scene}" width="${w}" height="${h}"/></defs>`];
+      const L = p.loupe; let id = 0;
+      for (const d of drops) {
+        const r = d.r, ry = r * (d.slide ? 1.12 : 1);
+        if (r < 2.6) { out.push(`<circle cx="${f(d.x)}" cy="${f(d.y + r * 0.2)}" r="${f(r)}" fill="#000" fill-opacity="0.22"/><circle cx="${f(d.x - r * 0.2)}" cy="${f(d.y - r * 0.3)}" r="${f(r * 0.45)}" fill="#fff" fill-opacity="0.55"/>`); continue; }
+        const view = r * (2.2 + 6 * L), k = (r * 2.1) / (view * 2);
+        out.push(`<clipPath id="g${id}"><ellipse cx="${f(d.x)}" cy="${f(d.y)}" rx="${f(r)}" ry="${f(ry)}"/></clipPath><g clip-path="url(#g${id})"><use href="#scene" transform="translate(${f(d.x)} ${f(d.y)}) scale(${(-k).toFixed(4)} ${(-k * ry / r).toFixed(4)}) translate(${f(-d.x)} ${f(-d.y)})"/></g><ellipse cx="${f(d.x)}" cy="${f(d.y)}" rx="${f(r)}" ry="${f(ry)}" fill="none" stroke="#000" stroke-opacity="0.3" stroke-width="${f(Math.max(0.8, r * 0.16))}"/><ellipse cx="${f(d.x - r * 0.3)}" cy="${f(d.y - ry * 0.42)}" rx="${f(r * 0.22)}" ry="${f(ry * 0.13)}" transform="rotate(-28.6 ${f(d.x - r * 0.3)} ${f(d.y - ry * 0.42)})" fill="#fff" fill-opacity="0.75"/>`);
+        id++;
+      }
+      return `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">\n${out.join('\n')}\n</svg>`;
+    }
+  </script>
+</body>
+</html>
