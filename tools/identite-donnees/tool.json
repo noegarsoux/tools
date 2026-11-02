@@ -1,0 +1,15 @@
+{
+  "slug": "identite-donnees",
+  "title": "Identité pilotée par les données",
+  "type": "system",
+  "description": "Une série de valeurs (jeu intégré, CSV importé ou retouche au pointeur) dessine la marque : rayons, anneau, barres, grille, ruban, fleur ; famille en planche.",
+  "tags": ["identite", "donnees", "csv", "systeme", "logo", "svg"],
+  "inspiration": [
+    "Patrik Hübner : identités génératives nourries par les données",
+    "Identités data-driven (CodeCrafted), marques qui changent avec un chiffre",
+    "references/identites.md ; palettes biennale, kegelbahn, salon, good-room, luzern, thermique"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
