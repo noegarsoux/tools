@@ -1,0 +1,285 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Nuée</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Nuée : une murmuration d'étourneaux. Chaque oiseau suit les règles de Reynolds (séparation,
+    // alignement, cohésion) avec ses plus proches voisins, en trois dimensions ; la projection fait
+    // apparaître les vagues de densité typiques des nuées. Le pointeur joue le rapace.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const P60 = PAL('papier-60'), BIEN = PAL('biennale'), MENTHE = PAL('menthe'), KB = PAL('kegelbahn'), GR = PAL('good-room'), NUIT = PAL('trame-nuit');
+    const LUZ = PAL('luzern'), SALON = PAL('salon'), PYR = PAL('pyramides'), ACIDE = PAL('acide'), THER = PAL('thermique'), ORB = PAL('orbite'), PHOTO = PAL('photocopie');
+
+    let N = 0, P = null, V = null, ph = null, tgt = null, built = false, predator = null, bursts = [], trailCv = null, trailX = null, time = 0;
+    let maskCache = null, maskKey = null, lastSize = '';
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.045, vignette: 0.1 },
+      hint: 'Le pointeur est un rapace : la nuée l’évite · touchez pour l’effaroucher · glissez pour la poursuivre · molette : nombre d’oiseaux',
+      notes: 'Chaque oiseau regarde au plus une douzaine de voisins dans son rayon de vision : il s’en écarte s’ils sont trop près, s’aligne sur leur vol et se rapproche de leur centre. Une cible lente fait tourner la nuée ; en mode forme, chaque oiseau rejoint un point du logo puis la nuée se défait.',
+      params: {
+        'Nuée': {
+          oiseaux: { type: 'range', label: 'Oiseaux', min: 200, max: 4000, step: 50, value: 1800 },
+          vitesse: { type: 'range', label: 'Vitesse', min: 0.2, max: 3, step: 0.05, value: 1 },
+          separation: { type: 'range', label: 'Séparation', min: 0, max: 3, step: 0.05, value: 1.2 },
+          alignement: { type: 'range', label: 'Alignement', min: 0, max: 3, step: 0.05, value: 1 },
+          cohesion: { type: 'range', label: 'Cohésion', min: 0, max: 3, step: 0.05, value: 0.9 },
+          vision: { type: 'range', label: 'Rayon de vision', min: 10, max: 90, step: 1, value: 36 },
+          agitation: { type: 'range', label: 'Agitation', min: 0, max: 1, step: 0.01, value: 0.2 },
+        },
+        'Forme': {
+          forme: { type: 'select', label: 'Forme', options: { libre: 'Vol libre', logo: 'Logo', anneau: 'Anneau', vague: 'Vague' }, value: 'libre' },
+          image: { type: 'file', label: 'Logo', accept: 'image/*', show: (q) => q.forme === 'logo' },
+          attraction: { type: 'range', label: 'Attraction de la forme', min: 0, max: 1, step: 0.01, value: 0.7, show: (q) => q.forme !== 'libre' },
+          cycle: { type: 'range', label: 'Cycle (secondes)', min: 4, max: 30, step: 0.5, value: 12, show: (q) => q.forme !== 'libre' },
+        },
+        'Rendu': {
+          taille: { type: 'range', label: 'Taille des oiseaux', min: 0.5, max: 4, step: 0.05, value: 2 },
+          profondeur: { type: 'range', label: 'Profondeur', min: 0, max: 1, step: 0.01, value: 0.6 },
+          traine: { type: 'range', label: 'Traînées', min: 0, max: 0.95, step: 0.01, value: 0 },
+          ciel: { type: 'color', label: 'Ciel en haut', value: '#cfd6dc' },
+          horizon: { type: 'color', label: 'Ciel en bas', value: '#f1d9c0' },
+          couleurs: { type: 'palette', label: 'Oiseaux', value: ['#1c1b1f'] },
+        },
+      },
+      presets: {
+        'Crépuscule': {},
+        'Logo': { forme: 'logo', oiseaux: 2600, ciel: P60[0], horizon: P60[0], couleurs: [P60[1]], attraction: 0.8, cycle: 12, taille: 1.6 },
+        'Nuit': { ciel: '#0c0d18', horizon: '#2a2240', couleurs: ['#f4f3f0'], profondeur: 0.8, traine: 0.6, oiseaux: 2200 },
+        'Anneau': { forme: 'anneau', ciel: MENTHE[0], horizon: '#ffffff', couleurs: [MENTHE[1], MENTHE[3]], attraction: 0.6, cycle: 16 },
+        'Vague': { forme: 'vague', ciel: BIEN[0], horizon: BIEN[3], couleurs: [BIEN[1], BIEN[2]], oiseaux: 2400, attraction: 0.5 },
+        'Essaim': { oiseaux: 3600, vision: 22, separation: 1.6, cohesion: 1.4, agitation: 0.45, taille: 0.9, ciel: '#e9e6df', horizon: '#e9e6df', couleurs: ['#111111'] },
+        'Kegelbahn': { ciel: KB[0], horizon: '#1d0f2a', couleurs: [KB[1], KB[2], KB[3]], traine: 0.75, oiseaux: 1600, profondeur: 0.4 },
+        'Luzern': { ciel: LUZ[2], horizon: LUZ[0], couleurs: [LUZ[3], LUZ[1]], oiseaux: 2000 },
+        'Thermique': { ciel: THER[1], horizon: THER[2], couleurs: [THER[3], THER[5]], traine: 0.5, forme: 'anneau', attraction: 0.45 },
+        'Acide': { forme: 'logo', ciel: ACIDE[0], horizon: ACIDE[3], couleurs: [ACIDE[1], ACIDE[2]], oiseaux: 3000, attraction: 0.85, taille: 1 },
+        'Photocopie': { ciel: PHOTO[0], horizon: PHOTO[0], couleurs: [PHOTO[1], PHOTO[2]], profondeur: 1, oiseaux: 2800, taille: 1.8, alignement: 1.6 },
+        'Orbite': { ciel: ORB[1], horizon: ORB[1], couleurs: [ORB[0], ORB[2]], traine: 0.85, oiseaux: 900, vitesse: 1.4, taille: 1.2 },
+        'Pyramides': { forme: 'vague', ciel: PYR[0], horizon: PYR[4], couleurs: [PYR[1], PYR[6]], oiseaux: 2000 },
+      },
+      brand(colors) {
+        const c = colors.slice(1).length ? colors.slice(1) : ['#111111'];
+        const lum = (h) => { const n = parseInt(h.slice(1), 16); return ((n >> 16) & 255) * 0.299 + ((n >> 8) & 255) * 0.587 + (n & 255) * 0.114; };
+        const sorted = c.slice().sort((a, b) => lum(a) - lum(b)), bgL = lum(colors[0]);
+        const birds = bgL > 128 ? sorted.slice(0, 2) : sorted.slice(-2).reverse();
+        const hz = c.filter((x) => !birds.includes(x))[0] || colors[0];
+        return { ciel: colors[0], horizon: hz, couleurs: birds };
+      },
+      pointer: {
+        move: (q) => { predator = { x: q.x, y: q.y, k: predator?.drag ? 1 : 0.6, drag: predator?.drag }; },
+        down: (q) => { predator = { x: q.x, y: q.y, k: 1, drag: true, x0: q.x, y0: q.y, moved: false }; },
+        drag: (q) => { if (predator) { if (Math.hypot(q.x - predator.x0, q.y - predator.y0) > 8) predator.moved = true; predator.x = q.x; predator.y = q.y; predator.k = 1; } },
+        up: (q) => { if (predator && !predator.moved) bursts.push({ x: q.x, y: q.y, t: 0 }); if (predator) { predator.drag = false; predator.k = 0.6; } },
+        wheel: (q, dy) => app.set('oiseaux', Math.max(200, Math.min(4000, p.oiseaux + (dy > 0 ? -100 : 100)))),
+      },
+      onChange(k) { if (['oiseaux', '*'].includes(k)) built = false; if (k === 'forme' || k === 'image') { maskKey = null; assignTargets(); } },
+      onSeed() { built = false; },
+      export: { name: 'nuee', svg: () => toSVG() },
+    });
+    const p = app.params;
+    canvas.addEventListener('pointerleave', () => { predator = null; });
+
+    // ——— Formes cibles ———
+    function logoPoints(n) {
+      const img = p.image || app.logoImg, key = (img ? (img.src || 'c') : 'demo') + n;
+      if (key === maskKey && maskCache) return maskCache;
+      maskKey = key;
+      const M = 200, c = document.createElement('canvas'); c.width = c.height = M; const x = c.getContext('2d', { willReadFrequently: true });
+      if (img) { const iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height, k = M * 0.92 / Math.max(iw, ih); x.drawImage(img, (M - iw * k) / 2, (M - ih * k) / 2, iw * k, ih * k); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(100, 100, 92, 0, TAU); x.arc(100, 100, 54, 0, TAU, true); x.fill('evenodd'); x.fillRect(88, 4, 24, 192); }
+      const d = x.getImageData(0, 0, M, M).data, pts = [];
+      let transp = 0; for (let i = 3; i < d.length; i += 16) if (d[i] < 128) transp++;
+      const useA = transp > d.length / 16 * 0.05;
+      for (let j = 0; j < M; j++) for (let i = 0; i < M; i++) { const o = (j * M + i) * 4, l = (d[o] * 0.2126 + d[o + 1] * 0.7152 + d[o + 2] * 0.0722) / 255; if (useA ? d[o + 3] > 128 : d[o + 3] > 128 && l < 0.5) pts.push([i / M, j / M]); }
+      maskCache = pts.length ? pts : [[0.5, 0.5]];
+      return maskCache;
+    }
+    function assignTargets() {
+      if (!N) return;
+      const { w, h } = app.size, S = Math.min(w, h), r = app.rng(77), D = depth();
+      tgt = new Float32Array(N * 3);
+      const pts = p.forme === 'logo' ? logoPoints(N) : null;
+      for (let i = 0; i < N; i++) {
+        let x = w / 2, y = h / 2, z = 0;
+        if (p.forme === 'logo') { const q = pts[Math.floor(r() * pts.length)], Z = S * 0.72; x = (w - Z) / 2 + (q[0] + (r() - 0.5) / 200) * Z; y = (h - Z) / 2 + (q[1] + (r() - 0.5) / 200) * Z; z = (r() - 0.5) * D * 0.15; }
+        else if (p.forme === 'anneau') { const a = r() * TAU, rr = S * (0.3 + (r() - 0.5) * 0.08); x = w / 2 + Math.cos(a) * rr; y = h / 2 + Math.sin(a) * rr * 0.9; z = (r() - 0.5) * D * 0.3; }
+        else if (p.forme === 'vague') { const u = r(); x = w * (0.08 + u * 0.84); y = h / 2 + Math.sin(u * TAU * 1.5) * h * 0.2 + (r() - 0.5) * h * 0.08; z = (r() - 0.5) * D * 0.4; }
+        tgt[i * 3] = x; tgt[i * 3 + 1] = y; tgt[i * 3 + 2] = z;
+      }
+    }
+    const depth = () => Math.min(app.size.w, app.size.h) * 0.45;
+
+    function build() {
+      const { w, h } = app.size, r = app.rng(31), D = depth();
+      N = Math.round(p.oiseaux);
+      P = new Float32Array(N * 3); V = new Float32Array(N * 3); ph = new Float32Array(N);
+      // départ : un nuage ovale qui vole déjà dans une direction commune
+      const a0 = r() * TAU;
+      for (let i = 0; i < N; i++) {
+        const u = r() * TAU, rr = Math.sqrt(r());
+        P[i * 3] = w / 2 + Math.cos(u) * rr * w * 0.28; P[i * 3 + 1] = h / 2 + Math.sin(u) * rr * h * 0.2; P[i * 3 + 2] = (r() - 0.5) * D;
+        V[i * 3] = Math.cos(a0) * 60 + (r() - 0.5) * 20; V[i * 3 + 1] = Math.sin(a0) * 30 + (r() - 0.5) * 20; V[i * 3 + 2] = (r() - 0.5) * 20;
+        ph[i] = r() * TAU;
+      }
+      assignTargets();
+      built = true;
+    }
+
+    // ——— Vol ———
+    let gHead = null, gNext = null;
+    function step(dt, t) {
+      const { w, h } = app.size, S = Math.min(w, h), D = depth(), R = p.vision, R2 = R * R;
+      const gx = Math.max(1, Math.ceil(w / R) + 2), gy = Math.max(1, Math.ceil(h / R) + 2), gz = Math.max(1, Math.ceil((2 * D) / R) + 2), G = gx * gy * gz;
+      if (!gHead || gHead.length < G) gHead = new Int32Array(G);
+      if (!gNext || gNext.length < N) gNext = new Int32Array(N);
+      gHead.fill(-1, 0, G);
+      const cell = (x, y, z) => {
+        const ix = Math.min(gx - 1, Math.max(0, Math.floor(x / R) + 1)), iy = Math.min(gy - 1, Math.max(0, Math.floor(y / R) + 1)), iz = Math.min(gz - 1, Math.max(0, Math.floor((z + D) / R) + 1));
+        return (iz * gy + iy) * gx + ix;
+      };
+      for (let i = 0; i < N; i++) { const c = cell(P[i * 3], P[i * 3 + 1], P[i * 3 + 2]); gNext[i] = gHead[c]; gHead[c] = i; }
+      const vmax = 140 * p.vitesse, vmin = 55 * p.vitesse, sep = p.separation, ali = p.alignement, coh = p.cohesion, ag = p.agitation;
+      // Cible lente qui fait virer la nuée (vol libre) ; forme : attraction qui monte, tient, puis se relâche.
+      const Tx = w * (0.5 + 0.3 * Math.sin(t * 0.13)), Ty = h * (0.5 + 0.22 * Math.sin(t * 0.21 + 1.3)), Tz = D * 0.3 * Math.sin(t * 0.17);
+      let shape = 0;
+      if (p.forme !== 'libre' && tgt) { const c = (t % p.cycle) / p.cycle; shape = p.attraction * (c < 0.15 ? c / 0.15 : c < 0.65 ? 1 : c < 0.8 ? 1 - (c - 0.65) / 0.15 : 0); shape = shape * shape * (3 - 2 * shape); }
+      const pr = predator, prR = S * 0.16;
+      // Pilotage commun : la même poussée pour tous, vers la cible, à partir du centre de la nuée (pas de contraction).
+      let Cx = 0, Cy = 0, Cz = 0; for (let i = 0; i < N; i++) { Cx += P[i * 3]; Cy += P[i * 3 + 1]; Cz += P[i * 3 + 2]; }
+      Cx /= N; Cy /= N; Cz /= N;
+      let Gx = Tx - Cx, Gy = Ty - Cy, Gz = Tz - Cz; const Gl = Math.hypot(Gx, Gy, Gz) + S * 0.15;
+      const Gk = 95 * p.vitesse * (1 - shape); Gx = Gx / Gl * Gk; Gy = Gy / Gl * Gk; Gz = Gz / Gl * Gk;
+      const mx = w * 0.08, my = h * 0.1;
+      for (let i = 0; i < N; i++) {
+        const o = i * 3, x = P[o], y = P[o + 1], z = P[o + 2];
+        let sx = 0, sy = 0, sz = 0, ax = 0, ay = 0, az = 0, cx = 0, cy = 0, cz = 0, n = 0;
+        const ix = Math.min(gx - 1, Math.max(0, Math.floor(x / R) + 1)), iy = Math.min(gy - 1, Math.max(0, Math.floor(y / R) + 1)), iz = Math.min(gz - 1, Math.max(0, Math.floor((z + D) / R) + 1));
+        outer:
+        for (let dz = -1; dz <= 1; dz++) { const zz = iz + dz; if (zz < 0 || zz >= gz) continue;
+          for (let dy = -1; dy <= 1; dy++) { const yy = iy + dy; if (yy < 0 || yy >= gy) continue;
+            for (let dx = -1; dx <= 1; dx++) { const xx = ix + dx; if (xx < 0 || xx >= gx) continue;
+              for (let j = gHead[(zz * gy + yy) * gx + xx]; j >= 0; j = gNext[j]) {
+                if (j === i) continue;
+                const q = j * 3, ex = P[q] - x, ey = P[q + 1] - y, ez = P[q + 2] - z, d2 = ex * ex + ey * ey + ez * ez;
+                if (d2 > R2 || d2 < 1e-6) continue;
+                const inv = 1 / d2; if (d2 < R2 * 0.35) { sx -= ex * inv; sy -= ey * inv; sz -= ez * inv; }
+                ax += V[q]; ay += V[q + 1]; az += V[q + 2]; cx += ex; cy += ey; cz += ez;
+                if (++n >= 12) break outer;
+              }
+            }
+          }
+        }
+        let fx = 0, fy = 0, fz = 0;
+        if (n) {
+          fx += sx * sep * 2200 * (1 - shape * 0.75) + (ax / n - V[o]) * ali * 1.1 + (cx / n) * coh * 1.0;
+          fy += sy * sep * 2200 * (1 - shape * 0.75) + (ay / n - V[o + 1]) * ali * 1.1 + (cy / n) * coh * 1.0;
+          fz += sz * sep * 2200 * (1 - shape * 0.75) + (az / n - V[o + 2]) * ali * 1.1 + (cz / n) * coh * 1.0;
+        }
+        // cible commune ou forme
+        fx += Gx; fy += Gy; fz += Gz;
+        // tenue d'ensemble : au-delà d'un certain rayon, un oiseau isolé revient vers la nuée
+        { const ex = Cx - x, ey = Cy - y, ez = Cz - z, d = Math.hypot(ex, ey, ez) + 1e-3, Rf = S * 0.24 * (1 - shape); if (d > Rf) { const k = (d - Rf) / d * 1.4 * (1 - shape); fx += ex * k; fy += ey * k; fz += ez * k; } }
+        if (shape > 0) { fx += (tgt[o] - x) * shape * 2.2 - V[o] * shape * 1.2; fy += (tgt[o + 1] - y) * shape * 2.2 - V[o + 1] * shape * 1.2; fz += (tgt[o + 2] - z) * shape * 2.2 - V[o + 2] * shape * 1.2; }
+        // bords souples
+        if (x < mx) fx += (mx - x) * 4; else if (x > w - mx) fx -= (x - (w - mx)) * 4;
+        if (y < my) fy += (my - y) * 4; else if (y > h - my) fy -= (y - (h - my)) * 4;
+        if (z < -D) fz += (-D - z) * 1.5; else if (z > D) fz -= (z - D) * 1.5;
+        // rapace : fuite, d'autant plus forte qu'il est près
+        if (pr) { const ex = x - pr.x, ey = y - pr.y, d = Math.hypot(ex, ey) + 1; if (d < prR) { const f = (1 - d / prR) * 2600 * pr.k; fx += ex / d * f; fy += ey / d * f; } }
+        for (const b of bursts) { const ex = x - b.x, ey = y - b.y, d = Math.hypot(ex, ey) + 1, front = b.t * S * 1.1; if (Math.abs(d - front) < S * 0.12) { const f = 3800 * (1 - b.t / 0.9); fx += ex / d * f; fy += ey / d * f; fz += (Math.sin(ph[i]) * f * 0.5); } }
+        // agitation
+        fx += Math.sin(t * 2.3 + ph[i]) * ag * 120; fy += Math.cos(t * 1.9 + ph[i] * 1.3) * ag * 120;
+        V[o] += fx * dt; V[o + 1] += fy * dt; V[o + 2] += fz * dt;
+        let sp = Math.hypot(V[o], V[o + 1], V[o + 2]);
+        const lo = shape > 0.5 ? vmin * (1 - shape) * 0.8 : vmin, hi = vmax * (1 + (pr ? 0.4 : 0));
+        if (sp > hi) { const k = hi / sp; V[o] *= k; V[o + 1] *= k; V[o + 2] *= k; } else if (sp < lo && sp > 1e-3) { const k = lo / sp; V[o] *= k; V[o + 1] *= k; V[o + 2] *= k; }
+      }
+      for (let i = 0; i < N * 3; i++) P[i] += V[i] * dt;
+    }
+
+    // ——— Dessin : chaque oiseau est un petit V qui bat des ailes ———
+    const hex = (h) => { const n = parseInt(h.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; };
+    function birdBuckets(t) {
+      const { w, h } = app.size, D = depth(), f = Math.max(w, h) * 1.4, NB = 5, cols = (p.couleurs.length ? p.couleurs : ['#111111']).map(hex);
+      const sky = hex(p.ciel), hz = hex(p.horizon);
+      const out = [];
+      for (let ci = 0; ci < cols.length; ci++) for (let b = 0; b < NB; b++) out.push({ ci, b, segs: [] });
+      for (let i = 0; i < N; i++) {
+        const o = i * 3, z = P[o + 2], s = f / (f + z * 1.2 * p.profondeur), x = w / 2 + (P[o] - w / 2) * s, y = h / 2 + (P[o + 1] - h / 2) * s;
+        if (x < -20 || x > w + 20 || y < -20 || y > h + 20) continue;
+        let vx = V[o] + 0.001, vy = V[o + 1]; const vl = Math.hypot(vx, vy) || 1; vx /= vl; vy /= vl;
+        const L = p.taille * 2.6 * s * (1 + 0.15 * p.profondeur), flap = 0.35 + 0.65 * Math.abs(Math.sin(t * 11 + ph[i] * 3));
+        const nx = -vy, ny = vx;
+        const bx = x - vx * L * 0.6, by = y - vy * L * 0.6;
+        const seg = [bx + nx * L * flap, by + ny * L * flap, x, y, bx - nx * L * flap, by - ny * L * flap];
+        const bk = Math.max(0, Math.min(NB - 1, Math.floor(((z / D) * 0.5 + 0.5) * NB)));
+        out[(i % cols.length) * NB + bk].segs.push(seg);
+      }
+      // couleur par profondeur : les oiseaux lointains se fondent dans le ciel
+      for (const g of out) {
+        const c = cols[g.ci], k = (g.b / (NB - 1)) * 0.55 * p.profondeur, m = sky.map((v, q) => (v + hz[q]) / 2);
+        g.col = `rgb(${c.map((v, q) => Math.round(v + (m[q] - v) * k)).join(',')})`;
+        g.lw = Math.max(0.8, p.taille * 0.6 * (1 - g.b / (NB - 1) * 0.3 * p.profondeur));
+      }
+      return out;
+    }
+
+    function skyFill(x, w, h) {
+      const g = x.createLinearGradient(0, 0, 0, h); g.addColorStop(0, p.ciel); g.addColorStop(1, p.horizon);
+      x.fillStyle = g; x.fillRect(0, 0, w, h);
+    }
+
+    app.loop((t, dt) => {
+      const { w, h, dpr } = app.size;
+      dt = Math.min(0.04, dt || 0);
+      const sz = w + 'x' + h;
+      if (!built || sz !== lastSize) {
+        lastSize = sz; build();
+        // Vignette : on laisse la nuée voler quelques secondes pour qu'elle prenne sa forme.
+        if (app.thumbnail) for (let k = 0; k < 420; k++) { time += 1 / 60; step(1 / 120, time); step(1 / 120, time); }
+      }
+      time += dt;
+      const sub = 2; for (let s = 0; s < sub; s++) step(dt / sub, time);
+      for (const b of bursts) b.t += dt;
+      bursts = bursts.filter((b) => b.t < 0.9);
+      const B = birdBuckets(time);
+      // calque de traînées
+      if (!trailCv || trailCv.width !== canvas.width || trailCv.height !== canvas.height) { trailCv = document.createElement('canvas'); trailCv.width = canvas.width; trailCv.height = canvas.height; trailX = trailCv.getContext('2d'); trailX.setTransform(dpr, 0, 0, dpr, 0, 0); skyFill(trailX, w, h); }
+      trailX.setTransform(dpr, 0, 0, dpr, 0, 0);
+      trailX.globalAlpha = 1 - p.traine; skyFill(trailX, w, h); trailX.globalAlpha = 1;
+      trailX.lineCap = 'round'; trailX.lineJoin = 'round';
+      for (let k = B.length - 1; k >= 0; k--) {
+        const g = B[k]; if (!g.segs.length) continue;
+        trailX.strokeStyle = g.col; trailX.lineWidth = g.lw; trailX.beginPath();
+        for (const s of g.segs) { trailX.moveTo(s[0], s[1]); trailX.lineTo(s[2], s[3]); trailX.lineTo(s[4], s[5]); }
+        trailX.stroke();
+      }
+      ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.drawImage(trailCv, 0, 0);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      app.finish(ctx);
+    });
+
+    function toSVG() {
+      const { w, h } = app.size, B = birdBuckets(time), f = (v) => v.toFixed(1), out = [];
+      for (let k = B.length - 1; k >= 0; k--) {
+        const g = B[k]; if (!g.segs.length) continue;
+        out.push(`<path d="${g.segs.map((s) => `M${f(s[0])} ${f(s[1])}L${f(s[2])} ${f(s[3])}L${f(s[4])} ${f(s[5])}`).join('')}" fill="none" stroke="${g.col}" stroke-width="${g.lw.toFixed(2)}" stroke-linecap="round" stroke-linejoin="round"/>`);
+      }
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">\n<defs><linearGradient id="ciel" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="${p.ciel}"/><stop offset="1" stop-color="${p.horizon}"/></linearGradient></defs>\n<rect width="100%" height="100%" fill="url(#ciel)"/>\n${out.join('\n')}\n</svg>`;
+    }
+  </script>
+</body>
+</html>

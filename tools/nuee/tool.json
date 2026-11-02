@@ -1,0 +1,15 @@
+{
+  "slug": "nuee",
+  "title": "Nuée",
+  "type": "motion",
+  "description": "Une murmuration d'étourneaux en trois dimensions qui vire, se resserre et s'étire, fuit le pointeur comme un rapace et peut dessiner le logo.",
+  "tags": ["boids", "murmuration", "essaim", "oiseaux", "logo", "svg"],
+  "inspiration": [
+    "Craig Reynolds, Boids (1987)",
+    "Ballerini et al., règle des voisins topologiques chez l'étourneau (2008)",
+    "references/physique-maths.md ; palettes biennale, menthe, kegelbahn, photocopie"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
