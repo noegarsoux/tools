@@ -1,0 +1,330 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Gelée</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Gelée : des formes molles (le logo, des cubes, des ronds, des étoiles) qui tombent, s'empilent,
+    // tremblent et rebondissent. Chaque forme est un réseau de particules : des liens entre voisines
+    // (dynamique par positions) et un rappel global vers la forme d'origine (appariement de forme,
+    // Müller 2005) qui garde la silhouette tout en la laissant s'écraser.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const BIEN = PAL('biennale'), KB = PAL('kegelbahn'), SALON = PAL('salon'), MENTHE = PAL('menthe'), GR = PAL('good-room'), GLY = PAL('glyphes'), PIX = PAL('pixels'), ACIDE = PAL('acide');
+
+    let bodies = [], parts = [], links = [], bKey = '', time = 0, lastDrop = 0, dropQ = [], shake = 0, grab = null, frozen = false, shapeCache = {}, logoKey = null;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.04, vignette: 0.2 },
+      hint: 'Attrapez une forme pour l’étirer et la lancer · touchez pour la pincer · molette : fermeté',
+      notes: 'Chaque forme est un réseau de particules. Les liens entre voisines gardent la matière d’un seul tenant ; un rappel global ramène l’ensemble vers sa forme de repos (rotation et écrasement compris), sans jamais la figer. Moins de fermeté, plus de tremblement ; plus d’écrasement, plus de rebond mou.',
+      params: {
+        'Formes': {
+          forme: { type: 'select', label: 'Forme', options: { logo: 'Logo', cube: 'Cubes', rond: 'Ronds', etoile: 'Étoiles', melange: 'Mélange' }, value: 'melange' },
+          image: { type: 'file', label: 'Logo', accept: 'image/*', show: (q) => q.forme === 'logo' || q.forme === 'melange' },
+          nombre: { type: 'range', label: 'Nombre', min: 1, max: 14, step: 1, value: 7 },
+          taille: { type: 'range', label: 'Taille', min: 0.08, max: 0.5, step: 0.01, value: 0.2 },
+          finesse: { type: 'range', label: 'Finesse du réseau', min: 5, max: 16, step: 1, value: 9 },
+        },
+        'Matière': {
+          fermete: { type: 'range', label: 'Fermeté', min: 0, max: 1, step: 0.01, value: 0.35 },
+          ecrasement: { type: 'range', label: 'Écrasement', min: 0, max: 1, step: 0.01, value: 0.5 },
+          amorti: { type: 'range', label: 'Amorti', min: 0, max: 1, step: 0.01, value: 0.25 },
+          gravite: { type: 'range', label: 'Pesanteur', min: 0, max: 2, step: 0.01, value: 1 },
+          secousses: { type: 'range', label: 'Secousses (par minute)', min: 0, max: 30, step: 1, value: 8 },
+        },
+        'Rendu': {
+          couleurs: { type: 'palette', label: 'Couleurs', value: ['#e5452a', '#f2b0c8', '#f2e640', '#4b6cf0'] },
+          transparence: { type: 'range', label: 'Transparence', min: 0, max: 0.8, step: 0.01, value: 0.15 },
+          brillance: { type: 'range', label: 'Brillance', min: 0, max: 1, step: 0.01, value: 0.7 },
+          fond: { type: 'color', label: 'Fond', value: '#f4f3f0' },
+          sol: { type: 'color', label: 'Sol', value: '#e4e1da' },
+        },
+      },
+      presets: {
+        'Mélange': {},
+        'Logo': { forme: 'logo', nombre: 3, taille: 0.34, finesse: 12 },
+        'Cubes': { forme: 'cube', nombre: 9, taille: 0.17 },
+        'Ronds mous': { forme: 'rond', nombre: 10, taille: 0.16, fermete: 0.15, ecrasement: 0.8 },
+        'Étoiles': { forme: 'etoile', nombre: 8, taille: 0.2, finesse: 11 },
+        'Géante': { forme: 'logo', nombre: 1, taille: 0.5, finesse: 14, fermete: 0.25, secousses: 12 },
+        'Gelée ferme': { fermete: 0.85, ecrasement: 0.2, amorti: 0.4 },
+        'Tremblote': { fermete: 0.08, ecrasement: 0.9, amorti: 0.05, secousses: 14 },
+        'Lune': { gravite: 0.25, secousses: 4, amorti: 0.1 },
+        'Biennale': { couleurs: [BIEN[2], BIEN[3], BIEN[4], BIEN[1]], fond: BIEN[0], sol: '#e2e0db' },
+        'Kegelbahn': { couleurs: [KB[1], KB[2], KB[3], KB[5], KB[4]], fond: KB[0], sol: '#16100f', brillance: 0.9 },
+        'Salon': { couleurs: [SALON[2], SALON[3], SALON[4]], fond: SALON[0], sol: '#d4d0c8', forme: 'cube' },
+        'Good Room': { couleurs: [GR[1], GR[2], GR[3], GR[4]], fond: GR[0], sol: '#1d1d1d', forme: 'rond', transparence: 0.35 },
+        'Acide': { couleurs: [ACIDE[2], ACIDE[3]], fond: ACIDE[1], sol: '#2a2a24', forme: 'etoile', transparence: 0.3 },
+      },
+      brand(colors) {
+        const lum = (h) => { const n = parseInt(h.slice(1), 16); return ((n >> 16) & 255) * 0.299 + ((n >> 8) & 255) * 0.587 + (n & 255) * 0.114; };
+        const all = colors.slice().sort((a, b) => lum(b) - lum(a));
+        const fond = all[0], rest = all.slice(1);
+        const mix = (h, t) => { const n = parseInt(h.slice(1), 16), c = [(n >> 16) & 255, (n >> 8) & 255, n & 255].map((v) => Math.round(v * (1 - t))); return '#' + c.map((v) => v.toString(16).padStart(2, '0')).join(''); };
+        return { fond, sol: mix(fond, 0.07), couleurs: rest.length ? rest : [all[0]] };
+      },
+      pointer: {
+        down: (q) => {
+          let best = null, bd = Infinity;
+          for (const pt of parts) { const d = Math.hypot(pt.x - q.x, pt.y - q.y); if (d < bd) { bd = d; best = pt; } }
+          if (best && bd < best.body.gs * 2.5) {
+            const R = best.body.size * 0.2;
+            grab = { x: q.x, y: q.y, body: best.body, pts: best.body.pts.filter((o) => Math.hypot(o.x - best.x, o.y - best.y) < R).map((o) => ({ o, dx: o.x - q.x, dy: o.y - q.y, w: 1 - Math.hypot(o.x - best.x, o.y - best.y) / R })), moved: false, x0: q.x, y0: q.y };
+          } else grab = { x: q.x, y: q.y, pts: [], moved: false, x0: q.x, y0: q.y };
+        },
+        drag: (q) => { if (!grab) return; grab.x = q.x; grab.y = q.y; if (Math.hypot(q.x - grab.x0, q.y - grab.y0) > 6) grab.moved = true; },
+        up: (q) => {
+          if (grab && !grab.moved) poke(q.x, q.y);
+          grab = null;
+        },
+        wheel: (q, dy) => app.set('fermete', Math.max(0, Math.min(1, +(p.fermete + (dy > 0 ? -0.05 : 0.05)).toFixed(2)))),
+      },
+      onChange(k) { if (['forme', 'image', 'nombre', 'taille', 'finesse'].includes(k)) bKey = ''; if (k === 'image') logoKey = null; if (k === 'couleurs') for (const b of bodies) b.col = p.couleurs[b.ci % p.couleurs.length]; frozen = false; },
+      onSeed() { bKey = ''; frozen = false; },
+      export: { name: 'gelee', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    const hex = (h) => { const n = parseInt(h.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; };
+    const rgba = (c, a) => `rgba(${Math.round(c[0])},${Math.round(c[1])},${Math.round(c[2])},${a})`;
+    const mixc = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+    let seed = 1; const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+
+    // ——— Silhouettes : masque 64×64 → couverture ———
+    function shapeMask(kind) {
+      const imgL = p.image || app.logoImg, key = kind === 'logo' ? 'logo:' + (imgL ? (imgL.src || 'c') : 'demo') : kind;
+      if (shapeCache[key]) return shapeCache[key];
+      const M = 64, c = document.createElement('canvas'); c.width = c.height = M; const x = c.getContext('2d', { willReadFrequently: true });
+      x.fillStyle = '#000';
+      if (kind === 'cube') { x.beginPath(); x.roundRect(6, 6, 52, 52, 8); x.fill(); }
+      else if (kind === 'rond') { x.beginPath(); x.arc(32, 32, 28, 0, TAU); x.fill(); }
+      else if (kind === 'etoile') { x.beginPath(); for (let i = 0; i < 10; i++) { const a = -Math.PI / 2 + i * Math.PI / 5, r = i % 2 ? 13 : 30; x.lineTo(32 + Math.cos(a) * r, 34 + Math.sin(a) * r); } x.closePath(); x.lineJoin = 'round'; x.lineWidth = 4; x.fill(); x.strokeStyle = '#000'; x.stroke(); }
+      else if (imgL) { const iw = imgL.naturalWidth || imgL.width, ih = imgL.naturalHeight || imgL.height, k = M * 0.92 / Math.max(iw, ih); x.drawImage(imgL, (M - iw * k) / 2, (M - ih * k) / 2, iw * k, ih * k); }
+      else { x.beginPath(); x.arc(32, 32, 29, 0, TAU); x.arc(32, 32, 15, 0, TAU, true); x.fill('evenodd'); x.fillRect(27, 2, 10, 60); }
+      const d = x.getImageData(0, 0, M, M).data, a = new Uint8Array(M * M);
+      let transp = 0; for (let i = 3; i < d.length; i += 4) if (d[i] < 128) transp++;
+      const useA = kind !== 'logo' || transp > M * M * 0.05;
+      for (let i = 0; i < M * M; i++) { const l = (d[i * 4] * 0.2126 + d[i * 4 + 1] * 0.7152 + d[i * 4 + 2] * 0.0722) / 255; a[i] = useA ? (d[i * 4 + 3] > 110 ? 1 : 0) : (d[i * 4 + 3] > 128 && l < 0.5 ? 1 : 0); }
+      // contours (marching squares) en coordonnées du masque
+      const loops = contours(a, M);
+      return (shapeCache[key] = { M, a, loops });
+    }
+    function contours(a, M) {
+      const at = (x, y) => (x < 0 || y < 0 || x >= M || y >= M) ? 0 : a[y * M + x];
+      const segs = new Map(), key = (x, y) => x * 1000 + y;
+      const add = (x1, y1, x2, y2) => { segs.set(key(x1, y1), [x1, y1, x2, y2]); };
+      // segments orientés sur une grille doublée (milieux d'arêtes)
+      for (let y = -1; y < M; y++) for (let x = -1; x < M; x++) {
+        const tl = at(x, y), tr = at(x + 1, y), br = at(x + 1, y + 1), bl = at(x, y + 1), c = tl * 8 + tr * 4 + br * 2 + bl;
+        const T = [2 * x + 2, 2 * y + 1], R = [2 * x + 3, 2 * y + 2], B = [2 * x + 2, 2 * y + 3], L = [2 * x + 1, 2 * y + 2];
+        const S = (p1, p2) => add(p1[0], p1[1], p2[0], p2[1]);
+        switch (c) {
+          case 1: S(B, L); break; case 2: S(R, B); break; case 3: S(R, L); break; case 4: S(T, R); break;
+          case 5: S(T, L); S(B, R); break; case 6: S(T, B); break; case 7: S(T, L); break; case 8: S(L, T); break;
+          case 9: S(B, T); break; case 10: S(L, B); S(R, T); break; case 11: S(R, T); break; case 12: S(L, R); break;
+          case 13: S(B, R); break; case 14: S(L, B); break;
+        }
+      }
+      const loops = [];
+      while (segs.size) {
+        const [k0, s0] = segs.entries().next().value; segs.delete(k0);
+        const loop = [[s0[0] / 2, s0[1] / 2]]; let cx = s0[2], cy = s0[3], guard = 0;
+        while (guard++ < 100000) { const k = key(cx, cy), s = segs.get(k); if (!s) break; segs.delete(k); loop.push([cx / 2, cy / 2]); cx = s[2]; cy = s[3]; }
+        if (loop.length > 6) loops.push(loop);
+      }
+      return loops;
+    }
+
+    // ——— Construction d'un corps mou ———
+    function makeBody(kind, size, x, y, ci, ang) {
+      const sm = shapeMask(kind), M = sm.M, res = p.finesse, gs = size / res, cellM = M / res;
+      const cov = (i, j) => { if (i < 0 || j < 0 || i >= res || j >= res) return 0; let n = 0; for (let v = 0; v < 3; v++) for (let u = 0; u < 3; u++) { const mx = Math.floor((i + (u + 0.5) / 3) * cellM), my = Math.floor((j + (v + 0.5) / 3) * cellM); n += sm.a[my * M + mx]; } return n; };
+      const node = new Map(), body = { kind, size, gs, ci, col: p.couleurs[ci % p.couleurs.length], pts: [], links: [], loops: [], cx: x, cy: y, rot: ang, Aqq: null };
+      const ca = Math.cos(ang), sa = Math.sin(ang);
+      for (let j = 0; j <= res; j++) for (let i = 0; i <= res; i++) {
+        if (cov(i - 1, j - 1) + cov(i, j - 1) + cov(i - 1, j) + cov(i, j) === 0) continue;
+        const rx = (i - res / 2) * gs, ry = (j - res / 2) * gs;
+        const pt = { body, qx: rx, qy: ry, x: x + rx * ca - ry * sa, y: y + rx * sa + ry * ca, px: 0, py: 0, vx: 0, vy: 0 };
+        pt.px = pt.x; pt.py = pt.y; node.set(j * 1000 + i, pt); body.pts.push(pt);
+      }
+      // liens : voisins directs et diagonales
+      for (const [k, a] of node) { const i = k % 1000, j = Math.floor(k / 1000); for (const [di, dj] of [[1, 0], [0, 1], [1, 1], [-1, 1], [2, 0], [0, 2]]) { const b = node.get((j + dj) * 1000 + i + di); if (b) body.links.push({ a, b, L: Math.hypot(a.qx - b.qx, a.qy - b.qy), far: Math.abs(di) + Math.abs(dj) > 2 || di === 2 || dj === 2 }); } }
+      // contours rattachés au réseau par interpolation bilinéaire
+      for (const loop of sm.loops) {
+        const L = [], step = Math.max(1, Math.round(loop.length / 90));
+        for (let n = 0; n < loop.length; n += step) {
+          const gx = loop[n][0] / cellM, gy = loop[n][1] / cellM; let i = Math.floor(gx), j = Math.floor(gy); i = Math.max(0, Math.min(res - 1, i)); j = Math.max(0, Math.min(res - 1, j));
+          const fx = gx - i, fy = gy - j, c = [node.get(j * 1000 + i), node.get(j * 1000 + i + 1), node.get((j + 1) * 1000 + i), node.get((j + 1) * 1000 + i + 1)], w = [(1 - fx) * (1 - fy), fx * (1 - fy), (1 - fx) * fy, fx * fy];
+          if (c.every(Boolean)) L.push({ c, w });
+          else { // coin manquant : on renormalise sur les coins présents
+            let s = 0; const cc = [], ww = []; for (let k = 0; k < 4; k++) if (c[k]) { cc.push(c[k]); ww.push(w[k]); s += w[k]; }
+            if (cc.length) L.push({ c: cc, w: ww.map((v) => v / (s || 1)) });
+          }
+        }
+        if (L.length > 4) body.loops.push(L);
+      }
+      // appariement de forme : positions de repos centrées sur le barycentre, puis moments
+      { let mx = 0, my = 0; for (const q of body.pts) { mx += q.qx; my += q.qy; } mx /= body.pts.length; my /= body.pts.length; for (const q of body.pts) { q.qx -= mx; q.qy -= my; } }
+      let a00 = 0, a01 = 0, a11 = 0; for (const q of body.pts) { a00 += q.qx * q.qx; a01 += q.qx * q.qy; a11 += q.qy * q.qy; }
+      const det = a00 * a11 - a01 * a01 || 1; body.Aqq = [a11 / det, -a01 / det, -a01 / det, a00 / det];
+      return body;
+    }
+    function build() {
+      const { w, h } = app.size, key = [w, h, p.forme, p.nombre, p.taille, p.finesse, app.seed, logoKey].join();
+      if (key === bKey) return; bKey = key; logoKey = logoKey ?? 'x';
+      seed = (app.seed % 2147483646) + 1;
+      bodies = []; dropQ = []; parts = [];
+      const S = Math.min(w, h), kinds = p.forme === 'melange' ? ['logo', 'cube', 'rond', 'etoile'] : [p.forme];
+      for (let i = 0; i < p.nombre; i++) dropQ.push({ kind: kinds[i % kinds.length], size: S * p.taille * (0.8 + rnd() * 0.4), ci: i, x: w * (0.15 + rnd() * 0.7), ang: (rnd() - 0.5) * 1.2, t: i * 0.45 });
+      time = 0; lastDrop = 0; frozen = false;
+    }
+    const floorY = () => app.size.h * 0.86;
+    function poke(x, y) {
+      const R = Math.min(app.size.w, app.size.h) * 0.15;
+      for (const pt of parts) { const dx = pt.x - x, dy = pt.y - y, d = Math.hypot(dx, dy); if (d < R) { const k = (1 - d / R) * R * 0.03; pt.px -= dx / (d || 1) * k; pt.py -= dy / (d || 1) * k + k * 0.4; } }
+    }
+
+    // ——— Pas de simulation (dynamique par positions) ———
+    function step(dt) {
+      const { w, h } = app.size, S = Math.min(w, h), fy = floorY();
+      time += dt;
+      // chutes échelonnées
+      for (let i = dropQ.length - 1; i >= 0; i--) if (time >= dropQ[i].t) { const d = dropQ.splice(i, 1)[0]; const b = makeBody(d.kind, d.size, d.x, -d.size * 0.7, d.ci, d.ang); bodies.push(b); lastDrop = time; }
+      parts = []; for (const b of bodies) for (const pt of b.pts) parts.push(pt);
+      // secousse du sol : tout saute et tremble
+      if (p.secousses > 0 && time - lastDrop > 2.5 && Math.floor(time * p.secousses / 60) !== Math.floor((time - dt) * p.secousses / 60)) { shake = 1; for (const b of bodies) { const spin = (rnd() - 0.5) * 0.04, up = S * 0.003 * (0.8 + rnd() * 0.6); for (const pt of b.pts) pt.py += up + (pt.x - b.cx) * spin; } }
+      shake *= Math.exp(-dt * 6);
+      const sub = 3, h2 = dt / sub, g = S * 2.2 * p.gravite, damp = 1 - (0.004 + p.amorti * 0.05);
+      const kLink = 0.25 + 0.6 * p.fermete, kShape = 0.05 + 0.3 * p.fermete * p.fermete, beta = 0.15 + 0.75 * p.ecrasement;
+      for (let s = 0; s < sub; s++) {
+        for (const pt of parts) { const vx = (pt.x - pt.px) * damp, vy = (pt.y - pt.py) * damp; pt.px = pt.x; pt.py = pt.y; pt.x += vx; pt.y += vy + g * h2 * h2; }
+        // prise à la main
+        if (grab && grab.pts.length) for (const gp of grab.pts) { const tx = grab.x + gp.dx * 0.8, ty = grab.y + gp.dy * 0.8, k = 0.5 * (0.3 + 0.7 * gp.w); gp.o.x += (tx - gp.o.x) * k; gp.o.y += (ty - gp.o.y) * k; }
+        for (const b of bodies) {
+          // liens
+          for (let it = 0; it < 2; it++) for (let n = 0, nl = b.links.length; n < nl; n++) { const l = b.links[(it + s) % 2 ? nl - 1 - n : n], dx = l.b.x - l.a.x, dy = l.b.y - l.a.y, d = Math.hypot(dx, dy) || 1e-6, k = (d - l.L) / d * 0.5 * (l.far ? kLink * 0.5 : kLink); l.a.x += dx * k; l.a.y += dy * k; l.b.x -= dx * k; l.b.y -= dy * k; }
+          // appariement de forme : rotation + part linéaire (écrasement), volume conservé
+          let cx = 0, cy = 0; for (const pt of b.pts) { cx += pt.x; cy += pt.y; } cx /= b.pts.length; cy /= b.pts.length;
+          let p00 = 0, p01 = 0, p10 = 0, p11 = 0; for (const pt of b.pts) { const rx = pt.x - cx, ry = pt.y - cy; p00 += rx * pt.qx; p01 += rx * pt.qy; p10 += ry * pt.qx; p11 += ry * pt.qy; }
+          const th = Math.atan2(p10 - p01, p00 + p11), c = Math.cos(th), sn = Math.sin(th);
+          const Q = b.Aqq; let l00 = p00 * Q[0] + p01 * Q[2], l01 = p00 * Q[1] + p01 * Q[3], l10 = p10 * Q[0] + p11 * Q[2], l11 = p10 * Q[1] + p11 * Q[3];
+          const det = l00 * l11 - l01 * l10; if (det > 0.05) { const k = 1 / Math.sqrt(det); l00 *= k; l01 *= k; l10 *= k; l11 *= k; } else { l00 = c; l01 = -sn; l10 = sn; l11 = c; }
+          const m00 = beta * l00 + (1 - beta) * c, m01 = beta * l01 - (1 - beta) * sn, m10 = beta * l10 + (1 - beta) * sn, m11 = beta * l11 + (1 - beta) * c;
+          for (const pt of b.pts) { const gx = cx + m00 * pt.qx + m01 * pt.qy, gy = cy + m10 * pt.qx + m11 * pt.qy; pt.x += (gx - pt.x) * kShape; pt.y += (gy - pt.y) * kShape; }
+          b.cx = cx; b.cy = cy; b.rot = th;
+        }
+        // contacts entre corps (grille), sol et murs
+        const cell = Math.max(4, Math.min(...bodies.map((b) => b.gs), 1e9)), grid = new Map();
+        for (let i = 0; i < parts.length; i++) { const pt = parts[i], k = Math.floor(pt.x / cell) * 73856093 ^ Math.floor(pt.y / cell) * 19349663; let a = grid.get(k); if (!a) grid.set(k, a = []); a.push(i); }
+        for (let i = 0; i < parts.length; i++) {
+          const a = parts[i], gx = Math.floor(a.x / cell), gy = Math.floor(a.y / cell);
+          for (let u = -1; u <= 1; u++) for (let v = -1; v <= 1; v++) {
+            const arr = grid.get((gx + u) * 73856093 ^ (gy + v) * 19349663); if (!arr) continue;
+            for (const j of arr) {
+              if (j <= i) continue; const b = parts[j]; if (b.body === a.body) continue;
+              const R = (a.body.gs + b.body.gs) * 0.5 * 0.95, dx = b.x - a.x, dy = b.y - a.y, d2 = dx * dx + dy * dy;
+              if (d2 < R * R && d2 > 1e-6) { const d = Math.sqrt(d2), k = (R - d) / d * 0.5; a.x -= dx * k; a.y -= dy * k; b.x += dx * k; b.y += dy * k; }
+            }
+          }
+        }
+        for (const pt of parts) {
+          const r = pt.body.gs * 0.45;
+          if (pt.y > fy - r) { pt.y = fy - r; const vx = pt.x - pt.px; pt.px = pt.x - vx * 0.6; }
+          if (pt.x < r) { pt.x = r; } else if (pt.x > w - r) { pt.x = w - r; }
+        }
+      }
+    }
+
+    // ——— Rendu ———
+    function outline(b) {
+      return b.loops.map((L) => L.map((v) => { let x = 0, y = 0; for (let k = 0; k < v.c.length; k++) { x += v.c[k].x * v.w[k]; y += v.c[k].y * v.w[k]; } return [x, y]; }));
+    }
+    function tracePath(x, loops) {
+      x.beginPath();
+      for (const L of loops) {
+        const n = L.length; let m = [(L[n - 1][0] + L[0][0]) / 2, (L[n - 1][1] + L[0][1]) / 2]; x.moveTo(m[0], m[1]);
+        for (let i = 0; i < n; i++) { const a = L[i], b = L[(i + 1) % n]; x.quadraticCurveTo(a[0], a[1], (a[0] + b[0]) / 2, (a[1] + b[1]) / 2); }
+        x.closePath();
+      }
+    }
+    app.loop((tt, dt) => {
+      const { w, h, dpr } = app.size, S = Math.min(w, h);
+      dt = Math.min(1 / 30, dt || 0);
+      build();
+      if (app.thumbnail) { if (!frozen) { for (let i = 0; i < 60 * 9; i++) step(1 / 60); frozen = true; } }
+      else step(dt);
+
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over';
+      const fy = floorY();
+      ctx.fillStyle = p.fond; ctx.fillRect(0, 0, w, h);
+      ctx.fillStyle = p.sol; ctx.fillRect(0, fy, w, h - fy);
+      const gl = ctx.createLinearGradient(0, fy, 0, fy + S * 0.04); gl.addColorStop(0, 'rgba(0,0,0,0.08)'); gl.addColorStop(1, 'rgba(0,0,0,0)'); ctx.fillStyle = gl; ctx.fillRect(0, fy, w, S * 0.04);
+      // ombres portées
+      for (const b of bodies) {
+        let minX = Infinity, maxX = -Infinity, maxY = -Infinity; for (const pt of b.pts) { if (pt.x < minX) minX = pt.x; if (pt.x > maxX) maxX = pt.x; if (pt.y > maxY) maxY = pt.y; }
+        const hgt = Math.max(0, fy - maxY), k = Math.max(0, 1 - hgt / (S * 0.5)), cw = (maxX - minX) * (0.55 + 0.2 * (1 - k));
+        const sg = ctx.createRadialGradient(0, 0, 0, 0, 0, 1); sg.addColorStop(0, `rgba(0,0,0,${0.22 * k})`); sg.addColorStop(1, 'rgba(0,0,0,0)');
+        ctx.save(); ctx.translate((minX + maxX) / 2, fy + 2); ctx.scale(cw, S * 0.018 * (1 + (1 - k))); ctx.fillStyle = sg; ctx.beginPath(); ctx.arc(0, 0, 1, 0, TAU); ctx.fill(); ctx.restore();
+      }
+      const L = p.brillance, al = 1 - p.transparence;
+      for (const b of bodies) {
+        const loops = outline(b), col = hex(b.col);
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity; for (const Lp of loops) for (const [x, y] of Lp) { if (x < minX) minX = x; if (y < minY) minY = y; if (x > maxX) maxX = x; if (y > maxY) maxY = y; }
+        const bw = maxX - minX, bh = maxY - minY;
+        tracePath(ctx, loops);
+        const g = ctx.createLinearGradient(minX, minY, maxX, maxY); g.addColorStop(0, rgba(mixc(col, [255, 255, 255], 0.22), al)); g.addColorStop(0.55, rgba(col, al)); g.addColorStop(1, rgba(mixc(col, [0, 0, 0], 0.3), al));
+        ctx.fillStyle = g; ctx.fill('evenodd');
+        ctx.save(); ctx.clip('evenodd');
+        // lumière qui traverse la gelée : cœur plus clair, bord bas sombre
+        const cg = ctx.createRadialGradient(minX + bw * 0.45, minY + bh * 0.55, 0, minX + bw * 0.45, minY + bh * 0.55, Math.max(bw, bh) * 0.6); cg.addColorStop(0, rgba(mixc(col, [255, 240, 220], 0.35), 0.35 * L)); cg.addColorStop(1, rgba(col, 0));
+        ctx.fillStyle = cg; ctx.fillRect(minX, minY, bw, bh);
+        // liseré intérieur : bords éclairés en haut, sombres en bas
+        ctx.lineJoin = 'round';
+        // contour décalé vers le haut : ombre interne en bas ; vers le bas : liseré clair en haut
+        ctx.lineWidth = b.gs * 0.9; ctx.strokeStyle = rgba(mixc(col, [0, 0, 0], 0.45), 0.35);
+        ctx.translate(0, -b.gs * 0.3); tracePath(ctx, loops); ctx.stroke(); ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        ctx.lineWidth = b.gs * 0.5; ctx.strokeStyle = `rgba(255,255,255,${0.45 * L})`;
+        ctx.translate(0, b.gs * 0.22); tracePath(ctx, loops); ctx.stroke(); ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        // reflets spéculaires : une tache et un trait, en haut à gauche
+        if (L > 0) {
+          const sx = minX + bw * 0.28, sy = minY + bh * 0.2, r = Math.min(bw, bh) * 0.12;
+          const sg = ctx.createRadialGradient(sx, sy, 0, sx, sy, r * 1.6); sg.addColorStop(0, `rgba(255,255,255,${0.85 * L})`); sg.addColorStop(0.35, `rgba(255,255,255,${0.35 * L})`); sg.addColorStop(1, 'rgba(255,255,255,0)');
+          ctx.fillStyle = sg; ctx.beginPath(); ctx.ellipse(sx, sy, r * 1.6, r * 1.0, -0.5, 0, TAU); ctx.fill();
+        }
+        ctx.restore();
+        ctx.lineWidth = Math.max(1, b.gs * 0.08); ctx.strokeStyle = rgba(mixc(col, [0, 0, 0], 0.5), 0.5 * al + 0.2); tracePath(ctx, loops); ctx.stroke();
+      }
+      app.finish(ctx);
+    });
+
+    function toSVG() {
+      const { w, h } = app.size, f = (v) => v.toFixed(1), fy = floorY(), defs = [], out = [];
+      out.push(`<rect width="100%" height="100%" fill="${p.fond}"/><rect x="0" y="${f(fy)}" width="${w}" height="${f(h - fy)}" fill="${p.sol}"/>`);
+      const al = (1 - p.transparence).toFixed(2), L = p.brillance;
+      bodies.forEach((b, i) => {
+        const loops = outline(b), col = hex(b.col);
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity; for (const Lp of loops) for (const [x, y] of Lp) { if (x < minX) minX = x; if (y < minY) minY = y; if (x > maxX) maxX = x; if (y > maxY) maxY = y; }
+        const d = loops.map((Lp) => { const n = Lp.length; let s = `M${f((Lp[n - 1][0] + Lp[0][0]) / 2)} ${f((Lp[n - 1][1] + Lp[0][1]) / 2)}`; for (let k = 0; k < n; k++) { const a = Lp[k], c = Lp[(k + 1) % n]; s += `Q${f(a[0])} ${f(a[1])} ${f((a[0] + c[0]) / 2)} ${f((a[1] + c[1]) / 2)}`; } return s + 'Z'; }).join('');
+        const shade = (t, a) => `rgb(${mixc(col, a ? [255, 255, 255] : [0, 0, 0], t).map(Math.round)})`;
+        defs.push(`<linearGradient id="g${i}" gradientUnits="userSpaceOnUse" x1="${f(minX)}" y1="${f(minY)}" x2="${f(maxX)}" y2="${f(maxY)}"><stop offset="0" stop-color="${shade(0.22, 1)}"/><stop offset="0.55" stop-color="${b.col}"/><stop offset="1" stop-color="${shade(0.3, 0)}"/></linearGradient><clipPath id="c${i}"><path d="${d}" clip-rule="evenodd"/></clipPath>`);
+        const sx = minX + (maxX - minX) * 0.28, sy = minY + (maxY - minY) * 0.2, r = Math.min(maxX - minX, maxY - minY) * 0.12;
+        out.push(`<ellipse cx="${f((minX + maxX) / 2)}" cy="${f(fy + 2)}" rx="${f((maxX - minX) * 0.55)}" ry="${f(Math.min(w, h) * 0.018)}" fill="#000" fill-opacity="${(0.16 * Math.max(0, 1 - (fy - maxY) / (Math.min(w, h) * 0.5))).toFixed(2)}"/>`);
+        out.push(`<g><path d="${d}" fill="url(#g${i})" fill-opacity="${al}" fill-rule="evenodd"/><g clip-path="url(#c${i})"><path d="${d}" transform="translate(0 ${f(b.gs * 0.22)})" fill="none" stroke="#fff" stroke-opacity="${(0.45 * L).toFixed(2)}" stroke-width="${f(b.gs * 0.5)}"/><ellipse cx="${f(sx)}" cy="${f(sy)}" rx="${f(r * 1.2)}" ry="${f(r * 0.7)}" transform="rotate(-28 ${f(sx)} ${f(sy)})" fill="#fff" fill-opacity="${(0.6 * L).toFixed(2)}"/></g><path d="${d}" fill="none" stroke="${shade(0.5, 0)}" stroke-opacity="0.6" stroke-width="${f(Math.max(1, b.gs * 0.08))}"/></g>`);
+      });
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">\n<defs>${defs.join('')}</defs>\n${out.join('\n')}\n</svg>`;
+    }
+  </script>
+</body>
+</html>

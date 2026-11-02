@@ -1,0 +1,15 @@
+{
+  "slug": "gelee",
+  "title": "Gelée",
+  "type": "motion",
+  "description": "Le logo, des cubes, des ronds ou des étoiles en gelée : formes molles qui tombent, s'empilent, tremblent, s'écrasent et se laissent étirer.",
+  "tags": ["gelee", "corps-mous", "physique", "rebond", "logo", "svg"],
+  "inspiration": [
+    "Müller et al., Meshless Deformations Based on Shape Matching (2005)",
+    "Dynamique par positions (position based dynamics)",
+    "Palettes biennale, kegelbahn, salon, good-room"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
