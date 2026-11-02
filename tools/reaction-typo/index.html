@@ -1,0 +1,580 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Réaction-diffusion typographique</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Réaction-diffusion typographique : le modèle de Gray-Scott (deux substances U et V qui diffusent
+    // et réagissent, U + 2V → 3V) calculé sur le GPU, avec un mot comme graine, comme masque ou comme
+    // frontière entre deux régimes. Les régimes (F, k) viennent de la carte de Pearson : corail,
+    // labyrinthe, mitose, vers, bulles, ondes. Le régime dérive lentement et un courant doux fait
+    // glisser la matière, si bien que le motif ne se fige jamais. Export SVG par contours (marching squares).
+    const canvas = document.querySelector('canvas');
+    const gl = canvas.getContext('webgl2', { alpha: false, antialias: false, depth: false, stencil: false, preserveDrawingBuffer: false });
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const P60 = PAL('papier-60'), KB = PAL('kegelbahn'), LU = PAL('luzern'), MENTHE = PAL('menthe'), NUIT = PAL('trame-nuit');
+    const TH = PAL('thermique'), ACIDE = PAL('acide'), SALON = PAL('salon'), BIEN = PAL('biennale'), GR = PAL('good-room');
+    const MAXC = 6, ECART = 0.07, NISO = 7;
+
+    // Régimes (F, k) de la carte de Pearson (1993), tels que les recense Robert Munafo.
+    const REGIMES = {
+      corail: [0.0545, 0.062], labyrinthe: [0.029, 0.057], mitose: [0.0367, 0.0649], taches: [0.03, 0.0625],
+      vers: [0.078, 0.061], bulles: [0.039, 0.058], ondes: [0.014, 0.047], empreinte: [0.037, 0.06],
+    };
+    const REG_OPTS = { corail: 'Corail', labyrinthe: 'Labyrinthe', mitose: 'Mitose', taches: 'Taches', vers: 'Vers', bulles: 'Bulles', ondes: 'Ondes', empreinte: 'Empreinte' };
+    const FONTS = {
+      grotesque: "'Helvetica Neue', Helvetica, Arial, sans-serif",
+      serif: "Georgia, 'Times New Roman', Times, serif",
+      mono: "'Courier New', Courier, monospace",
+      etroite: "'Helvetica Neue', Helvetica, Arial, sans-serif",
+    };
+
+    let ready = false, dirty = true, maskDirty = true, ptr = null, painting = null, frame = 0, simTime = 0;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.03, vignette: 0 },
+      hint: 'Survol : le pointeur déplace le régime · glissez pour ensemencer · molette : taille du texte',
+      notes: 'Deux substances diffusent et réagissent (modèle de Gray-Scott). Le texte sert de source, de masque, de creux, de frontière entre deux régimes ou de graine qui se dissout. Le régime dérive lentement et un courant fait glisser la matière.',
+      params: {
+        'Texte': {
+          texte: { type: 'textarea', label: 'Texte (une ligne par retour)', value: 'MATIÈRE', rows: 2 },
+          police: { type: 'font', label: 'Police', options: { grotesque: 'Grotesque', serif: 'Sérif', mono: 'Machine', etroite: 'Étroite' }, value: 'grotesque' },
+          graisse: { type: 'segmented', label: 'Graisse', options: { 400: 'Normale', 700: 'Grasse', 900: 'Noire' }, value: '900' },
+          taille: { type: 'range', label: 'Taille', min: 0.2, max: 0.98, step: 0.01, value: 0.84 },
+          forme: { type: 'segmented', label: 'Forme', options: { texte: 'Texte', logo: 'Logo' }, value: 'texte' },
+        },
+        'Réaction': {
+          role: { type: 'select', label: 'Rôle du texte', options: { source: 'Source', masque: 'Masque', creux: 'Creux', deux: 'Deux régimes', graine: 'Graine qui se dissout' }, value: 'source' },
+          regime: { type: 'select', label: 'Régime', options: REG_OPTS, value: 'corail' },
+          regimeLettres: { type: 'select', label: 'Régime des lettres (deux régimes)', options: REG_OPTS, value: 'labyrinthe' },
+          ajustF: { type: 'range', label: 'Alimentation F (ajustement)', min: -0.008, max: 0.008, step: 0.0001, value: 0 },
+          ajustK: { type: 'range', label: 'Mortalité k (ajustement)', min: -0.004, max: 0.004, step: 0.0001, value: 0 },
+          marge: { type: 'range', label: 'Marge autour des lettres', min: 0, max: 1, step: 0.01, value: 0.4 },
+          echelle: { type: 'segmented', label: 'Échelle du motif', options: { 1: '1', 2: '2', 3: '3', 4: '4' }, value: '2' },
+        },
+        'Mouvement': {
+          vitesse: { type: 'range', label: 'Pas par image', min: 1, max: 32, step: 1, value: 12 },
+          derive: { type: 'range', label: 'Dérive du régime', min: 0, max: 1, step: 0.01, value: 0.45 },
+          boucle: { type: 'range', label: 'Durée d’une dérive (s)', min: 8, max: 120, step: 1, value: 40 },
+          courant: { type: 'range', label: 'Courant', min: 0, max: 1, step: 0.01, value: 0.3 },
+          cycle: { type: 'range', label: 'Retour de la graine (s)', min: 4, max: 60, step: 1, value: 16 },
+          survol: { type: 'range', label: 'Effet du survol', min: 0, max: 1, step: 0.01, value: 0.6 },
+          effacer: { type: 'button', label: 'Réensemencer', action: () => { dirty = true; } },
+        },
+        'Rendu': {
+          rendu: { type: 'segmented', label: 'Rendu', options: { aplat: 'Aplats', degrade: 'Dégradé', relief: 'Relief', contours: 'Contours' }, value: 'aplat' },
+          seuil: { type: 'range', label: 'Seuil', min: 0.05, max: 0.4, step: 0.005, value: 0.2 },
+          trait: { type: 'range', label: 'Épaisseur des contours', min: 0.5, max: 4, step: 0.1, value: 1.4 },
+          fantome: { type: 'range', label: 'Lettres en filigrane', min: 0, max: 1, step: 0.01, value: 0 },
+          fond: { type: 'color', label: 'Fond', value: P60[0] },
+          couleurs: { type: 'palette', label: 'Couleurs', value: [P60[1]] },
+        },
+      },
+      presets: {
+        'Corail': {},
+        'Labyrinthe': { role: 'masque', regime: 'labyrinthe', fond: '#0c0c0c', couleurs: ['#f2f2f0'], echelle: '1', taille: 0.9 },
+        'Mitose': { role: 'deux', regime: 'mitose', regimeLettres: 'labyrinthe', fond: MENTHE[0], couleurs: [MENTHE[3], MENTHE[1]], seuil: 0.17 },
+        'Empreinte': { role: 'creux', regime: 'empreinte', rendu: 'contours', fond: NUIT[0], couleurs: [NUIT[1], NUIT[2]], trait: 1.2, fantome: 0.2 },
+        'Relief': { role: 'source', regime: 'empreinte', rendu: 'relief', fond: '#0a0a0a', couleurs: [LU[0], LU[1], '#ffffff'], seuil: 0.16, echelle: '3' },
+        'Dissolution': { role: 'graine', regime: 'corail', rendu: 'degrade', fond: TH[1], couleurs: [TH[2], TH[3], '#fff4e0'], cycle: 14, derive: 0.3 },
+        'Ondes': { role: 'source', regime: 'ondes', rendu: 'degrade', fond: ACIDE[1], couleurs: ['#3d3d33', ACIDE[2], ACIDE[3]], seuil: 0.14, courant: 0.5 },
+        'Bulles': { role: 'masque', regime: 'bulles', fond: SALON[0], couleurs: [SALON[2], SALON[1], SALON[3]], seuil: 0.13, graisse: '900', police: 'etroite', taille: 0.9, echelle: '1', texte: 'SALON\nDU MOTIF' },
+        'Filigrane': { role: 'creux', regime: 'mitose', fond: BIEN[0], couleurs: [BIEN[2], BIEN[1]], fantome: 0.22, police: 'serif', graisse: '700', texte: 'Biennale' },
+        'Logo': { forme: 'logo', role: 'deux', regime: 'taches', regimeLettres: 'corail', fond: KB[0], couleurs: [KB[2], KB[1], KB[3]], seuil: 0.15 },
+        'Nuit': { role: 'source', regime: 'labyrinthe', rendu: 'contours', fond: GR[0], couleurs: [GR[1], GR[2], GR[3], GR[4]], trait: 1.6, texte: 'GOOD\nROOM' },
+      },
+      brand(colors) {
+        const rest = colors.slice(1);
+        return { fond: colors[0], couleurs: (rest.length ? rest : ['#ffffff']).slice(0, MAXC) };
+      },
+      pointer: {
+        move: (q) => { ptr = { x: q.x, y: q.y }; },
+        down: (q) => { painting = { x: q.x, y: q.y }; ptr = { x: q.x, y: q.y }; },
+        drag: (q) => { painting = { x: q.x, y: q.y }; ptr = { x: q.x, y: q.y }; },
+        up: () => { painting = null; },
+        wheel: (q, dy) => app.set('taille', Math.max(0.2, Math.min(0.98, Math.round((p.taille - dy * 0.0008) * 100) / 100))),
+      },
+      onChange(k) {
+        if (!ready) return;
+        if (k === '*' || k === 'echelle') dirty = true;
+        if (k === '*' || k === '_logo' || ['texte', 'police', 'graisse', 'taille', 'forme', 'marge'].includes(k)) maskDirty = true;
+        if (k === 'role') dirty = true;
+      },
+      onSeed() { dirty = true; },
+      export: { name: 'reaction-typo', svg: () => toSVG() },
+    });
+    const p = app.params;
+    canvas.addEventListener('pointerleave', () => { ptr = null; painting = null; });
+    if (document.fonts) document.fonts.addEventListener('loadingdone', () => { maskDirty = true; });
+
+    // ——— WebGL ———
+    const okFloat = !!gl.getExtension('EXT_color_buffer_float');
+    const VS = `#version 300 es
+    layout(location = 0) in vec2 aP;
+    void main() { gl_Position = vec4(aP, 0., 1.); }`;
+
+    const COMMON = `
+    uniform sampler2D uS;
+    uniform vec2 uSim;
+    vec2 at(ivec2 p) { ivec2 S = ivec2(uSim); return texelFetch(uS, (p % S + S) % S, 0).xy; }
+    vec2 bil(vec2 q) {
+      q -= 0.5;
+      vec2 f = fract(q); ivec2 i = ivec2(floor(q));
+      return mix(mix(at(i), at(i + ivec2(1, 0)), f.x), mix(at(i + ivec2(0, 1)), at(i + ivec2(1, 1)), f.x), f.y);
+    }`;
+
+    // Un pas de Gray-Scott : laplacien 3 × 3 (Karl Sims), courant par advection semi-lagrangienne.
+    const FS_STEP = `#version 300 es
+    precision highp float;
+    ${COMMON}
+    uniform sampler2D uM;
+    uniform vec2 uFk0, uFk1, uPtr;
+    uniform int uRole;
+    uniform float uPin, uFlow, uT, uPtrR, uLens, uPaint, uMarge;
+    out vec4 o;
+    void main() {
+      ivec2 c = ivec2(gl_FragCoord.xy);
+      vec2 q = gl_FragCoord.xy;
+      // Courant : un champ tourbillonnaire lent, sans divergence (dérivé d'une fonction de courant).
+      vec2 z = q / max(uSim.x, uSim.y) * 6.2831853;
+      float a = uT * 0.08;
+      const vec2 p1 = vec2(0.9, 1.3), p2 = vec2(-1.7, 0.8), p3 = vec2(0.4, -2.1);
+      vec2 vel = vec2(p1.y, -p1.x) * cos(dot(p1, z) + a)
+               + vec2(p2.y, -p2.x) * cos(dot(p2, z) - a * 1.3) * 0.6
+               + vec2(p3.y, -p3.x) * cos(dot(p3, z) + a * 0.7 + 2.) * 0.4;
+      vec2 s = uFlow > 0. ? bil(q - vel * uFlow) : at(c);
+      vec2 lap = -at(c)
+        + 0.2 * (at(c + ivec2(1, 0)) + at(c - ivec2(1, 0)) + at(c + ivec2(0, 1)) + at(c - ivec2(0, 1)))
+        + 0.05 * (at(c + ivec2(1, 1)) + at(c - ivec2(1, 1)) + at(c + ivec2(1, -1)) + at(c - ivec2(1, -1)));
+      vec2 mm = texelFetch(uM, c, 0).rg;
+      float m = mm.r;
+      // Marge : autour des lettres, la réaction s'éteint, et le texte reste lisible.
+      float halo = uMarge * smoothstep(0.02, 0.2, mm.g) * (1. - smoothstep(0.25, 0.6, m));
+      vec2 fk = uFk0;
+      if (uRole == 3) fk = mix(uFk0, uFk1, m);
+      if (uRole == 1) fk.y += (1. - m) * 0.05;
+      if (uRole == 2) fk.y += m * 0.05;
+      if (uRole == 0 || uRole == 2) fk.y += halo * 0.05;
+      float g = 0.;
+      if (uPtrR > 0.) { vec2 d = q - uPtr; g = exp(-dot(d, d) / (uPtrR * uPtrR)); }
+      fk += g * uLens * vec2(-0.012, 0.0035);
+      float u = s.x, v = s.y, r = u * v * v;
+      u += 1.0 * lap.x - r + fk.x * (1. - u);
+      v += 0.5 * lap.y + r - (fk.x + fk.y) * v;
+      // Le texte entretient la réaction (source) ou revient par impulsions (graine).
+      float pin = (uRole == 0 ? 0.35 : uRole == 4 ? uPin : 0.) * smoothstep(0.35, 0.75, m);
+      pin = max(pin, g * uPaint);
+      u = mix(u, 0.42, pin); v = mix(v, 0.38, pin);
+      o = vec4(clamp(u, 0., 1.), clamp(v, 0., 1.), 0., 1.);
+    }`;
+
+    const FS_SHOW = `#version 300 es
+    precision highp float;
+    ${COMMON}
+    uniform sampler2D uM;
+    uniform vec2 uRes;
+    uniform vec3 uBg, uC[${MAXC}];
+    uniform int uNC, uMode;
+    uniform float uSeuil, uTrait, uGhost, uGrain, uVig, uFrame, uPx;
+    out vec4 o;
+    float hash(vec2 p) { uvec2 q = uvec2(ivec2(p)) * uvec2(1597334673u, 3812015801u); uint n = (q.x ^ q.y) * 1597334673u; n ^= n >> 16; n *= 2246822519u; n ^= n >> 13; return float(n) / 4294967295.; }
+    vec3 pal(int i) { return uC[clamp(i, 0, uNC - 1)]; }
+    vec3 ramp(float x) {
+      float n = float(uNC);
+      float f = clamp(x, 0., 1.) * n;
+      int i = int(min(floor(f), n - 1.));
+      vec3 a = i == 0 ? uBg : uC[i - 1];
+      return mix(a, uC[i], f - float(i));
+    }
+    void main() {
+      vec2 uv = gl_FragCoord.xy / uRes;
+      vec2 q = uv * uSim;
+      float v = bil(q).y;
+      float aa = max(fwidth(v), 1e-5);
+      vec3 col = uBg;
+      if (uMode == 0) {
+        for (int i = 0; i < ${MAXC}; i++) {
+          if (i >= uNC) break;
+          float th = uSeuil + float(i) * ${ECART.toFixed(3)};
+          col = mix(col, uC[i], smoothstep(th - aa * 0.75, th + aa * 0.75, v));
+        }
+      } else if (uMode == 1) {
+        col = ramp(pow(clamp(v / (2. * uSeuil), 0., 1.), 0.9));
+      } else if (uMode == 2) {
+        float e = 1.;
+        float dx = bil(q + vec2(e, 0.)).y - bil(q - vec2(e, 0.)).y;
+        float dy = bil(q + vec2(0., e)).y - bil(q - vec2(0., e)).y;
+        vec3 n = normalize(vec3(-dx * 9., -dy * 9., 1.));
+        vec3 L = normalize(vec3(-0.5, 0.6, 0.65));
+        float dif = max(dot(n, L), 0.), spec = pow(max(dot(reflect(-L, n), vec3(0., 0., 1.)), 0.), 24.);
+        float x = clamp(v / (2. * uSeuil), 0., 1.);
+        col = ramp(x) * (0.45 + 0.75 * dif) + spec * 0.55 * smoothstep(0.05, 0.4, x);
+      } else {
+        float f = v / (2. * uSeuil) * ${NISO}.;
+        float w = fwidth(f);
+        float d = abs(fract(f - 0.5) - 0.5) / max(w, 1e-5);
+        float k = floor(f + 0.5);
+        float line = (1. - smoothstep(uTrait * 0.5 - 0.5, uTrait * 0.5 + 0.5, d * uPx)) * step(0.5, k) * step(k, ${NISO - 1}.5);
+        col = mix(uBg, pal(int(k) - 1), line);
+      }
+      if (uGhost > 0.) col = mix(col, pal(uNC - 1), texture(uM, uv).r * uGhost);
+      vec2 c2 = uv * 2. - 1.;
+      col *= 1. - uVig * 0.85 * smoothstep(0.35, 1.25, length(c2));
+      col += (hash(gl_FragCoord.xy + uFrame * 17.31) - 0.5) * uGrain * 0.22;
+      o = vec4(col, 1.);
+    }`;
+
+    function sh(type, src) { const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s); if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s)); return s; }
+    function program(vs, fs) {
+      const pr = gl.createProgram();
+      gl.attachShader(pr, sh(gl.VERTEX_SHADER, vs)); gl.attachShader(pr, sh(gl.FRAGMENT_SHADER, fs));
+      gl.linkProgram(pr);
+      if (!gl.getProgramParameter(pr, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(pr));
+      const L = {}; pr.u = (n) => (n in L ? L[n] : (L[n] = gl.getUniformLocation(pr, n)));
+      return pr;
+    }
+    const pStep = program(VS, FS_STEP), pShow = program(VS, FS_SHOW);
+    const quad = gl.createVertexArray(); gl.bindVertexArray(quad);
+    const buf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+
+    function tex(w, h, ifmt, fmt, type, filter, data = null) {
+      const t = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, t);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.texImage2D(gl.TEXTURE_2D, 0, ifmt, w, h, 0, fmt, type, data);
+      return t;
+    }
+    function fbo(t) { const f = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, f); gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, t, 0); return f; }
+
+    let sim = null;
+    function dispose() {
+      if (!sim) return;
+      for (const t of [...sim.S, sim.M]) gl.deleteTexture(t);
+      for (const f of sim.fS) gl.deleteFramebuffer(f);
+      sim = null;
+    }
+
+    // ——— Le texte (ou le logo) en masque, à la résolution de la simulation ———
+    let maskCv = null, maskCtx = null, maskData = null, logoCache = null, haloCv = null, haloCtx = null;
+    function family() {
+      return p.police === 'AtelierBrand' ? "'AtelierBrand', sans-serif" : (FONTS[p.police] || FONTS.grotesque);
+    }
+    function logoMask() {
+      const img = app.logoImg;
+      if (!img) return null;
+      if (logoCache && logoCache.img === img) return logoCache.cv;
+      const N = 512, iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height, k = N / Math.max(iw, ih);
+      const cv = document.createElement('canvas'); cv.width = Math.max(1, Math.round(iw * k)); cv.height = Math.max(1, Math.round(ih * k));
+      const x = cv.getContext('2d', { willReadFrequently: true });
+      x.drawImage(img, 0, 0, cv.width, cv.height);
+      const im = x.getImageData(0, 0, cv.width, cv.height), d = im.data;
+      let clear = 0;
+      for (let i = 3; i < d.length; i += 4) if (d[i] < 128) clear++;
+      const useAlpha = clear > d.length / 4 * 0.1;
+      for (let i = 0; i < d.length; i += 4) {
+        const lum = (d[i] * 0.2126 + d[i + 1] * 0.7152 + d[i + 2] * 0.0722) / 255;
+        const v = useAlpha ? d[i + 3] / 255 : (1 - lum) * d[i + 3] / 255;
+        d[i] = d[i + 1] = d[i + 2] = 255; d[i + 3] = Math.round(v * 255);
+      }
+      x.putImageData(im, 0, 0);
+      logoCache = { img, cv };
+      return cv;
+    }
+    function drawMask(c, W, H) {
+      c.save();
+      c.fillStyle = '#000'; c.fillRect(0, 0, W, H);
+      c.fillStyle = '#fff'; c.strokeStyle = '#fff';
+      c.filter = `blur(${Math.max(0.6, Math.min(W, H) * 0.0016).toFixed(2)}px)`;
+      const U = Math.min(W, H);
+      if (p.forme === 'logo') {
+        const m = logoMask();
+        if (m) {
+          const k = Math.min(W * p.taille, H * Math.min(0.9, p.taille * 1.1)) / Math.max(m.width, m.height) * (m.width >= m.height ? 1 : 1);
+          c.drawImage(m, W / 2 - m.width * k / 2, H / 2 - m.height * k / 2, m.width * k, m.height * k);
+        } else {
+          // Sans logo : un anneau et un point, la marque par défaut de l'atelier.
+          const R = U * p.taille * 0.5;
+          c.lineWidth = R * 0.24; c.beginPath(); c.arc(W / 2, H / 2, R * 0.8, 0, TAU); c.stroke();
+          c.beginPath(); c.arc(W / 2, H / 2, R * 0.28, 0, TAU); c.fill();
+        }
+      } else {
+        const lines = String(p.texte || '').split('\n').map((s) => s.trim()).filter(Boolean);
+        if (lines.length) {
+          const fam = family(), wt = p.graisse;
+          // Étroite : la grotesque condensée par une échelle horizontale, identique sur toutes les machines.
+          const sx = p.police === 'etroite' ? 0.68 : 1;
+          c.font = `${wt} 100px ${fam}`;
+          let mw = 1;
+          for (const l of lines) mw = Math.max(mw, c.measureText(l).width * sx);
+          const lh = 0.92;
+          const size = Math.min(W * p.taille / mw * 100, H * Math.min(0.92, p.taille * 1.05) / (lines.length * lh));
+          c.font = `${wt} ${size}px ${fam}`;
+          c.textAlign = 'center'; c.textBaseline = 'middle';
+          c.translate(W / 2, 0); c.scale(sx, 1);
+          lines.forEach((l, i) => c.fillText(l, 0, H / 2 + (i - (lines.length - 1) / 2) * size * lh + size * 0.04));
+        }
+      }
+      c.restore();
+    }
+    function buildMask() {
+      const { sw, sh: shh } = sim;
+      if (!maskCv || maskCv.width !== sw || maskCv.height !== shh) {
+        maskCv = document.createElement('canvas'); maskCv.width = sw; maskCv.height = shh;
+        maskCtx = maskCv.getContext('2d', { willReadFrequently: true });
+      }
+      drawMask(maskCtx, sw, shh);
+      const d = maskCtx.getImageData(0, 0, sw, shh).data;
+      maskData = new Uint8Array(sw * shh);
+      for (let i = 0; i < maskData.length; i++) maskData[i] = d[i * 4];
+      // Second canal : le masque très flouté, qui dessine une marge autour des lettres.
+      if (!haloCv || haloCv.width !== sw || haloCv.height !== shh) {
+        haloCv = document.createElement('canvas'); haloCv.width = sw; haloCv.height = shh;
+        haloCtx = haloCv.getContext('2d', { willReadFrequently: true });
+      }
+      haloCtx.fillStyle = '#000'; haloCtx.fillRect(0, 0, sw, shh);
+      haloCtx.filter = `blur(${Math.max(0.5, p.marge * Math.min(sw, shh) * 0.02).toFixed(2)}px)`;
+      haloCtx.drawImage(maskCv, 0, 0);
+      haloCtx.filter = 'none';
+      const hd = haloCtx.getImageData(0, 0, sw, shh).data, rg = new Uint8Array(sw * shh * 2);
+      for (let i = 0; i < maskData.length; i++) { rg[i * 2] = maskData[i]; rg[i * 2 + 1] = hd[i * 4]; }
+      gl.bindTexture(gl.TEXTURE_2D, sim.M);
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true); gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RG8, sw, shh, 0, gl.RG, gl.UNSIGNED_BYTE, rg);
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+      maskDirty = false;
+    }
+
+    // ——— État initial : U = 1 partout, V semé dans le texte et en quelques îlots ———
+    function seedState() {
+      const { sw, sh: shh } = sim, r = app.rng(3), data = new Float32Array(sw * shh * 4);
+      for (let i = 0; i < sw * shh; i++) { data[i * 4] = 1; data[i * 4 + 3] = 1; }
+      const put = (x, y) => { const i = ((((y % shh) + shh) % shh) * sw + (((x % sw) + sw) % sw)) * 4; data[i] = 0.5; data[i + 1] = 0.25 + r() * 0.05; };
+      // Des îlots serrés partout : le motif prend en quelques centaines de pas sur tout le champ.
+      const B = 5;
+      for (let by = 0; by < shh; by += B) for (let bx = 0; bx < sw; bx += B) {
+        if (r() > 0.1) continue;
+        const ox = Math.floor(r() * B), oy = Math.floor(r() * B), rad = 1 + Math.floor(r() * 2.5);
+        for (let y = -rad; y <= rad; y++) for (let x = -rad; x <= rad; x++) if (x * x + y * y <= rad * rad + 1) put(bx + ox + x, by + oy + y);
+      }
+      if (p.role !== 'creux') {
+        // Le masque est stocké de haut en bas ; la simulation de bas en haut.
+        for (let y = 0; y < shh; y++) for (let x = 0; x < sw; x++) {
+          if (maskData[y * sw + x] > 128 && r() < 0.35) put(x, shh - 1 - y);
+        }
+      }
+      gl.bindTexture(gl.TEXTURE_2D, sim.S[sim.a]);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, sw, shh, 0, gl.RGBA, gl.FLOAT, data);
+    }
+
+    function setup() {
+      dispose();
+      const { w, h } = app.size, cell = +p.echelle;
+      let sw = Math.max(48, Math.round(w / cell)), shh = Math.max(48, Math.round(h / cell));
+      const cap = 1400 / Math.max(sw, shh); if (cap < 1) { sw = Math.round(sw * cap); shh = Math.round(shh * cap); }
+      const S = [0, 1].map(() => tex(sw, shh, gl.RGBA32F, gl.RGBA, gl.FLOAT, gl.NEAREST));
+      const M = tex(sw, shh, gl.RG8, gl.RG, gl.UNSIGNED_BYTE, gl.LINEAR);
+      sim = { sw, sh: shh, S, M, fS: S.map(fbo), a: 0, cssW: w, cssH: h };
+      buildMask();
+      seedState();
+      dirty = false;
+      simTime = 0;
+      // Pré-roulage, borné dans le temps : le motif a déjà pris quand l'image apparaît.
+      const t0 = performance.now(), budget = app.thumbnail ? 2400 : 280, px = new Float32Array(4);
+      for (let i = 0; i < 900; i += 25) {
+        for (let j = 0; j < 25; j++) step(0, 0);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, sim.fS[sim.a]);
+        gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.FLOAT, px);
+        if (performance.now() - t0 > budget) break;
+      }
+    }
+
+    function regime(name) {
+      const r = REGIMES[name] || REGIMES.corail;
+      return [r[0] + p.ajustF, r[1] + p.ajustK];
+    }
+    function step(t, i) {
+      const S = sim, u = pStep.u;
+      // Dérive : le point (F, k) décrit une petite ellipse autour du régime choisi.
+      const ph = TAU * t / p.boucle, D = p.derive;
+      const dF = D * (0.0045 * Math.sin(ph) + 0.0015 * Math.sin(ph * 2.3 + 1)), dK = D * 0.0018 * Math.sin(ph + 1.9);
+      const r0 = regime(p.regime), r1 = regime(p.regimeLettres);
+      gl.bindVertexArray(quad);
+      gl.useProgram(pStep);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, S.fS[1 - S.a]); gl.viewport(0, 0, S.sw, S.sh);
+      gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, S.S[S.a]);
+      gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, S.M);
+      gl.uniform1i(u('uS'), 0); gl.uniform1i(u('uM'), 1);
+      gl.uniform2f(u('uSim'), S.sw, S.sh);
+      gl.uniform2f(u('uFk0'), r0[0] + dF, r0[1] + dK); gl.uniform2f(u('uFk1'), r1[0] + dF * 0.6, r1[1] - dK * 0.6);
+      const role = ['source', 'masque', 'creux', 'deux', 'graine'].indexOf(p.role);
+      gl.uniform1i(u('uRole'), Math.max(0, role));
+      // Graine : une impulsion au début de chaque cycle, puis le texte se dissout.
+      const tc = t % p.cycle;
+      gl.uniform1f(u('uPin'), t > 0 ? 0.5 * Math.exp(-tc * 4) : 0);
+      gl.uniform1f(u('uFlow'), p.courant * 0.03);
+      gl.uniform1f(u('uMarge'), p.marge > 0.01 ? 1 : 0);
+      gl.uniform1f(u('uT'), t);
+      if (ptr) {
+        gl.uniform2f(u('uPtr'), ptr.x * S.sw / app.size.w, (app.size.h - ptr.y) * S.sh / app.size.h);
+        gl.uniform1f(u('uPtrR'), Math.min(S.sw, S.sh) * (painting ? 0.03 : 0.12));
+        gl.uniform1f(u('uLens'), painting ? 0 : p.survol);
+        gl.uniform1f(u('uPaint'), painting ? 0.5 : 0);
+      } else { gl.uniform1f(u('uPtrR'), 0); gl.uniform1f(u('uLens'), 0); gl.uniform1f(u('uPaint'), 0); }
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+      S.a = 1 - S.a;
+    }
+
+    const rgbf = (hx) => { const n = parseInt(String(hx).slice(1, 7), 16) || 0; return [(n >> 16 & 255) / 255, (n >> 8 & 255) / 255, (n & 255) / 255]; };
+    const palette = () => (p.couleurs && p.couleurs.length ? p.couleurs : ['#ffffff']).slice(0, MAXC);
+    function show() {
+      const S = sim, u = pShow.u;
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.viewport(0, 0, canvas.width, canvas.height);
+      gl.bindVertexArray(quad);
+      gl.useProgram(pShow);
+      gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, S.S[S.a]);
+      gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, S.M);
+      gl.uniform1i(u('uS'), 0); gl.uniform1i(u('uM'), 1);
+      gl.uniform2f(u('uSim'), S.sw, S.sh);
+      gl.uniform2f(u('uRes'), canvas.width, canvas.height);
+      gl.uniform3fv(u('uBg'), rgbf(p.fond));
+      const pal = palette(), flat = [];
+      for (let i = 0; i < MAXC; i++) flat.push(...rgbf(pal[Math.min(i, pal.length - 1)]));
+      gl.uniform3fv(u('uC[0]'), flat); gl.uniform1i(u('uNC'), pal.length);
+      gl.uniform1i(u('uMode'), ['aplat', 'degrade', 'relief', 'contours'].indexOf(p.rendu));
+      gl.uniform1f(u('uSeuil'), p.seuil);
+      gl.uniform1f(u('uPx'), 1);
+      gl.uniform1f(u('uTrait'), p.trait * canvas.width / Math.max(1, app.size.w));
+      gl.uniform1f(u('uGhost'), p.fantome);
+      gl.uniform1f(u('uGrain'), p.grain ?? 0); gl.uniform1f(u('uVig'), p.vignette ?? 0); gl.uniform1f(u('uFrame'), frame % 997);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+    }
+
+    function render(t, dt) {
+      if (!okFloat) { const c = rgbf(p.fond); gl.clearColor(c[0], c[1], c[2], 1); gl.clear(gl.COLOR_BUFFER_BIT); return; }
+      const { w, h } = app.size;
+      if (!sim || dirty || sim.cssW !== w || sim.cssH !== h) setup();
+      if (maskDirty) buildMask();
+      if (dt > 0) {
+        simTime += Math.min(dt, 0.1);
+        for (let i = 0; i < p.vitesse; i++) step(simTime, i);
+        frame++;
+      }
+      show();
+    }
+
+    // ——— Export SVG : contours du champ V (marching squares), empilés comme les aplats ———
+    function readField() {
+      const S = sim, n = S.sw * S.sh, out = new Float32Array(n * 4);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, S.fS[S.a]);
+      gl.readPixels(0, 0, S.sw, S.sh, gl.RGBA, gl.FLOAT, out);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      // De haut en bas, canal V seulement.
+      const f = new Float32Array(n);
+      for (let y = 0; y < S.sh; y++) for (let x = 0; x < S.sw; x++) f[y * S.sw + x] = out[((S.sh - 1 - y) * S.sw + x) * 4 + 1];
+      return f;
+    }
+    // Contours fermés de { f ≥ th } : la grille est bordée de vide pour que chaque boucle se ferme.
+    function contours(f, W, H, th) {
+      const GW = W + 2, GH = H + 2;
+      const g = (i, j) => (i < 1 || j < 1 || i > W || j > H ? -1 : f[(j - 1) * W + (i - 1)]);
+      const NH = GW * GH;
+      const adj = new Int32Array(NH * 4).fill(-1);
+      const px = new Float32Array(NH * 2), py = new Float32Array(NH * 2);
+      const link = (a, b) => { if (adj[a * 2] < 0) adj[a * 2] = b; else adj[a * 2 + 1] = b; if (adj[b * 2] < 0) adj[b * 2] = a; else adj[b * 2 + 1] = a; };
+      const hE = (i, j, a, b) => { const id = j * GW + i; px[id] = i + (th - a) / (b - a); py[id] = j; return id; };
+      const vE = (i, j, a, b) => { const id = NH + j * GW + i; px[id] = i; py[id] = j + (th - a) / (b - a); return id; };
+      for (let j = 0; j < GH - 1; j++) for (let i = 0; i < GW - 1; i++) {
+        const a = g(i, j), b = g(i + 1, j), c = g(i + 1, j + 1), d = g(i, j + 1);
+        const k = (a >= th) | ((b >= th) << 1) | ((c >= th) << 2) | ((d >= th) << 3);
+        if (k === 0 || k === 15) continue;
+        const e0 = () => hE(i, j, a, b), e2 = () => hE(i, j + 1, d, c), e3 = () => vE(i, j, a, d), e1 = () => vE(i + 1, j, b, c);
+        const mid = (a + b + c + d) / 4 >= th;
+        switch (k) {
+          case 1: case 14: link(e3(), e0()); break;
+          case 2: case 13: link(e0(), e1()); break;
+          case 3: case 12: link(e3(), e1()); break;
+          case 4: case 11: link(e1(), e2()); break;
+          case 6: case 9: link(e0(), e2()); break;
+          case 7: case 8: link(e3(), e2()); break;
+          case 5: if (mid) { link(e0(), e1()); link(e2(), e3()); } else { link(e3(), e0()); link(e1(), e2()); } break;
+          case 10: if (mid) { link(e3(), e0()); link(e1(), e2()); } else { link(e0(), e1()); link(e2(), e3()); } break;
+        }
+      }
+      const seen = new Uint8Array(NH * 2), loops = [];
+      for (let s = 0; s < NH * 2; s++) {
+        if (seen[s] || adj[s * 2] < 0) continue;
+        const pts = [];
+        let prev = -1, cur = s;
+        while (cur >= 0 && !seen[cur]) {
+          seen[cur] = 1; pts.push(px[cur] - 1, py[cur] - 1);
+          const n0 = adj[cur * 2], n1 = adj[cur * 2 + 1];
+          const nx = n0 !== prev && !seen[n0] ? n0 : n1;
+          prev = cur; cur = nx;
+        }
+        if (pts.length >= 6) loops.push(pts);
+      }
+      return loops;
+    }
+    function pathOf(loops, kx, ky) {
+      let d = '';
+      for (const L of loops) {
+        let lx = 1e9, ly = 1e9, s = '';
+        for (let i = 0; i < L.length; i += 2) {
+          const x = (L[i] + 0.5) * kx, y = (L[i + 1] + 0.5) * ky;
+          if (i > 0 && i < L.length - 2 && Math.abs(x - lx) + Math.abs(y - ly) < 0.9) continue;
+          s += (i ? 'L' : 'M') + x.toFixed(1) + ' ' + y.toFixed(1);
+          lx = x; ly = y;
+        }
+        d += s + 'Z';
+      }
+      return d;
+    }
+    function toSVG() {
+      const { w, h } = app.size;
+      if (!sim) return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}"/>`;
+      const S = sim, f = readField(), kx = w / S.sw, ky = h / S.sh, pal = palette();
+      let body = '';
+      if (p.rendu === 'contours') {
+        const sw = (p.trait).toFixed(2);
+        for (let k = 1; k < NISO; k++) {
+          const th = k * 2 * p.seuil / NISO;
+          const d = pathOf(contours(f, S.sw, S.sh, th), kx, ky);
+          if (d) body += `<path d="${d}" fill="none" stroke="${pal[Math.min(k - 1, pal.length - 1)]}" stroke-width="${sw}" stroke-linejoin="round"/>\n`;
+        }
+      } else {
+        // Aplats (et version vectorielle des rendus dégradé et relief) : un niveau par couleur.
+        const n = pal.length;
+        for (let i = 0; i < n; i++) {
+          const th = p.rendu === 'aplat' ? p.seuil + i * ECART : 2 * p.seuil * (i + 0.5) / n;
+          const d = pathOf(contours(f, S.sw, S.sh, th), kx, ky);
+          if (d) body += `<path d="${d}" fill="${pal[i]}" fill-rule="evenodd"/>\n`;
+        }
+      }
+      if (p.fantome > 0 && maskData) {
+        const m = new Float32Array(maskData.length);
+        for (let i = 0; i < m.length; i++) m[i] = maskData[i] / 255;
+        const d = pathOf(contours(m, S.sw, S.sh, 0.5), kx, ky);
+        if (d) body += `<path d="${d}" fill="${pal[pal.length - 1]}" fill-opacity="${p.fantome.toFixed(2)}" fill-rule="evenodd"/>\n`;
+      }
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">\n<rect width="100%" height="100%" fill="${p.fond}"/>\n${body}</svg>`;
+    }
+
+    ready = true;
+    app.loop((t, dt) => render(t, dt));
+  </script>
+</body>
+</html>
