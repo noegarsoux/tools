@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Trame en barres</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Trame en barres : une image rendue en tirets horizontaux, comme une photocopie tramée.
+    // Chaque ligne de balayage croise une porteuse en dents de scie : là où l'image est plus sombre
+    // que la porteuse, on encre (modulation de largeur d'impulsion). La longueur des barres suit donc
+    // la luminance. Quand le pas des lignes approche la fréquence de l'image (anneaux, ondes), les
+    // deux grilles battent entre elles : c'est le moiré.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const PHOTO = PAL('photocopie'), ACIDE = PAL('acide'), THERM = PAL('thermique'), ORB = PAL('orbite');
+    const P60 = PAL('papier-60'), NUIT = PAL('trame-nuit'), BIEN = PAL('biennale'), KB = PAL('kegelbahn');
+
+    let ready = false, hover = null, centre = { x: 0, y: 0 }, dragFrom = null, lastT = 0;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.05, vignette: 0 },
+      hint: 'Glissez pour tirer le sujet (il revient) · survol : loupe · molette : pas des lignes',
+      notes: 'Les barres sont une modulation de largeur d’impulsion : chaque ligne compare l’image à une porteuse en dents de scie. Rapprochez le pas des lignes de la fréquence des anneaux pour faire naître le moiré.',
+      params: {
+        'Sujet': {
+          sujet: { type: 'segmented', label: 'Sujet', options: { anneaux: 'Anneaux', sphere: 'Sphère', ondes: 'Ondes', logo: 'Logo', image: 'Image' }, value: 'anneaux' },
+          image: { type: 'file', label: 'Image', accept: 'image/*', show: (q) => q.sujet === 'image' || q.sujet === 'logo' },
+          echelle: { type: 'range', label: 'Échelle', min: 0.3, max: 2.5, step: 0.01, value: 1 },
+          posX: { type: 'range', label: 'Position horizontale', min: -0.6, max: 0.6, step: 0.01, value: 0 },
+          posY: { type: 'range', label: 'Position verticale', min: -0.6, max: 0.6, step: 0.01, value: 0 },
+          frequence: { type: 'range', label: 'Fréquence des anneaux', min: 2, max: 120, step: 0.5, value: 13, show: (q) => q.sujet === 'anneaux' || q.sujet === 'ondes' },
+          irregularite: { type: 'range', label: 'Irrégularité', min: 0, max: 1, step: 0.01, value: 0.35, show: (q) => q.sujet === 'anneaux' },
+          contraste: { type: 'range', label: 'Contraste', min: 0.3, max: 3, step: 0.01, value: 1.3 },
+          inverser: { type: 'toggle', label: 'Inverser', value: false },
+        },
+        'Trame': {
+          pas: { type: 'range', label: 'Pas des lignes (px)', min: 2, max: 32, step: 0.5, value: 7 },
+          epaisseur: { type: 'range', label: 'Épaisseur des barres', min: 0.1, max: 1, step: 0.01, value: 0.62 },
+          modulation: { type: 'segmented', label: 'La valeur module', options: { longueur: 'Longueur', epaisseur: 'Épaisseur', deux: 'Les deux' }, value: 'longueur' },
+          periode: { type: 'range', label: 'Période des tirets (px)', min: 4, max: 260, step: 1, value: 34, show: (q) => q.modulation !== 'epaisseur' },
+          decalage: { type: 'range', label: 'Décalage entre lignes', min: 0, max: 1, step: 0.01, value: 0.38, show: (q) => q.modulation !== 'epaisseur' },
+          ondulation: { type: 'range', label: 'Ondulation', min: 0, max: 1, step: 0.01, value: 0 },
+          bouts: { type: 'segmented', label: 'Bouts', options: { carre: 'Carrés', rond: 'Ronds' }, value: 'carre' },
+        },
+        'Mouvement': {
+          boucle: { type: 'range', label: 'Boucle (s)', min: 4, max: 40, step: 1, value: 12 },
+          seuil: { type: 'range', label: 'Seuil qui respire', min: 0, max: 0.6, step: 0.01, value: 0.18 },
+          defilement: { type: 'range', label: 'Défilement des tirets', min: -4, max: 4, step: 1, value: 1 },
+          derive: { type: 'range', label: 'Dérive du sujet', min: -3, max: 3, step: 1, value: 1 },
+          loupe: { type: 'range', label: 'Loupe au survol', min: 0, max: 1, step: 0.01, value: 0.5 },
+        },
+        'Couleur': {
+          fond: { type: 'color', label: 'Fond', value: PHOTO[0] },
+          palette: { type: 'palette', label: 'Encres (du plus sombre au plus clair)', value: [PHOTO[1]] },
+        },
+      },
+      presets: {
+        'Photocopie': {},
+        'Moiré': { frequence: 52, pas: 12, periode: 260, decalage: 0.5, epaisseur: 0.55, irregularite: 0.15, contraste: 1.4, seuil: 0.1, defilement: 0, derive: 1 },
+        'Sphère': { sujet: 'sphere', echelle: 1.15, pas: 6, periode: 22, decalage: 0.5, epaisseur: 0.7, contraste: 1.2, fond: P60[0], palette: [P60[1]], bouts: 'rond', seuil: 0.08 },
+        'Ondes': { sujet: 'ondes', frequence: 18, pas: 9, modulation: 'epaisseur', epaisseur: 0.95, contraste: 1.1, fond: NUIT[0], palette: [NUIT[1]], seuil: 0.1 },
+        'Acide': { sujet: 'anneaux', frequence: 9, pas: 10, periode: 60, decalage: 0.5, epaisseur: 0.8, fond: ACIDE[1], palette: [ACIDE[2], ACIDE[0]], bouts: 'rond', contraste: 1.6 },
+        'Thermique': { sujet: 'ondes', frequence: 11, pas: 8, periode: 46, decalage: 0.5, modulation: 'deux', epaisseur: 0.9, fond: THERM[5], palette: [THERM[1], THERM[2]], contraste: 1.3 },
+        'Code-barres': { sujet: 'sphere', pas: 16, periode: 9, decalage: 0, epaisseur: 0.92, contraste: 1.8, fond: BIEN[0], palette: [BIEN[1], BIEN[2]], seuil: 0.25, defilement: 2 },
+        'Orbite': { frequence: 7, irregularite: 0.6, pas: 12, periode: 80, decalage: 0.25, epaisseur: 0.5, ondulation: 0.35, fond: ORB[0], palette: [ORB[1], ORB[2]], bouts: 'rond', contraste: 1.5 },
+        'Logo': { sujet: 'logo', pas: 6, periode: 28, decalage: 0.45, epaisseur: 0.75, contraste: 1.6, seuil: 0.15, echelle: 1.1 },
+      },
+      brand(colors) {
+        return { fond: colors[0], palette: colors.length > 1 ? colors.slice(1) : [colors[0]] };
+      },
+      pointer: {
+        move: (q) => { hover = { x: q.x, y: q.y }; },
+        down: (q) => { dragFrom = { x: q.x, y: q.y, cx: centre.x, cy: centre.y }; },
+        drag: (q) => {
+          if (!dragFrom) return;
+          const u = Math.min(app.size.w, app.size.h);
+          centre = { x: dragFrom.cx + (q.x - dragFrom.x) / u, y: dragFrom.cy + (q.y - dragFrom.y) / u };
+        },
+        up: () => { dragFrom = null; },
+        wheel: (q, dy) => app.set('pas', Math.max(2, Math.min(32, Math.round((p.pas + dy * 0.01) * 2) / 2))),
+      },
+      onChange(k) { if (ready && (k === 'image' || k === '*' || k === 'sujet')) srcDirty = true; },
+      onSeed() { centre = { x: 0, y: 0 }; if (ready) reseed(); },
+      export: { name: 'trame-en-barres', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    // ——— Image ou logo → carte de luminance (sombre = 1) ———
+    let srcDirty = true, src = null; // { w, h, d: Float32Array }
+    function buildSource() {
+      srcDirty = false; src = null;
+      const img = p.sujet === 'logo' ? (p.image || app.logoImg) : p.sujet === 'image' ? p.image : null;
+      if (!img) return;
+      const M = 400, iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height, k = M / Math.max(iw, ih);
+      const w = Math.max(2, Math.round(iw * k)), h = Math.max(2, Math.round(ih * k));
+      const cv = document.createElement('canvas'); cv.width = w; cv.height = h;
+      const x = cv.getContext('2d', { willReadFrequently: true });
+      x.fillStyle = '#fff'; x.fillRect(0, 0, w, h);
+      // Le logo est adouci : ses bords deviennent un dégradé que la trame traduit en barres effilées.
+      if (p.sujet === 'logo') x.filter = 'blur(4px)';
+      x.drawImage(img, 0, 0, w, h);
+      const px = x.getImageData(0, 0, w, h).data, d = new Float32Array(w * h);
+      for (let i = 0; i < d.length; i++) d[i] = 1 - (px[i * 4] * 0.2126 + px[i * 4 + 1] * 0.7152 + px[i * 4 + 2] * 0.0722) / 255;
+      src = { w, h, d };
+    }
+    function sampleSrc(u, v) {
+      // u, v ∈ [0, 1] ; bilinéaire, blanc hors de l'image.
+      if (u < 0 || v < 0 || u > 1 || v > 1) return 0;
+      const fx = u * (src.w - 1), fy = v * (src.h - 1), x0 = fx | 0, y0 = fy | 0, x1 = Math.min(src.w - 1, x0 + 1), y1 = Math.min(src.h - 1, y0 + 1);
+      const ax = fx - x0, ay = fy - y0, d = src.d, W = src.w;
+      return (d[y0 * W + x0] * (1 - ax) + d[y0 * W + x1] * ax) * (1 - ay) + (d[y1 * W + x0] * (1 - ax) + d[y1 * W + x1] * ax) * ay;
+    }
+
+    // ——— Sujets procéduraux : valeur sombre ∈ [0, 1] en coordonnées centrées (unité = petit côté) ———
+    let ph = 0, seedOff = [0, 0, 0];
+    function subject(X, Y) {
+      const s = p.echelle, x = (X - centre.x - p.posX) / s, y = (Y - centre.y - p.posY) / s;
+      switch (p.sujet) {
+        case 'anneaux': {
+          // Coupe de tronc : anneaux de croissance irréguliers, plus serrés vers l'écorce.
+          const r = Math.hypot(x, y), a = Math.atan2(y, x), R = 0.42;
+          if (r > R + 0.04) return 0;
+          const wob = p.irregularite * (0.018 * Math.sin(3 * a + seedOff[0]) + 0.01 * Math.sin(7 * a + seedOff[1]) + 0.006 * Math.sin(13 * a + seedOff[2]));
+          const rr = r + wob, g = rr * p.frequence * (1 + 0.6 * rr / R);
+          const ring = 0.5 + 0.5 * Math.cos(TAU * (g - ph));
+          const bark = Math.min(1, Math.max(0, (rr - R + 0.035) / 0.03));
+          const edge = 1 - Math.min(1, Math.max(0, (r - R - 0.01) / 0.03));
+          return Math.max(ring * 0.9 + 0.05, bark) * edge;
+        }
+        case 'sphere': {
+          // Sphère éclairée par une lumière qui tourne : ombre propre, terminateur, reflet.
+          const R = 0.36, r2 = (x * x + y * y) / (R * R);
+          const lx = Math.cos(TAU * ph) * 0.7, ly = -0.45, lz = Math.sin(TAU * ph) * 0.7 + 0.35, ll = Math.hypot(lx, ly, lz);
+          if (r2 >= 1) {
+            // Ombre portée au sol, aplatie.
+            const sx = (x + lx / ll * 0.18) / (R * 1.1), sy = (y - 0.33) / (R * 0.22);
+            return Math.max(0, 0.55 * (1 - sx * sx - sy * sy));
+          }
+          const nz = Math.sqrt(1 - r2), nx = x / R, ny = y / R;
+          const lam = Math.max(0, (nx * lx + ny * ly + nz * lz) / ll);
+          return 1 - (0.08 + 0.92 * lam);
+        }
+        case 'ondes': {
+          // Deux sources en phase : franges d'interférence.
+          const d = 0.22, k = p.frequence * TAU;
+          const r1 = Math.hypot(x - d, y), r2 = Math.hypot(x + d, y);
+          const v = Math.cos(k * r1 - TAU * ph) / (1 + r1 * 1.2) + Math.cos(k * r2 - TAU * ph) / (1 + r2 * 1.2);
+          return 0.5 + 0.32 * v;
+        }
+        default: {
+          if (!src) return subjectFallback(x, y);
+          const U = 0.9, asp = src.w / src.h, ww = asp >= 1 ? U : U * asp, hh = asp >= 1 ? U / asp : U;
+          // Lente respiration de l'image.
+          const z = 1 + 0.03 * Math.sin(TAU * ph);
+          return sampleSrc(x / (ww * z) + 0.5, y / (hh * z) + 0.5);
+        }
+      }
+    }
+    function subjectFallback(x, y) {
+      // Sans image : un disque doux, pour que la trame reste lisible.
+      const r = Math.hypot(x, y);
+      return Math.max(0, Math.min(1, (0.36 - r) / 0.12));
+    }
+
+    // ——— Géométrie : liste de barres { x, y, w, h, c } ———
+    function bars(t) {
+      const { w, h } = app.size, U = Math.min(w, h);
+      const T = t / p.boucle, phase = TAU * T;
+      ph = (T * p.derive) % 1;
+      if (srcDirty) buildSource();
+      const pas = p.pas, rows = Math.ceil(h / pas) + 1, ncol = Math.max(1, p.palette.length);
+      const thr = p.seuil * Math.sin(phase);
+      const per = p.periode, scroll = per * p.defilement * T;
+      const mode = p.modulation, k = p.contraste, inv = p.inverser;
+      const L = hover && p.loupe > 0 ? { x: hover.x, y: hover.y, r: U * 0.16, s: p.loupe * 0.6 } : null;
+      const out = [], step = 1;
+      const oy = (h - (rows - 1) * pas) / 2;
+      for (let j = 0; j < rows; j++) {
+        const y = oy + j * pas;
+        const off = (j * p.decalage * per + scroll) % per;
+        let runX = -1, runV = 0, runN = 0, lastQ = -1, segX = 0;
+        const flush = (xe) => {
+          if (runX < 0) return;
+          const vm = runV / runN, c = Math.min(ncol - 1, Math.floor((1 - vm) * ncol * 0.999 + (ncol === 1 ? 0 : 0)));
+          out.push({ x: runX, y, w: xe - runX, h: mode === 'longueur' ? pas * p.epaisseur : lastQ, c: Math.max(0, c) });
+          runX = -1; runV = 0; runN = 0;
+        };
+        for (let x = 0; x <= w; x += step) {
+          // Position échantillonnée : ondulation verticale et loupe au survol.
+          let sx = x, sy = y + p.ondulation * pas * 1.6 * Math.sin(x / U * 9 + j * 0.35 + phase);
+          if (L) { const dx = sx - L.x, dy = sy - L.y, g = Math.exp(-(dx * dx + dy * dy) / (L.r * L.r)); sx -= dx * g * L.s; sy -= dy * g * L.s; }
+          let v = subject((sx - w / 2) / U, (sy - h / 2) / U);
+          if (inv) v = 1 - v;
+          v = Math.min(1, Math.max(0, (v - 0.5) * k + 0.5 + thr));
+          let on, hq;
+          if (mode === 'epaisseur') { on = v > 0.04; hq = Math.round(v * pas * p.epaisseur * 2) / 2; }
+          else {
+            const carrier = ((x + off) % per + per) % per / per;
+            on = v > 0.06 && carrier < v;
+            hq = mode === 'deux' ? Math.max(0.5, Math.round((0.35 + 0.65 * v) * pas * p.epaisseur * 2) / 2) : 0;
+          }
+          if (on && (mode === 'longueur' || hq === lastQ || runX < 0)) {
+            if (runX < 0) { runX = x; lastQ = hq; }
+            runV += v; runN++;
+          } else {
+            flush(x);
+            if (on) { runX = x; lastQ = hq; runV = v; runN = 1; }
+          }
+        }
+        flush(w);
+      }
+      return out;
+    }
+
+    function draw(t) {
+      const { w, h, dpr } = app.size;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = p.fond; ctx.fillRect(0, 0, w, h);
+      const list = bars(t), pal = p.palette.length ? p.palette : ['#000'];
+      const round = p.bouts === 'rond';
+      for (let c = 0; c < pal.length; c++) {
+        ctx.fillStyle = pal[c];
+        ctx.beginPath();
+        for (const b of list) {
+          if (b.c !== c || b.h <= 0) continue;
+          if (round && b.w > 1) ctx.roundRect(b.x, b.y - b.h / 2, b.w, b.h, Math.min(b.h, b.w) / 2);
+          else ctx.rect(b.x, b.y - b.h / 2, b.w, b.h);
+        }
+        ctx.fill();
+      }
+      app.finish(ctx);
+    }
+
+    function toSVG() {
+      const { w, h } = app.size, list = bars(lastT), pal = p.palette.length ? p.palette : ['#000'];
+      const round = p.bouts === 'rond', f = (n) => +n.toFixed(2);
+      const groups = pal.map((col, c) => {
+        const rs = list.filter((b) => b.c === c && b.h > 0).map((b) => {
+          const r = round && b.w > 1 ? ` rx="${f(Math.min(b.h, b.w) / 2)}"` : '';
+          return `<rect x="${f(b.x)}" y="${f(b.y - b.h / 2)}" width="${f(b.w)}" height="${f(b.h)}"${r}/>`;
+        });
+        return `<g fill="${col}">${rs.join('')}</g>`;
+      });
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><rect width="100%" height="100%" fill="${p.fond}"/>${groups.join('')}</svg>`;
+    }
+
+    ready = true;
+    function reseed() { const r = app.rng(7); seedOff = [r() * TAU, r() * TAU, r() * TAU]; }
+    reseed();
+    app.loop((t, dt) => {
+      // Relâché, le sujet revient en douceur à sa place : le geste est un étirement, pas un réglage.
+      if (!dragFrom) { const k = Math.min(1, (dt || 0) * 2.5); centre = { x: centre.x * (1 - k), y: centre.y * (1 - k) }; }
+      lastT = t; draw(t);
+    });
+  </script>
+</body>
+</html>
