@@ -1,0 +1,274 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Phases</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Piles de disques décalés. Chaque disque recouvre presque le précédent : il ne reste de chacun
+    // qu'un croissant, comme les phases de la lune. Une onde parcourt les piles (décalage latéral et
+    // rayon), la valeur des disques suit leur rang, et certains disques reçoivent un accent avec une lueur.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const glowCv = document.createElement('canvas'), gctx = glowCv.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const ACIDE = PAL('acide'), NUIT = PAL('trame-nuit'), MENTHE = PAL('menthe'), PYR = PAL('pyramides');
+    const KB = PAL('kegelbahn'), ORB = PAL('orbite'), P60 = PAL('papier-60'), LUZ = PAL('luzern'), BIEN = PAL('biennale');
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: 4,
+      finish: { grain: 0.12, vignette: 0.18 },
+      hint: 'Glissez pour courber les piles · le pointeur allume les disques proches · molette : nombre de disques',
+      notes: 'Chaque pile est une suite de disques posés l’un sur l’autre avec un léger décalage. Le décalage suit une onde qui court le long de la pile et d’une pile à l’autre : les croissants s’élargissent sur les flancs de l’onde et disparaissent sur ses crêtes, ce qui dessine un volume. La valeur des disques suit leur rang dans la pile.',
+      params: {
+        'Piles': {
+          mode: { type: 'segmented', label: 'Élément', options: { lunes: 'Lunes', empilement: 'Disques empilés' }, value: 'lunes' },
+          colonnes: { type: 'range', label: 'Colonnes', min: 1, max: 24, step: 1, value: 7 },
+          rangees: { type: 'range', label: 'Rangées', min: 1, max: 6, step: 1, value: 1 },
+          disques: { type: 'range', label: 'Disques par pile', min: 3, max: 120, step: 1, value: 14 },
+          rayon: { type: 'range', label: 'Rayon', min: 0.2, max: 1.6, step: 0.01, value: 0.78 },
+          marge: { type: 'range', label: 'Marge', min: 0, max: 0.3, step: 0.005, value: 0.1 },
+          sens: { type: 'segmented', label: 'Empilement', options: { bas: 'Vers le bas', haut: 'Vers le haut' }, value: 'bas' },
+          rotation: { type: 'range', label: 'Rotation (°)', min: -90, max: 90, step: 1, value: 0 },
+        },
+        'Onde': {
+          amplitude: { type: 'range', label: 'Amplitude', min: 0, max: 1.5, step: 0.01, value: 0.35 },
+          longueur: { type: 'range', label: 'Longueur d’onde (disques)', min: 4, max: 120, step: 1, value: 14 },
+          dephasage: { type: 'range', label: 'Décalage entre piles (°)', min: 0, max: 360, step: 1, value: 40 },
+          forme: { type: 'segmented', label: 'Forme', options: { sinus: 'Sinus', triangle: 'Triangle', carre: 'Créneau doux' }, value: 'sinus' },
+          gonflement: { type: 'range', label: 'Gonflement du rayon', min: 0, max: 0.9, step: 0.01, value: 0.2 },
+          profil: { type: 'segmented', label: 'Profil de pile', options: { droit: 'Droit', fuseau: 'Fuseau', cone: 'Cône' }, value: 'fuseau' },
+          phase: { type: 'range', label: 'Course de la phase', min: 0, max: 1.5, step: 0.01, value: 0.9, show: (q) => q.mode === 'lunes' },
+          lumiere: { type: 'range', label: 'Direction de la lumière (°)', min: -180, max: 180, step: 1, value: 0, show: (q) => q.mode === 'lunes' },
+          retard: { type: 'range', label: 'Retard phase / onde (°)', min: 0, max: 360, step: 1, value: 90, show: (q) => q.mode === 'lunes' },
+        },
+        'Mouvement': {
+          boucle: { type: 'range', label: 'Boucle (s)', min: 2, max: 30, step: 0.5, value: 9 },
+          tours: { type: 'range', label: 'Tours d’onde', min: -4, max: 4, step: 1, value: 1 },
+          respiration: { type: 'range', label: 'Respiration', min: 0, max: 1, step: 0.01, value: 0.25 },
+        },
+        'Valeur': {
+          nuit: { type: 'color', label: 'Face cachée', value: ACIDE[1], show: (q) => q.mode === 'lunes' },
+          valeurs: { type: 'palette', label: 'Valeurs (du fond de pile au dessus)', value: [ACIDE[3], ACIDE[0], ACIDE[1]] },
+          cycles: { type: 'range', label: 'Cycles de valeur', min: 0.5, max: 6, step: 0.5, value: 1 },
+          ombre: { type: 'range', label: 'Ombre portée', min: 0, max: 1, step: 0.01, value: 0.35 },
+          contour: { type: 'range', label: 'Contour', min: 0, max: 4, step: 0.05, value: 0 },
+        },
+        'Accent': {
+          accent: { type: 'color', label: 'Accent', value: ACIDE[2] },
+          selection: { type: 'segmented', label: 'Sélection', options: { piles: 'Piles', onde: 'Crêtes', aucun: 'Aucun' }, value: 'piles' },
+          part: { type: 'range', label: 'Part des piles', min: 0, max: 1, step: 0.01, value: 0.25, show: (q) => q.selection === 'piles' },
+          seuil: { type: 'range', label: 'Seuil de crête', min: 0.5, max: 0.99, step: 0.01, value: 0.85, show: (q) => q.selection === 'onde' },
+          lueur: { type: 'range', label: 'Rayon de lueur', min: 0, max: 0.2, step: 0.002, value: 0.06 },
+          intensite: { type: 'range', label: 'Intensité de lueur', min: 0, max: 2, step: 0.01, value: 0.9 },
+        },
+        'Couleur': {
+          fond: { type: 'color', label: 'Fond', value: ACIDE[0] },
+        },
+      },
+      presets: {
+        'Acide': {},
+        'Calendrier': { mode: 'lunes', colonnes: 9, rangees: 1, disques: 9, rayon: 0.78, amplitude: 0.12, longueur: 9, dephasage: 40, gonflement: 0, profil: 'droit', phase: 1.1, lumiere: 0, retard: 90, fond: P60[0], valeurs: [P60[0], '#c9c8c4'], nuit: P60[1], cycles: 1, ombre: 0.15, contour: 0, accent: BIEN[2], selection: 'piles', part: 0.12, lueur: 0.015, intensite: 0.4 },
+        'Pyramides': { mode: 'empilement', colonnes: 9, rangees: 1, disques: 22, rayon: 0.95, amplitude: 0.2, longueur: 60, dephasage: 25, gonflement: 0.55, profil: 'cone', forme: 'sinus', tours: 1, respiration: 0.4, fond: PYR[0], valeurs: [PYR[3], PYR[2], PYR[6]], cycles: 1, ombre: 0.2, contour: 0, accent: PYR[4], selection: 'piles', part: 0.2, lueur: 0.03, intensite: 0.6 },
+        'Nuit': { mode: 'empilement', colonnes: 12, rangees: 1, disques: 60, rayon: 0.7, amplitude: 0.8, longueur: 40, dephasage: 18, gonflement: 0.2, profil: 'fuseau', fond: NUIT[0], valeurs: [NUIT[0], NUIT[2], NUIT[1]], cycles: 2, ombre: 0.6, contour: 0, accent: ACIDE[2], selection: 'onde', seuil: 0.9, lueur: 0.08, intensite: 1.3 },
+        'Grille menthe': { mode: 'lunes', colonnes: 12, rangees: 3, disques: 7, rayon: 0.85, amplitude: 0.1, longueur: 7, dephasage: 30, gonflement: 0, profil: 'droit', phase: 1, lumiere: -35, retard: 60, fond: MENTHE[0], valeurs: [MENTHE[2], MENTHE[0]], nuit: MENTHE[1], cycles: 1, ombre: 0.25, contour: 0, accent: MENTHE[3], selection: 'onde', seuil: 0.9, lueur: 0.04, intensite: 0.9 },
+        'Kegelbahn': { mode: 'lunes', colonnes: 6, rangees: 1, disques: 11, rayon: 0.95, amplitude: 0.5, longueur: 11, dephasage: 60, forme: 'triangle', gonflement: 0.15, profil: 'fuseau', phase: 1.2, lumiere: 90, retard: 0, fond: KB[0], valeurs: [KB[1], KB[3], KB[5], KB[2]], nuit: KB[0], cycles: 1, ombre: 0, contour: 1.4, accent: KB[3], selection: 'aucun', lueur: 0 },
+        'Papier': { mode: 'empilement', colonnes: 16, rangees: 2, disques: 20, rayon: 0.75, amplitude: 0.4, longueur: 20, dephasage: 22, forme: 'carre', gonflement: 0.1, profil: 'droit', fond: P60[0], valeurs: [P60[0], P60[1]], cycles: 1, ombre: 0, contour: 0.9, accent: BIEN[2], selection: 'piles', part: 0.12, lueur: 0.02, intensite: 0.5 },
+        'Chrome Luzern': { mode: 'lunes', colonnes: 5, rangees: 1, disques: 9, rayon: 0.8, amplitude: 0.3, longueur: 9, dephasage: 72, gonflement: 0.1, profil: 'fuseau', phase: 1, lumiere: 45, retard: 120, rotation: 0, fond: LUZ[3], valeurs: [LUZ[0], LUZ[2], LUZ[4]], nuit: LUZ[1], cycles: 1, ombre: 0.5, contour: 0, accent: LUZ[0], selection: 'onde', seuil: 0.85, lueur: 0.07, intensite: 1.1 },
+      },
+      brand(colors) {
+        return { fond: colors[0], valeurs: colors.length > 2 ? [colors[0], ...colors.slice(2)] .concat([colors[1]]) : colors.slice(), accent: colors[2] || colors[1] || colors[0] };
+      },
+      pointer: {
+        move: (q) => { hover = { x: q.x, y: q.y }; },
+        down: (q) => { hover = { x: q.x, y: q.y }; bend = { x0: q.x, y0: q.y, dx: 0, dy: 0 }; },
+        drag: (q) => { hover = { x: q.x, y: q.y }; if (bend) { bend.dx = q.x - bend.x0; bend.dy = q.y - bend.y0; } },
+        up: () => { bend = null; },
+        wheel: (q, dy) => app.set('disques', Math.round(Math.min(120, Math.max(3, p.disques * Math.exp(-dy * 0.0015))))),
+      },
+      export: { name: 'phases', svg: () => exportSVG() },
+    });
+    const p = app.params;
+    let hover = null, bend = null, bendLive = { dx: 0, dy: 0, x0: 0, y0: 0, k: 0 }, lit = new Map();
+
+    const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
+    const hex = (c) => { const n = parseInt(c.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; };
+    const rgb = (a) => `rgb(${a[0] | 0},${a[1] | 0},${a[2] | 0})`;
+    const mix = (a, b, k) => [a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k, a[2] + (b[2] - a[2]) * k];
+    function ramp(pal, u) {
+      if (pal.length === 1) return hex(pal[0]);
+      const f = clamp(u, 0, 1) * (pal.length - 1), i = Math.min(pal.length - 2, Math.floor(f));
+      return mix(hex(pal[i]), hex(pal[i + 1]), f - i);
+    }
+    function wave(x) {
+      const s = Math.sin(x);
+      if (p.forme === 'triangle') return Math.asin(s) / (Math.PI / 2);
+      if (p.forme === 'carre') return Math.tanh(s * 3) / Math.tanh(3);
+      return s;
+    }
+
+    // Géométrie de toutes les piles pour un temps t : liste de disques, dans l'ordre de dessin.
+    function build(t, w, h) {
+      const u = Math.min(w, h), th = TAU * p.tours * t / p.boucle, br = 1 + p.respiration * 0.25 * Math.sin(TAU * t / p.boucle);
+      const C = p.colonnes, Rw = p.rangees, M = p.disques;
+      const ang = p.rotation * Math.PI / 180, ca = Math.cos(ang), sa = Math.sin(ang);
+      // Cadre tourné : on dispose les piles dans un rectangle qui couvre le cadre une fois tourné.
+      const W = Math.abs(w * ca) + Math.abs(h * sa), H = Math.abs(w * sa) + Math.abs(h * ca);
+      const mW = W * p.marge, mH = H * p.marge;
+      const cellW = (W - 2 * mW) / C, cellH = (H - 2 * mH) / Rw;
+      const R0 = Math.min(cellW * 0.5 * p.rayon, cellH * 0.45);
+      const r = app.rng(13), accentPile = [];
+      for (let k = 0; k < C * Rw; k++) accentPile.push(r() < p.part);
+      const discs = [];
+      for (let row = 0; row < Rw; row++) for (let col = 0; col < C; col++) {
+        const k = row * C + col, cxp = -W / 2 + mW + cellW * (col + 0.5);
+        const top = -H / 2 + mH + row * cellH, span = cellH - 2 * R0 * (1 + p.gonflement);
+        const ph = k * p.dephasage * Math.PI / 180;
+        for (let i0 = 0; i0 < M; i0++) {
+          const i = p.sens === 'bas' ? i0 : M - 1 - i0, f = M === 1 ? 0.5 : i / (M - 1);
+          const ky = top + R0 * (1 + p.gonflement) + span * f;
+          const a = TAU * i / p.longueur + ph - th;
+          const wv = wave(a);
+          let prof = 1;
+          if (p.profil === 'fuseau') prof = 0.35 + 0.65 * Math.sin(Math.PI * (0.08 + 0.84 * f));
+          else if (p.profil === 'cone') prof = 0.25 + 0.75 * f;
+          const rad = R0 * prof * br * (1 + p.gonflement * wave(a + Math.PI / 2));
+          let x = cxp + wv * p.amplitude * R0, y = ky;
+          // Rotation vers le cadre.
+          let X = w / 2 + x * ca - y * sa, Y = h / 2 + x * sa + y * ca;
+          if (bendLive.k > 0.001) {
+            const d = Math.hypot(X - bendLive.x0, Y - bendLive.y0), fall = Math.exp(-(d * d) / (2 * (u * 0.28) ** 2)) * bendLive.k;
+            X += bendLive.dx * fall; Y += bendLive.dy * fall;
+          }
+          const crest = (wv + 1) / 2;
+          let acc = 0;
+          if (p.selection === 'piles') acc = accentPile[k] ? 1 : 0;
+          else if (p.selection === 'onde') acc = clamp((crest - p.seuil) / Math.max(0.01, 1 - p.seuil), 0, 1);
+          const key = k * 100000 + i;
+          const l = lit.get(key);
+          if (l) acc = Math.max(acc, l);
+          const m = clamp(wave(a + p.retard * Math.PI / 180) * p.phase, -1, 1);
+          discs.push({ x: X, y: Y, r: Math.max(0.5, rad), f, acc, key, pile: k, m });
+        }
+      }
+      return discs;
+    }
+
+    function colours(d) {
+      const q = d.f * p.cycles, n = Math.floor(q), fr = q - n;
+      // Cycles en aller-retour : la valeur remonte au lieu de sauter.
+      const v = ramp(p.valeurs, n % 2 ? 1 - fr : fr);
+      if (d.acc <= 0) return { fill: v };
+      // L'accent remplace la couleur claire de la valeur : les disques gardent leur modelé.
+      const a = hex(p.accent), lum = (v[0] * 0.2126 + v[1] * 0.7152 + v[2] * 0.0722) / 255;
+      const tinted = mix(mix([0, 0, 0], a, 0.35 + 0.65 * lum), a, 0.25);
+      return { fill: mix(v, tinted, d.acc) };
+    }
+
+    function moonOffset(d) {
+      const k = Math.abs(d.m);
+      if (k >= 0.999) return null;
+      const la = p.lumiere * Math.PI / 180 + (d.m < 0 ? Math.PI : 0), dist = 2 * d.r * k;
+      return [Math.cos(la) * dist, Math.sin(la) * dist];
+    }
+    // La face cachée garde un peu de la couleur de l'accent quand le disque est allumé.
+    function shade(fill) { return rgb(hex(p.nuit)); }
+
+    // Éclairage au pointeur : les disques proches s'allument, puis s'éteignent doucement.
+    function updateLit(discs, dt) {
+      const decay = Math.exp(-dt * 1.6);
+      for (const [k, v] of lit) { const n = v * decay; if (n < 0.02) lit.delete(k); else lit.set(k, n); }
+      if (!hover) return;
+      const { w, h } = app.size, rr = Math.min(w, h) * 0.08;
+      for (const d of discs) { const dd = Math.hypot(d.x - hover.x, d.y - hover.y); if (dd < rr + d.r * 0.5) lit.set(d.key, Math.max(lit.get(d.key) || 0, 1 - dd / (rr + d.r))); }
+    }
+
+    function render(c, t, w, h, discs) {
+      const u = Math.min(w, h);
+      c.fillStyle = p.fond; c.fillRect(0, 0, w, h);
+      const sh = p.ombre, cw = p.contour * u / 1000;
+      for (const d of discs) {
+        const col = colours(d);
+        if (sh > 0) {
+          // Ombre portée douce sous chaque disque : renforce l'empilement.
+          c.save(); c.shadowColor = `rgba(0,0,0,${0.45 * sh})`; c.shadowBlur = d.r * 0.35 * sh; c.shadowOffsetY = d.r * 0.06 * sh;
+          c.fillStyle = rgb(col.fill); c.beginPath(); c.arc(d.x, d.y, d.r, 0, TAU); c.fill(); c.restore();
+        } else { c.fillStyle = rgb(col.fill); c.beginPath(); c.arc(d.x, d.y, d.r, 0, TAU); c.fill(); }
+        if (p.mode === 'lunes') {
+          // Face cachée : un disque du même rayon décalé selon la phase, découpé par le disque éclairé.
+          const off = moonOffset(d);
+          if (off) {
+            c.save(); c.beginPath(); c.arc(d.x, d.y, d.r, 0, TAU); c.clip();
+            c.fillStyle = shade(col.fill); c.beginPath(); c.arc(d.x + off[0], d.y + off[1], d.r * 1.002, 0, TAU); c.fill(); c.restore();
+          }
+          c.beginPath(); c.arc(d.x, d.y, d.r, 0, TAU);
+        }
+        if (cw > 0) { c.strokeStyle = p.fond; c.lineWidth = cw; c.stroke(); }
+      }
+      // Lueur additive sur les disques accentués.
+      const gr = p.lueur * u;
+      if (gr > 0.5 && p.intensite > 0 && discs.some((d) => d.acc > 0.02)) {
+        const { dpr } = app.size;
+        if (glowCv.width !== Math.round(w * dpr / 4) || glowCv.height !== Math.round(h * dpr / 4)) { glowCv.width = Math.max(1, Math.round(w * dpr / 4)); glowCv.height = Math.max(1, Math.round(h * dpr / 4)); }
+        const s = glowCv.width / w;
+        gctx.setTransform(1, 0, 0, 1, 0, 0); gctx.clearRect(0, 0, glowCv.width, glowCv.height);
+        gctx.filter = `blur(${Math.max(0.5, gr * s)}px)`;
+        gctx.setTransform(s, 0, 0, s, 0, 0);
+        gctx.fillStyle = p.accent;
+        for (const d of discs) if (d.acc > 0.02) { gctx.globalAlpha = d.acc; gctx.beginPath(); gctx.arc(d.x, d.y, d.r * 0.9, 0, TAU); gctx.fill(); }
+        gctx.globalAlpha = 1; gctx.filter = 'none';
+        c.save(); c.setTransform(1, 0, 0, 1, 0, 0); c.globalCompositeOperation = 'screen';
+        for (let k = p.intensite; k > 0; k -= 1) { c.globalAlpha = Math.min(1, k); c.drawImage(glowCv, 0, 0, c.canvas.width, c.canvas.height); }
+        c.restore();
+      }
+    }
+
+    let lastT = 0;
+    app.loop((t, dt) => {
+      const { w, h, dpr } = app.size;
+      // Le geste de courbure revient en place quand on lâche.
+      if (bend) { bendLive = { dx: bend.dx, dy: bend.dy, x0: bend.x0, y0: bend.y0, k: 1 }; }
+      else bendLive.k *= Math.exp(-(dt || 0) * 3);
+      const discs = build(t, w, h);
+      updateLit(discs, dt || 0);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      render(ctx, t, w, h, discs);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      app.finish(ctx);
+      lastT = t;
+    });
+
+    // SVG : disques en aplats (l'ombre et la lueur deviennent des filtres SVG).
+    function exportSVG() {
+      const { w, h } = app.size, u = Math.min(w, h), f = (v) => Math.round(v * 100) / 100;
+      const discs = build(app.time, w, h), cw = p.contour * u / 1000;
+      const out = [`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}">`,
+        `<defs><filter id="g" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="${f(p.lueur * u)}"/></filter></defs>`,
+        `<rect width="${w}" height="${h}" fill="${p.fond}"/>`];
+      let n = 0;
+      for (const d of discs) {
+        const off = p.mode === 'lunes' ? moonOffset(d) : null, stroke = cw > 0 ? ` stroke="${p.fond}" stroke-width="${f(cw)}"` : '';
+        out.push(`<circle cx="${f(d.x)}" cy="${f(d.y)}" r="${f(d.r)}" fill="${rgb(colours(d).fill)}"/>`);
+        if (off) { n++; out.push(`<clipPath id="c${n}"><circle cx="${f(d.x)}" cy="${f(d.y)}" r="${f(d.r)}"/></clipPath><circle clip-path="url(#c${n})" cx="${f(d.x + off[0])}" cy="${f(d.y + off[1])}" r="${f(d.r)}" fill="${p.nuit}"/>`); }
+        if (stroke) out.push(`<circle cx="${f(d.x)}" cy="${f(d.y)}" r="${f(d.r)}" fill="none"${stroke}/>`);
+      }
+      const acc = discs.filter((d) => d.acc > 0.02);
+      if (acc.length && p.lueur > 0 && p.intensite > 0) {
+        out.push(`<g filter="url(#g)" style="mix-blend-mode:screen" fill="${p.accent}" opacity="${f(Math.min(1, p.intensite))}">`);
+        for (const d of acc) out.push(`<circle cx="${f(d.x)}" cy="${f(d.y)}" r="${f(d.r * 0.9)}" fill-opacity="${f(d.acc)}"/>`);
+        out.push('</g>');
+      }
+      out.push('</svg>');
+      return out.join('\n');
+    }
+  </script>
+</body>
+</html>

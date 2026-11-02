@@ -1,0 +1,15 @@
+{
+  "slug": "phases",
+  "title": "Phases",
+  "type": "shapes",
+  "description": "Piles de disques décalés dont il ne reste que des croissants : une onde parcourt les piles et dessine un volume, accent coloré avec lueur, export SVG.",
+  "tags": ["cercles", "croissants", "onde", "volume", "lueur", "boucle"],
+  "inspiration": [
+    "Moodboard de Noé, fiche 5 — croissants empilés et lueur acide",
+    "Moodboard de Noé, fiche 15 — pyramides d'ellipses",
+    "Palettes acide, pyramides, trame-nuit, menthe, kegelbahn, orbite, papier-60, luzern"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
