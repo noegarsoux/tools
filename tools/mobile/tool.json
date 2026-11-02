@@ -1,0 +1,15 @@
+{
+  "slug": "mobile",
+  "title": "Mobile",
+  "type": "motion",
+  "description": "Un mobile suspendu dont chaque tige tient à son point d'équilibre : plaques de couleur qui tournent au vent, s'amincissent de profil et projettent leur ombre.",
+  "tags": ["mobile", "suspension", "equilibre", "cinetique", "logo", "svg"],
+  "inspiration": [
+    "Alexander Calder, mobiles (années 1930 à 1970)",
+    "Bruno Munari, Macchine inutili (1933)",
+    "references/artistes.md ; palettes biennale, menthe, kegelbahn, luzern"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}

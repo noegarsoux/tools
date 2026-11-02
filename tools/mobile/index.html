@@ -1,0 +1,337 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mobile</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Mobile : un mobile suspendu, à la manière des sculptures cinétiques. Chaque tige est accrochée
+    // à son point d'équilibre (calculé à partir du poids des formes qu'elle porte) et tourne autour
+    // de son fil ; les plaques vues de biais s'amincissent, montrent leur revers, et projettent leur
+    // ombre sur le mur.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const P60 = PAL('papier-60'), BIEN = PAL('biennale'), MENTHE = PAL('menthe'), KB = PAL('kegelbahn'), GR = PAL('good-room'), NUIT = PAL('trame-nuit');
+    const LUZ = PAL('luzern'), SALON = PAL('salon'), PYR = PAL('pyramides'), ACIDE = PAL('acide'), ORB = PAL('orbite'), EV = PAL('eventail'), BIT = PAL('bitmap');
+
+    let root = null, rods = [], leaves = [], fit = { k: 1, x: 0 }, built = false;
+    let ptr = null, pv = { x: 0, y: 0 }, grab = null, down = null, logoKey = '', logoCv = null, windT = 0;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.035, vignette: 0 },
+      hint: 'Passez vite pour souffler · glissez une forme pour faire tourner sa branche · touchez-la pour la faire pivoter · molette : nombre de formes',
+      notes: 'Chaque tige est suspendue à son point d’équilibre : le poids d’une plaque vaut son aire, celui d’une branche la somme de ce qu’elle porte. Les tiges tournent autour de leur fil avec un ressort de torsion ; une plaque vue de biais s’amincit et montre son revers.',
+      params: {
+        'Structure': {
+          structure: { type: 'select', label: 'Structure', options: { cascade: 'Cascade', arbre: 'Arbre', grappe: 'Grappe' }, value: 'cascade' },
+          formesN: { type: 'range', label: 'Nombre de formes', min: 3, max: 16, step: 1, value: 8 },
+          asymetrie: { type: 'range', label: 'Asymétrie', min: 0, max: 1, step: 0.01, value: 0.5 },
+          formes: { type: 'select', label: 'Formes', options: { disques: 'Disques', petales: 'Pétales', mixte: 'Mélange', libres: 'Formes libres', logo: 'Logo' }, value: 'mixte' },
+          image: { type: 'file', label: 'Logo', accept: 'image/*', show: (q) => q.formes === 'logo' },
+          taille: { type: 'range', label: 'Taille des formes', min: 0.3, max: 2, step: 0.01, value: 1 },
+          ecarts: { type: 'range', label: 'Écarts de taille', min: 0, max: 1, step: 0.01, value: 0.6 },
+        },
+        'Mouvement': {
+          vent: { type: 'range', label: 'Vent', min: 0, max: 2, step: 0.01, value: 0.6 },
+          vitesse: { type: 'range', label: 'Vitesse', min: 0, max: 3, step: 0.05, value: 1 },
+          raideur: { type: 'range', label: 'Torsion des fils', min: 0, max: 1, step: 0.01, value: 0.35 },
+        },
+        'Rendu': {
+          ombre: { type: 'range', label: 'Ombre sur le mur', min: 0, max: 1, step: 0.01, value: 0.5 },
+          epaisseur: { type: 'range', label: 'Épaisseur des tiges', min: 0.5, max: 6, step: 0.1, value: 2.2 },
+          fond: { type: 'color', label: 'Fond', value: '#efede8' },
+          couleurs: { type: 'palette', label: 'Plaques', value: ['#e5452a', '#111111', '#f2c230', '#2f4fa8', '#f4f3f0'] },
+          verso: { type: 'color', label: 'Revers', value: '#111111' },
+          tiges: { type: 'color', label: 'Tiges et fils', value: '#111111' },
+        },
+      },
+      presets: {
+        'Atelier': {},
+        'Rouge': { couleurs: ['#e5452a'], verso: '#111111', structure: 'cascade', formesN: 10, formes: 'petales', fond: '#f4f3f0', ombre: 0.6 },
+        'Arbre': { structure: 'arbre', formesN: 12, formes: 'disques', couleurs: [BIEN[2], BIEN[1], BIEN[4], BIEN[3]], fond: BIEN[0], verso: BIEN[1], tiges: BIEN[1], taille: 1.1 },
+        'Grappe': { structure: 'grappe', formesN: 14, taille: 0.8, formes: 'libres', couleurs: [MENTHE[3], MENTHE[2], MENTHE[1]], fond: MENTHE[0], verso: MENTHE[1], tiges: MENTHE[1], ombre: 0.4 },
+        'Nuit': { couleurs: [NUIT[1], NUIT[2], '#e05527'], fond: NUIT[0], verso: '#2a2a2a', tiges: NUIT[1], ombre: 0.25, formes: 'mixte', vent: 0.9 },
+        'Logo': { formes: 'logo', formesN: 7, couleurs: [P60[1]], verso: '#8a8680', fond: P60[0], tiges: P60[1], taille: 1.2, structure: 'cascade' },
+        'Kegelbahn': { couleurs: [KB[1], KB[2], KB[3], KB[4], KB[5]], fond: KB[0], verso: '#f4f3f0', tiges: '#f4f3f0', ombre: 0.2, formes: 'disques', structure: 'arbre', formesN: 10 },
+        'Luzern': { couleurs: [LUZ[0], LUZ[1], LUZ[2]], fond: LUZ[4], verso: LUZ[3], tiges: LUZ[3], formes: 'petales', formesN: 9, asymetrie: 0.8 },
+        'Salon': { couleurs: [SALON[2], SALON[3], SALON[4], SALON[1]], fond: SALON[0], verso: SALON[1], tiges: SALON[1], formes: 'libres', structure: 'grappe', formesN: 11 },
+        'Orbite': { couleurs: [ORB[0], ORB[2]], fond: ORB[1], verso: ORB[0], tiges: ORB[2], formes: 'disques', structure: 'cascade', formesN: 12, ecarts: 0.9, ombre: 0 },
+        'Pyramides': { couleurs: [PYR[2], PYR[3], PYR[4], PYR[5]], fond: PYR[0], verso: PYR[1], tiges: PYR[6], formes: 'petales', structure: 'arbre', formesN: 9 },
+        'Acide': { couleurs: [ACIDE[2], ACIDE[3]], fond: ACIDE[0], verso: ACIDE[1], tiges: ACIDE[1], formes: 'libres', formesN: 13, vent: 1.2, structure: 'grappe' },
+        'Éventail': { couleurs: [EV[1], EV[2], EV[3], EV[4]], fond: '#e8dcc4', verso: EV[0], tiges: EV[0], formes: 'mixte', formesN: 10, asymetrie: 0.9 },
+      },
+      brand(colors) {
+        const c = colors.slice(1).length ? colors.slice(1) : ['#111111'];
+        const lum = (h) => { const n = parseInt(h.slice(1), 16); return ((n >> 16) & 255) * 0.299 + ((n >> 8) & 255) * 0.587 + (n & 255) * 0.114; };
+        const dark = c.slice().sort((a, b) => lum(a) - lum(b))[0];
+        return { fond: colors[0], couleurs: c.slice(0, 6), tiges: lum(colors[0]) > 128 ? dark : '#f4f3f0', verso: dark };
+      },
+      pointer: {
+        move: (q) => { if (ptr) { pv.x = pv.x * 0.6 + (q.x - ptr.x) * 0.4; pv.y = pv.y * 0.6 + (q.y - ptr.y) * 0.4; } ptr = { x: q.x, y: q.y }; },
+        down: (q) => { down = { x: q.x, y: q.y, moved: false }; ptr = { x: q.x, y: q.y }; grab = pick(q.x, q.y, 60); },
+        drag: (q) => {
+          if (down && Math.hypot(q.x - down.x, q.y - down.y) > 6) down.moved = true;
+          if (grab && grab.parent && ptr) grab.parent.w += (q.x - ptr.x) * 0.012 * (grab.side || 1);
+          if (ptr) { pv.x = pv.x * 0.6 + (q.x - ptr.x) * 0.4; pv.y = pv.y * 0.6 + (q.y - ptr.y) * 0.4; }
+          ptr = { x: q.x, y: q.y };
+        },
+        up: (q) => { if (down && !down.moved) { const l = pick(q.x, q.y, 40); if (l) l.w += (app.random() < 0.5 ? -1 : 1) * 9; } down = null; grab = null; },
+        wheel: (q, dy) => app.set('formesN', Math.max(3, Math.min(16, p.formesN + (dy > 0 ? -1 : 1)))),
+      },
+      onChange(k) {
+        if (['structure', 'formesN', 'asymetrie', 'formes', 'taille', 'ecarts', 'couleurs', '*'].includes(k)) built = false;
+        if (k === 'image' || k === 'formes') logoKey = '';
+      },
+      onSeed() { built = false; },
+      export: { name: 'mobile', svg: () => toSVG() },
+    });
+    const p = app.params;
+    canvas.addEventListener('pointerleave', () => { ptr = null; });
+
+    // ——— Construction : arbre de tiges et de plaques, équilibré ———
+    function build() {
+      const r = app.rng(17), n = Math.round(p.formesN), cols = p.couleurs.length ? p.couleurs : ['#e5452a'];
+      rods = []; leaves = [];
+      const kinds = { disques: ['disque'], petales: ['petale'], libres: ['libre'], mixte: ['disque', 'petale', 'libre', 'demi'], logo: ['logo'] }[p.formes] || ['disque'];
+      let ci = Math.floor(r() * cols.length);
+      const leaf = (depth) => {
+        const size = 0.06 * p.taille * (1 - p.ecarts * 0.45 + r() * p.ecarts * 0.9) * (1 - Math.min(0.4, depth * 0.03));
+        const L = { leaf: true, size, kind: kinds[Math.floor(r() * kinds.length)], col: cols[ci++ % cols.length], wire: 0.025 + r() * 0.03,
+          th: (r() - 0.5) * 1.6, w: 0, rest: (r() - 0.5) * 1.2, ph: r() * TAU, tilt: (r() - 0.5) * 0.9, pts: null };
+        if (L.kind === 'libre') { const m = 7, a = []; for (let k = 0; k < m; k++) a.push(0.7 + r() * 0.5); L.pts = a; }
+        L.mass = size * size * (L.kind === 'petale' ? 0.7 : L.kind === 'demi' ? 0.5 : 1);
+        leaves.push(L); return L;
+      };
+      const rod = (kids, depth) => {
+        const len = 0.34 * Math.pow(0.86, depth) * (1 + (r() - 0.5) * p.asymetrie * 0.8);
+        const R = { leaf: false, kids, len, th: (r() - 0.5) * 1.2, w: 0, rest: (r() - 0.5) * 0.9, ph: r() * TAU, depth, wire: 0.05 + r() * 0.035 };
+        kids.forEach((k, i) => { k.parent = R; k.side = i === 0 ? -1 : 1; });
+        const mL = kids[0].mass, mR = kids[1].mass;
+        // Point d'équilibre : mL·a = mR·b, a + b = longueur.
+        R.a = len * mR / (mL + mR); R.b = len * mL / (mL + mR);
+        R.mass = mL + mR + len * 0.004;
+        rods.push(R); return R;
+      };
+      const make = (m, depth) => {
+        if (m <= 1) return leaf(depth);
+        if (p.structure === 'cascade') {
+          const sub = make(m - 1, depth + 1), l = leaf(depth);
+          return rod(r() < 0.5 ? [l, sub] : [sub, l], depth);
+        }
+        if (p.structure === 'grappe') {
+          // Grappe : de petites tiges à deux ou trois formes, accrochées à une tige mère.
+          if (m <= 3) { const a = leaf(depth + 1); return m === 2 ? rod([a, leaf(depth + 1)], depth + 1.5) : rod([a, rod([leaf(depth + 2), leaf(depth + 2)], depth + 2.5)], depth + 1.5); }
+          const m1 = Math.max(1, Math.min(m - 1, Math.round(m * (0.35 + r() * 0.3))));
+          return rod([make(m1, depth + 1), make(m - m1, depth + 1)], depth);
+        }
+        const m1 = Math.max(1, Math.min(m - 1, Math.round(m * (0.3 + r() * 0.4))));
+        return rod([make(m1, depth + 1), make(m - m1, depth + 1)], depth);
+      };
+      root = make(n, 0);
+      root.side = 0;
+      // Mise à l'échelle : la pose « à plat » (toutes les tiges face à nous) doit tenir dans le cadre.
+      const { w, h } = app.size, S = Math.min(w, h), box = { x0: 0, x1: 0, y1: 0 };
+      const walk = (nd, x, y) => {
+        if (nd.leaf) { box.x0 = Math.min(box.x0, x - nd.size); box.x1 = Math.max(box.x1, x + nd.size); box.y1 = Math.max(box.y1, y + nd.wire + nd.size * 2); return; }
+        box.x0 = Math.min(box.x0, x - nd.a); box.x1 = Math.max(box.x1, x + nd.b);
+        walk(nd.kids[0], x - nd.a, y + nd.kids[0].wire); walk(nd.kids[1], x + nd.b, y + nd.kids[1].wire);
+      };
+      walk(root, 0, 0);
+      const kx = (w * 0.86) / Math.max(0.01, box.x1 - box.x0), ky = (h * 0.8) / Math.max(0.01, box.y1);
+      fit.k = Math.min(kx, ky, S * 3.2);
+      // Les fils s'allongent pour occuper la hauteur quand la largeur limite l'échelle.
+      let kv = Infinity;
+      const walk2 = (nd, y) => {
+        if (nd.leaf) { const ww = y + nd.wire; if (ww > 0) kv = Math.min(kv, (h * 0.8 - nd.size * 2 * fit.k) / ww); return; }
+        walk2(nd.kids[0], y + (nd.kids[0].leaf ? 0 : nd.kids[0].wire)); walk2(nd.kids[1], y + (nd.kids[1].leaf ? 0 : nd.kids[1].wire));
+      };
+      walk2(root, 0);
+      fit.kv = Math.max(fit.k, Math.min(fit.k * 2.6, kv));
+      fit.x = w / 2 - (box.x0 + box.x1) / 2 * fit.k;
+      fit.top = h * 0.1;
+      built = true;
+    }
+
+    // ——— Dynamique : torsion des fils, rafales et souffle du pointeur ———
+    const noise = (t, s) => Math.sin(t * 0.31 + s) * 0.6 + Math.sin(t * 0.73 + s * 2.1) * 0.3 + Math.sin(t * 1.37 + s * 3.7) * 0.15;
+    function step(dt, t) {
+      const K = 0.15 + p.raideur * 1.6, D = 0.35 + p.raideur * 0.5;
+      const pts = [];
+      for (const nd of rods.concat(leaves)) {
+        let tq = -K * (nd.th - nd.rest) - D * nd.w + p.vent * noise(t, nd.ph) * (nd.leaf ? 0.9 : 0.5);
+        // Le souffle du pointeur fait tourner les éléments proches, dans le sens du geste.
+        if (ptr && nd.sx != null && !grab) {
+          const d = Math.hypot(nd.sx - ptr.x, nd.sy - ptr.y), R = Math.min(app.size.w, app.size.h) * 0.25;
+          if (d < R) tq += pv.x * 0.9 * (1 - d / R) * (nd.leaf ? 1.5 : 0.6);
+        }
+        nd.w += tq * dt;
+        nd.th += nd.w * dt;
+      }
+      pv.x *= Math.pow(0.02, dt); pv.y *= Math.pow(0.02, dt);
+    }
+
+    // ——— Pose et projection ———
+    // x vers la droite, y vers le bas, z vers le fond ; perspective faible.
+    function pose() {
+      const { w, h } = app.size, S = Math.min(w, h), k = fit.k, f = S * 3.5, cx = fit.x, out = [];
+      const proj = (x, y, z) => { const s = f / (f + z); return [w / 2 + (x - w / 2) * s, fit.top * 0.4 + (y - fit.top * 0.4) * s, s]; };
+      const rec = (nd, X, Y, Z, yaw) => {
+        if (nd.leaf) {
+          const a = yaw + nd.th, sz = nd.size * k, wy = Y + nd.wire * fit.kv, cy = wy + sz;
+          const [ax, ay, s] = proj(X, Y, Z), [bx, by] = proj(X, wy, Z), [px, py] = proj(X, cy, Z);
+          nd.sx = px; nd.sy = py;
+          out.push({ type: 'wire', z: Z + 0.5, x0: ax, y0: ay, x1: bx, y1: by, s });
+          out.push({ type: 'plate', z: Z, nd, x: px, y: py, r: sz * s, c: Math.cos(a), top: by, s });
+          return;
+        }
+        const a = yaw + nd.th, ca = Math.cos(a), sa = Math.sin(a);
+        const L = [X - nd.a * k * ca, Y, Z - nd.a * k * sa], R = [X + nd.b * k * ca, Y, Z + nd.b * k * sa];
+        const [lx, ly, ls] = proj(...L), [rx, ry, rs] = proj(...R), [mx, my] = proj(X, Y, Z);
+        nd.sx = mx; nd.sy = my;
+        out.push({ type: 'rod', z: Z, x0: lx, y0: ly, x1: rx, y1: ry, s: (ls + rs) / 2, mx, my });
+        nd.kids.forEach((c, i) => {
+          const E = i === 0 ? L : R, top = E[1] + c.wire * fit.kv;
+          if (!c.leaf) { const [ex, ey, es] = proj(...E), [tx, ty] = proj(E[0], top, E[2]); out.push({ type: 'wire', z: E[2] + 0.5, x0: ex, y0: ey, x1: tx, y1: ty, s: es }); rec(c, E[0], top, E[2], a); }
+          else rec(c, E[0], E[1], E[2], a);
+        });
+      };
+      const [hx] = proj(cx, 0, 0);
+      out.push({ type: 'wire', z: 1, x0: hx, y0: -2, x1: proj(cx, fit.top, 0)[0], y1: proj(cx, fit.top, 0)[1], s: 1 });
+      rec(root, cx, fit.top, 0, 0);
+      out.sort((u, v) => v.z - u.z);
+      return out;
+    }
+
+    // ——— Formes des plaques (repère local : rayon 1, accroche en haut) ———
+    function platePath(nd) {
+      const k = nd.kind;
+      if (k === 'disque' || k === 'logo') { const d = []; for (let i = 0; i <= 40; i++) { const a = i / 40 * TAU; d.push([Math.cos(a), Math.sin(a)]); } return d; }
+      if (k === 'petale') {
+        // Pétale : pointe en haut (côté du fil), ventre arrondi, légèrement penché.
+        const d = []; for (let i = 0; i <= 40; i++) { const t = i / 40 * TAU, x = Math.sin(t) * (0.62 + 0.18 * Math.cos(t)), y = -Math.cos(t) * 1.05; d.push([x + nd.tilt * (y + 1) * 0.25, y]); } return d;
+      }
+      if (k === 'demi') { const d = []; for (let i = 0; i <= 30; i++) { const a = Math.PI * (i / 30); d.push([Math.cos(a), Math.sin(a) * 1.1 - 0.35]); } d.push([1, -0.35]); return d.map(([x, y]) => [x * Math.cos(nd.tilt) - y * Math.sin(nd.tilt), x * Math.sin(nd.tilt) + y * Math.cos(nd.tilt)]); }
+      // libre : contour lissé à partir de rayons tirés au hasard
+      const m = nd.pts.length, d = [];
+      for (let i = 0; i <= 48; i++) {
+        const u = i / 48 * m, a0 = Math.floor(u) % m, a1 = (a0 + 1) % m, f = u - Math.floor(u), s = f * f * (3 - 2 * f);
+        const rr = nd.pts[a0] * (1 - s) + nd.pts[a1] * s, a = i / 48 * TAU;
+        d.push([Math.cos(a) * rr, Math.sin(a) * rr]);
+      }
+      return d;
+    }
+    function logoCanvas() {
+      const img = p.image || app.logoImg, key = img ? (img.src || 'c') : 'demo';
+      if (key === logoKey && logoCv) return logoCv;
+      logoKey = key; const M = 256; logoCv = document.createElement('canvas'); logoCv.width = logoCv.height = M;
+      const x = logoCv.getContext('2d');
+      if (img) { const iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height, k = M * 0.86 / Math.max(iw, ih); x.drawImage(img, (M - iw * k) / 2, (M - ih * k) / 2, iw * k, ih * k); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(128, 128, 104, 0, TAU); x.arc(128, 128, 60, 0, TAU, true); x.fill('evenodd'); x.fillRect(114, 14, 28, 228); }
+      return logoCv;
+    }
+    const tinted = new Map();
+    function logoTinted(col) {
+      const base = logoCanvas(), key = logoKey + col;
+      if (tinted.has(key)) return tinted.get(key);
+      const c = document.createElement('canvas'); c.width = c.height = base.width; const x = c.getContext('2d');
+      x.drawImage(base, 0, 0); x.globalCompositeOperation = 'source-in'; x.fillStyle = col; x.fillRect(0, 0, c.width, c.height);
+      if (tinted.size > 24) tinted.clear(); tinted.set(key, c); return c;
+    }
+
+    // Polygone écran d'une plaque : largeur multipliée par cos(angle) (vue de biais).
+    function plateScreen(it) {
+      const nd = it.nd, r = it.r, c = it.c, pts = platePath(nd);
+      return pts.map(([x, y]) => [it.x + x * r * c, it.y + y * r]);
+    }
+    const shadowOff = (it) => { const S = Math.min(app.size.w, app.size.h); return [S * 0.035 * p.ombre + (1 - it.s) * S * 0.6 * p.ombre, S * 0.05 * p.ombre]; };
+
+    // ——— Sélection ———
+    function pick(x, y, R) {
+      let best = null, bd = R;
+      for (const l of leaves) if (l.sx != null) { const d = Math.hypot(l.sx - x, l.sy - y); if (d < bd) { bd = d; best = l; } }
+      return best;
+    }
+
+    let shadowCv = null, shadowCtx = null;
+    app.loop((t, dt) => {
+      const { w, h, dpr } = app.size;
+      if (!built) build();
+      dt = Math.min(0.05, dt || 0) * p.vitesse;
+      windT += dt;
+      const sub = 2; for (let s = 0; s < sub; s++) step(dt / sub, windT);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = p.fond; ctx.fillRect(0, 0, w, h);
+      // L'ombre est dessinée opaque sur un calque, puis posée en transparence (pas de cumul aux recouvrements).
+      const items = pose();
+      if (p.ombre > 0) {
+        if (!shadowCv || shadowCv.width !== canvas.width || shadowCv.height !== canvas.height) { shadowCv = document.createElement('canvas'); shadowCv.width = canvas.width; shadowCv.height = canvas.height; shadowCtx = shadowCv.getContext('2d'); }
+        shadowCtx.setTransform(1, 0, 0, 1, 0, 0); shadowCtx.clearRect(0, 0, shadowCv.width, shadowCv.height);
+        shadowCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        const save = ctxRef; ctxRef = shadowCtx; renderItems(items, true); ctxRef = save;
+        ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.globalAlpha = 0.1 + p.ombre * 0.14; ctx.drawImage(shadowCv, 0, 0); ctx.globalAlpha = 1; ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      }
+      renderItems(items, false);
+      app.finish(ctx);
+    });
+
+    // Tiges légèrement cintrées, comme du fil d'acier : le milieu remonte.
+    const bow = (it) => [(it.x0 + it.x1) / 2, (it.y0 + it.y1) / 2 - Math.abs(it.x1 - it.x0) * 0.07];
+    let ctxRef = ctx;
+    function renderItems(items, shadow) {
+      const x = ctxRef, lw = p.epaisseur;
+      for (const it of items) {
+        const [ox, oy] = shadow ? shadowOff(it) : [0, 0];
+        const col = shadow ? '#000000' : null;
+        if (it.type === 'wire' || it.type === 'rod') {
+          x.strokeStyle = col || p.tiges; x.lineCap = 'round'; x.lineWidth = it.type === 'rod' ? lw * it.s : Math.max(0.6, lw * 0.32 * it.s);
+          x.beginPath(); x.moveTo(it.x0 + ox, it.y0 + oy);
+          if (it.type === 'rod') { const [qx, qy] = bow(it); x.quadraticCurveTo(qx + ox, qy + oy, it.x1 + ox, it.y1 + oy); } else x.lineTo(it.x1 + ox, it.y1 + oy);
+          x.stroke();
+          if (it.type === 'rod') { x.fillStyle = col || p.tiges; x.beginPath(); x.arc(it.mx + ox, it.my + oy, lw * 0.9 * it.s, 0, TAU); x.fill(); }
+        } else if (it.nd.kind === 'logo') {
+          const im = logoTinted(col || (it.c >= 0 ? it.nd.col : p.verso)), r = it.r * 1.1, sx = Math.max(0.02, Math.abs(it.c));
+          x.save(); x.translate(it.x + ox, it.y + oy); x.scale(sx, 1); x.drawImage(im, -r, -r, r * 2, r * 2); x.restore();
+        } else {
+          const pts = plateScreen(it);
+          x.fillStyle = col || (it.c >= 0 ? it.nd.col : p.verso); x.beginPath();
+          pts.forEach(([px, py], i) => (i ? x.lineTo(px + ox, py + oy) : x.moveTo(px + ox, py + oy))); x.closePath(); x.fill();
+          // Liseré clair sur la tranche quand la plaque est presque de profil.
+          if (!shadow && Math.abs(it.c) < 0.25) { x.strokeStyle = it.c >= 0 ? it.nd.col : p.verso; x.lineWidth = 1.2; x.stroke(); }
+        }
+      }
+    }
+
+    function toSVG() {
+      const { w, h } = app.size, items = pose(), lw = p.epaisseur, out = [], sh = [];
+      const f = (v) => v.toFixed(1);
+      const emit = (arr, it, shadow) => {
+        const [ox, oy] = shadow ? shadowOff(it) : [0, 0], col = shadow ? '#000000' : null;
+        if (it.type === 'wire' || it.type === 'rod') {
+          const [qx, qy] = it.type === 'rod' ? bow(it) : [(it.x0 + it.x1) / 2, (it.y0 + it.y1) / 2];
+          arr.push(`<path d="M${f(it.x0 + ox)} ${f(it.y0 + oy)}Q${f(qx + ox)} ${f(qy + oy)} ${f(it.x1 + ox)} ${f(it.y1 + oy)}" fill="none" stroke="${col || p.tiges}" stroke-width="${(it.type === 'rod' ? lw * it.s : Math.max(0.6, lw * 0.32 * it.s)).toFixed(2)}" stroke-linecap="round"/>`);
+          if (it.type === 'rod') arr.push(`<circle cx="${f(it.mx + ox)}" cy="${f(it.my + oy)}" r="${(lw * 0.9 * it.s).toFixed(2)}" fill="${col || p.tiges}"/>`);
+        } else if (it.nd.kind === 'logo') {
+          const r = it.r * 1.1, sx = Math.max(0.02, Math.abs(it.c));
+          arr.push(`<image href="${logoTinted(col || (it.c >= 0 ? it.nd.col : p.verso)).toDataURL('image/png')}" x="${f(-r)}" y="${f(-r)}" width="${f(r * 2)}" height="${f(r * 2)}" transform="translate(${f(it.x + ox)} ${f(it.y + oy)}) scale(${sx.toFixed(3)} 1)"/>`);
+        } else {
+          const pts = plateScreen(it);
+          arr.push(`<path d="M${pts.map(([x, y]) => f(x + ox) + ' ' + f(y + oy)).join('L')}Z" fill="${col || (it.c >= 0 ? it.nd.col : p.verso)}"/>`);
+        }
+      };
+      if (p.ombre > 0) for (const it of items) emit(sh, it, true);
+      for (const it of items) emit(out, it, false);
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">\n<rect width="100%" height="100%" fill="${p.fond}"/>\n${sh.length ? `<g opacity="${(0.1 + p.ombre * 0.14).toFixed(3)}">${sh.join('')}</g>\n` : ''}${out.join('\n')}\n</svg>`;
+    }
+  </script>
+</body>
+</html>
