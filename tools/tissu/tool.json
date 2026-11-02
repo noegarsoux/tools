@@ -1,0 +1,15 @@
+{
+  "slug": "tissu",
+  "title": "Tissu",
+  "type": "system",
+  "description": "Un drapeau, un rideau ou un hamac aux motifs de la marque, simulé en Verlet : le vent le fait claquer, on l'attrape, on le tire, il se déchire.",
+  "tags": ["tissu", "drapeau", "verlet", "simulation", "vent", "logo"],
+  "inspiration": [
+    "Thomas Jakobsen, Advanced Character Physics (2001), intégration de Verlet et contraintes",
+    "Daniel Shiffman, The Nature of Code, ressorts et forces",
+    "references/physique-maths.md (ressorts) ; palettes biennale, kegelbahn, salon, luzern, good-room"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
