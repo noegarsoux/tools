@@ -1,0 +1,15 @@
+{
+  "slug": "calligramme",
+  "title": "Calligramme",
+  "type": "typography",
+  "description": "Le texte coule le long des lignes de niveau d’un champ (bois veiné, relief, vagues, tourbillon), en bandes qui alternent avec des traits, points et hachures.",
+  "tags": ["calligramme", "lignes-de-niveau", "champ", "typographie", "svg", "motion"],
+  "inspiration": [
+    "Calligramme en flux, phrases et motifs dans des régions veinées (moodboard 10)",
+    "Guillaume Apollinaire, Calligrammes (1918)",
+    "references/moodboard.md ; palettes papier-gris, papier-60, menthe, biennale, thermique, photocopie"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
