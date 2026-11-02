@@ -1,0 +1,16 @@
+{
+  "slug": "lignes-de-champ",
+  "title": "Lignes de champ",
+  "type": "generative",
+  "description": "Charges électriques et aimants qu'on déplace à la main : lignes de champ intégrées en RK4, limaille, équipotentielles, sources sur le contour d'un logo, export SVG.",
+  "tags": ["champ", "magnetisme", "electrostatique", "rk4", "svg", "boucle"],
+  "inspiration": [
+    "physique-maths.md — magnétisme et lignes de champ, électrostatique et potentiel",
+    "Loi de Coulomb et champ du dipôle magnétique",
+    "Feynman, Lectures on Physics vol. II — champs et lignes de champ",
+    "Palettes trame-nuit, photocopie, papier-gris, orbite, kegelbahn, menthe, thermique"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}

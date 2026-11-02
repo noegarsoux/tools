@@ -1,0 +1,493 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Lignes de champ</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Lignes de champ de charges électriques ou d'aimants, calculées pour de vrai.
+    //   Charge q en p :  E = q·d / |d|³                      potentiel V = q / |d|
+    //   Dipôle m en p :  B = (3(m·d̂)d̂ − m) / |d|³            potentiel V = m·d / |d|³
+    // Les lignes sont intégrées en Runge-Kutta 4 sur le champ normalisé, depuis des graines réparties
+    // autour de chaque source (le nombre de lignes suit la charge, comme le flux). La limaille est
+    // une poussière de petits traits orientés par le champ, les équipotentielles des courbes de niveau.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const NUIT = PAL('trame-nuit'), PHOTO = PAL('photocopie'), ORB = PAL('orbite'), PGRIS = PAL('papier-gris');
+    const KB = PAL('kegelbahn'), PAP = PAL('papier'), MENTHE = PAL('menthe'), TH = PAL('thermique'), ACIDE = PAL('acide');
+
+    const isLines = (q) => q.rendu === 'lignes' || q.rendu === 'mixte';
+    const isFil = (q) => q.rendu === 'limaille';
+    const isEq = (q) => q.rendu === 'equipotentielles' || q.rendu === 'mixte';
+
+    const LAYOUT_KEYS = new Set(['nature', 'disposition', 'nombre', 'etendue', 'polarite', 'orientation', 'image', 'points']);
+    let ready = false;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: 21,
+      finish: { grain: 0.07, vignette: 0.16 },
+      hint: 'Glissez une source pour la déplacer · clic dans le vide pour en poser une (Maj : négative) · Alt + clic pour l’enlever · molette sur une source : la tourner ou changer sa charge',
+      notes: 'Charges : champ électrique E = q·d/|d|³ (loi de Coulomb). Aimants : champ d’un dipôle B = (3(m·d̂)d̂ − m)/|d|³. Les lignes sont intégrées en Runge-Kutta 4. Le nombre de lignes qui partent d’une charge est proportionnel à sa valeur, comme le flux. L’adoucissement ε évite la singularité au cœur des sources. Les équipotentielles sont les courbes où le potentiel est constant ; elles coupent les lignes de champ à angle droit.',
+      params: {
+        'Sources': {
+          nature: { type: 'segmented', label: 'Nature', options: { charges: 'Charges', aimants: 'Aimants' }, value: 'aimants' },
+          disposition: { type: 'select', label: 'Disposition', options: { hasard: 'Au hasard', cercle: 'En cercle', ligne: 'En ligne', grille: 'En grille', logo: 'Contour du logo' }, value: 'cercle' },
+          nombre: { type: 'range', label: 'Nombre', min: 1, max: 16, step: 1, value: 5, show: (q) => q.disposition !== 'logo' },
+          etendue: { type: 'range', label: 'Étendue', min: 0.05, max: 0.9, step: 0.01, value: 0.6 },
+          polarite: { type: 'segmented', label: 'Polarité', options: { alternee: 'Alternée', hasard: 'Au hasard', positive: 'Positive' }, value: 'alternee', show: (q) => q.nature === 'charges' },
+          orientation: { type: 'segmented', label: 'Orientation', options: { alignes: 'Alignés', radiale: 'Radiale', tangente: 'Tangente', hasard: 'Au hasard' }, value: 'tangente', show: (q) => q.nature === 'aimants' },
+          image: { type: 'file', label: 'Logo ou image', accept: 'image/*', show: (q) => q.disposition === 'logo' },
+          points: { type: 'range', label: 'Sources sur le contour', min: 6, max: 60, step: 1, value: 24, show: (q) => q.disposition === 'logo' },
+          reinit: { type: 'button', label: 'Replacer les sources', action: () => layout(true) },
+        },
+        'Champ': {
+          lignes: { type: 'range', label: 'Lignes par source', min: 2, max: 64, step: 1, value: 22 },
+          pas: { type: 'range', label: 'Pas d’intégration', min: 0.002, max: 0.02, step: 0.0005, value: 0.006 },
+          longueur: { type: 'range', label: 'Longueur maximale', min: 0.3, max: 8, step: 0.1, value: 3 },
+          epsilon: { type: 'range', label: 'Adoucissement ε', min: 0.002, max: 0.1, step: 0.001, value: 0.015 },
+          rayon: { type: 'range', label: 'Rayon des sources', min: 0, max: 0.08, step: 0.001, value: 0.018 },
+        },
+        'Rendu': {
+          rendu: { type: 'select', label: 'Rendu', options: { lignes: 'Lignes de champ', limaille: 'Limaille', equipotentielles: 'Équipotentielles', mixte: 'Lignes et équipotentielles' }, value: 'lignes' },
+          epaisseur: { type: 'range', label: 'Épaisseur', min: 0.2, max: 10, step: 0.1, value: 1.4 },
+          effilement: { type: 'range', label: 'Effilement', min: 0, max: 1, step: 0.01, value: 0.7, show: (q) => !isFil(q) },
+          flux: { type: 'range', label: 'Flux (tirets qui coulent)', min: 0, max: 4, step: 1, value: 0, show: isLines },
+          tiret: { type: 'range', label: 'Longueur des tirets', min: 0.004, max: 0.08, step: 0.001, value: 0.018, show: (q) => isLines(q) && q.flux > 0 },
+          densite: { type: 'range', label: 'Densité de limaille', min: 20, max: 160, step: 1, value: 80, show: isFil },
+          brin: { type: 'range', label: 'Longueur des brins', min: 0.004, max: 0.05, step: 0.001, value: 0.016, show: isFil },
+          niveaux: { type: 'range', label: 'Équipotentielles', min: 4, max: 60, step: 1, value: 22, show: isEq },
+          sources: { type: 'toggle', label: 'Montrer les sources', value: true },
+        },
+        'Mouvement': {
+          boucle: { type: 'range', label: 'Boucle (s)', min: 3, max: 40, step: 0.5, value: 12 },
+          derive: { type: 'range', label: 'Dérive', min: 0, max: 0.2, step: 0.002, value: 0.05 },
+          tours: { type: 'range', label: 'Rotation (tours)', min: -3, max: 3, step: 1, value: 1, show: (q) => q.nature === 'aimants' },
+          pulsation: { type: 'range', label: 'Pulsation des charges', min: 0, max: 1, step: 0.01, value: 0.3, show: (q) => q.nature === 'charges' },
+        },
+        'Couleur': {
+          fond: { type: 'color', label: 'Fond', value: NUIT[0] },
+          encre: { type: 'color', label: 'Encre', value: NUIT[1] },
+          coloration: { type: 'segmented', label: 'Coloration', options: { une: 'Une', source: 'Par source', intensite: 'Intensité' }, value: 'intensite' },
+          palette: { type: 'palette', label: 'Palette', value: [NUIT[2], NUIT[1], ACIDE[2]], show: (q) => q.coloration !== 'une' },
+        },
+      },
+      presets: {
+        'Aimants nuit': {},
+        'Limaille': { nature: 'aimants', disposition: 'hasard', nombre: 4, etendue: 0.55, orientation: 'hasard', rendu: 'limaille', densite: 110, brin: 0.018, epaisseur: 1.1, sources: false, derive: 0.04, tours: 1, coloration: 'une', fond: PHOTO[0], encre: PHOTO[1], seed: 5 },
+        'Dipôle': { nature: 'charges', disposition: 'ligne', nombre: 2, etendue: 0.4, polarite: 'alternee', rendu: 'mixte', lignes: 28, niveaux: 26, epaisseur: 1.2, effilement: 0.4, pulsation: 0.2, derive: 0.03, coloration: 'une', fond: PGRIS[0], encre: PGRIS[1], sources: true },
+        'Orbite': { nature: 'charges', disposition: 'cercle', nombre: 6, etendue: 0.3, polarite: 'alternee', rendu: 'lignes', lignes: 22, epaisseur: 2, effilement: 0.85, flux: 1, tiret: 0.02, pulsation: 0.5, derive: 0.08, coloration: 'une', fond: ORB[0], encre: ORB[1], sources: true },
+        'Kegelbahn': { nature: 'aimants', disposition: 'grille', nombre: 9, etendue: 0.6, orientation: 'radiale', rendu: 'lignes', lignes: 12, epaisseur: 3.2, effilement: 0.2, coloration: 'source', fond: KB[0], encre: KB[1], palette: KB.slice(1), sources: false, tours: 1, derive: 0.03 },
+        'Logo rayonnant': { nature: 'charges', disposition: 'logo', points: 40, etendue: 0.7, polarite: 'positive', rendu: 'lignes', lignes: 8, longueur: 2, epaisseur: 1, effilement: 0.6, flux: 0, pulsation: 0.15, derive: 0.01, coloration: 'une', fond: PAP[0], encre: PAP[1], sources: true, rayon: 0.008 },
+        'Équipotentielles menthe': { nature: 'charges', disposition: 'hasard', nombre: 7, etendue: 0.7, polarite: 'hasard', rendu: 'equipotentielles', niveaux: 40, epaisseur: 1.3, effilement: 0.3, coloration: 'intensite', fond: MENTHE[1], encre: MENTHE[2], palette: [MENTHE[3], MENTHE[2], MENTHE[0]], derive: 0.06, pulsation: 0.4, sources: false, seed: 9 },
+        'Thermique': { nature: 'aimants', disposition: 'cercle', nombre: 7, etendue: 0.5, orientation: 'alignes', rendu: 'lignes', lignes: 26, epaisseur: 2.4, effilement: 0.5, flux: 0, coloration: 'intensite', fond: TH[0], encre: TH[1], palette: [TH[1], TH[4], TH[2], TH[3]], sources: true, tours: -1, derive: 0.05 },
+      },
+      brand(colors) {
+        return { fond: colors[0], encre: colors[1] || colors[0], palette: colors.length > 1 ? colors.slice(1) : colors };
+      },
+      pointer: {
+        down: (q) => pointerDown(q),
+        drag: (q) => pointerDrag(q),
+        up: () => { grab = null; },
+        wheel: (q, dy) => pointerWheel(q, dy),
+      },
+      onChange: (key) => { if (ready && (key === '*' || LAYOUT_KEYS.has(key))) layout(true); },
+      onSeed: () => { if (ready) layout(true); },
+      export: { name: 'lignes-de-champ', svg: () => exportSVG() },
+    });
+    const p = app.params;
+    ready = true;
+
+    const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
+    const hex = (c) => { const n = parseInt(c.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; };
+    const rgb = (a) => `rgb(${a[0] | 0},${a[1] | 0},${a[2] | 0})`;
+    function ramp(pal, u) {
+      if (pal.length === 1) return hex(pal[0]);
+      const f = clamp(u, 0, 1) * (pal.length - 1), i = Math.min(pal.length - 2, Math.floor(f)), k = f - i;
+      const a = hex(pal[i]), b = hex(pal[i + 1]);
+      return [a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k, a[2] + (b[2] - a[2]) * k];
+    }
+
+    // ——— Sources ———
+    // Repère : origine au centre, unité = petit côté du cadre. Chaque source : position de base (bx, by),
+    // charge q (signe et valeur) ou angle a d'aimant, et une petite orbite propre pour l'animation.
+    let S = [], laidFor = null;
+    function frameHalf() { const { w, h } = app.size, u = Math.min(w, h); return { ax: w / u / 2, ay: h / u / 2 }; }
+
+    let imgSrc = null, edge = null;
+    function logoEdge() {
+      const img = p.image || app.logoImg;
+      if (!img) return null;
+      if (img === imgSrc) return edge;
+      imgSrc = img;
+      const N = 220, iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height, k = N / Math.max(iw, ih);
+      const cw = Math.max(2, Math.round(iw * k)), ch = Math.max(2, Math.round(ih * k));
+      const cv = document.createElement('canvas'); cv.width = cw; cv.height = ch;
+      const x = cv.getContext('2d', { willReadFrequently: true });
+      x.fillStyle = '#fff'; x.fillRect(0, 0, cw, ch); x.drawImage(img, 0, 0, cw, ch);
+      const d = x.getImageData(0, 0, cw, ch).data;
+      const ink = (i, j) => { if (i < 0 || j < 0 || i >= cw || j >= ch) return false; const o = (j * cw + i) * 4; return (d[o] * 0.2126 + d[o + 1] * 0.7152 + d[o + 2] * 0.0722) < 128 && d[o + 3] > 60; };
+      const pts = [];
+      for (let j = 0; j < ch; j++) for (let i = 0; i < cw; i++) {
+        if (ink(i, j) && (!ink(i + 1, j) || !ink(i - 1, j) || !ink(i, j + 1) || !ink(i, j - 1))) pts.push([(i + 0.5) / Math.max(cw, ch) - cw / Math.max(cw, ch) / 2, (j + 0.5) / Math.max(cw, ch) - ch / Math.max(cw, ch) / 2]);
+      }
+      edge = pts.length ? pts : null;
+      return edge;
+    }
+
+    function layout(force) {
+      const key = [p.nature, p.disposition, p.nombre, p.etendue, p.polarite, p.orientation, p.points, app.seed, !!(p.image || app.logoImg)].join('|');
+      if (!force && key === laidFor) return;
+      laidFor = key;
+      const r = app.rng(5), { ax, ay } = frameHalf();
+      const E = p.etendue, pos = [];
+      let n = p.nombre;
+      if (p.disposition === 'logo') {
+        const pts = logoEdge();
+        if (pts) {
+          // Points du contour tirés au plus loin les uns des autres (échantillonnage farthest-point).
+          n = Math.min(p.points, pts.length);
+          const pick = [pts[Math.floor(r() * pts.length)]], dmin = new Float32Array(pts.length).fill(1e9);
+          while (pick.length < n) {
+            const last = pick[pick.length - 1]; let bi = 0, bd = -1;
+            for (let i = 0; i < pts.length; i++) { const d = (pts[i][0] - last[0]) ** 2 + (pts[i][1] - last[1]) ** 2; if (d < dmin[i]) dmin[i] = d; if (dmin[i] > bd) { bd = dmin[i]; bi = i; } }
+            pick.push(pts[bi]);
+          }
+          for (const q of pick) pos.push([q[0] * E * 1.2, q[1] * E * 1.2]);
+        } else {
+          n = p.points;
+          for (let i = 0; i < n; i++) { const a = TAU * i / n; pos.push([Math.cos(a) * E * 0.6, Math.sin(a) * E * 0.6]); }
+        }
+      } else if (p.disposition === 'cercle') {
+        for (let i = 0; i < n; i++) { const a = TAU * i / n - Math.PI / 2; pos.push([Math.cos(a) * E * 0.6, Math.sin(a) * E * 0.6]); }
+      } else if (p.disposition === 'ligne') {
+        for (let i = 0; i < n; i++) pos.push([n === 1 ? 0 : (i / (n - 1) - 0.5) * E * 2 * Math.min(1.6, ax), 0]);
+      } else if (p.disposition === 'grille') {
+        const c = Math.ceil(Math.sqrt(n)), rows = Math.ceil(n / c);
+        for (let i = 0; i < n; i++) { const gx = i % c, gy = Math.floor(i / c); pos.push([(c === 1 ? 0 : gx / (c - 1) - 0.5) * E * 1.4, (rows === 1 ? 0 : gy / (rows - 1) - 0.5) * E * 1.4]); }
+      } else {
+        for (let i = 0; i < n; i++) pos.push([(r() - 0.5) * E * 2 * Math.min(ax * 1.4, 1.4), (r() - 0.5) * E * 2 * Math.min(ay * 1.4, 1.4)]);
+      }
+      S = pos.map(([x, y], i) => {
+        let q = 1;
+        if (p.polarite === 'alternee') q = i % 2 ? -1 : 1;
+        else if (p.polarite === 'hasard') q = r() < 0.5 ? -1 : 1;
+        q *= 0.7 + r() * 0.6;
+        let a = 0;
+        if (p.orientation === 'radiale') a = Math.atan2(y, x);
+        else if (p.orientation === 'tangente') a = Math.atan2(y, x) + Math.PI / 2;
+        else if (p.orientation === 'hasard') a = r() * TAU;
+        if ((x === 0 && y === 0) && p.orientation !== 'hasard') a = 0;
+        return { bx: x, by: y, q, a, ph: r() * TAU, ox: 1 + Math.floor(r() * 2), oy: 1 + Math.floor(r() * 2), id: i };
+      });
+    }
+
+    // Positions et valeurs animées pour un temps t (boucle parfaite).
+    let live = [];
+    function animate(t) {
+      const th = TAU * t / p.boucle, D = p.derive;
+      live = S.map((s) => {
+        const x = s.bx + D * Math.sin(s.ox * th + s.ph), y = s.by + D * Math.sin(s.oy * th + s.ph * 1.7);
+        if (p.nature === 'aimants') return { x, y, a: s.a + p.tours * th, m: Math.abs(s.q), s };
+        return { x, y, q: s.q * (1 + p.pulsation * 0.6 * Math.sin(th + s.ph)), s };
+      });
+    }
+
+    // ——— Champ ———
+    function field(x, y, out) {
+      let ex = 0, ey = 0;
+      const e2 = p.epsilon * p.epsilon;
+      if (p.nature === 'aimants') {
+        for (const s of live) {
+          const dx = x - s.x, dy = y - s.y, r2 = dx * dx + dy * dy + e2, r = Math.sqrt(r2), r3 = r2 * r;
+          const mx = Math.cos(s.a) * s.m, my = Math.sin(s.a) * s.m, md = (mx * dx + my * dy) / r2;
+          ex += (3 * md * dx - mx) / r3; ey += (3 * md * dy - my) / r3;
+        }
+      } else {
+        for (const s of live) {
+          const dx = x - s.x, dy = y - s.y, r2 = dx * dx + dy * dy + e2, r3 = r2 * Math.sqrt(r2);
+          ex += s.q * dx / r3; ey += s.q * dy / r3;
+        }
+      }
+      out[0] = ex; out[1] = ey;
+      return out;
+    }
+    function potential(x, y) {
+      let v = 0;
+      const e2 = p.epsilon * p.epsilon;
+      for (const s of live) {
+        const dx = x - s.x, dy = y - s.y, r2 = dx * dx + dy * dy + e2;
+        if (p.nature === 'aimants') v += s.m * (Math.cos(s.a) * dx + Math.sin(s.a) * dy) / (r2 * Math.sqrt(r2));
+        else v += s.q / Math.sqrt(r2);
+      }
+      return v;
+    }
+
+    // Une ligne : RK4 sur le champ normalisé (sens dir = ±1). S'arrête au bord, sur une source ou à la longueur maximale.
+    const F1 = [0, 0], F2 = [0, 0], F3 = [0, 0], F4 = [0, 0];
+    function dirAt(x, y, sgn, o) { field(x, y, o); const m = Math.hypot(o[0], o[1]) || 1e-9; o[0] = o[0] / m * sgn; o[1] = o[1] / m * sgn; return m; }
+    function trace(x, y, sgn, from, ax, ay) {
+      const h = p.pas, maxN = Math.ceil(p.longueur / h), xs = [x], ys = [y], ms = [];
+      const stopR = Math.max(p.rayon, h * 1.5), mg = 0.04;
+      let end = -1;
+      ms.push(dirAt(x, y, sgn, F1));
+      for (let n = 0; n < maxN; n++) {
+        dirAt(x, y, sgn, F1);
+        dirAt(x + F1[0] * h / 2, y + F1[1] * h / 2, sgn, F2);
+        dirAt(x + F2[0] * h / 2, y + F2[1] * h / 2, sgn, F3);
+        dirAt(x + F3[0] * h, y + F3[1] * h, sgn, F4);
+        x += h / 6 * (F1[0] + 2 * F2[0] + 2 * F3[0] + F4[0]);
+        y += h / 6 * (F1[1] + 2 * F2[1] + 2 * F3[1] + F4[1]);
+        xs.push(x); ys.push(y); ms.push(dirAt(x, y, sgn, F4));
+        // Point d'arrêt du champ (zone où il s'annule) : la ligne tourne sur place, on la coupe.
+        if (n > 60 && n % 30 === 0) { const j = xs.length - 61; if (Math.hypot(x - xs[j], y - ys[j]) < h * 12) { xs.length -= 60; ys.length -= 60; ms.length -= 60; break; } }
+        if (x < -ax - mg || x > ax + mg || y < -ay - mg || y > ay + mg) break;
+        let hit = -1;
+        for (let k = 0; k < live.length; k++) {
+          const dx = x - live[k].x, dy = y - live[k].y;
+          if (dx * dx + dy * dy < stopR * stopR && (k !== from || n > 8)) { hit = k; break; }
+        }
+        if (hit >= 0) { end = hit; break; }
+      }
+      return { xs, ys, ms, end };
+    }
+
+    function buildLines() {
+      const { ax, ay } = frameHalf(), lines = [];
+      const r0 = Math.max(p.rayon, p.pas * 2) * 1.05;
+      live.forEach((s, k) => {
+        if (p.nature === 'aimants') {
+          // Graines sur l'hémisphère nord. Une ligne de dipôle qui part à l'angle θ de l'axe monte jusqu'à
+          // r = r0 / sin²θ : on choisit θ pour que les boucles aient des tailles en progression géométrique.
+          const n = Math.max(2, Math.round(p.lignes * s.m)), Rmax = 2.4 * Math.max(ax, ay);
+          for (let i = 0; i < n; i++) {
+            const k2 = Math.floor(i / 2), m2 = Math.ceil(n / 2);
+            const R = r0 * Math.pow(Rmax / r0, (k2 + 0.5) / m2);
+            const th = Math.asin(Math.sqrt(clamp(r0 / R, 0, 1))) * (i % 2 ? -1 : 1);
+            const a = s.a + th;
+            const L = trace(s.x + Math.cos(a) * r0, s.y + Math.sin(a) * r0, 1, k, ax, ay);
+            L.src = k; lines.push(L);
+          }
+        } else {
+          const n = Math.max(2, Math.round(p.lignes * Math.abs(s.q)));
+          const sgn = s.q > 0 ? 1 : -1, off = s.s.ph;
+          for (let i = 0; i < n; i++) {
+            const a = off + TAU * i / n;
+            const L = trace(s.x + Math.cos(a) * r0, s.y + Math.sin(a) * r0, sgn, k, ax, ay);
+            // Une ligne partie d'une charge négative qui finit sur une positive est déjà tracée depuis la positive.
+            if (sgn < 0 && L.end >= 0 && live[L.end].q > 0) continue;
+            L.src = k; lines.push(L);
+          }
+        }
+      });
+      return lines;
+    }
+
+    // ——— Dessin (canvas ou SVG via un « sink ») ———
+    function draw(t, w, h, sink) {
+      layout(false); animate(t);
+      const u = Math.min(w, h), cx = w / 2, cy = h / 2, base = p.epaisseur * u / 1000;
+      const X = (x) => cx + x * u, Y = (y) => cy + y * u;
+      const pal = p.palette && p.palette.length ? p.palette : [p.encre];
+      const th = TAU * t / p.boucle;
+      const LV = 16;
+      // Intensité normalisée : log du champ, ramenée à [0, 1] par une référence liée au rayon des sources.
+      const ref = Math.log(1 / Math.max(p.rayon, 0.01) ** 2), lo = Math.log(0.5);
+      const level = (m) => clamp((Math.log(m + 1e-9) - lo) / (ref - lo), 0, 1);
+      const colorOf = (src, lv) => p.coloration === 'une' ? p.encre : p.coloration === 'source' ? pal[src % pal.length] : rgb(ramp(pal, lv));
+
+      if (isEq(p)) {
+        // Équipotentielles : grille du potentiel, transformée asinh pour répartir les niveaux, puis marching squares.
+        const G = Math.max(3, u / 160);
+        const nx = Math.ceil(w / G) + 1, ny = Math.ceil(h / G) + 1, V = new Float32Array(nx * ny);
+        let vmin = 1e9, vmax = -1e9;
+        for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+          const v = Math.asinh(potential((i * G - cx) / u, (j * G - cy) / u) * 0.6);
+          V[j * nx + i] = v; if (v < vmin) vmin = v; if (v > vmax) vmax = v;
+        }
+        vmin = Math.max(vmin, -4); vmax = Math.min(vmax, 4);
+        const top = Math.max(Math.abs(vmin), Math.abs(vmax), 1e-6), Nl = p.niveaux;
+        for (let l = 0; l < Nl; l++) {
+          const iso = vmin + (vmax - vmin) * (l + 0.5) / Nl, segs = [];
+          for (let j = 0; j < ny - 1; j++) for (let i = 0; i < nx - 1; i++) {
+            const a = V[j * nx + i] - iso, b = V[j * nx + i + 1] - iso, c = V[(j + 1) * nx + i + 1] - iso, d = V[(j + 1) * nx + i] - iso;
+            const k = (a > 0 ? 8 : 0) | (b > 0 ? 4 : 0) | (c > 0 ? 2 : 0) | (d > 0 ? 1 : 0);
+            if (k === 0 || k === 15) continue;
+            const x0 = i * G, y0 = j * G;
+            const T = [x0 + G * a / (a - b), y0], R = [x0 + G, y0 + G * b / (b - c)], B = [x0 + G * d / (d - c), y0 + G], L = [x0, y0 + G * a / (a - d)];
+            const S2 = { 1: [[L, B]], 2: [[B, R]], 3: [[L, R]], 4: [[T, R]], 5: [[L, T], [B, R]], 6: [[T, B]], 7: [[L, T]], 8: [[L, T]], 9: [[T, B]], 10: [[T, R], [L, B]], 11: [[T, R]], 12: [[L, R]], 13: [[B, R]], 14: [[L, B]] }[k];
+            for (const s of S2) segs.push(s);
+          }
+          const lv = Math.abs(iso) / top;
+          const wl = base * (1 - p.effilement * 0.7 * (1 - lv));
+          sink.segs({ segs, w: isLines(p) ? wl * 0.6 : wl, col: p.coloration === 'source' ? pal[l % pal.length] : colorOf(0, lv), alpha: isLines(p) ? 0.55 : 1 });
+        }
+      }
+
+      if (isLines(p)) {
+        const lines = buildLines();
+        const dashLen = p.tiret * u;
+        for (const L of lines) {
+          const n = L.xs.length;
+          if (n < 2) continue;
+          // Paliers de largeur (effilement : plus fin là où le champ faiblit) et de couleur.
+          const lvAt = (i) => level(L.ms[i]);
+          const wAt = (i) => base * (1 - p.effilement + p.effilement * (0.15 + 0.85 * lvAt(i)));
+          const key = (i) => Math.round(wAt(i) / base * 6) * 100 + (p.coloration === 'intensite' ? Math.round(lvAt(i) * (LV - 1)) : 0);
+          let a = 0, ka = key(0), len = 0, lenA = 0;
+          const px = new Float32Array(n), py = new Float32Array(n);
+          for (let i = 0; i < n; i++) { px[i] = X(L.xs[i]); py[i] = Y(L.ys[i]); }
+          for (let i = 1; i < n; i++) {
+            len += Math.hypot(px[i] - px[i - 1], py[i] - py[i - 1]);
+            const ki = key(i);
+            if (ki !== ka || i === n - 1) {
+              const lv = lvAt(a);
+              sink.line({ X: px, Y: py, a, b: i, w: Math.max(0.2, wAt(a)), col: colorOf(L.src, Math.round(lv * (LV - 1)) / (LV - 1)), dash: p.flux > 0 ? dashLen : 0, offset: lenA - p.flux * th / TAU * dashLen * 2 });
+              a = i; ka = ki; lenA = len;
+            }
+          }
+        }
+      }
+
+      if (isFil(p)) {
+        // Limaille : grains posés en grille jitterée (graine), orientés par le champ.
+        const r = app.rng(9), cell = u / p.densite, nx = Math.ceil(w / cell), ny = Math.ceil(h / cell);
+        const half = p.brin * u / 2, buckets = new Map(), o = [0, 0];
+        for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+          const x = (i + r()) * cell, y = (j + r()) * cell, jit = r();
+          const fx = (x - cx) / u, fy = (y - cy) / u;
+          let near = false;
+          for (const s of live) if ((fx - s.x) ** 2 + (fy - s.y) ** 2 < (p.rayon * 1.2) ** 2) { near = true; break; }
+          if (near) continue;
+          field(fx, fy, o);
+          const m = Math.hypot(o[0], o[1]) || 1e-9, lv = level(m), dx = o[0] / m, dy = o[1] / m;
+          const L = half * (0.55 + 0.45 * lv) * (0.75 + 0.5 * jit);
+          let src = 0;
+          if (p.coloration === 'source') { let bd = 1e9; live.forEach((s, k) => { const d = (fx - s.x) ** 2 + (fy - s.y) ** 2; if (d < bd) { bd = d; src = k; } }); }
+          const kk = p.coloration === 'intensite' ? Math.round(lv * (LV - 1)) : src;
+          let B = buckets.get(kk);
+          if (!B) buckets.set(kk, B = { segs: [], w: base, col: p.coloration === 'intensite' ? colorOf(0, kk / (LV - 1)) : colorOf(src, 0), alpha: 1 });
+          B.segs.push([[x - dx * L, y - dy * L], [x + dx * L, y + dy * L]]);
+        }
+        for (const B of buckets.values()) sink.segs(B);
+      }
+
+      if (p.sources) {
+        const R = Math.max(p.rayon * u, base * 2.5);
+        live.forEach((s, k) => {
+          const col = p.coloration === 'source' ? pal[k % pal.length] : p.encre;
+          if (p.nature === 'aimants') sink.magnet({ x: X(s.x), y: Y(s.y), a: s.a, r: R, col, bg: p.fond });
+          else sink.charge({ x: X(s.x), y: Y(s.y), r: R * (0.75 + 0.25 * Math.min(1.5, Math.abs(s.q))), pos: s.q > 0, col, w: base, bg: p.fond });
+        });
+      }
+    }
+
+    const canvasSink = {
+      line(L) {
+        ctx.strokeStyle = L.col; ctx.lineWidth = L.w; ctx.globalAlpha = 1;
+        if (L.dash) { ctx.setLineDash([L.dash, L.dash]); ctx.lineDashOffset = -L.offset; } else ctx.setLineDash([]);
+        ctx.beginPath(); ctx.moveTo(L.X[L.a], L.Y[L.a]);
+        for (let i = L.a + 1; i <= L.b; i++) ctx.lineTo(L.X[i], L.Y[i]);
+        ctx.stroke();
+      },
+      segs(B) {
+        ctx.setLineDash([]); ctx.strokeStyle = B.col; ctx.lineWidth = B.w; ctx.globalAlpha = B.alpha;
+        ctx.beginPath();
+        for (const [a, b] of B.segs) { ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); }
+        ctx.stroke(); ctx.globalAlpha = 1;
+      },
+      charge(C) {
+        ctx.setLineDash([]); ctx.beginPath(); ctx.arc(C.x, C.y, C.r, 0, TAU);
+        if (C.pos) { ctx.fillStyle = C.col; ctx.fill(); }
+        else { ctx.fillStyle = C.bg; ctx.fill(); ctx.strokeStyle = C.col; ctx.lineWidth = Math.max(1, C.w * 1.2); ctx.stroke(); }
+      },
+      magnet(M) {
+        ctx.setLineDash([]); ctx.save(); ctx.translate(M.x, M.y); ctx.rotate(M.a);
+        const L = M.r * 1.5, Hh = M.r * 0.45;
+        ctx.fillStyle = M.bg; ctx.fillRect(-L, -Hh, L * 2, Hh * 2);
+        ctx.fillStyle = M.col; ctx.fillRect(0, -Hh, L, Hh * 2);
+        ctx.strokeStyle = M.col; ctx.lineWidth = Math.max(1, M.r * 0.12); ctx.strokeRect(-L, -Hh, L * 2, Hh * 2);
+        ctx.restore();
+      },
+    };
+
+    app.loop((t) => {
+      const { w, h, dpr } = app.size;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.globalAlpha = 1; ctx.setLineDash([]);
+      ctx.fillStyle = p.fond; ctx.fillRect(0, 0, w, h);
+      ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+      draw(t, w, h, canvasSink);
+      ctx.setLineDash([]); ctx.globalAlpha = 1;
+      app.finish(ctx);
+    });
+
+    // ——— Pointeur ———
+    let grab = null;
+    function toWorld(q) { const { w, h } = app.size, u = Math.min(w, h); return [(q.x - w / 2) / u, (q.y - h / 2) / u]; }
+    function pick(x, y) {
+      const R = Math.max(p.rayon * 2.2, 0.03);
+      let best = -1, bd = R * R;
+      live.forEach((s, k) => { const d = (x - s.x) ** 2 + (y - s.y) ** 2; if (d < bd) { bd = d; best = k; } });
+      return best;
+    }
+    function pointerDown(q) {
+      const [x, y] = toWorld(q), k = pick(x, y);
+      if (k >= 0 && q.alt) { S.splice(k, 1); live.splice(k, 1); grab = null; return; }
+      if (k >= 0) { const s = S[k]; grab = { s, dx: s.bx - x, dy: s.by - y }; return; }
+      // Nouvelle source sous le pointeur (Maj : charge négative ou aimant tourné vers l'ouest).
+      const s = { bx: x, by: y, q: q.shift ? -1 : 1, a: q.shift ? Math.PI : 0, ph: S.length * 1.37, ox: 1, oy: 1, id: S.length };
+      S.push(s); grab = { s, dx: 0, dy: 0 };
+    }
+    function pointerDrag(q) {
+      if (!grab) return;
+      const [x, y] = toWorld(q);
+      grab.s.bx = x + grab.dx; grab.s.by = y + grab.dy;
+    }
+    function pointerWheel(q, dy) {
+      const [x, y] = toWorld(q), k = pick(x, y);
+      if (k < 0) return;
+      const s = S[k];
+      if (p.nature === 'aimants') s.a += dy * 0.004;
+      else { const v = clamp(Math.abs(s.q) * Math.exp(-dy * 0.002), 0.2, 3); s.q = Math.sign(s.q || 1) * v; }
+    }
+
+    // ——— Export SVG ———
+    function exportSVG() {
+      const { w, h } = app.size, f = (v) => Math.round(v * 100) / 100;
+      const out = [`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}">`, `<rect width="${w}" height="${h}" fill="${p.fond}"/>`, '<g fill="none" stroke-linecap="round" stroke-linejoin="round">'];
+      draw(app.time, w, h, {
+        line(L) {
+          let d = `M${f(L.X[L.a])} ${f(L.Y[L.a])}`;
+          for (let i = L.a + 1; i <= L.b; i++) d += `L${f(L.X[i])} ${f(L.Y[i])}`;
+          const dash = L.dash ? ` stroke-dasharray="${f(L.dash)} ${f(L.dash)}" stroke-dashoffset="${f(-L.offset)}"` : '';
+          out.push(`<path d="${d}" stroke="${L.col}" stroke-width="${f(L.w)}"${dash}/>`);
+        },
+        segs(B) {
+          if (!B.segs.length) return;
+          let d = '';
+          for (const [a, b] of B.segs) d += `M${f(a[0])} ${f(a[1])}L${f(b[0])} ${f(b[1])}`;
+          out.push(`<path d="${d}" stroke="${B.col}" stroke-width="${f(B.w)}" stroke-opacity="${f(B.alpha)}"/>`);
+        },
+        charge(C) {
+          out.push(C.pos ? `<circle cx="${f(C.x)}" cy="${f(C.y)}" r="${f(C.r)}" fill="${C.col}"/>` : `<circle cx="${f(C.x)}" cy="${f(C.y)}" r="${f(C.r)}" fill="${C.bg}" stroke="${C.col}" stroke-width="${f(Math.max(1, C.w * 1.2))}"/>`);
+        },
+        magnet(M) {
+          const L = M.r * 1.5, Hh = M.r * 0.45, deg = M.a * 180 / Math.PI;
+          out.push(`<g transform="translate(${f(M.x)} ${f(M.y)}) rotate(${f(deg)})"><rect x="${f(-L)}" y="${f(-Hh)}" width="${f(2 * L)}" height="${f(2 * Hh)}" fill="${M.bg}" stroke="${M.col}" stroke-width="${f(Math.max(1, M.r * 0.12))}"/><rect x="0" y="${f(-Hh)}" width="${f(L)}" height="${f(2 * Hh)}" fill="${M.col}"/></g>`);
+        },
+      });
+      out.push('</g></svg>');
+      return out.join('\n');
+    }
+  </script>
+</body>
+</html>
