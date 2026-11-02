@@ -1,0 +1,15 @@
+{
+  "slug": "reaction-typo",
+  "title": "Réaction-diffusion typographique",
+  "type": "typography",
+  "description": "Un mot qui nourrit une réaction de Gray-Scott : source, masque, creux ou frontière entre deux régimes de la carte de Pearson, en mouvement, export SVG.",
+  "tags": ["reaction-diffusion", "gray-scott", "typographie", "webgl", "svg", "logo"],
+  "inspiration": [
+    "Karl Sims, Reaction-Diffusion Tutorial (modèle de Gray-Scott, laplacien 3 × 3)",
+    "John E. Pearson (1993), Complex Patterns in a Simple System ; carte des régimes de Robert Munafo",
+    "references/physique-maths.md (réaction-diffusion) ; palettes papier-60, menthe, trame-nuit, luzern, thermique, acide, salon, biennale, kegelbahn, good-room"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
