@@ -1,0 +1,336 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Bulles</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Bulles : des bulles de savon soufflées par une baguette, montant d'une machine ou flottant au vent.
+    // La couleur de chaque bulle vient de l'interférence dans le film d'eau savonneuse : l'épaisseur
+    // varie (plus épaisse en bas, où l'eau s'écoule), tourbillonne, s'amincit avec l'âge jusqu'aux
+    // taches noires, puis la bulle éclate.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const BIEN = PAL('biennale'), MENTHE = PAL('menthe'), THER = PAL('thermique'), KB = PAL('kegelbahn'), SALON = PAL('salon'), GLY = PAL('glyphes'), PIX = PAL('pixels');
+
+    let bubbles = [], drops = [], time = 0, spawnAcc = 0, uid = 0, bg = null, bgKey = '', lut = null, noiseT = null, drag = null, logoSpr = null, logoKey = null, frozen = false;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.04, vignette: 0.2 },
+      hint: 'Touchez une bulle pour la crever · glissez pour souffler des bulles · molette : vent',
+      notes: 'La teinte d’une bulle vient de l’interférence entre la lumière réfléchie par les deux faces du film : elle dépend de son épaisseur, de quelques centaines de nanomètres. L’eau s’écoule vers le bas, le film tourbillonne et s’amincit ; quand il devient plus fin que la longueur d’onde, il ne reflète plus rien (les taches noires) et la bulle éclate.',
+      params: {
+        'Bulles': {
+          source: { type: 'select', label: 'Source', options: { baguette: 'Baguette', machine: 'Machine (montée)', vent: 'Au vent' }, value: 'baguette' },
+          debit: { type: 'range', label: 'Débit', min: 0.2, max: 12, step: 0.1, value: 2.2 },
+          nombre: { type: 'range', label: 'Nombre max', min: 1, max: 60, step: 1, value: 24 },
+          taille: { type: 'range', label: 'Taille', min: 0.03, max: 0.3, step: 0.005, value: 0.09 },
+          ecart: { type: 'range', label: 'Écart des tailles', min: 0, max: 1, step: 0.01, value: 0.6 },
+          vie: { type: 'range', label: 'Durée de vie (s)', min: 2, max: 30, step: 0.5, value: 10 },
+        },
+        'Film': {
+          epaisseur: { type: 'range', label: 'Épaisseur du film', min: 0.2, max: 1.6, step: 0.01, value: 0.75 },
+          tourbillons: { type: 'range', label: 'Tourbillons', min: 0, max: 1, step: 0.01, value: 0.55 },
+          irisation: { type: 'range', label: 'Irisation', min: 0, max: 1.5, step: 0.01, value: 1 },
+          reflet: { type: 'select', label: 'Reflet', options: { fenetre: 'Fenêtre', logo: 'Logo', aucun: 'Aucun' }, value: 'fenetre' },
+          image: { type: 'file', label: 'Logo', accept: 'image/*', show: (q) => q.reflet === 'logo' },
+        },
+        'Air': {
+          vent: { type: 'range', label: 'Vent', min: -1, max: 1, step: 0.01, value: 0.15 },
+          gravite: { type: 'range', label: 'Pesanteur', min: -1, max: 1, step: 0.01, value: 0.15 },
+          turbulence: { type: 'range', label: 'Turbulence', min: 0, max: 1, step: 0.01, value: 0.4 },
+        },
+        'Fond': {
+          fond: { type: 'color', label: 'Fond', value: '#1d2a33' },
+          decor: { type: 'palette', label: 'Taches du décor', value: ['#e5452a', '#f2b0c8', '#f2e640', '#4b6cf0'] },
+          flou: { type: 'range', label: 'Présence du décor', min: 0, max: 1, step: 0.01, value: 0.45 },
+          baguette: { type: 'color', label: 'Baguette', value: '#e5452a' },
+        },
+      },
+      presets: {
+        'Baguette': {},
+        'Machine': { source: 'machine', debit: 5, nombre: 40, taille: 0.06, gravite: -0.5, vent: 0 },
+        'Au vent': { source: 'vent', vent: 0.6, debit: 1.5, nombre: 18, taille: 0.11 },
+        'Géantes': { taille: 0.22, ecart: 0.3, debit: 0.9, nombre: 6, vie: 18, tourbillons: 0.8, gravite: -0.08, vent: 0.05 },
+        'Film épais': { epaisseur: 1.5, irisation: 1.2, tourbillons: 0.3 },
+        'Taches noires': { epaisseur: 0.32, vie: 16, tourbillons: 0.9 },
+        'Logo': { reflet: 'logo', taille: 0.16, debit: 1, nombre: 10, vie: 14 },
+        'Biennale': { fond: BIEN[0], decor: [BIEN[2], BIEN[3], BIEN[4]], baguette: BIEN[1], flou: 0.6 },
+        'Menthe': { fond: MENTHE[1], decor: [MENTHE[2], MENTHE[3], MENTHE[0]], baguette: MENTHE[2], source: 'machine', debit: 4, nombre: 34, taille: 0.06, gravite: -0.5, vent: 0 },
+        'Kegelbahn': { fond: KB[0], decor: [KB[1], KB[2], KB[3], KB[5]], baguette: KB[3], flou: 0.7 },
+        'Salon': { fond: SALON[0], decor: [SALON[2], SALON[3], SALON[4]], baguette: SALON[2], flou: 0.35 },
+        'Nuit': { fond: '#07080c', decor: ['#24305a', '#3a1d3f'], flou: 0.8, irisation: 1.3, baguette: '#cfd3dc' },
+        'Pixels': { fond: PIX[0], decor: [PIX[1], PIX[2], PIX[3], PIX[4]], source: 'vent', vent: -0.5, baguette: PIX[2] },
+      },
+      brand(colors) {
+        const lum = (h) => { const n = parseInt(h.slice(1), 16); return ((n >> 16) & 255) * 0.299 + ((n >> 8) & 255) * 0.587 + (n & 255) * 0.114; };
+        const all = colors.slice().sort((a, b) => lum(a) - lum(b));
+        const rest = colors.filter((c) => c !== all[0]);
+        return { fond: all[0], decor: rest.length ? rest : [all[0]], baguette: rest[0] || '#e5452a' };
+      },
+      pointer: {
+        down: (q) => { drag = { x: q.x, y: q.y, x0: q.x, y0: q.y, moved: false, acc: 0 }; },
+        drag: (q) => {
+          if (!drag) return;
+          if (Math.hypot(q.x - drag.x0, q.y - drag.y0) > 8) drag.moved = true;
+          const dx = q.x - drag.x, dy = q.y - drag.y, d = Math.hypot(dx, dy), S = Math.min(app.size.w, app.size.h);
+          drag.acc += d;
+          if (drag.acc > S * p.taille * 1.6 && bubbles.length < p.nombre + 20) { drag.acc = 0; spawn(q.x, q.y, dx * 8, dy * 8, 0.5 + Math.random() * 0.7); }
+          drag.x = q.x; drag.y = q.y;
+        },
+        up: (q) => {
+          if (drag && !drag.moved) { const b = bubbles.slice().reverse().find((o) => Math.hypot(q.x - o.x, q.y - o.y) < o.r); if (b) pop(b); else spawn(q.x, q.y, 0, 0, 1); }
+          drag = null;
+        },
+        wheel: (q, dy) => app.set('vent', Math.max(-1, Math.min(1, +(p.vent + (dy > 0 ? -0.05 : 0.05)).toFixed(2)))),
+      },
+      onChange(k) { if (k === 'image') logoKey = null; frozen = false; },
+      onSeed() { bubbles = []; drops = []; bgKey = ''; frozen = false; },
+      export: { name: 'bulles', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    const hex = (h) => { const n = parseInt(h.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; };
+    const rgb = (c) => `rgb(${c[0]},${c[1]},${c[2]})`;
+    const rgba = (c, a) => `rgba(${c[0]},${c[1]},${c[2]},${a})`;
+    function hash(n) { const s = Math.sin(n * 127.1 + app.seed * 0.0131) * 43758.5453; return s - Math.floor(s); }
+    function vnoise(x, o) { const i = Math.floor(x), f = x - i, u = f * f * (3 - 2 * f); return hash(i + o) * (1 - u) + hash(i + 1 + o) * u; }
+    const lightBg = () => { const [r, g, b] = hex(p.fond); return r * 0.3 + g * 0.6 + b * 0.1 > 140; };
+
+    // ——— Optique du film : couleur réfléchie selon l'épaisseur (nm), trois bandes moyennées ———
+    function buildLUT() {
+      const N = 1024, out = new Float32Array(N * 3), n = 1.33;
+      const bands = [[620, 40], [540, 35], [460, 30]];
+      for (let i = 0; i < N; i++) {
+        const d = i / (N - 1) * 1800;
+        for (let c = 0; c < 3; c++) {
+          let s = 0; for (let k = -2; k <= 2; k++) { const lam = bands[c][0] + k * bands[c][1] * 0.5; const ph = 2 * TAU * n * d / lam; s += Math.sin(ph / 2) ** 2; }
+          out[i * 3 + c] = s / 5;
+        }
+        // saturation : on écarte chaque canal de la moyenne
+        const m = (out[i * 3] + out[i * 3 + 1] + out[i * 3 + 2]) / 3;
+        for (let c = 0; c < 3; c++) out[i * 3 + c] = Math.max(0, Math.min(1, m + (out[i * 3 + c] - m) * 1.3));
+      }
+      return out;
+    }
+    // bruit en tuile (fbm) pour les tourbillons du film
+    function buildNoise() {
+      const M = 128, g = 16, out = new Float32Array(M * M), rnd = (i, j, o) => hash(((i % g + g) % g) * 31.7 + ((j % g + g) % g) * 91.3 + o);
+      for (let y = 0; y < M; y++) for (let x = 0; x < M; x++) {
+        let v = 0, a = 0.6;
+        for (let oc = 0; oc < 3; oc++) {
+          const sc = g * (1 << oc) / M, fx = x * sc, fy = y * sc, ix = Math.floor(fx), iy = Math.floor(fy), ux = fx - ix, uy = fy - iy, sx = ux * ux * (3 - 2 * ux), sy = uy * uy * (3 - 2 * uy), G = g * (1 << oc);
+          const r = (i, j) => hash((((i % G) + G) % G) * 31.7 + (((j % G) + G) % G) * 91.3 + oc * 17 + 300);
+          v += a * ((r(ix, iy) * (1 - sx) + r(ix + 1, iy) * sx) * (1 - sy) + (r(ix, iy + 1) * (1 - sx) + r(ix + 1, iy + 1) * sx) * sy);
+          a *= 0.5;
+        }
+        out[y * M + x] = v / 1.05;
+      }
+      return { M, d: out };
+    }
+    function nsample(u, v) {
+      const M = noiseT.M, d = noiseT.d; u = ((u % M) + M) % M; v = ((v % M) + M) % M;
+      const ix = u | 0, iy = v | 0, fx = u - ix, fy = v - iy, ix1 = (ix + 1) % M, iy1 = (iy + 1) % M;
+      return (d[iy * M + ix] * (1 - fx) + d[iy * M + ix1] * fx) * (1 - fy) + (d[iy1 * M + ix] * (1 - fx) + d[iy1 * M + ix1] * fx) * fy;
+    }
+
+    // ——— Bulles ———
+    function spawn(x, y, vx, vy, k) {
+      const S = Math.min(app.size.w, app.size.h), i = uid++;
+      const r = S * p.taille * (1 + (Math.random() - 0.5) * p.ecart * 1.4) * (k || 1);
+      bubbles.push({ id: i, x, y, vx, vy, r: Math.max(6, r), grow: 0, age: 0, life: p.vie * (0.6 + Math.random() * 0.8), d0: 0.8 + Math.random() * 0.45, rot: Math.random() * TAU, spin: (Math.random() - 0.5) * 0.6, ox: Math.random() * 128, oy: Math.random() * 128, wob: 1, wp: 0, cv: null, n: 0, tick: 0 });
+    }
+    function wandPos() { const { w, h } = app.size; return { x: w * 0.16, y: h * 0.58, r: Math.min(w, h) * Math.max(0.06, p.taille * 0.85) }; }
+    function emit(dt) {
+      const { w, h } = app.size, S = Math.min(w, h);
+      spawnAcc += dt * p.debit;
+      while (spawnAcc >= 1) {
+        spawnAcc -= 1;
+        if (bubbles.length >= p.nombre) continue;
+        if (p.source === 'baguette') { const W = wandPos(); spawn(W.x + W.r * 0.4, W.y, S * (0.25 + Math.random() * 0.2) * (p.vent < -0.2 ? -1 : 1), -S * (0.04 + Math.random() * 0.08), 1); bubbles[bubbles.length - 1].grow = 0.25; }
+        else if (p.source === 'machine') spawn(w * (0.25 + Math.random() * 0.5), h + S * 0.05, (Math.random() - 0.5) * S * 0.1, -S * (0.1 + Math.random() * 0.1), 1);
+        else { const left = p.vent >= 0; spawn(left ? -S * 0.1 : w + S * 0.1, h * (0.15 + Math.random() * 0.7), (left ? 1 : -1) * S * 0.05, 0, 1); }
+      }
+    }
+    function pop(b) {
+      b.dead = true;
+      const n = Math.round(10 + b.r * 0.15);
+      for (let i = 0; i < n; i++) { const a = Math.random() * TAU, s = b.r * (2 + Math.random() * 3); drops.push({ x: b.x + Math.cos(a) * b.r, y: b.y + Math.sin(a) * b.r, vx: Math.cos(a) * s + b.vx, vy: Math.sin(a) * s + b.vy, t: 0, life: 0.25 + Math.random() * 0.35, r: Math.max(0.8, b.r * 0.02 * (0.5 + Math.random())) }); }
+      drops.push({ ring: true, x: b.x, y: b.y, r: b.r, t: 0, life: 0.12 });
+    }
+    function step(dt) {
+      const { w, h } = app.size, S = Math.min(w, h);
+      time += dt;
+      emit(dt);
+      for (const b of bubbles) {
+        b.age += dt; b.grow = Math.min(1, b.grow + dt * 2.2); b.rot += b.spin * dt;
+        // vent, turbulence, pesanteur (les grosses bulles tombent un peu plus) et traînée
+        const tx = (vnoise(b.y / S * 2 + time * 0.3, 7) - 0.5) * 2, ty = (vnoise(b.x / S * 2 + time * 0.3 + 40, 9) - 0.5) * 2;
+        const ax = p.vent * S * 0.35 + tx * p.turbulence * S * 0.35, ay = p.gravite * S * 0.12 * (0.6 + b.r / (S * 0.1) * 0.4) + ty * p.turbulence * S * 0.25;
+        b.vx += (ax - b.vx) * Math.min(1, dt * 0.9); b.vy += (ay - b.vy) * Math.min(1, dt * 0.9);
+        b.x += b.vx * dt; b.y += b.vy * dt;
+        b.wob *= Math.exp(-dt * 2.5); b.wp += dt * (9 / Math.sqrt(b.r / (S * 0.05)));
+        const m = b.r * 1.5;
+        if (b.x < -m * 2 || b.x > w + m * 2 || b.y < -m * 2 || b.y > h + m * 2) b.dead = true;
+        if (b.age > b.life) pop(b);
+      }
+      // contacts : les bulles se repoussent doucement et se déforment
+      for (let i = 0; i < bubbles.length; i++) for (let j = i + 1; j < bubbles.length; j++) {
+        const a = bubbles[i], c = bubbles[j], dx = c.x - a.x, dy = c.y - a.y, d = Math.hypot(dx, dy), rr = (a.r * a.grow + c.r * c.grow) * 0.98;
+        if (d < rr && d > 0.01) { const o = (rr - d) / d * 0.5, ma = c.r / (a.r + c.r); a.x -= dx * o * ma; a.y -= dy * o * ma; c.x += dx * o * (1 - ma); c.y += dy * o * (1 - ma); const rv = ((c.vx - a.vx) * dx + (c.vy - a.vy) * dy) / d; if (rv < 0) { const k = rv * 0.5 / d; a.vx += dx * k; a.vy += dy * k; c.vx -= dx * k; c.vy -= dy * k; } a.wob = Math.max(a.wob, 0.25); c.wob = Math.max(c.wob, 0.25); }
+      }
+      bubbles = bubbles.filter((b) => !b.dead);
+      for (const d of drops) { d.t += dt; if (!d.ring) { d.vy += S * 1.2 * dt; d.x += d.vx * dt; d.y += d.vy * dt; } }
+      drops = drops.filter((d) => d.t < d.life);
+    }
+
+    // texture du film d'une bulle, recalculée à basse résolution
+    function filmSprite(b) {
+      const { dpr } = app.size, n = Math.max(28, Math.min(120, Math.ceil(b.r * 2 * dpr * 0.6)));
+      if (!b.cv || b.n !== n) { b.cv = document.createElement('canvas'); b.cv.width = b.cv.height = n; b.n = n; b.cx = b.cv.getContext('2d'); b.img = b.cx.createImageData(n, n); }
+      const D = b.img.data, u = Math.min(1, b.age / b.life);
+      // l'épaisseur moyenne baisse avec l'âge ; le haut se vide d'abord
+      const dm = 760 * p.epaisseur * b.d0 * (1 - 0.82 * Math.pow(u, 1.3)), sw = p.tourbillons, irid = p.irisation, cr = Math.cos(b.rot), sr = Math.sin(b.rot);
+      const flow = time * 4, light = lightBg() ? 0.7 : 1;
+      for (let j = 0; j < n; j++) {
+        const dy = (j + 0.5) / n * 2 - 1;
+        for (let i = 0; i < n; i++) {
+          const dx = (i + 0.5) / n * 2 - 1, r2 = dx * dx + dy * dy, o = (j * n + i) * 4;
+          if (r2 > 1) { D[o + 3] = 0; continue; }
+          const z = Math.sqrt(1 - r2), sx = dx / (1 + z), sy = dy / (1 + z);
+          const ru = sx * cr - sy * sr, rv = sx * sr + sy * cr;
+          const nz = nsample(ru * 16 + b.ox + flow * 0.25, rv * 22 + b.oy + Math.sin(ru * 2.5 + time * 0.6) * 5) - 0.5;
+          // drainage : film plus épais en bas
+          let d = dm * (0.35 + 0.95 * (dy * 0.5 + 0.5)) * (1 + nz * sw * 1.6);
+          if (d < 0) d = 0;
+          const li = Math.min(1023, (d / 1800 * 1023) | 0) * 3;
+          const rr = Math.sqrt(r2), fres = 0.08 + 0.92 * Math.pow(rr, 6);
+          const thin = Math.min(1, d / 70);
+          const a = Math.min(1, (0.12 + fres * 0.88) * thin) * light * Math.min(1, (1 - rr) * n * 0.5);
+          D[o] = Math.min(255, (lut[li] * irid + (1 - irid) * 0.6) * 255);
+          D[o + 1] = Math.min(255, (lut[li + 1] * irid + (1 - irid) * 0.6) * 255);
+          D[o + 2] = Math.min(255, (lut[li + 2] * irid + (1 - irid) * 0.6) * 255);
+          D[o + 3] = a * 255;
+        }
+      }
+      b.cx.putImageData(b.img, 0, 0);
+      return b.cv;
+    }
+    function logoSprite() {
+      const img = p.image || app.logoImg, key = img ? (img.src || 'c') : 'demo';
+      if (logoSpr && logoKey === key) return logoSpr; logoKey = key;
+      const M = 128, c = document.createElement('canvas'); c.width = c.height = M; const x = c.getContext('2d');
+      if (img) {
+        const iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height, k = M * 0.9 / Math.max(iw, ih);
+        x.drawImage(img, (M - iw * k) / 2, (M - ih * k) / 2, iw * k, ih * k);
+        const d = x.getImageData(0, 0, M, M), a = d.data; let transp = 0; for (let i = 3; i < a.length; i += 4) if (a[i] < 128) transp++;
+        const useA = transp > M * M * 0.05;
+        for (let i = 0; i < a.length; i += 4) { const l = (a[i] * 0.2126 + a[i + 1] * 0.7152 + a[i + 2] * 0.0722) / 255, on = useA ? a[i + 3] / 255 : (a[i + 3] > 128 && l < 0.5 ? 1 : 0); a[i] = a[i + 1] = a[i + 2] = 255; a[i + 3] = on * 255; }
+        x.putImageData(d, 0, 0);
+      } else { x.fillStyle = '#fff'; x.beginPath(); x.arc(64, 64, 58, 0, TAU); x.arc(64, 64, 34, 0, TAU, true); x.fill('evenodd'); x.fillRect(56, 4, 16, 120); }
+      logoSpr = c; return c;
+    }
+    // décor : grandes taches floues aux couleurs de la marque, que l'on voit à travers les bulles
+    function background() {
+      const { w, h, dpr } = app.size, key = [w, h, dpr, p.fond, p.decor.join(), p.flou, app.seed].join();
+      if (key === bgKey) return bg; bgKey = key;
+      if (!bg) bg = document.createElement('canvas');
+      const q = 0.25, c = bg; c.width = Math.ceil(w * q); c.height = Math.ceil(h * q); const x = c.getContext('2d');
+      x.fillStyle = p.fond; x.fillRect(0, 0, c.width, c.height);
+      const cols = p.decor.length ? p.decor : [p.fond], S = Math.min(w, h) * q;
+      for (let i = 0; i < 9; i++) {
+        const cx = hash(i * 3.1 + 40) * c.width, cy = hash(i * 5.7 + 41) * c.height, r = S * (0.15 + hash(i + 42) * 0.35);
+        const g = x.createRadialGradient(cx, cy, 0, cx, cy, r), col = hex(cols[i % cols.length]);
+        g.addColorStop(0, rgba(col, 0.9 * p.flou)); g.addColorStop(0.55, rgba(col, 0.5 * p.flou)); g.addColorStop(1, rgba(col, 0));
+        x.fillStyle = g; x.fillRect(cx - r, cy - r, r * 2, r * 2);
+      }
+      return c;
+    }
+
+    app.loop((tt, dt) => {
+      const { w, h, dpr } = app.size, S = Math.min(w, h);
+      dt = Math.min(0.05, dt || 0);
+      if (!lut) lut = buildLUT();
+      if (!noiseT) noiseT = buildNoise();
+      if (app.thumbnail) { if (!frozen) { bubbles = []; time = 0; for (let i = 0; i < 360; i++) step(1 / 60); frozen = true; } }
+      else step(dt);
+
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over';
+      ctx.imageSmoothingEnabled = true;
+      ctx.drawImage(background(), 0, 0, w, h);
+      const L = lightBg();
+      // baguette
+      if (p.source === 'baguette') {
+        const W = wandPos();
+        ctx.strokeStyle = p.baguette; ctx.lineCap = 'round';
+        ctx.lineWidth = Math.max(3, W.r * 0.09); ctx.beginPath(); ctx.moveTo(W.x - W.r * 0.15, W.y + W.r); ctx.lineTo(W.x - W.r * 0.45, h + 10); ctx.stroke();
+        ctx.lineWidth = Math.max(2, W.r * 0.07); ctx.beginPath(); ctx.ellipse(W.x, W.y, W.r * 0.35, W.r, 0, 0, TAU); ctx.stroke();
+        ctx.strokeStyle = 'rgba(255,255,255,0.35)'; ctx.lineWidth = 1; ctx.beginPath(); ctx.ellipse(W.x + 1, W.y, W.r * 0.3, W.r * 0.94, 0, 0, TAU); ctx.stroke();
+      }
+      // bulles
+      const refl = p.reflet, ls = refl === 'logo' ? logoSprite() : null;
+      for (const b of bubbles) {
+        const r = b.r * (0.25 + 0.75 * b.grow), sq = 1 + Math.sin(b.wp) * b.wob * 0.12;
+        if (!frozen || !b.cv) filmSprite(b);
+        ctx.save(); ctx.translate(b.x, b.y); ctx.scale(sq, 1 / sq);
+        // fond légèrement assombri derrière le film (sur fond clair)
+        if (L) { ctx.fillStyle = 'rgba(0,0,0,0.03)'; ctx.beginPath(); ctx.arc(0, 0, r, 0, TAU); ctx.fill(); }
+        ctx.globalCompositeOperation = L ? 'source-over' : 'screen';
+        ctx.drawImage(b.cv, -r, -r, r * 2, r * 2);
+        ctx.globalCompositeOperation = 'source-over';
+        ctx.strokeStyle = L ? 'rgba(40,40,60,0.18)' : 'rgba(255,255,255,0.16)'; ctx.lineWidth = Math.max(0.6, r * 0.012); ctx.beginPath(); ctx.arc(0, 0, r * 0.995, 0, TAU); ctx.stroke();
+        // reflets
+        const fade = Math.min(1, (b.life - b.age) * 2, b.grow * 2);
+        if (refl === 'fenetre') {
+          ctx.fillStyle = `rgba(255,255,255,${0.55 * fade})`;
+          ctx.save(); ctx.rotate(-0.6); const wx = -r * 0.12, wy = -r * 0.62, ww = r * 0.42, wh = r * 0.22;
+          // fenêtre à croisillon, courbée par la sphère
+          ctx.beginPath();
+          for (let k = 0; k < 2; k++) for (let m = 0; m < 2; m++) { const px = wx + (k - 1) * ww * 0.5 + ww * 0.03, py = wy + (m - 1) * wh * 0.5 + wh * 0.04 + (k ? 0 : r * 0.02); ctx.roundRect(px, py, ww * 0.44, wh * 0.42, Math.min(ww, wh) * 0.12); }
+          ctx.fill();
+          ctx.restore();
+          ctx.fillStyle = `rgba(255,255,255,${0.35 * fade})`; ctx.beginPath(); ctx.ellipse(r * 0.52, r * 0.55, r * 0.09, r * 0.05, -0.8, 0, TAU); ctx.fill();
+        } else if (refl === 'logo') {
+          ctx.globalAlpha = 0.6 * fade; const s = r * 0.5; ctx.save(); ctx.translate(-r * 0.38, -r * 0.4); ctx.rotate(-0.35); ctx.scale(-1, 0.8); ctx.drawImage(ls, -s / 2, -s / 2, s, s); ctx.restore();
+          ctx.globalAlpha = 0.3 * fade; ctx.save(); ctx.translate(r * 0.5, r * 0.5); ctx.scale(1, -0.6); ctx.drawImage(ls, -s * 0.15, -s * 0.15, s * 0.3, s * 0.3); ctx.restore(); ctx.globalAlpha = 1;
+        }
+        ctx.restore();
+      }
+      // gouttelettes de l'éclatement
+      for (const d of drops) {
+        const u = d.t / d.life;
+        if (d.ring) { ctx.strokeStyle = `rgba(255,255,255,${0.5 * (1 - u)})`; ctx.lineWidth = Math.max(1, d.r * 0.03); ctx.beginPath(); ctx.arc(d.x, d.y, d.r * (1 + u * 0.15), 0, TAU); ctx.stroke(); continue; }
+        ctx.fillStyle = L ? `rgba(60,70,90,${0.6 * (1 - u)})` : `rgba(235,240,255,${0.75 * (1 - u)})`; ctx.beginPath(); ctx.arc(d.x, d.y, d.r, 0, TAU); ctx.fill();
+      }
+      app.finish(ctx);
+    });
+
+    // SVG : film approché par un dégradé vertical (épaisseur du haut au bas) et un anneau de Fresnel
+    function toSVG() {
+      const { w, h } = app.size, f = (v) => v.toFixed(1), S = Math.min(w, h), defs = [], out = [];
+      const cols = p.decor.length ? p.decor : [p.fond];
+      defs.push(`<filter id="fl" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="${f(S * 0.06)}"/></filter><radialGradient id="fr"><stop offset="0.6" stop-color="#fff" stop-opacity="0"/><stop offset="0.93" stop-color="#fff" stop-opacity="0.18"/><stop offset="1" stop-color="#fff" stop-opacity="0.45"/></radialGradient>`);
+      out.push(`<rect width="100%" height="100%" fill="${p.fond}"/>`);
+      out.push(`<g filter="url(#fl)">${Array.from({ length: 9 }, (_, i) => { const cx = hash(i * 3.1 + 40) * w, cy = hash(i * 5.7 + 41) * h, r = S * (0.15 + hash(i + 42) * 0.35) * 0.6; return `<circle cx="${f(cx)}" cy="${f(cy)}" r="${f(r)}" fill="${cols[i % cols.length]}" fill-opacity="${(0.7 * p.flou).toFixed(2)}"/>`; }).join('')}</g>`);
+      if (p.source === 'baguette') { const W = wandPos(); out.push(`<g fill="none" stroke="${p.baguette}" stroke-linecap="round"><path d="M${f(W.x - W.r * 0.15)} ${f(W.y + W.r)}L${f(W.x - W.r * 0.45)} ${h + 10}" stroke-width="${f(Math.max(3, W.r * 0.09))}"/><ellipse cx="${f(W.x)}" cy="${f(W.y)}" rx="${f(W.r * 0.35)}" ry="${f(W.r)}" stroke-width="${f(Math.max(2, W.r * 0.07))}"/></g>`); }
+      bubbles.forEach((b, i) => {
+        const r = b.r * (0.25 + 0.75 * b.grow), u = Math.min(1, b.age / b.life), dm = 760 * p.epaisseur * b.d0 * (1 - 0.82 * Math.pow(u, 1.3));
+        const stops = [0, 0.25, 0.5, 0.75, 1].map((t) => { const d = Math.max(0, dm * (0.35 + 0.95 * t)), li = Math.min(1023, (d / 1800 * 1023) | 0) * 3, c = [0, 1, 2].map((k) => Math.round(Math.min(1, lut[li + k] * p.irisation + (1 - p.irisation) * 0.6) * 255)); return `<stop offset="${t}" stop-color="rgb(${c})" stop-opacity="${(0.35 * Math.min(1, d / 70)).toFixed(2)}"/>`; }).join('');
+        defs.push(`<linearGradient id="b${i}" x1="0" y1="0" x2="0" y2="1">${stops}</linearGradient>`);
+        out.push(`<g transform="translate(${f(b.x)} ${f(b.y)})"><circle r="${f(r)}" fill="url(#b${i})" style="mix-blend-mode:screen"/><circle r="${f(r)}" fill="url(#fr)"/>${p.reflet === 'fenetre' ? `<ellipse cx="${f(-r * 0.42)}" cy="${f(-r * 0.45)}" rx="${f(r * 0.2)}" ry="${f(r * 0.1)}" transform="rotate(-35 ${f(-r * 0.42)} ${f(-r * 0.45)})" fill="#fff" fill-opacity="0.5"/><ellipse cx="${f(r * 0.52)}" cy="${f(r * 0.55)}" rx="${f(r * 0.09)}" ry="${f(r * 0.05)}" fill="#fff" fill-opacity="0.35"/>` : ''}</g>`);
+      });
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">\n<defs>${defs.join('')}</defs>\n${out.join('\n')}\n</svg>`;
+    }
+  </script>
+</body>
+</html>
