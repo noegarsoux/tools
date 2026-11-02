@@ -1,0 +1,15 @@
+{
+  "slug": "papier-peint",
+  "title": "Papier peint",
+  "type": "pattern",
+  "description": "Un module (forme, tirage ou logo) répété selon l'un des 17 groupes de symétrie du plan : rotations, miroirs et réflexions glissées, module qui dérive.",
+  "tags": ["symetrie", "papier-peint", "pavage", "motif", "svg", "logo"],
+  "inspiration": [
+    "Conway, Burgiel et Goodman-Strauss, The Symmetry of Things",
+    "Tables internationales de cristallographie, volume A : les 17 groupes plans",
+    "references/techniques.md ; palettes papier-60, kegelbahn, biennale, good-room, salon, luzern"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
