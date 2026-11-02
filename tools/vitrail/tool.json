@@ -1,0 +1,15 @@
+{
+  "slug": "vitrail",
+  "title": "Vitrail",
+  "type": "motion",
+  "description": "Des pièces de verre serties de plomb, en éclats, en rose, en rectangles ou autour du logo, traversées par un soleil qui passe et des nuages qui filent.",
+  "tags": ["vitrail", "verre", "voronoi", "lumiere", "logo", "svg"],
+  "inspiration": [
+    "Rose nord de Notre-Dame de Paris (vers 1250)",
+    "Pierre Soulages, vitraux de l'abbatiale de Conques (1994)",
+    "references/techniques.md ; palettes biennale, kegelbahn, luzern, thermique"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}

@@ -1,0 +1,357 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Vitrail</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Vitrail : des pièces de verre serties de plomb. La lumière d'un soleil qui passe derrière
+    // (ou que l'on guide) traverse chaque pièce ; des nuages filent, le verre scintille, et l'on
+    // recolore les pièces au toucher.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const P60 = PAL('papier-60'), BIEN = PAL('biennale'), MENTHE = PAL('menthe'), KB = PAL('kegelbahn'), GR = PAL('good-room'), NUIT = PAL('trame-nuit');
+    const LUZ = PAL('luzern'), SALON = PAL('salon'), PYR = PAL('pyramides'), ACIDE = PAL('acide'), THER = PAL('thermique'), GL = PAL('glyphes'), EV = PAL('eventail'), BIT = PAL('bitmap');
+
+    let panes = [], built = false, sun = { x: 0, y: 0 }, hover = null, painting = null, texCv = null, texKey = '', maskCache = null, maskKey = null;
+    let overrides = new Map(); // couleurs choisies à la main : index de pièce → index de couleur
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.04, vignette: 0.18 },
+      hint: 'Le pointeur guide le soleil · touchez une pièce pour changer sa couleur · glissez pour peindre plusieurs pièces · molette : nombre de pièces',
+      notes: 'Les pièces sont des cellules de Voronoï régularisées (Lloyd), les secteurs d’une rose ou un découpage en rectangles. La lumière d’une pièce dépend de sa distance au soleil, du passage des nuages et d’un léger scintillement propre à chaque verre.',
+      params: {
+        'Dessin': {
+          dessin: { type: 'select', label: 'Dessin', options: { voronoi: 'Éclats', rosace: 'Rose', grille: 'Moderne', logo: 'Logo' }, value: 'voronoi' },
+          image: { type: 'file', label: 'Logo', accept: 'image/*', show: (q) => q.dessin === 'logo' },
+          pieces: { type: 'range', label: 'Nombre de pièces', min: 12, max: 360, step: 1, value: 90 },
+          regularite: { type: 'range', label: 'Régularité', min: 0, max: 1, step: 0.01, value: 0.5, show: (q) => q.dessin === 'voronoi' || q.dessin === 'logo' },
+          symetrie: { type: 'range', label: 'Branches de la rose', min: 6, max: 24, step: 1, value: 12, show: (q) => q.dessin === 'rosace' },
+        },
+        'Verre': {
+          couleurs: { type: 'palette', label: 'Verres', value: ['#1f3f9a', '#c8321e', '#e8b62c', '#2f7a46', '#7a3a8c', '#e8e2c8'] },
+          texture: { type: 'range', label: 'Texture du verre', min: 0, max: 1, step: 0.01, value: 0.5 },
+          plomb: { type: 'color', label: 'Plomb', value: '#151515' },
+          epaisseur: { type: 'range', label: 'Épaisseur du plomb', min: 1, max: 12, step: 0.5, value: 5 },
+          fond: { type: 'color', label: 'Mur', value: '#2a2724' },
+        },
+        'Lumière': {
+          soleil: { type: 'range', label: 'Soleil', min: 0, max: 1.5, step: 0.01, value: 0.9 },
+          halo: { type: 'range', label: 'Halo', min: 0.1, max: 1.2, step: 0.01, value: 0.42 },
+          nuages: { type: 'range', label: 'Nuages', min: 0, max: 1, step: 0.01, value: 0.45 },
+          scintillement: { type: 'range', label: 'Scintillement', min: 0, max: 1, step: 0.01, value: 0.35 },
+          vitesse: { type: 'range', label: 'Vitesse', min: 0, max: 3, step: 0.05, value: 1 },
+        },
+      },
+      presets: {
+        'Cathédrale': {},
+        'Rose': { dessin: 'rosace', symetrie: 12, pieces: 120, couleurs: ['#1f3f9a', '#c8321e', '#e8b62c', '#2f7a46', '#1b2a6e'], epaisseur: 4.5 },
+        'Moderne': { dessin: 'grille', pieces: 60, couleurs: [BIEN[2], BIEN[4], BIEN[3], BIEN[0], '#4b6cf0'], plomb: BIEN[1], epaisseur: 7, texture: 0.3, fond: BIEN[1] },
+        'Logo': { dessin: 'logo', pieces: 220, couleurs: ['#c8321e', '#f2efe6', '#d9d4c4', '#ece6d6'], regularite: 0.7, epaisseur: 3.5, nuages: 0.3 },
+        'Menthe': { dessin: 'voronoi', pieces: 140, couleurs: [MENTHE[2], MENTHE[3], MENTHE[0], '#2c5e4a'], plomb: MENTHE[1], fond: MENTHE[1], regularite: 0.8 },
+        'Kegelbahn': { dessin: 'grille', pieces: 90, couleurs: [KB[1], KB[2], KB[3], KB[4], KB[5]], plomb: KB[0], fond: KB[0], epaisseur: 6 },
+        'Luzern': { dessin: 'rosace', symetrie: 8, pieces: 80, couleurs: [LUZ[0], LUZ[1], LUZ[2], LUZ[4]], plomb: LUZ[3], fond: LUZ[3] },
+        'Glyphes': { dessin: 'voronoi', pieces: 260, couleurs: [GL[2], GL[3], GL[4], GL[5], GL[6], GL[1]], regularite: 0.2, epaisseur: 3, plomb: GL[0], fond: GL[0] },
+        'Thermique': { dessin: 'rosace', symetrie: 18, pieces: 200, couleurs: [THER[1], THER[2], THER[3], THER[4], THER[5]], epaisseur: 3.5, fond: '#1d1d3a' },
+        'Pyramides': { dessin: 'voronoi', pieces: 50, couleurs: [PYR[2], PYR[3], PYR[4], PYR[5], PYR[1]], plomb: PYR[6], fond: PYR[0], regularite: 1, epaisseur: 8 },
+        'Acide': { dessin: 'logo', pieces: 300, couleurs: [ACIDE[2], ACIDE[0], ACIDE[3]], plomb: ACIDE[1], fond: ACIDE[1], regularite: 0.6, epaisseur: 2.5 },
+        'Éventail': { dessin: 'rosace', symetrie: 10, pieces: 150, couleurs: [EV[1], EV[2], EV[3], EV[4], '#e8dcc4'], plomb: EV[0], fond: EV[0] },
+        'Nuit': { dessin: 'voronoi', pieces: 110, couleurs: ['#1b2a6e', '#2f4fa8', '#3b3bb3', '#6a5acd', '#e8b62c'], soleil: 0.6, halo: 0.35, nuages: 0.7, plomb: '#0a0a0a', fond: '#0a0a0a' },
+      },
+      brand(colors) {
+        const c = colors.slice(1).length ? colors.slice(1) : ['#1f3f9a'];
+        const lum = (h) => { const n = parseInt(h.slice(1), 16); return ((n >> 16) & 255) * 0.299 + ((n >> 8) & 255) * 0.587 + (n & 255) * 0.114; };
+        const dark = c.concat([colors[0]]).sort((a, b) => lum(a) - lum(b))[0];
+        return { couleurs: c.concat([colors[0]]).filter((x) => x !== dark).slice(0, 6), plomb: dark, fond: dark };
+      },
+      pointer: {
+        move: (q) => { hover = { x: q.x, y: q.y }; },
+        down: (q) => { painting = { x: q.x, y: q.y, moved: false, col: null, last: -1 }; },
+        drag: (q) => {
+          hover = { x: q.x, y: q.y };
+          if (!painting) return;
+          if (Math.hypot(q.x - painting.x, q.y - painting.y) > 6) painting.moved = true;
+          if (painting.moved) {
+            const i = paneAt(q.x, q.y);
+            if (i >= 0 && i !== painting.last) {
+              if (painting.col == null) painting.col = (colorIndex(i) + 1) % ncol();
+              setPane(i, painting.col); painting.last = i;
+            }
+          }
+        },
+        up: (q) => {
+          if (painting && !painting.moved) { const i = paneAt(q.x, q.y); if (i >= 0) setPane(i, (colorIndex(i) + 1) % ncol()); }
+          painting = null;
+        },
+        wheel: (q, dy) => app.set('pieces', Math.max(12, Math.min(360, p.pieces + (dy > 0 ? -8 : 8)))),
+      },
+      onChange(k) {
+        if (['dessin', 'pieces', 'regularite', 'symetrie', 'image', '*'].includes(k)) { built = false; overrides = new Map(); }
+        if (k === 'couleurs') for (const pn of panes) pn.flash = 0;
+        if (k === 'image' || k === 'dessin') maskKey = null;
+      },
+      onSeed() { built = false; overrides = new Map(); },
+      export: { name: 'vitrail', svg: () => toSVG() },
+    });
+    const p = app.params;
+    canvas.addEventListener('pointerleave', () => { hover = null; });
+    const ncol = () => Math.max(1, p.couleurs.length);
+    const colorIndex = (i) => (overrides.has(i) ? overrides.get(i) : panes[i].ci) % ncol();
+    function setPane(i, c) { overrides.set(i, c); panes[i].flash = 1; }
+
+    // ——— Géométrie ———
+    function clipHalf(poly, ax, ay, nx, ny) {
+      // garde les points tels que (P - A)·n <= 0
+      const out = [], n = poly.length;
+      for (let k = 0; k < n; k++) {
+        const P = poly[k], Q = poly[(k + 1) % n], dp = (P[0] - ax) * nx + (P[1] - ay) * ny, dq = (Q[0] - ax) * nx + (Q[1] - ay) * ny;
+        if (dp <= 0) out.push(P);
+        if ((dp < 0 && dq > 0) || (dp > 0 && dq < 0)) { const t = dp / (dp - dq); out.push([P[0] + (Q[0] - P[0]) * t, P[1] + (Q[1] - P[1]) * t]); }
+      }
+      return out;
+    }
+    function voronoi(sites, w, h) {
+      const cells = [];
+      const order = sites.map((_, i) => i);
+      for (let i = 0; i < sites.length; i++) {
+        const [sx, sy] = sites[i];
+        let poly = [[0, 0], [w, 0], [w, h], [0, h]];
+        const near = order.slice().sort((a, b) => ((sites[a][0] - sx) ** 2 + (sites[a][1] - sy) ** 2) - ((sites[b][0] - sx) ** 2 + (sites[b][1] - sy) ** 2));
+        for (const j of near) {
+          if (j === i) continue;
+          const [tx, ty] = sites[j], d2 = (tx - sx) ** 2 + (ty - sy) ** 2;
+          let rmax = 0; for (const q of poly) rmax = Math.max(rmax, (q[0] - sx) ** 2 + (q[1] - sy) ** 2);
+          if (d2 > 4 * rmax) break;
+          poly = clipHalf(poly, (sx + tx) / 2, (sy + ty) / 2, tx - sx, ty - sy);
+          if (poly.length < 3) break;
+        }
+        cells.push(poly);
+      }
+      return cells;
+    }
+    const centroid = (poly) => {
+      let a = 0, cx = 0, cy = 0;
+      for (let k = 0; k < poly.length; k++) { const [x0, y0] = poly[k], [x1, y1] = poly[(k + 1) % poly.length], f = x0 * y1 - x1 * y0; a += f; cx += (x0 + x1) * f; cy += (y0 + y1) * f; }
+      if (Math.abs(a) < 1e-6) return poly[0];
+      return [cx / (3 * a), cy / (3 * a)];
+    };
+
+    function logoMask() {
+      const img = p.image || app.logoImg, key = img ? (img.src || 'c') : 'demo';
+      if (key === maskKey && maskCache) return maskCache;
+      maskKey = key;
+      const M = 220, c = document.createElement('canvas'); c.width = c.height = M; const x = c.getContext('2d', { willReadFrequently: true });
+      if (img) { const iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height, k = M * 0.9 / Math.max(iw, ih); x.drawImage(img, (M - iw * k) / 2, (M - ih * k) / 2, iw * k, ih * k); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(110, 110, 100, 0, TAU); x.arc(110, 110, 58, 0, TAU, true); x.fill('evenodd'); x.fillRect(97, 6, 26, 208); }
+      const d = x.getImageData(0, 0, M, M).data, a = new Uint8Array(M * M);
+      let transp = 0; for (let i = 3; i < d.length; i += 16) if (d[i] < 128) transp++;
+      const useA = transp > d.length / 16 * 0.05;
+      for (let i = 0; i < M * M; i++) { const l = (d[i * 4] * 0.2126 + d[i * 4 + 1] * 0.7152 + d[i * 4 + 2] * 0.0722) / 255; a[i] = (useA ? d[i * 4 + 3] > 128 : d[i * 4 + 3] > 128 && l < 0.5) ? 1 : 0; }
+      maskCache = { M, a }; return maskCache;
+    }
+
+    function build() {
+      const { w, h } = app.size, S = Math.min(w, h), r = app.rng(23), n = Math.round(p.pieces), nc = ncol();
+      panes = [];
+      if (p.dessin === 'voronoi' || p.dessin === 'logo') {
+        let sites = [];
+        let inLogo = null;
+        if (p.dessin === 'logo') {
+          const m = logoMask(), Z = S * 0.8, x0 = (w - Z) / 2, y0 = (h - Z) / 2;
+          inLogo = (x, y) => { const u = (x - x0) / Z, v = (y - y0) / Z; return u >= 0 && v >= 0 && u < 1 && v < 1 && m.a[Math.floor(v * m.M) * m.M + Math.floor(u * m.M)] === 1; };
+          // Plus de pièces le long du contour du logo pour que les plombs le dessinent.
+          let guard = 0;
+          while (sites.length < n * 0.55 && guard++ < 40000) {
+            const x = x0 + r() * Z, y = y0 + r() * Z, e = S * 0.012, a = inLogo(x, y);
+            if (a !== inLogo(x + e, y) || a !== inLogo(x, y + e) || a !== inLogo(x - e, y) || a !== inLogo(x, y - e)) sites.push([x, y]);
+          }
+          while (sites.length < n) sites.push([r() * w, r() * h]);
+        } else for (let i = 0; i < n; i++) sites.push([r() * w, r() * h]);
+        let cells = voronoi(sites, w, h);
+        const iters = Math.round(p.regularite * (p.dessin === 'logo' ? 2 : 5));
+        for (let it = 0; it < iters; it++) { sites = cells.map((c, i) => (c.length >= 3 ? centroid(c) : sites[i])); cells = voronoi(sites, w, h); }
+        cells.forEach((poly, i) => { if (poly.length >= 3) panes.push({ poly, c: centroid(poly), logo: inLogo ? inLogo(...centroid(poly)) : false }); });
+        // Couleurs : éviter qu'une pièce ait la couleur d'une voisine.
+        const spacing = Math.sqrt((w * h) / Math.max(1, panes.length));
+        panes.forEach((pn, i) => {
+          if (p.dessin === 'logo') { pn.ci = pn.logo ? 0 : 1 + Math.floor(r() * Math.max(1, nc - 1)); return; }
+          const used = new Set(); for (let j = 0; j < i; j++) if (Math.hypot(panes[j].c[0] - pn.c[0], panes[j].c[1] - pn.c[1]) < spacing * 1.5) used.add(panes[j].ci);
+          const free = []; for (let k = 0; k < nc; k++) if (!used.has(k)) free.push(k);
+          pn.ci = free.length ? free[Math.floor(r() * free.length)] : Math.floor(r() * nc);
+        });
+      } else if (p.dessin === 'rosace') {
+        const cx = w / 2, cy = h / 2, R = S * 0.47, N = Math.round(p.symetrie);
+        // anneaux : rayon intérieur, extérieur, nombre de secteurs, décalage
+        const ringsAll = [[0, 0.16, 1, 0], [0.16, 0.36, N / 2, 0.5], [0.36, 0.56, N, 0], [0.56, 0.72, N, 0.5], [0.72, 0.86, N * 2, 0], [0.86, 1, N * 2, 0.5]];
+        const dens = Math.max(1, Math.round(n / (N * 6.5)));
+        const arc = (rr, a0, a1, k) => { const a = []; for (let q = 0; q <= k; q++) { const t = a0 + (a1 - a0) * q / k; a.push([cx + Math.cos(t) * rr, cy + Math.sin(t) * rr]); } return a; };
+        ringsAll.forEach(([r0, r1, m, off], ri) => {
+          const M = Math.max(1, Math.round(m * (ri >= 4 ? dens : 1)));
+          if (M === 1 && r0 === 0) { panes.push({ poly: arc(R * r1, 0, TAU, 48).slice(0, -1), c: [cx, cy], ci: 0, ring: ri }); return; }
+          for (let s = 0; s < M; s++) {
+            const a0 = (s + off) / M * TAU - Math.PI / 2, a1 = (s + 1 + off) / M * TAU - Math.PI / 2, k = 2 * Math.max(2, Math.ceil(24 / M * 2));
+            let poly;
+            if (ri === 2) {
+              // pétales : un arc en ogive vers l'extérieur
+              const mid = (a0 + a1) / 2, tip = [cx + Math.cos(mid) * R * r1, cy + Math.sin(mid) * R * r1];
+              const inner = arc(R * r0, a1, a0, k), left = [cx + Math.cos(a0) * R * (r0 + (r1 - r0) * 0.45), cy + Math.sin(a0) * R * (r0 + (r1 - r0) * 0.45)], right = [cx + Math.cos(a1) * R * (r0 + (r1 - r0) * 0.45), cy + Math.sin(a1) * R * (r0 + (r1 - r0) * 0.45)];
+              const bez = (P0, P1, P2) => { const a = []; for (let q = 1; q < 8; q++) { const t = q / 8; a.push([(1 - t) * (1 - t) * P0[0] + 2 * (1 - t) * t * P1[0] + t * t * P2[0], (1 - t) * (1 - t) * P0[1] + 2 * (1 - t) * t * P1[1] + t * t * P2[1]]); } return a; };
+              const c1 = [cx + Math.cos(a0 + (mid - a0) * 0.25) * R * r1 * 0.98, cy + Math.sin(a0 + (mid - a0) * 0.25) * R * r1 * 0.98];
+              const c2 = [cx + Math.cos(a1 - (a1 - mid) * 0.25) * R * r1 * 0.98, cy + Math.sin(a1 - (a1 - mid) * 0.25) * R * r1 * 0.98];
+              poly = [...inner, left, ...bez(left, c1, tip), tip, ...bez(tip, c2, right), right];
+              // le reste de l'anneau autour du pétale devient deux écoinçons
+              const outerArc = arc(R * r1, a0, a1, k), hk = k / 2;
+              panes.push({ poly: [left, ...outerArc.slice(0, hk), tip, ...bez(left, c1, tip).reverse()], ci: 0, ring: 2.5, side: 0 });
+              panes.push({ poly: [tip, ...outerArc.slice(hk + 1), right, ...bez(tip, c2, right).reverse()], ci: 0, ring: 2.5, side: 1 });
+            } else poly = [...arc(R * r0, a0, a1, k), ...arc(R * r1, a1, a0, k)];
+            panes.push({ poly, c: centroid(poly), ci: 0, ring: ri, s });
+          }
+        });
+        // couleurs par anneau, en alternance : la symétrie se lit dans les couleurs.
+        const ringCol = []; for (let k = 0; k < 8; k++) ringCol.push(Math.floor(r() * nc));
+        panes.forEach((pn) => { if (!pn.c) pn.c = centroid(pn.poly); const k = Math.floor(pn.ring * 2); pn.ci = (ringCol[k % 8] + ((pn.s ?? pn.side ?? 0) % 2) * (k % 3 === 1 ? 1 : 0)) % nc; });
+        // écoinçons hors de la rose : le mur
+      } else {
+        // Moderne : découpage récursif en rectangles, coupes horizontales ou verticales.
+        const rects = [[0, 0, w, h]];
+        while (rects.length < n) {
+          let bi = 0, ba = 0; rects.forEach((q, i) => { const a = q[2] * q[3] * (0.6 + r() * 0.8); if (a > ba) { ba = a; bi = i; } });
+          const [x, y, rw, rh] = rects.splice(bi, 1)[0];
+          const t = 0.25 + r() * 0.5;
+          if (rw > rh * (0.7 + r() * 0.6)) { rects.push([x, y, rw * t, rh], [x + rw * t, y, rw * (1 - t), rh]); }
+          else rects.push([x, y, rw, rh * t], [x, y + rh * t, rw, rh * (1 - t)]);
+        }
+        rects.forEach(([x, y, rw, rh]) => panes.push({ poly: [[x, y], [x + rw, y], [x + rw, y + rh], [x, y + rh]], c: [x + rw / 2, y + rh / 2], ci: Math.floor(r() * nc) }));
+      }
+      panes.forEach((pn, i) => { pn.ph = r() * TAU; pn.flash = 0; pn.tone = 0.85 + r() * 0.3; pn.path = null; });
+      built = true;
+    }
+
+    function paneAt(x, y) {
+      for (let i = panes.length - 1; i >= 0; i--) {
+        const poly = panes[i].poly; let inside = false;
+        for (let a = 0, b = poly.length - 1; a < poly.length; b = a++) { const [xa, ya] = poly[a], [xb, yb] = poly[b]; if ((ya > y) !== (yb > y) && x < (xb - xa) * (y - ya) / (yb - ya) + xa) inside = !inside; }
+        if (inside) return i;
+      }
+      return -1;
+    }
+
+    // ——— Texture du verre : stries et bulles, calculée une fois ———
+    function texture(w, h, dpr) {
+      const key = [w, h, dpr, app.seed].join('|');
+      if (key === texKey && texCv) return texCv;
+      texKey = key; texCv = document.createElement('canvas'); texCv.width = Math.round(w); texCv.height = Math.round(h);
+      const x = texCv.getContext('2d'), r = app.rng(57);
+      x.fillStyle = '#808080'; x.fillRect(0, 0, w, h);
+      // stries ondulées
+      x.globalAlpha = 0.07;
+      for (let k = 0; k < 220; k++) {
+        const y0 = r() * h, a = r() * 0.6 - 0.3, amp = 3 + r() * 10;
+        x.strokeStyle = r() < 0.5 ? '#ffffff' : '#000000'; x.lineWidth = 1 + r() * 5; x.beginPath();
+        for (let xx = -20; xx <= w + 20; xx += 20) { const yy = y0 + xx * a + Math.sin(xx * 0.01 + k) * amp; xx < 0 ? x.moveTo(xx, yy) : x.lineTo(xx, yy); }
+        x.stroke();
+      }
+      // bulles
+      x.globalAlpha = 0.25;
+      for (let k = 0; k < 600; k++) { const bx = r() * w, by = r() * h, br = 0.6 + r() * r() * 3.5; x.fillStyle = r() < 0.6 ? '#ffffff' : '#202020'; x.beginPath(); x.arc(bx, by, br, 0, TAU); x.fill(); }
+      x.globalAlpha = 1;
+      return texCv;
+    }
+
+    // ——— Lumière ———
+    const hex = (h) => { const n = parseInt(h.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; };
+    const cloud = (x, y, t) => {
+      const { w } = app.size, k = 1 / w;
+      const v = Math.sin(x * k * 3.1 + t * 0.21) * Math.sin(y * k * 4.3 - t * 0.13) + 0.6 * Math.sin((x + y) * k * 7.7 + t * 0.37) + 0.35 * Math.sin((x - y * 0.6) * k * 13 - t * 0.5);
+      return Math.max(0, Math.min(1, 0.5 + v * 0.45));
+    };
+    function paneColors(t) {
+      const { w, h } = app.size, S = Math.min(w, h), R = S * p.halo, cols = (p.couleurs.length ? p.couleurs : ['#1f3f9a']).map(hex);
+      return panes.map((pn, i) => {
+        const [r0, g0, b0] = cols[colorIndex(i)];
+        const d = Math.hypot(pn.c[0] - sun.x, pn.c[1] - sun.y);
+        const glow = p.soleil * Math.exp(-(d * d) / (R * R));
+        const shade = 1 - p.nuages * 0.55 * cloud(pn.c[0], pn.c[1], t);
+        const tw = 1 + p.scintillement * 0.12 * Math.sin(t * (1.3 + (pn.ph % 1.7)) + pn.ph);
+        const L = (0.5 + 0.38 * shade) * pn.tone * tw;
+        // Au cœur du halo, le verre s'illumine puis tend vers une lumière blanche et chaude.
+        const hot = Math.min(1, Math.max(0, glow - 0.55) * 0.6) + pn.flash * 0.5;
+        const f = (c) => Math.round(Math.min(255, c * L * (1 + glow * 0.7) * (1 - hot) + 255 * hot * (0.8 + 0.2 * c / 255)));
+        return `rgb(${f(r0)},${f(g0)},${f(b0)})`;
+      });
+    }
+
+    let T = 0;
+    function sunPos(t) {
+      const { w, h } = app.size;
+      if (hover) return [hover.x, hover.y];
+      return [w * (0.5 + 0.34 * Math.sin(t * 0.17)), h * (0.42 + 0.22 * Math.sin(t * 0.34 + 1))];
+    }
+
+    app.loop((t, dt) => {
+      const { w, h, dpr } = app.size;
+      dt = Math.min(0.05, dt || 0);
+      if (!built) build();
+      T += dt * p.vitesse;
+      const [sx, sy] = sunPos(T); const kk = hover ? 0.2 : 1; sun.x += (sx - sun.x) * kk; sun.y += (sy - sun.y) * kk;
+      for (const pn of panes) pn.flash = Math.max(0, pn.flash - dt * 2.2);
+      const C = paneColors(T);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = p.fond; ctx.fillRect(0, 0, w, h);
+      for (let i = 0; i < panes.length; i++) {
+        const pn = panes[i]; if (!pn.path) { pn.path = new Path2D(); pn.poly.forEach(([x, y], k) => (k ? pn.path.lineTo(x, y) : pn.path.moveTo(x, y))); pn.path.closePath(); }
+        ctx.fillStyle = C[i]; ctx.fill(pn.path);
+      }
+      // texture du verre (lumière mêlée)
+      if (p.texture > 0) { ctx.save(); ctx.globalCompositeOperation = 'overlay'; ctx.globalAlpha = p.texture * 0.9; ctx.drawImage(texture(w, h, dpr), 0, 0, w, h); ctx.restore(); }
+      // halo du soleil derrière le verre
+      if (p.soleil > 0) {
+        const S = Math.min(w, h), R = S * p.halo * 1.4, g = ctx.createRadialGradient(sun.x, sun.y, 0, sun.x, sun.y, R);
+        g.addColorStop(0, `rgba(255,244,214,${Math.min(0.4, p.soleil * 0.26)})`); g.addColorStop(1, 'rgba(255,244,214,0)');
+        ctx.save(); ctx.globalCompositeOperation = 'screen'; ctx.fillStyle = g; ctx.fillRect(0, 0, w, h); ctx.restore();
+      }
+      leads(ctx, w, h);
+      app.finish(ctx);
+    });
+
+    function leadPaths() {
+      return panes.map((pn) => pn.poly);
+    }
+    function leads(x, w, h) {
+      const lw = p.epaisseur;
+      x.lineJoin = 'round'; x.lineCap = 'round';
+      x.strokeStyle = p.plomb; x.lineWidth = lw;
+      for (const pn of panes) x.stroke(pn.path);
+      // reflet sur le plomb
+      x.globalAlpha = 0.18; x.strokeStyle = '#ffffff'; x.lineWidth = Math.max(0.6, lw * 0.18);
+      x.save(); x.translate(-lw * 0.18, -lw * 0.18); for (const pn of panes) x.stroke(pn.path); x.restore();
+      x.globalAlpha = 1;
+      if (p.dessin === 'rosace') {
+        const S = Math.min(w, h), R = S * 0.47;
+        x.strokeStyle = p.plomb; x.lineWidth = lw * 2.2; x.beginPath(); x.arc(w / 2, h / 2, R, 0, TAU); x.stroke();
+      } else { x.strokeStyle = p.plomb; x.lineWidth = lw * 2.4; x.strokeRect(0, 0, w, h); }
+    }
+
+    function toSVG() {
+      const { w, h } = app.size, C = paneColors(T), f = (v) => v.toFixed(1), out = [];
+      const d = (poly) => 'M' + poly.map(([x, y]) => f(x) + ' ' + f(y)).join('L') + 'Z';
+      panes.forEach((pn, i) => out.push(`<path d="${d(pn.poly)}" fill="${C[i]}"/>`));
+      const S = Math.min(w, h), R = S * p.halo * 1.4;
+      const halo = p.soleil > 0 ? `<defs><radialGradient id="soleil" gradientUnits="userSpaceOnUse" cx="${f(sun.x)}" cy="${f(sun.y)}" r="${f(R)}"><stop offset="0" stop-color="#fff4d6" stop-opacity="${Math.min(0.4, p.soleil * 0.26).toFixed(2)}"/><stop offset="1" stop-color="#fff4d6" stop-opacity="0"/></radialGradient></defs><rect width="100%" height="100%" fill="url(#soleil)" style="mix-blend-mode:screen"/>` : '';
+      const lead = `<path d="${panes.map((pn) => d(pn.poly)).join('')}" fill="none" stroke="${p.plomb}" stroke-width="${p.epaisseur}" stroke-linejoin="round"/>`;
+      const frame = p.dessin === 'rosace' ? `<circle cx="${f(w / 2)}" cy="${f(h / 2)}" r="${f(S * 0.47)}" fill="none" stroke="${p.plomb}" stroke-width="${f(p.epaisseur * 2.2)}"/>` : `<rect width="${w}" height="${h}" fill="none" stroke="${p.plomb}" stroke-width="${f(p.epaisseur * 2.4)}"/>`;
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">\n<rect width="100%" height="100%" fill="${p.fond}"/>\n${out.join('\n')}\n${halo}\n${lead}\n${frame}\n</svg>`;
+    }
+  </script>
+</body>
+</html>
