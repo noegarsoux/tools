@@ -1,0 +1,15 @@
+{
+  "slug": "particle-life",
+  "title": "Particle Life",
+  "type": "system",
+  "description": "Des espèces de particules aux couleurs de la charte qui s'attirent ou se fuient selon une matrice : cellules, chaînes et membranes émergent et se poursuivent.",
+  "tags": ["particules", "emergence", "simulation", "matrice", "svg", "logo"],
+  "inspiration": [
+    "Jeffrey Ventrella, Clusters (2017)",
+    "Tom Mohr, Particle Life ; Hunar Ahmad, Particle Life simulation",
+    "references/physique-maths.md (forces) ; palettes kegelbahn, good-room, biennale, luzern, bitmap"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
