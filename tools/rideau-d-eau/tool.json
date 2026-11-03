@@ -1,0 +1,15 @@
+{
+  "slug": "rideau-d-eau",
+  "title": "Rideau d’eau",
+  "type": "motion",
+  "description": "Un rideau d’eau numérique : une rampe de buses lâche des gouttes ligne par ligne qui dessinent le logo et des motifs en tombant, et s’ouvre devant la main.",
+  "tags": ["particules", "eau", "motif", "interaction", "logo", "svg"],
+  "inspiration": [
+    "Les rideaux d’eau numériques des halls et des pavillons d’exposition",
+    "Les images qui tombent d’un bloc grâce au calage des gouttes",
+    "Le passage qui s’ouvre quand on traverse la cascade"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}
