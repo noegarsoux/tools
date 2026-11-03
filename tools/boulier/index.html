@@ -1,0 +1,319 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Boulier</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Boulier : chaque tige porte le même nombre de perles, et il reste toujours un peu de place libre. Une figure dit,
+    // rangée par rangée, où chaque perle devrait être ; un ressort l'y tire. Les perles ne se traversent pas : quand
+    // l'une rattrape l'autre, elles se cognent et échangent leur vitesse (avec un rebond réglable). Les changements de
+    // figure descendent les rangées en balayage. On peut saisir une perle et pousser toute la file ; la rangée reste
+    // alors en place un moment avant de revenir à la figure. Le logo se lit en creux : les perles s'écartent pour le laisser vide.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const BIEN = PAL('biennale'), MEN = PAL('menthe'), KB = PAL('kegelbahn');
+    const FIGS = ['vague', 'losange', 'escalier', 'compte', 'damier', 'ressac'];
+
+    let simT = 0, B = null, bKey = '', figI = 0, figT = -99, figName = '', prevFig = 'vague', grab = null, logoM = null, logoKey = '';
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.025, vignette: 0.1 },
+      hint: 'Glissez une perle pour pousser la file · clic : figure suivante · molette : nombre de rangées',
+      notes: 'Le boulier est une machine à compter faite de perles enfilées sur des tiges : on les pousse d\'un côté ou de l\'autre et leur position se lit comme un nombre. Ici chaque rangée devient un pixel mobile : en décalant l\'endroit où les perles se séparent, les rangées dessinent ensemble une vague, un losange, un escalier qui défile ou un damier. La figure « Compteur » fait vraiment compter le boulier, une rangée par chiffre. Les perles sont tirées par un ressort vers leur place, se cognent, se repoussent et rebondissent. Le logo apparaît en creux, dans l\'espace que les perles laissent libre.',
+      params: {
+        'Perles': {
+          rangees: { type: 'range', label: 'Rangées', min: 3, max: 40, step: 1, value: 12 },
+          perles: { type: 'range', label: 'Perles par rangée', min: 3, max: 40, step: 1, value: 14 },
+          taille: { type: 'range', label: 'Hauteur des perles', min: 0.3, max: 1, step: 0.01, value: 0.82 },
+          forme: { type: 'select', label: 'Forme', options: { toupie: 'Toupie', ronde: 'Ronde', carree: 'Carrée' }, value: 'toupie' },
+          relief: { type: 'range', label: 'Relief', min: 0, max: 1, step: 0.01, value: 0.6 },
+          ombre: { type: 'range', label: 'Ombre', min: 0, max: 1, step: 0.01, value: 0.5 },
+        },
+        'Mouvement': {
+          figure: { type: 'select', label: 'Figure', options: { cycle: 'Enchaîner', vague: 'Vague', losange: 'Losange', escalier: 'Escalier', compte: 'Compteur', damier: 'Damier', ressac: 'Ressac', logo: 'Logo' }, value: 'cycle' },
+          duree: { type: 'range', label: 'Durée d\'une figure (s)', min: 2, max: 20, step: 0.5, value: 6 },
+          balayage: { type: 'range', label: 'Balayage (s)', min: 0, max: 3, step: 0.05, value: 0.9 },
+          vitesse: { type: 'range', label: 'Vitesse', min: 0, max: 2, step: 0.01, value: 0.6 },
+          ressort: { type: 'range', label: 'Ressort', min: 0.3, max: 4, step: 0.05, value: 1.4 },
+          rebond: { type: 'range', label: 'Rebond', min: 0, max: 0.95, step: 0.01, value: 0.3 },
+        },
+        'Logo en creux': {
+          logo: { type: 'toggle', label: 'Inclure le logo', value: false },
+          tailleLogo: { type: 'range', label: 'Taille du logo', min: 0.3, max: 1, step: 0.01, value: 0.8, show: (q) => q.logo },
+          image: { type: 'file', label: 'Logo', accept: 'image/*', show: (q) => q.logo },
+        },
+        'Couleurs': {
+          fond: { type: 'color', label: 'Fond', value: '#ece6da' },
+          cadre: { type: 'range', label: 'Cadre', min: 0, max: 0.08, step: 0.002, value: 0.035 },
+          bois: { type: 'color', label: 'Bois du cadre', value: '#6e4b32' },
+          tige: { type: 'color', label: 'Tiges', value: '#9b9284' },
+          couleurs: { type: 'palette', label: 'Perles', value: ['#c8432b', '#f3efe4', '#22304f'] },
+          coloris: { type: 'select', label: 'Répartition', options: { groupes: 'Par cinq', rangees: 'Par rangée', degrade: 'Dégradé', moities: 'Par moitié' }, value: 'groupes' },
+        },
+      },
+      presets: {
+        'Boulier': {},
+        'Losange': { figure: 'losange', rangees: 17, perles: 20, coloris: 'rangees' },
+        'Compteur': { figure: 'compte', rangees: 7, perles: 9, forme: 'ronde', vitesse: 1, coloris: 'moities', couleurs: ['#22304f', '#c8432b'] },
+        'Escalier': { figure: 'escalier', rangees: 22, perles: 26, taille: 0.75, forme: 'carree', coloris: 'degrade', couleurs: ['#f2b0c8', '#e5452a', '#111111'] },
+        'Damier': { figure: 'damier', rangees: 16, perles: 18, rebond: 0.7 },
+        'Ressac': { figure: 'ressac', rangees: 26, perles: 30, taille: 0.7, ressort: 0.8, rebond: 0.6, fond: '#14161c', bois: '#2a2c33', tige: '#4a4d57', couleurs: ['#f4f1ea', '#e8c547', '#5c7cfa'] },
+        'Logo': { logo: true, figure: 'logo', rangees: 26, perles: 20, taille: 0.86, forme: 'carree', coloris: 'rangees', couleurs: ['#22304f', '#2c3c62'] },
+        'Biennale': { fond: BIEN[0], bois: BIEN[1], tige: '#888888', couleurs: [BIEN[2], BIEN[3], BIEN[4], BIEN[1]], coloris: 'rangees', rangees: 14, perles: 16 },
+        'Menthe': { fond: MEN[0], bois: MEN[3], tige: MEN[1], couleurs: [MEN[2], MEN[1], MEN[3]], forme: 'ronde', rangees: 10, perles: 12 },
+        'Kegelbahn': { fond: KB[0], bois: '#1c1a20', tige: '#3a3640', couleurs: KB.slice(1), coloris: 'degrade', figure: 'losange', rangees: 20, perles: 22, forme: 'carree' },
+      },
+      brand(colors) {
+        const s = colors.slice().sort((a, b) => lum(a) - lum(b)), L = s[s.length - 1], D = s[0];
+        return { fond: mix(L, D, 0.08), bois: D, tige: mix(L, D, 0.45), couleurs: s.length > 2 ? s.slice(0, -1).reverse() : [D, mix(L, D, 0.5)] };
+      },
+      pointer: {
+        down: (q) => { grab = { x: q.x, y: q.y, x0: q.x, y0: q.y, moved: 0, bead: null, vx: 0, t: simT }; pick(grab); grab.onBead = !!grab.bead; },
+        drag: (q) => {
+          if (!grab) return; const dt = Math.max(1e-3, simT - grab.t); grab.vx = (q.x - grab.x) / dt; grab.moved += Math.hypot(q.x - grab.x, q.y - grab.y); grab.x = q.x; grab.y = q.y; grab.t = simT;
+          // en glissant d'une rangée à l'autre, on attrape la perle qu'on rencontre
+          if (!grab.bead || grab.bead.r !== rowAt(q.y)) pick(grab);
+        },
+        up: () => {
+          if (grab && grab.moved < 6) {
+            if (grab.onBead && grab.bead) { const R = B.rows[grab.bead.r], i = grab.bead.i, mid = R.x[i] + B.bw / 2; R.v[i] = (mid < B.Lr / 2 ? 1 : -1) * B.Lr * 2.5; R.hold = simT + 2; }
+            else nextFig();
+          } else if (grab && grab.bead) { const R = B.rows[grab.bead.r]; R.v[grab.bead.i] = Math.max(-B.Lr * 3, Math.min(B.Lr * 3, grab.vx)); }
+          grab = null;
+        },
+        wheel: (q, dy) => app.set('rangees', Math.max(3, Math.min(40, p.rangees + (dy > 0 ? 1 : -1)))),
+      },
+      onChange(k) { if (['*', 'logo', 'image'].includes(k)) logoKey = ''; if (k === '*' || k === 'figure') { figI = 0; figName = ''; } },
+      export: { name: 'boulier', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    function hex(x) { const n = parseInt(x.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
+    function lum(x) { const c = hex(x); return (c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114) / 255; }
+    function mix(a, b, t) { const A = hex(a), C = hex(b); return '#' + A.map((v, i) => Math.round(v + (C[i] - v) * t).toString(16).padStart(2, '0')).join(''); }
+    const cl = (x) => (x < 0 ? 0 : x > 1 ? 1 : x);
+    const hash = (a, b) => { const s = Math.sin(a * 127.1 + b * 311.7 + app.seed * 0.013) * 43758.5453; return s - Math.floor(s); };
+
+    // ——— Logo ———
+    function buildLogo() {
+      const img0 = p.image || app.logoImg, key = [p.logo, img0 ? (img0.src || 'c') : 'demo'].join(); if (key === logoKey) return; logoKey = key;
+      const M = 200, c = document.createElement('canvas'); c.width = c.height = M; const x = c.getContext('2d', { willReadFrequently: true }), L = M * 0.94, cx = M / 2;
+      if (img0) { const iw = img0.naturalWidth || img0.width, ih = img0.naturalHeight || img0.height, s = L / Math.max(iw, ih); x.drawImage(img0, cx - iw * s / 2, cx - ih * s / 2, iw * s, ih * s); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(cx, cx, L * 0.48, 0, TAU); x.arc(cx, cx, L * 0.27, 0, TAU, true); x.fill('evenodd'); x.fillRect(cx - L * 0.07, cx - L * 0.5, L * 0.14, L); }
+      const d = x.getImageData(0, 0, M, M).data; let transp = 0; for (let i = 3; i < d.length; i += 4) if (d[i] < 128) transp++; const useA = transp > M * M * 0.05;
+      const m = new Uint8Array(M * M); for (let i = 0; i < M * M; i++) { const o = i * 4, l = (d[o] * 0.2126 + d[o + 1] * 0.7152 + d[o + 2] * 0.0722) / 255; m[i] = (useA ? d[o + 3] > 128 : d[o + 3] > 128 && l < 0.5) ? 1 : 0; }
+      logoM = { m, M };
+    }
+    // intervalles occupés par le logo le long d'une rangée (en coordonnées de tige)
+    function logoRuns(y) {
+      if (!logoM) return []; const S = Math.min(B.Lr, B.ih) * p.tailleLogo, v = Math.floor(((y - (B.y0 + B.ih / 2)) / S + 0.5) * logoM.M); if (v < 0 || v >= logoM.M) return [];
+      const runs = []; let st = -1; const ox = B.Lr / 2 - S / 2;
+      for (let u = 0; u <= logoM.M; u++) { const on = u < logoM.M && logoM.m[v * logoM.M + u] === 1; if (on && st < 0) st = u; if (!on && st >= 0) { runs.push([ox + st / logoM.M * S, ox + u / logoM.M * S]); st = -1; } }
+      return runs;
+    }
+
+    // ——— Géométrie et état ———
+    function board(w, h) {
+      const k = [p.rangees, p.perles, p.taille, p.forme, p.cadre, w, h].join(); if (k === bKey && B) return B; bKey = k;
+      const m = Math.min(w, h), fw = p.cadre * m, pad = m * 0.035, x0 = fw + pad, y0 = fw + pad * 0.6, Lr = w - 2 * x0, ih = h - 2 * y0, sp = ih / p.rangees;
+      const asp = { toupie: 1.3, ronde: 1, carree: 0.92 }[p.forme], K = p.perles;
+      let bh = sp * p.taille, bw = Math.min(bh * asp, (Lr * 0.74) / K); bh = Math.min(bh, bw / asp * 1.25);
+      const rows = [];
+      for (let r = 0; r < p.rangees; r++) {
+        const old = B && B.rows[r], x = new Float32Array(K), v = new Float32Array(K);
+        for (let i = 0; i < K; i++) x[i] = old && i < old.x.length ? Math.min(old.x[i], Lr - (K - i) * bw) : i * bw;
+        rows.push({ y: y0 + (r + 0.5) * sp, x, v, hold: -1 });
+      }
+      B = { x0, y0, Lr, ih, sp, bw, bh, K, R: p.rangees, rows, fw, free: Lr - K * bw };
+      for (const R of B.rows) settle(R, -1);
+      return B;
+    }
+    const rowAt = (y) => { const r = Math.floor((y - B.y0) / B.sp); return r >= 0 && r < B.R ? r : -1; };
+    function pick(g) {
+      g.bead = null; const r = rowAt(g.y); if (r < 0) return; const R = B.rows[r], u = g.x - B.x0;
+      if (Math.abs(g.y - R.y) > B.bh * 0.75) return;
+      for (let i = 0; i < B.K; i++) if (u >= R.x[i] - 2 && u <= R.x[i] + B.bw + 2) { g.bead = { r, i, off: u - R.x[i] }; R.hold = simT + 2.5; return; }
+    }
+
+    // ——— Figures : position voulue de chaque perle (bord gauche, le long de la tige) ———
+    function gaps(n1, n2, i) { const { bw, free } = B; return n2 == null ? i * bw + free * cl(i + 1 - n1) : i * bw + free * 0.5 * (cl(i + 1 - n1) + cl(i + 1 - n2)); }
+    function targets(f, r, t, out) {
+      const K = B.K, Rn = B.R, u = Rn > 1 ? r / (Rn - 1) : 0.5, T = t * p.vitesse;
+      if (f === 'logo') {
+        // on enfile les perles de gauche à droite en sautant les morceaux de logo
+        let runs = logoRuns(B.rows[r].y), tot = runs.reduce((s, q) => s + q[1] - q[0], 0);
+        if (tot > B.free) { const k = B.free / tot; runs = runs.map(([a, b]) => { const c = (a + b) / 2, hl = (b - a) / 2 * k; return [c - hl, c + hl]; }); }
+        // deux passes : la place restante est partagée entre les deux bouts de la tige
+        let start = 0;
+        for (let pass = 0; pass < 2; pass++) {
+          let cur = start, j = 0;
+          for (let i = 0; i < K; i++) {
+            while (j < runs.length && cur + B.bw > runs[j][0]) { if (cur < runs[j][1]) cur = runs[j][1]; j++; }
+            out[i] = Math.min(cur, B.Lr - (K - i) * B.bw); cur = out[i] + B.bw;
+          }
+          start = Math.max(0, (B.Lr - cur) / 2);
+        }
+        return;
+      }
+      for (let i = 0; i < K; i++) {
+        let x;
+        switch (f) {
+          case 'vague': x = gaps(K * (0.5 + 0.4 * Math.sin(u * TAU * 1.1 - T * 0.8)), null, i); break;
+          case 'losange': { const d = 1 - Math.abs(2 * u - 1), b = 0.06 * Math.sin(T * 0.7); x = gaps(Math.round(K * (0.5 - 0.46 * d - b)), Math.round(K * (0.5 + 0.46 * d + b)), i); break; }
+          case 'escalier': { const q = (u * 1.5 - T * 0.12) % 1, tri = 1 - Math.abs(2 * ((q + 1) % 1) - 1); x = gaps(K * (0.06 + 0.88 * tri), null, i); break; }
+          case 'compte': {
+            // une rangée par chiffre, en base (perles + 1) ; la dernière rangée compte les unités
+            const base = K + 1, val = Math.floor(T * 3 + hash(1, 2) * 1000), place = Rn - 1 - r, dg = Math.floor(val / base ** place) % base;
+            x = gaps(dg, null, i); break;
+          }
+          case 'damier': { const q = Math.max(1, Math.round(Rn / 5)), s = Math.floor(r / q), ph = Math.floor(T * 0.5) & 1; x = gaps(Math.round((s + ph) & 1 ? K * 0.25 : K * 0.75), null, i); break; }
+          case 'ressac': { const ep = Math.floor(T * 0.6 - u * 1.2), a = hash(r, ep), b = hash(r + 50, ep); x = gaps(Math.round(K * Math.min(a, b)), Math.round(K * Math.max(a, b)), i); break; }
+          default: x = i * B.bw;
+        }
+        out[i] = x;
+      }
+    }
+
+    function figList() { return p.figure === 'cycle' ? (p.logo ? ['logo', ...FIGS.slice(0, 3), 'logo', ...FIGS.slice(3)] : FIGS) : [p.figure]; }
+    function nextFig() { figI++; figName = ''; }
+
+    // les perles ne se traversent pas : on corrige les positions puis on échange les vitesses
+    function settle(R, gi) {
+      const { K, bw, Lr } = B, x = R.x, v = R.v, e = p.rebond;
+      const hit = (a, b) => { if (v[a] > v[b]) { const va = v[a], vb = v[b]; v[a] = ((1 - e) * va + (1 + e) * vb) / 2; v[b] = ((1 + e) * va + (1 - e) * vb) / 2; } };
+      if (gi >= 0) {
+        x[gi] = Math.max(gi * bw, Math.min(Lr - (K - gi) * bw, x[gi]));
+        for (let i = gi + 1; i < K; i++) if (x[i] < x[i - 1] + bw) { x[i] = x[i - 1] + bw; if (v[i] < v[i - 1]) v[i] = v[i - 1]; }
+        for (let i = gi - 1; i >= 0; i--) if (x[i] > x[i + 1] - bw) { x[i] = x[i + 1] - bw; if (v[i] > v[i + 1]) v[i] = v[i + 1]; }
+        return;
+      }
+      if (x[0] < 0) { x[0] = 0; if (v[0] < 0) v[0] = -v[0] * e; }
+      for (let i = 1; i < K; i++) if (x[i] < x[i - 1] + bw) { x[i] = x[i - 1] + bw; hit(i - 1, i); }
+      if (x[K - 1] > Lr - bw) { x[K - 1] = Lr - bw; if (v[K - 1] > 0) v[K - 1] = -v[K - 1] * e; }
+      for (let i = K - 2; i >= 0; i--) if (x[i] > x[i + 1] - bw) { x[i] = x[i + 1] - bw; hit(i, i + 1); }
+    }
+
+    const tg = new Float32Array(64);
+    function step(t, dt) {
+      buildLogo();
+      const L = figList();
+      if (p.figure === 'cycle' && figName && t - figT > p.duree + p.balayage) figI++;
+      const f2 = L[((figI % L.length) + L.length) % L.length];
+      if (f2 !== figName) { prevFig = figName || f2; figName = f2; figT = t; }
+      const w0 = TAU * p.ressort, k = w0 * w0, c = 2 * 0.8 * w0, sub = 3, h = dt / sub;
+      for (let r = 0; r < B.R; r++) {
+        const R = B.rows[r], delay = p.balayage * (B.R > 1 ? r / (B.R - 1) : 0), f = t - figT >= delay ? figName : prevFig;
+        targets(f, r, t, tg);
+        const held = R.hold > t, gi = grab && grab.bead && grab.bead.r === r ? grab.bead.i : -1;
+        for (let s = 0; s < sub; s++) {
+          for (let i = 0; i < B.K; i++) {
+            const a = held ? -c * 0.5 * R.v[i] : k * (tg[i] - R.x[i]) - c * R.v[i];
+            R.v[i] += a * h; R.x[i] += R.v[i] * h;
+          }
+          if (gi >= 0) { R.x[gi] = grab.x - B.x0 - grab.bead.off; R.v[gi] = 0; R.hold = t + 2.5; }
+          settle(R, gi);
+        }
+      }
+    }
+    function snap(t) { for (let r = 0; r < B.R; r++) { const R = B.rows[r]; targets(figName, r, t, tg); for (let i = 0; i < B.K; i++) { R.x[i] = tg[i]; R.v[i] = 0; } settle(R, -1); } }
+
+    // ——— Couleurs ———
+    function beadCol(r, i) {
+      const C = p.couleurs.length ? p.couleurs : ['#888888'], K = B.K;
+      switch (p.coloris) {
+        case 'rangees': return C[r % C.length];
+        case 'moities': return C[i < K / 2 ? 0 : 1 % C.length];
+        case 'degrade': { if (C.length < 2) return C[0]; const q = Math.round((i / Math.max(1, K - 1)) * 7) / 7 * (C.length - 1), a = Math.floor(Math.min(q, C.length - 1.001)); return mix(C[a], C[a + 1], q - a); }
+        default: return C[Math.floor(i / 5) % C.length];
+      }
+    }
+
+    // ——— Dessin (canvas ou SVG, avec le même tracé) ———
+    function shape(P, x, y, bw, bh) {
+      const x1 = x + bw, yt = y - bh / 2, yb = y + bh / 2;
+      if (p.forme === 'ronde') { P.moveTo(x1, y); P.ellipse(x + bw / 2, y, bw / 2, bh / 2, 0, 0, TAU); return; }
+      if (p.forme === 'carree') { const rr = Math.min(bw, bh) * 0.22; P.moveTo(x + rr, yt); P.lineTo(x1 - rr, yt); P.quadraticCurveTo(x1, yt, x1, yt + rr); P.lineTo(x1, yb - rr); P.quadraticCurveTo(x1, yb, x1 - rr, yb); P.lineTo(x + rr, yb); P.quadraticCurveTo(x, yb, x, yb - rr); P.lineTo(x, yt + rr); P.quadraticCurveTo(x, yt, x + rr, yt); P.closePath(); return; }
+      const e = bw * 0.3; P.moveTo(x, y); P.quadraticCurveTo(x + bw * 0.04, yt, x + e, yt); P.lineTo(x1 - e, yt); P.quadraticCurveTo(x1 - bw * 0.04, yt, x1, y); P.quadraticCurveTo(x1 - bw * 0.04, yb, x1 - e, yb); P.lineTo(x + e, yb); P.quadraticCurveTo(x + bw * 0.04, yb, x, y); P.closePath();
+    }
+    function render(pen, w, h) {
+      const { bw, bh, x0, fw } = B, m = Math.min(w, h);
+      pen.rect(0, 0, w, h, p.fond);
+      // tiges, puis cadre par-dessus leurs extrémités
+      pen.rods(B.rows.map((R) => R.y), x0 - B.sp * 0.5, w - x0 + B.sp * 0.5, Math.max(1, bh * 0.09), p.tige);
+      if (fw > 0) pen.frame(fw, p.bois, mix(p.bois, '#000000', 0.3), m);
+      // teintes calculées une fois par réglage : ombre, corps, reflet de chaque perle
+      const ck = [p.couleurs.join(), p.coloris, p.relief, B.K, B.R].join();
+      if (B.ck !== ck) { B.ck = ck; const memo = new Map(); B.cols = []; for (let r = 0; r < B.R; r++) for (let i = 0; i < B.K; i++) { const c = beadCol(r, i); if (!memo.has(c)) memo.set(c, [mix(c, '#000000', 0.28 * p.relief), c, mix(c, '#ffffff', 0.4 * p.relief)]); B.cols.push(memo.get(c)); } }
+      const layers = new Map(), add = (k, col, f) => { const key = k + col; let L = layers.get(key); if (!L) layers.set(key, (L = { k, col, items: [] })); L.items.push(f); }, sh = 'rgba(0,0,0,' + (0.22 * p.ombre).toFixed(3) + ')';
+      if (pen.bead) { for (let r = 0; r < B.R; r++) for (let i = 0; i < B.K; i++) pen.bead(x0 + B.rows[r].x[i], B.rows[r].y, B.cols[r * B.K + i], sh); return; }
+      for (let r = 0; r < B.R; r++) {
+        const R = B.rows[r];
+        for (let i = 0; i < B.K; i++) {
+          const x = x0 + R.x[i], y = R.y, cc = B.cols[r * B.K + i];
+          if (p.ombre > 0) add(0, sh, [x + bh * 0.1, y + bh * 0.14, bw, bh]);
+          if (p.relief > 0) { add(1, cc[0], [x, y, bw, bh]); add(2, cc[1], [x + bw * 0.02, y - bh * 0.07, bw * 0.96, bh * 0.84]); add(3, cc[2], [x + bw * 0.24, y - bh * 0.26, bw * 0.52, bh * 0.16]); }
+          else add(2, cc[1], [x, y, bw, bh]);
+        }
+      }
+      [...layers.values()].sort((a, b) => a.k - b.k).forEach((L) => pen.shapes(L.items, L.col));
+    }
+
+    // à l'écran, chaque teinte de perle est dessinée une fois dans une vignette, puis recopiée
+    const sprites = new Map(); let spKey = '';
+    function sprite(cc, sh, dpr) {
+      const k = [B.bw, B.bh, p.forme, p.relief, p.ombre, dpr].join(); if (k !== spKey) { spKey = k; sprites.clear(); }
+      let S = sprites.get(cc); if (S) return S;
+      const { bw, bh } = B, padX = bh * 0.2, padY = bh * 0.25, c = document.createElement('canvas'); c.width = Math.ceil((bw + padX * 2) * dpr); c.height = Math.ceil((bh + padY * 2) * dpr);
+      const g = c.getContext('2d'); g.setTransform(dpr, 0, 0, dpr, padX * dpr, padY * dpr);
+      const one = (col, a, b, W, H) => { const P = new Path2D(); shape(P, a, b, W, H); g.fillStyle = col; g.fill(P); }, y = bh / 2;
+      if (p.ombre > 0) one(sh, bh * 0.1, y + bh * 0.14, bw, bh);
+      if (p.relief > 0) { one(cc[0], 0, y, bw, bh); one(cc[1], bw * 0.02, y - bh * 0.07, bw * 0.96, bh * 0.84); one(cc[2], bw * 0.24, y - bh * 0.26, bw * 0.52, bh * 0.16); }
+      else one(cc[1], 0, y, bw, bh);
+      S = { c, padX, padY }; sprites.set(cc, S); return S;
+    }
+
+    app.loop((t, dt) => {
+      dt = Math.min(0.05, dt || 0);
+      const { w, h, dpr } = app.size; board(w, h);
+      if (app.thumbnail) { simT = 3.2; figI = 0; figName = ''; step(simT, 0); snap(simT); }
+      else { simT += dt; step(simT, dt); }
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      render({
+        rect(x, y, W, H, col) { ctx.fillStyle = col; ctx.fillRect(x, y, W, H); },
+        rods(ys, a, b, lw, col) { const P = new Path2D(); for (const y of ys) { P.moveTo(a, y); P.lineTo(b, y); } ctx.strokeStyle = col; ctx.lineWidth = lw; ctx.lineCap = 'butt'; ctx.stroke(P); },
+        frame(fw, col, dark, m) {
+          const P = new Path2D(); P.rect(0, 0, w, h); P.rect(fw, fw, w - 2 * fw, h - 2 * fw); ctx.fillStyle = col; ctx.fill(P, 'evenodd');
+          ctx.strokeStyle = dark; ctx.lineWidth = Math.max(1, fw * 0.12); ctx.strokeRect(fw, fw, w - 2 * fw, h - 2 * fw);
+        },
+        bead(x, y, cc, sh) { const S = sprite(cc, sh, dpr); ctx.drawImage(S.c, x - S.padX, y - B.bh / 2 - S.padY, S.c.width / dpr, S.c.height / dpr); },
+      }, w, h);
+      app.finish(ctx);
+    });
+
+    function toSVG() {
+      const { w, h } = app.size, f = (v) => +v.toFixed(2); board(w, h);
+      let s = `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">`;
+      const pathPen = () => { let d = ''; return { d: () => d, moveTo: (x, y) => (d += `M${f(x)} ${f(y)}`), lineTo: (x, y) => (d += `L${f(x)} ${f(y)}`), quadraticCurveTo: (a, b, x, y) => (d += `Q${f(a)} ${f(b)} ${f(x)} ${f(y)}`), closePath: () => (d += 'Z'), ellipse: (cx, cy, rx, ry) => (d += `M${f(cx - rx)} ${f(cy)}A${f(rx)} ${f(ry)} 0 1 0 ${f(cx + rx)} ${f(cy)}A${f(rx)} ${f(ry)} 0 1 0 ${f(cx - rx)} ${f(cy)}Z`) }; };
+      const fill = (col) => { const m = /^rgba\(0,0,0,([\d.]+)\)$/.exec(col); return m ? `fill="#000000" fill-opacity="${m[1]}"` : `fill="${col}"`; };
+      render({
+        rect(x, y, W, H, col) { s += `<rect x="${f(x)}" y="${f(y)}" width="${f(W)}" height="${f(H)}" fill="${col}"/>`; },
+        rods(ys, a, b, lw, col) { s += `<path d="${ys.map((y) => `M${f(a)} ${f(y)}H${f(b)}`).join('')}" stroke="${col}" stroke-width="${f(lw)}" fill="none"/>`; },
+        frame(fw, col, dark) { s += `<path d="M0 0H${f(w)}V${f(h)}H0ZM${f(fw)} ${f(fw)}V${f(h - fw)}H${f(w - fw)}V${f(fw)}Z" fill="${col}" fill-rule="evenodd"/><rect x="${f(fw)}" y="${f(fw)}" width="${f(w - 2 * fw)}" height="${f(h - 2 * fw)}" fill="none" stroke="${dark}" stroke-width="${f(Math.max(1, fw * 0.12))}"/>`; },
+        shapes(items, col) { const P = pathPen(); for (const it of items) shape(P, it[0], it[1], it[2], it[3]); s += `<path d="${P.d()}" ${fill(col)}/>`; },
+      }, w, h);
+      return s + '</svg>';
+    }
+  </script>
+</body>
+</html>
