@@ -1,0 +1,15 @@
+{
+  "slug": "dragon",
+  "title": "Courbe du dragon",
+  "type": "motion",
+  "description": "Une bande de papier pliée en deux, encore et encore, puis dépliée à angle droit : la courbe du dragon se déroule pli après pli, seule ou par quatre.",
+  "tags": ["mathematiques", "fractale", "lignes", "pliage", "logo", "svg"],
+  "inspiration": [
+    "John Heighway, Bruce Banks et William Harter, la courbe du dragon (NASA, 1966)",
+    "Martin Gardner, « Mathematical Games », Scientific American (1967)",
+    "Donald Knuth et Chandler Davis, « Number Representations and Dragon Curves » (1970)"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}

@@ -1,0 +1,245 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Courbe du dragon</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Courbe du dragon : on plie une bande de papier en deux, n fois, toujours dans le même sens, puis on la déplie en
+    // laissant chaque pli à angle droit. Construction par dépliage : la courbe d'ordre k+1 est celle d'ordre k suivie de
+    // sa copie inversée, tournée autour du dernier point. L'animation fait tourner cette copie, pli après pli.
+    // Quatre dragons autour d'un même point pavent le plan sans se chevaucher.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const BIEN = PAL('biennale'), GLY = PAL('glyphes'), SAL = PAL('salon'), MEN = PAL('menthe'), KB = PAL('kegelbahn');
+
+    let base = null, baseKey = '', phase = 15, dirSign = 1, cam = null, held = null, mask = null, mW = 0, mH = 0, maskKey = '', last = null;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: false,
+      finish: { grain: 0.03, vignette: 0.12 },
+      hint: 'Glissez de gauche à droite pour plier et déplier · molette : nombre de plis',
+      notes: 'Prenez une bande de papier, pliez-la en deux, puis encore en deux, toujours dans le même sens, une dizaine de fois. Dépliez-la en laissant chaque pli ouvert à angle droit : vue par la tranche, la bande dessine la courbe du dragon, découverte par trois physiciens de la NASA. Chaque nouveau pli double la courbe : on reprend tout le chemin parcouru, à l\'envers, tourné d\'un quart de tour autour du dernier point. Elle ne se croise jamais, ne fait que se toucher aux coins, et quatre dragons tournés autour d\'un même point pavent le plan. Avec un autre angle de pli, la bande dessine d\'autres créatures, plus ouvertes ou plus serrées.',
+      params: {
+        'Pliage': {
+          plis: { type: 'range', label: 'Plis', min: 3, max: 15, step: 1, value: 12 },
+          angle: { type: 'range', label: 'Angle du pli', min: 30, max: 150, step: 1, value: 90 },
+          copies: { type: 'segmented', label: 'Dragons', options: { 1: 'Un', 2: 'Deux', 4: 'Quatre' }, value: '1' },
+        },
+        'Mouvement': {
+          vitesse: { type: 'range', label: 'Plis par seconde', min: 0, max: 3, step: 0.05, value: 0.5 },
+          pause: { type: 'range', label: 'Pause dépliée (s)', min: 0, max: 8, step: 0.5, value: 2.5 },
+          rotation: { type: 'range', label: 'Rotation (°/s)', min: -20, max: 20, step: 0.5, value: 0 },
+        },
+        'Logo dans le dragon': {
+          logo: { type: 'toggle', label: 'Logo dans le tracé', value: false },
+          image: { type: 'file', label: 'Logo', accept: 'image/*', show: (q) => q.logo },
+        },
+        'Trait': {
+          style: { type: 'segmented', label: 'Coins', options: { arrondi: 'Arrondis', vif: 'Vifs' }, value: 'arrondi' },
+          epaisseur: { type: 'range', label: 'Épaisseur', min: 0.05, max: 0.8, step: 0.01, value: 0.42 },
+          teinte: { type: 'segmented', label: 'Couleur selon', options: { pli: 'Pli', longueur: 'Longueur', copie: 'Dragon' }, value: 'longueur' },
+        },
+        'Couleurs': {
+          fond: { type: 'color', label: 'Fond', value: '#101012' },
+          couleurs: { type: 'palette', label: 'Tracé', value: ['#486cfc', '#f272ba', '#ef5a2f', '#edd14b'] },
+          accent: { type: 'color', label: 'Logo', value: '#f4f1ea' },
+        },
+      },
+      presets: {
+        'Dragon': {},
+        'Quatre dragons': { copies: '4', plis: 11, epaisseur: 0.5, teinte: 'copie', couleurs: ['#ef5a2f', '#edd14b', '#486cfc', '#f4f1ea'] },
+        'Jumeaux': { copies: '2', plis: 12, epaisseur: 0.45, teinte: 'copie', couleurs: ['#486cfc', '#f272ba'] },
+        'Fil': { plis: 10, epaisseur: 0.1, style: 'vif', teinte: 'longueur', couleurs: ['#f4f1ea', '#edd14b', '#ef5a2f'], vitesse: 0.7 },
+        'Ouvert': { angle: 100, plis: 12, epaisseur: 0.5, teinte: 'longueur', couleurs: ['#7fe0c2', '#486cfc', '#f272ba'], rotation: 3 },
+        'Serré': { angle: 84, plis: 11, epaisseur: 0.25, teinte: 'pli', couleurs: GLY.slice(2, 7), rotation: -2 },
+        'Logo': { logo: true, copies: '4', plis: 12, epaisseur: 0.55, teinte: 'copie', couleurs: ['#2c2c33', '#34343c', '#2a2a30', '#303038'], accent: '#ef5a2f' },
+        'Biennale': { copies: '4', plis: 10, fond: BIEN[0], couleurs: [BIEN[1], BIEN[2], BIEN[3], BIEN[4]], epaisseur: 0.5, teinte: 'copie' },
+        'Menthe': { plis: 13, fond: MEN[1], couleurs: [MEN[2], MEN[3], MEN[0]], epaisseur: 0.4, teinte: 'longueur' },
+        'Kegelbahn': { copies: '2', plis: 12, fond: KB[0], couleurs: [KB[1], KB[2]], epaisseur: 0.32, style: 'vif', teinte: 'pli' },
+      },
+      brand(colors) {
+        const s = colors.slice().sort((a, b) => lum(a) - lum(b)), rest = s.slice(1);
+        return { fond: s[0], couleurs: rest.length ? rest : ['#ffffff'], accent: s[s.length - 1] };
+      },
+      pointer: {
+        down: (q) => { held = { x: q.x, ph: phase }; },
+        drag: (q) => { if (held) { phase = Math.max(0, Math.min(p.plis, held.ph + (q.x - held.x) / app.size.w * p.plis * 1.4)); } },
+        up: () => { held = null; },
+        wheel: (q, dy) => app.set('plis', Math.max(3, Math.min(15, p.plis + (dy > 0 ? -1 : 1)))),
+      },
+      onChange(k) {
+        if (k === 'image' || k === 'logo' || k === '*') maskKey = '';
+        if (k === 'plis' || k === '*') phase = Math.min(phase, p.plis);
+        if (k === 'copies' || k === 'angle' || k === '*') cam = null;
+      },
+      export: { name: 'dragon', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    function hex(x) { const n = parseInt(x.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
+    function lum(x) { const c = hex(x); return (c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114) / 255; }
+    function mix(a, b, t) { const A = hex(a), B = hex(b); return '#' + A.map((v, i) => Math.round(v + (B[i] - v) * t).toString(16).padStart(2, '0')).join(''); }
+
+    // ——— Dépliage : tous les points jusqu'au nombre de plis maximal, pour un angle donné ———
+    function buildBase() {
+      const key = [p.angle].join(); if (key === baseKey && base) return; baseKey = key;
+      const N = (1 << 15) + 1, X = new Float64Array(N), Y = new Float64Array(N), a = -p.angle * Math.PI / 180, c = Math.cos(a), s = Math.sin(a);
+      X[0] = 0; Y[0] = 0; X[1] = 1; Y[1] = 0;
+      for (let L = 1; L < (1 << 15); L *= 2) {
+        const ex = X[L], ey = Y[L];
+        for (let j = 1; j <= L; j++) { const dx = X[L - j] - ex, dy = Y[L - j] - ey; X[L + j] = ex + dx * c - dy * s; Y[L + j] = ey + dx * s + dy * c; }
+      }
+      base = { X, Y };
+    }
+    // les points affichés : k plis complets, et le pli suivant en cours d'ouverture (f de 0 à 1)
+    function current(ph) {
+      buildBase();
+      const k = Math.min(p.plis, Math.floor(ph)), f = Math.min(1, ph - k), L = 1 << k;
+      const n = f > 0 && k < p.plis ? 2 * L : L, X = new Float64Array(n + 1), Y = new Float64Array(n + 1);
+      X.set(base.X.subarray(0, L + 1)); Y.set(base.Y.subarray(0, L + 1));
+      if (n > L) {
+        // la copie part repliée sur l'original (le papier plié) et tourne autour du dernier point jusqu'à l'angle du pli
+        const e = f * f * (3 - 2 * f), a = -p.angle * Math.PI / 180 * e, c = Math.cos(a), s = Math.sin(a), ex = X[L], ey = Y[L];
+        for (let j = 1; j <= L; j++) { const dx = X[L - j] - ex, dy = Y[L - j] - ey; X[L + j] = ex + dx * c - dy * s; Y[L + j] = ey + dx * s + dy * c; }
+      }
+      return { X, Y, n, k, f };
+    }
+
+    // ——— Cadrage : la boîte de tout ce qui est visible, suivie en douceur ———
+    function copiesList() { const m = +p.copies; return Array.from({ length: m }, (_, i) => i * TAU / m); }
+    function frame(C, rot, w, h) {
+      let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity; const { X, Y, n } = C, st = Math.max(1, (n / 2000) | 0);
+      for (const a of copiesList()) {
+        const c = Math.cos(a + rot), s = Math.sin(a + rot);
+        for (let i = 0; i <= n; i += st) { const x = X[i] * c - Y[i] * s, y = X[i] * s + Y[i] * c; if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+      }
+      const pad = 0.12, sc = Math.min(w * (1 - 2 * pad) / Math.max(1e-6, x1 - x0), h * (1 - 2 * pad) / Math.max(1e-6, y1 - y0));
+      return { sc, cx: (x0 + x1) / 2, cy: (y0 + y1) / 2 };
+    }
+
+    function buildMask(w, h) {
+      const img0 = p.image || app.logoImg, key = [w, h, img0 ? (img0.src || 'c') : 'demo'].join();
+      if (key === maskKey) return; maskKey = key;
+      const k = 0.5; mW = Math.ceil(w * k); mH = Math.ceil(h * k);
+      const c = document.createElement('canvas'); c.width = mW; c.height = mH; const x = c.getContext('2d', { willReadFrequently: true });
+      const L = Math.min(mW, mH) * 0.55, cx = mW / 2, cy = mH / 2;
+      if (img0) { const iw = img0.naturalWidth || img0.width, ih = img0.naturalHeight || img0.height, s = L / Math.max(iw, ih); x.drawImage(img0, cx - iw * s / 2, cy - ih * s / 2, iw * s, ih * s); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(cx, cy, L * 0.48, 0, TAU); x.arc(cx, cy, L * 0.27, 0, TAU, true); x.fill('evenodd'); x.fillRect(cx - L * 0.07, cy - L * 0.5, L * 0.14, L); }
+      const N = mW * mH, d = x.getImageData(0, 0, mW, mH).data; let transp = 0; for (let i = 3; i < d.length; i += 4) if (d[i] < 128) transp++;
+      const useA = transp > N * 0.05; mask = new Uint8Array(N);
+      for (let i = 0; i < N; i++) { const l = (d[i * 4] * 0.2126 + d[i * 4 + 1] * 0.7152 + d[i * 4 + 2] * 0.0722) / 255; mask[i] = (useA ? d[i * 4 + 3] > 128 : d[i * 4 + 3] > 128 && l < 0.5) ? 1 : 0; }
+    }
+    const inMask = (x, y) => { const i = (x * 0.5) | 0, j = (y * 0.5) | 0; return i >= 0 && j >= 0 && i < mW && j < mH && mask[j * mW + i] === 1; };
+
+    // ——— Morceaux de tracé : de milieu à milieu en passant par le coin, regroupés par couleur ———
+    const QC = 16;
+    function pieces(w, h) {
+      const C = last.C, V = last.view, rot = last.rot, { X, Y, n } = C, pal = p.couleurs.length ? p.couleurs : ['#ffffff'];
+      const out = new Map(), logo = p.logo && mask, cps = copiesList(), m = cps.length;
+      const add = (key, k, a, b, c, d, e, g) => { let L = out.get(key); if (!L) out.set(key, (L = [])); L.push(k, a, b, c, d, e, g); };
+      const maxK = Math.max(1, C.k + (C.f > 0 ? 1 : 0));
+      cps.forEach((a0, ci) => {
+        const c = Math.cos(a0 + rot), s = Math.sin(a0 + rot);
+        const sx = (i) => w / 2 + ((X[i] * c - Y[i] * s) - V.cx) * V.sc, sy = (i) => h / 2 + ((X[i] * s + Y[i] * c) - V.cy) * V.sc;
+        let pxm = sx(0), pym = sy(0);
+        for (let i = 0; i < n; i++) {
+          // couleur du segment i
+          let t;
+          if (p.teinte === 'pli') { const g = i === 0 ? 0 : Math.floor(Math.log2(i)) + 1; t = maxK > 1 ? Math.min(1, g / maxK) : 0; }
+          else if (p.teinte === 'longueur') t = n > 1 ? i / (n - 1) : 0;
+          else t = m > 1 ? ci / (m - 1) : 0;
+          const ax = sx(i), ay = sy(i), bx = sx(i + 1), by = sy(i + 1), mx = (ax + bx) / 2, my = (ay + by) / 2;
+          let key = Math.round(t * (QC - 1)); if (p.teinte === 'copie') key = ci % pal.length + 1000;
+          if (logo && inMask(mx, my)) key = -1;
+          // de la moitié précédente jusqu'au milieu de ce segment, puis jusqu'au coin suivant si c'est le dernier
+          if (i === 0) add(key, 0, ax, ay, mx, my, mx, my);
+          else add(key, 1, pxm, pym, ax, ay, mx, my);
+          if (i === n - 1) add(key, 0, mx, my, bx, by, bx, by);
+          pxm = mx; pym = my;
+        }
+      });
+      return { out, pal };
+    }
+    function colorOf(key, pal) {
+      if (key < 0) return p.accent;
+      if (key >= 1000) return pal[(key - 1000) % pal.length];
+      const t = key / (QC - 1); if (pal.length === 1) return pal[0];
+      const u = t * (pal.length - 1), i = Math.min(pal.length - 2, Math.floor(u)); return mix(pal[i], pal[i + 1], u - i);
+    }
+
+    // l'épaisseur suit la longueur d'un segment, sans dépasser un trait raisonnable aux premiers plis
+    const strokeW = (w, h) => Math.max(0.6, Math.min(Math.min(w, h) * 0.035, last.view.sc * p.epaisseur));
+    let simT = 0, holdT = 0, cache = null, cctx = null, cacheKey = '';
+    function render(w, h, dpr) {
+      const W = Math.round(w * dpr), H = Math.round(h * dpr);
+      if (!cache || cache.width !== W || cache.height !== H) { cache = document.createElement('canvas'); cache.width = W; cache.height = H; cctx = cache.getContext('2d'); }
+      const ctx = cctx;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = p.fond; ctx.fillRect(0, 0, w, h);
+      const { out, pal } = pieces(w, h);
+      ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+      ctx.lineWidth = strokeW(w, h);
+      const vif = p.style === 'vif';
+      const keys = [...out.keys()].sort((a, b) => (a < 0) - (b < 0) || a - b);
+      for (const key of keys) {
+        const L = out.get(key), P2 = new Path2D();
+        for (let i = 0; i < L.length; i += 7) {
+          P2.moveTo(L[i + 1], L[i + 2]);
+          if (L[i] === 0 || vif) { P2.lineTo(L[i + 3], L[i + 4]); P2.lineTo(L[i + 5], L[i + 6]); }
+          else P2.quadraticCurveTo(L[i + 3], L[i + 4], L[i + 5], L[i + 6]);
+        }
+        ctx.strokeStyle = colorOf(key, pal); ctx.stroke(P2);
+      }
+    }
+    app.loop((t, dt) => {
+      dt = Math.min(0.1, dt || 0);
+      const { w, h, dpr } = app.size;
+      // l'horloge : plier jusqu'au bout, attendre, replier, recommencer
+      phase = Math.min(phase, p.plis);
+      if (app.thumbnail) phase = p.plis;
+      else if (!held) {
+        simT += dt;
+        if (holdT > 0) { holdT -= dt; if (holdT <= 0) dirSign = -dirSign; }
+        else {
+          phase += dirSign * dt * p.vitesse * (dirSign < 0 ? 2.5 : 1);
+          if (phase >= p.plis) { phase = p.plis; holdT = p.pause + 1e-3; }
+          else if (phase <= 0) { phase = 0; holdT = 0.6; }
+        }
+      }
+      const C = current(phase), rot = (app.thumbnail ? 0 : simT) * p.rotation * Math.PI / 180, V = frame(C, rot, w, h);
+      if (!cam || app.thumbnail) cam = { ...V }; else { const k = Math.min(1, dt * 2.5); cam.sc += (V.sc - cam.sc) * k; cam.cx += (V.cx - cam.cx) * k; cam.cy += (V.cy - cam.cy) * k; }
+      last = { C, view: cam, rot };
+      if (p.logo) buildMask(w, h);
+      // image figée (dépliée, en pause, sans rotation) : on réutilise le dernier rendu
+      const key = [w, h, dpr, phase, rot, cam.sc.toFixed(4), cam.cx.toFixed(4), cam.cy.toFixed(4), maskKey, JSON.stringify(p)].join('|');
+      if (key !== cacheKey || !cache) { cacheKey = key; render(w, h, dpr); }
+      ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.drawImage(cache, 0, 0);
+      app.finish(ctx);
+    });
+
+    function toSVG() {
+      const { w, h } = app.size, f = (v) => +v.toFixed(2);
+      if (p.logo) buildMask(w, h);
+      const { out, pal } = pieces(w, h), vif = p.style === 'vif';
+      const keys = [...out.keys()].sort((a, b) => (a < 0) - (b < 0) || a - b);
+      let body = '';
+      for (const key of keys) {
+        const L = out.get(key); let d = '';
+        for (let i = 0; i < L.length; i += 7) d += `M${f(L[i + 1])} ${f(L[i + 2])}${L[i] === 0 || vif ? 'L' : 'Q'}${f(L[i + 3])} ${f(L[i + 4])}${L[i] === 0 || vif ? 'L' : ' '}${f(L[i + 5])} ${f(L[i + 6])}`;
+        body += `<path d="${d}" stroke="${colorOf(key, pal)}"/>`;
+      }
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><rect width="100%" height="100%" fill="${p.fond}"/><g fill="none" stroke-width="${f(strokeW(w, h))}" stroke-linecap="round" stroke-linejoin="round">${body}</g></svg>`;
+    }
+  </script>
+</body>
+</html>
