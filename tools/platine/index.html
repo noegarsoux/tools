@@ -1,0 +1,502 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Platine</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Platine : le disque (motif, sillons, étiquette au logo) est peint une fois dans une texture, puis tourné
+    // à chaque image. Le reflet des sillons, lui, ne tourne pas : deux pinceaux de lumière opposés, fixes,
+    // pointent vers la lampe. Le bras suit l'aiguille, dont le rayon recule à mesure que le disque tourne
+    // (en arrière quand on scratche), et un petit automate le pose, le lève et le ramène en fin de face.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const BIE = PAL('biennale'), LUZ = PAL('luzern'), MEN = PAL('menthe');
+
+    let vKey = '', logoM = null, logoKey = '', ptr = null, S = null, gKey = '', DT = null, dtKey = '', SH = null, shKey = '', ST = null, stKey = '';
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.035, vignette: 0.2 },
+      hint: 'Glissez sur le disque pour scratcher · attrapez le bras pour changer de plage · clic : marche/arrêt · molette : pitch',
+      notes: 'Un disque vinyle tourne sur sa platine. La lumière, fixe, fait naître deux pinceaux de reflet dans les sillons, qui ne tournent pas avec lui. Le bras avance de plage en plage, se lève en fin de face et revient se poser. Le motif du vinyle (noir, marbré, éclaboussé, en secteurs, picture disc), l’étiquette et le logo viennent de la marque. Attrapez le disque pour scratcher, ou le bras pour sauter une plage.',
+      params: {
+        'Disque': {
+          motif: { type: 'select', label: 'Motif', options: { noir: 'Noir', uni: 'Uni', marbre: 'Marbré', eclats: 'Éclaboussures', secteurs: 'Secteurs', moities: 'Moitiés', image: 'Picture disc' }, value: 'noir' },
+          vinyle: { type: 'color', label: 'Vinyle', value: '#121214' },
+          vinyle2: { type: 'color', label: 'Seconde teinte', value: '#e5452a' },
+          transparence: { type: 'range', label: 'Transparence', min: 0, max: 0.7, step: 0.01, value: 0 },
+          plages: { type: 'range', label: 'Plages', min: 1, max: 14, step: 1, value: 6 },
+          sillons: { type: 'range', label: 'Sillons', min: 0.4, max: 2, step: 0.05, value: 1 },
+          reflet: { type: 'range', label: 'Reflet', min: 0, max: 1, step: 0.01, value: 0.6 },
+          irisation: { type: 'range', label: 'Irisation', min: 0, max: 1, step: 0.01, value: 0.25 },
+          voile: { type: 'range', label: 'Voile', min: 0, max: 1, step: 0.01, value: 0.2 },
+        },
+        'Lecture': {
+          vitesse: { type: 'select', label: 'Vitesse', options: { 33: '33 tours', 45: '45 tours', 78: '78 tours' }, value: '33' },
+          pitch: { type: 'range', label: 'Pitch', min: -16, max: 16, step: 0.5, value: 0 },
+          lecture: { type: 'range', label: 'Durée d’une face (s)', min: 10, max: 120, step: 1, value: 45 },
+          auto: { type: 'toggle', label: 'Bras automatique', value: true },
+          scratch: { type: 'range', label: 'Scratch automatique', min: 0, max: 1, step: 0.01, value: 0 },
+        },
+        'Étiquette': {
+          etiquette: { type: 'color', label: 'Étiquette', value: '#f4f1ea' },
+          encre: { type: 'color', label: 'Encre', value: '#e5452a' },
+          rayon: { type: 'range', label: 'Taille de l’étiquette', min: 0.2, max: 0.6, step: 0.01, value: 0.33 },
+          place: { type: 'select', label: 'Logo', options: { haut: 'Au-dessus du trou', centre: 'Centré' }, value: 'haut' },
+          centre: { type: 'select', label: 'Trou', options: { petit: 'Petit (33 tours)', grand: 'Grand (45 tours)' }, value: 'petit' },
+          image: { type: 'file', label: 'Image du logo', accept: 'image/*' },
+        },
+        'Platine': {
+          platine: { type: 'toggle', label: 'Afficher la platine', value: true },
+          echelle: { type: 'range', label: 'Échelle', min: 0.6, max: 1.2, step: 0.01, value: 1 },
+          socle: { type: 'color', label: 'Socle', value: '#2b2724' },
+          bras: { type: 'color', label: 'Métal', value: '#c9ccd1' },
+          fond: { type: 'color', label: 'Fond', value: '#e9e4da' },
+        },
+      },
+      presets: {
+        'Classique': {},
+        'Marbré': { motif: 'marbre', vinyle: '#1b2a4a', vinyle2: '#e9e2d0', etiquette: '#e5452a', encre: '#f4f1ea', fond: '#d9d4ca', irisation: 0.15 },
+        'Éclaboussures': { motif: 'eclats', vinyle: '#f2c230', vinyle2: '#16161a', etiquette: '#16161a', encre: '#f2c230', socle: '#f4f1ea', bras: '#16161a', fond: '#2f5fd0' },
+        'Rouge translucide': { motif: 'uni', vinyle: '#e5452a', transparence: 0.45, reflet: 0.8, etiquette: '#16161a', encre: '#f4f1ea', socle: '#e9e4da', fond: '#16161a', bras: '#8a8f99' },
+        'Picture disc': { motif: 'image', vinyle: '#16161a', vinyle2: '#f2c230', rayon: 0.22, place: 'centre', etiquette: '#16161a', encre: '#f2c230', plages: 3, reflet: 0.75 },
+        '45 tours': { vitesse: '45', centre: 'grand', rayon: 0.5, plages: 2, motif: 'noir', etiquette: '#2f5fd0', encre: '#f4f1ea', lecture: 25, fond: '#f2c230' },
+        '78 tours': { vitesse: '78', motif: 'noir', vinyle: '#1a1512', sillons: 0.55, plages: 1, irisation: 0, reflet: 0.45, etiquette: '#6b2b1e', encre: '#d8b56a', socle: '#5a3a24', bras: '#b8a07a', fond: '#efe6d2', lecture: 20, voile: 0.6 },
+        'DJ': { scratch: 0.8, motif: 'secteurs', vinyle: '#16161a', vinyle2: '#2a2a30', etiquette: '#e5452a', encre: '#16161a', socle: '#0c0c0e', bras: '#9aa0aa', fond: '#1d1f26', pitch: 4 },
+        'Moitiés': { motif: 'moities', vinyle: '#2f5fd0', vinyle2: '#f4f1ea', etiquette: '#e5452a', encre: '#f4f1ea', platine: false, fond: '#f4f1ea', echelle: 1.05 },
+        'Biennale': { motif: 'marbre', vinyle: BIE[1], vinyle2: BIE[3], etiquette: BIE[0], encre: BIE[2], socle: BIE[4], fond: BIE[3] },
+        'Luzern': { motif: 'eclats', vinyle: LUZ[1], vinyle2: LUZ[0], etiquette: LUZ[4], encre: LUZ[1], socle: LUZ[3], fond: LUZ[2] },
+        'Menthe': { motif: 'uni', transparence: 0.25, vinyle: MEN[2], vinyle2: MEN[0], etiquette: MEN[1], encre: MEN[2], socle: MEN[3], fond: MEN[0], bras: '#e9e4da', reflet: 0.8 },
+      },
+      brand(colors) {
+        const s = colors.slice().sort((a, b) => lum(a) - lum(b)), D = s[0], L = s[s.length - 1], mid = s.length > 2 ? s.slice(1, -1) : [D];
+        return { vinyle: mid[0], vinyle2: L, etiquette: L, encre: D, socle: D, fond: mix(L, mid[mid.length - 1], 0.15), motif: 'marbre' };
+      },
+      pointer: {
+        down: (q) => down(q),
+        drag: (q) => drag(q),
+        up: () => up(),
+        wheel: (q, dy) => app.set('pitch', Math.max(-16, Math.min(16, p.pitch + (dy > 0 ? -0.5 : 0.5)))),
+      },
+      onChange(k) { if (['*', 'image'].includes(k)) logoKey = ''; },
+      export: { name: 'platine', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    function hex(x) { const n = parseInt(x.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
+    function lum(x) { const c = hex(x); return (c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114) / 255; }
+    function mix(a, b, t) { const A = hex(a), C = hex(b); return '#' + A.map((v, i) => Math.round(v + (C[i] - v) * t).toString(16).padStart(2, '0')).join(''); }
+    function rgba(c, a) { const h = hex(c); return `rgba(${h[0]},${h[1]},${h[2]},${a})`; }
+    function rng(s) { let a = s >>> 0; return () => { a = (a + 0x6d2b79f5) >>> 0; let t = a; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+    const ease = (x) => (x <= 0 ? 0 : x >= 1 ? 1 : x * x * (3 - 2 * x));
+
+    function buildLogo() {
+      const img0 = p.image || app.logoImg, key = img0 ? (img0.src || 'c') : 'demo'; if (key === logoKey) return; logoKey = key; vKey = '';
+      const M = 200, c = document.createElement('canvas'); c.width = c.height = M; const x = c.getContext('2d', { willReadFrequently: true }), L = M * 0.94, cx = M / 2;
+      if (img0) { const iw = img0.naturalWidth || img0.width, ih = img0.naturalHeight || img0.height, s = L / Math.max(iw, ih); x.drawImage(img0, cx - iw * s / 2, cx - ih * s / 2, iw * s, ih * s); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(cx, cx, L * 0.48, 0, TAU); x.arc(cx, cx, L * 0.27, 0, TAU, true); x.fill('evenodd'); x.fillRect(cx - L * 0.07, cx - L * 0.5, L * 0.14, L); }
+      const d = x.getImageData(0, 0, M, M).data; let transp = 0; for (let i = 3; i < d.length; i += 4) if (d[i] < 128) transp++; const useA = transp > M * M * 0.05;
+      const F = new Float64Array(M * M); for (let i = 0; i < M * M; i++) { const o = i * 4, l = (d[o] * 0.2126 + d[o + 1] * 0.7152 + d[o + 2] * 0.0722) / 255; F[i] = useA ? d[o + 3] / 255 : (d[o + 3] / 255) * Math.min(1, Math.max(0, (0.75 - l) * 2)); }
+      { const G2 = new Float64Array(M * M); for (let j = 1; j < M - 1; j++) for (let i = 1; i < M - 1; i++) { let a = 0; for (let b = -1; b <= 1; b++) for (let c = -1; c <= 1; c++) a += F[(j + b) * M + i + c] * (b || c ? (b && c ? 1 : 2) : 4); G2[j * M + i] = a / 16; } F.set(G2); }
+      for (let k = 0; k < M; k++) F[k] = F[(M - 1) * M + k] = F[k * M] = F[k * M + M - 1] = 0;
+      logoM = contours(F, M, M, 0.5, 0, 0, 1).filter((c) => c.closed && c.pts.length > 6).map((c) => chaikin(chaikin(c.pts, true), true).map((q) => [q[0] / M - 0.5, q[1] / M - 0.5]));
+    }
+    // carrés marchants + chaînage
+    function contours(F, nx, ny, lev, ox, oy, cs) {
+      const pt = new Map(), adj = new Map();
+      const P = (id) => { let q = pt.get(id); if (q) return q; const cell = id >> 1, i = cell % nx, j = (cell - i) / nx; let a, b, ax, ay, bx, by; if (id & 1) { a = F[j * nx + i]; b = F[(j + 1) * nx + i]; ax = bx = i; ay = j; by = j + 1; } else { a = F[j * nx + i]; b = F[j * nx + i + 1]; ay = by = j; ax = i; bx = i + 1; } const t = (lev - a) / (b - a || 1e-9); q = [ox + (ax + (bx - ax) * t) * cs, oy + (ay + (by - ay) * t) * cs]; pt.set(id, q); return q; };
+      const link = (a, b) => { (adj.get(a) || adj.set(a, []).get(a)).push(b); (adj.get(b) || adj.set(b, []).get(b)).push(a); };
+      for (let j = 0; j < ny - 1; j++) for (let i = 0; i < nx - 1; i++) {
+        const A = F[j * nx + i] > lev, B = F[j * nx + i + 1] > lev, C = F[(j + 1) * nx + i + 1] > lev, D = F[(j + 1) * nx + i] > lev, idx = A | (B << 1) | (C << 2) | (D << 3);
+        if (idx === 0 || idx === 15) continue;
+        const T = (j * nx + i) * 2, R = (j * nx + i + 1) * 2 + 1, Bo = ((j + 1) * nx + i) * 2, Le = (j * nx + i) * 2 + 1;
+        const ctr = (F[j * nx + i] + F[j * nx + i + 1] + F[(j + 1) * nx + i + 1] + F[(j + 1) * nx + i]) / 4 > lev;
+        switch (idx) {
+          case 1: case 14: link(Le, T); break; case 2: case 13: link(T, R); break; case 3: case 12: link(Le, R); break;
+          case 4: case 11: link(R, Bo); break; case 6: case 9: link(T, Bo); break; case 7: case 8: link(Le, Bo); break;
+          case 5: if (ctr) { link(Le, Bo); link(T, R); } else { link(Le, T); link(R, Bo); } break;
+          case 10: if (ctr) { link(Le, T); link(R, Bo); } else { link(Le, Bo); link(T, R); } break;
+        }
+      }
+      const seen = new Set(), out = [];
+      const walk = (s) => { const L = [s]; seen.add(s); let cur = s; for (;;) { const nb = (adj.get(cur) || []).find((x) => !seen.has(x)); if (nb === undefined) break; seen.add(nb); L.push(nb); cur = nb; } return L; };
+      for (const [id, nb] of adj) if (nb.length === 1 && !seen.has(id)) out.push({ pts: walk(id).map(P), closed: false });
+      for (const [id] of adj) if (!seen.has(id)) out.push({ pts: walk(id).map(P), closed: true });
+      return out;
+    }
+    function chaikin(pts, closed) {
+      const o = []; const n = pts.length; for (let k = 0; k < (closed ? n : n - 1); k++) { const a = pts[k], b = pts[(k + 1) % n]; o.push([a[0] * 0.75 + b[0] * 0.25, a[1] * 0.75 + b[1] * 0.25], [a[0] * 0.25 + b[0] * 0.75, a[1] * 0.25 + b[1] * 0.75]); }
+      if (!closed) { o.unshift(pts[0]); o.push(pts[n - 1]); } return o;
+    }
+
+    // ——— géométrie ———
+    function build(w, h) {
+      const pl = p.platine;
+      const R = pl ? Math.min(w / 3.2, h / 2.55) * p.echelle : Math.min(w, h) * 0.45 * p.echelle;
+      const cx = pl ? w / 2 - R * 0.21 : w / 2, cy = h / 2;
+      const P = { x: cx + R * 1.17, y: cy - R * 0.78 }, dP = Math.hypot(P.x - cx, P.y - cy), L = dP * 1.02;
+      const rl = R * p.rayon, hole = p.centre === 'grand' ? R * 0.22 : R * 0.024;
+      const rIn = Math.max(rl + R * 0.07, R * 0.4), rOut = R * 0.955;
+      const old = S;
+      S = { w, h, R, cx, cy, P, L, rl, hole: Math.min(hole, rl * 0.7), rIn, rOut, pl, pw: R * 2.84, ph: R * 2.24,
+        th: old ? old.th : 0, om: old ? old.om : 0, rn: old ? Math.min(rOut, Math.max(rIn, old.rn)) : rOut, lift: old ? old.lift : 1,
+        st: old ? old.st : 'rest', stT: old ? old.stT : 0, a: old ? old.a : 0, on: old ? old.on : true, sT: old ? old.sT : 0, scr: null, armD: null };
+      S.aRest = Math.PI / 2 + 0.05;
+      { const x0 = w / 2 - S.pw / 2, y0 = cy - S.ph / 2; S.btn = { x: x0 + R * 0.22, y: y0 + S.ph - R * 0.22, r: R * 0.1 }; S.sl = { x: x0 + S.pw - R * 0.16, y0: cy + R * 0.05, y1: cy + R * 0.85 }; }
+      if (!old) S.a = S.aRest;
+      // plages : bornes et intensités
+      const r = rng(app.seed * 7 + 3), n = Math.round(p.plages), b = [0]; let acc = 0; const wts = [];
+      for (let i = 0; i < n; i++) { const x = 0.5 + r(); wts.push(x); acc += x; }
+      for (let i = 0; i < n; i++) b.push(b[i] + wts[i] / acc);
+      S.tracks = b; S.loud = Array.from({ length: n }, () => 0.35 + 0.65 * r());
+      S.wob = Array.from({ length: 6 }, () => [r() * TAU, 1 + Math.floor(r() * 5), r()]);
+      // motifs vectoriels (partagés par le canevas et le SVG)
+      const m = rng(app.seed * 13 + 1); S.marb = []; S.spl = [];
+      for (let i = 0; i < 38; i++) {
+        // tourbillons : de longues bandes presque concentriques qui ondulent doucement
+        const a0 = m() * TAU, r0 = R * (0.15 + 0.85 * Math.sqrt(m())), span = (2 + m() * 4) * (m() < 0.8 ? 1 : -1), fr = 0.4 + m() * 1.4, amp = R * (0.02 + m() * 0.08), ph = m() * TAU, dr = R * (m() - 0.5) * 0.35, pts = [];
+        for (let k = 0; k <= 60; k++) { const s = k / 60, a = a0 + span * s, rr = Math.max(R * 0.05, r0 + amp * Math.sin(ph + fr * s * TAU) + dr * s); pts.push([Math.cos(a) * rr, Math.sin(a) * rr]); }
+        S.marb.push({ pts, w: R * (0.006 + Math.pow(m(), 1.8) * 0.09), t: m(), a: 0.25 + m() * 0.6, b: m() < 0.55 });
+      }
+      for (let i = 0; i < 26; i++) {
+        const a = m() * TAU, rr = R * Math.sqrt(0.05 + 0.95 * m()), x = Math.cos(a) * rr, y = Math.sin(a) * rr, s = R * (0.025 + Math.pow(m(), 2) * 0.11), t = m();
+        S.spl.push({ x, y, r: s, t });
+        const nd = 3 + Math.floor(m() * 9);
+        for (let k = 0; k < nd; k++) { const da = m() * TAU, dd = s * (1.1 + m() * 1.8); S.spl.push({ x: x + Math.cos(da) * dd, y: y + Math.sin(da) * dd, r: s * (0.08 + m() * 0.3), t }); }
+        for (let k = 0; k < 5; k++) { const da = m() * TAU, dd = s * (0.5 + m() * 0.4); S.spl.push({ x: x + Math.cos(da) * dd, y: y + Math.sin(da) * dd, r: s * (0.35 + m() * 0.35), t }); }
+      }
+    }
+    const nom = () => (+p.vitesse) * TAU / 60;
+    function stylus(a) { return { x: S.P.x + Math.cos(a) * S.L, y: S.P.y + Math.sin(a) * S.L }; }
+    // angle du bras pour qu'aiguille soit au rayon r
+    function armFor(r) {
+      const Dx = S.P.x - S.cx, Dy = S.P.y - S.cy, dP = Math.hypot(Dx, Dy), v = (r * r - dP * dP - S.L * S.L) / (2 * S.L * dP);
+      const base = Math.atan2(Dy, Dx), c = Math.acos(Math.max(-1, Math.min(1, v)));
+      const a1 = base + c, a2 = base - c, n = (x) => Math.atan2(Math.sin(x), Math.cos(x));
+      // la branche qui reste du côté du repos (vers le bas)
+      return Math.abs(n(a1 - S.aRest)) < Math.abs(n(a2 - S.aRest)) ? a1 : a2;
+    }
+    const grooveR = () => S.rn + S.R * 0.0025 * (1 + p.voile * 3) * Math.sin(S.th);
+
+    // ——— texture du disque ———
+    function shape(g, k) {
+      const R = S.R, v1 = p.vinyle, v2 = p.vinyle2;
+      g.save(); g.beginPath(); g.arc(0, 0, R, 0, TAU); g.clip();
+      g.fillStyle = v1; g.beginPath(); g.arc(0, 0, R, 0, TAU); g.fill();
+      if (p.motif === 'marbre') { g.lineCap = 'round'; g.lineJoin = 'round'; for (const s of S.marb) { g.filter = s.b ? `blur(${(s.w * k * 0.35).toFixed(1)}px)` : 'none'; g.strokeStyle = s.t < 0.6 ? v2 : mix(v1, v2, 0.5); g.globalAlpha = s.a * (1 - p.transparence); g.lineWidth = s.w; g.beginPath(); s.pts.forEach((q, i) => (i ? g.lineTo(q[0], q[1]) : g.moveTo(q[0], q[1]))); g.stroke(); } g.filter = 'none'; g.globalAlpha = 1 - p.transparence; }
+      else if (p.motif === 'eclats') { for (const s of S.spl) { g.fillStyle = s.t < 0.7 ? v2 : mix(v2, p.etiquette, 0.6); g.beginPath(); g.arc(s.x, s.y, s.r, 0, TAU); g.fill(); } }
+      else if (p.motif === 'secteurs') { const n = 16; g.fillStyle = v2; for (let i = 0; i < n; i += 2) { g.beginPath(); g.moveTo(0, 0); g.arc(0, 0, R, i * TAU / n, (i + 1) * TAU / n); g.closePath(); g.fill(); } }
+      else if (p.motif === 'moities') { g.fillStyle = v2; g.beginPath(); g.arc(0, 0, R, -Math.PI / 2, Math.PI / 2); g.closePath(); g.fill(); }
+      else if (p.motif === 'image') {
+        g.fillStyle = v2; g.beginPath(); g.arc(0, 0, R, 0, TAU); g.fill();
+        g.strokeStyle = v1; g.globalAlpha = 0.25; g.lineWidth = R * 0.03; for (let r = 0.45; r < 1; r += 0.11) { g.beginPath(); g.arc(0, 0, R * r, 0, TAU); g.stroke(); } g.globalAlpha = 1;
+        if (logoM) { const s = R * 1.25; g.fillStyle = v1; g.beginPath(); for (const lp of logoM) { lp.forEach((q, i) => (i ? g.lineTo(q[0] * s, q[1] * s) : g.moveTo(q[0] * s, q[1] * s))); g.closePath(); } g.fill('evenodd'); }
+      }
+      g.restore();
+    }
+    function disc(dpr) {
+      const R = S.R, N = Math.min(2000, Math.ceil(2 * R * dpr)), k = N / (2 * R);
+      const key = [N, R, p.motif, p.vinyle, p.vinyle2, p.transparence, p.sillons, p.plages, p.etiquette, p.encre, p.rayon, p.place, p.centre, logoKey, app.seed].join('|');
+      if (key === dtKey) return DT; dtKey = key;
+      const c = DT && DT.width === N ? DT : document.createElement('canvas'); c.width = c.height = N; DT = c;
+      const g = c.getContext('2d'); g.setTransform(1, 0, 0, 1, 0, 0); g.clearRect(0, 0, N, N); g.setTransform(k, 0, 0, k, N / 2, N / 2);
+      g.globalAlpha = 1 - p.transparence; shape(g, k); g.globalAlpha = 1;
+      g.save(); g.beginPath(); g.arc(0, 0, R, 0, TAU); g.clip();
+      const dark = lum(p.vinyle) < 0.5 && p.motif === 'noir';
+      // sillons : anneaux fins, plus marqués dans les passages forts
+      const step = Math.max(0.9 / k, R * 0.0062 / p.sillons), T = S.tracks, nT = S.loud.length, nr = rng(app.seed * 31 + 5);
+      const tOf = (r) => (S.rOut - r) / (S.rOut - S.rIn);
+      g.lineWidth = Math.max(0.5 / k, step * 0.42);
+      for (let r = S.rIn; r <= S.rOut; r += step) {
+        const u = tOf(r); let ti = 0; while (ti < nT - 1 && u > T[ti + 1]) ti++;
+        const edge = Math.min(u - T[ti], T[ti + 1] - u) * (S.rOut - S.rIn);
+        if (edge < R * 0.006 && ti > 0 && u - T[ti] < T[ti + 1] - u) continue;
+        if (edge < R * 0.006 && ti < nT - 1 && u - T[ti] >= T[ti + 1] - u) continue;
+        const L = S.loud[ti], a = 0.16 + 0.3 * L;
+        g.strokeStyle = dark ? `rgba(255,255,255,${a * 0.17})` : `rgba(0,0,0,${a * 0.4})`;
+        g.beginPath(); g.arc(0, 0, r, 0, TAU); g.stroke();
+        // modulation : quelques arcs plus marqués, de longueur libre (les passages forts)
+        const na = 1 + Math.floor(nr() * 3 * L);
+        for (let s = 0; s < na; s++) { const a0 = nr() * TAU, la = 0.3 + nr() * 1.8; g.strokeStyle = dark ? `rgba(255,255,255,${0.05 * L})` : `rgba(0,0,0,${0.09 * L})`; g.beginPath(); g.arc(0, 0, r, a0, a0 + la); g.stroke(); }
+      }
+      // bord biseauté et zone de sortie lisse
+      g.strokeStyle = dark ? 'rgba(255,255,255,0.12)' : 'rgba(255,255,255,0.25)'; g.lineWidth = R * 0.008; g.beginPath(); g.arc(0, 0, R * 0.996, 0, TAU); g.stroke();
+      g.strokeStyle = 'rgba(0,0,0,0.25)'; g.lineWidth = 1 / k; g.beginPath(); g.arc(0, 0, S.rIn - R * 0.02, 0, TAU); g.stroke();
+      g.restore();
+      // étiquette
+      label(g, k);
+      g.globalCompositeOperation = 'destination-out'; g.beginPath(); g.arc(0, 0, S.hole, 0, TAU); g.fill(); g.globalCompositeOperation = 'source-over';
+      return DT;
+    }
+    function logoBox() {
+      const rl = S.rl, hl = S.hole;
+      if (p.place === 'centre') return { x: 0, y: 0, s: rl * 1.25 };
+      const s = Math.min((rl - hl) * 0.82, rl * 0.78); return { x: 0, y: -(hl + (rl - hl) * 0.47), s };
+    }
+    function label(g, k) {
+      const rl = S.rl; if (rl <= 0) return;
+      g.fillStyle = p.etiquette; g.beginPath(); g.arc(0, 0, rl, 0, TAU); g.fill();
+      g.strokeStyle = rgba(p.encre, 0.55); g.lineWidth = Math.max(1 / k, rl * 0.012); g.beginPath(); g.arc(0, 0, rl * 0.93, 0, TAU); g.stroke();
+      if (p.place === 'haut') { g.lineWidth = rl * 0.035; g.lineCap = 'round'; g.strokeStyle = p.encre; g.beginPath(); g.arc(0, 0, rl * 0.68, Math.PI * 0.22, Math.PI * 0.78); g.stroke(); g.lineWidth = rl * 0.015; g.beginPath(); g.arc(0, 0, rl * 0.56, Math.PI * 0.3, Math.PI * 0.7); g.stroke(); }
+      if (logoM && p.motif !== 'image') { const b = logoBox(); g.fillStyle = p.encre; g.beginPath(); for (const lp of logoM) { lp.forEach((q, i) => (i ? g.lineTo(b.x + q[0] * b.s, b.y + q[1] * b.s) : g.moveTo(b.x + q[0] * b.s, b.y + q[1] * b.s))); g.closePath(); } g.fill('evenodd'); }
+      // léger relief du papier
+      const gr = g.createRadialGradient(-rl * 0.3, -rl * 0.3, 0, 0, 0, rl); gr.addColorStop(0, 'rgba(255,255,255,0.10)'); gr.addColorStop(1, 'rgba(0,0,0,0.10)');
+      g.fillStyle = gr; g.beginPath(); g.arc(0, 0, rl, 0, TAU); g.fill();
+    }
+    // reflet fixe : deux pinceaux opposés vers la lampe
+    const LA = -2.25;
+    function sheen(dpr) {
+      const R = S.R, N = Math.min(1600, Math.ceil(2 * R * dpr)), k = N / (2 * R);
+      const key = [N, R, p.reflet, p.irisation, S.rl, S.rIn, p.motif].join('|'); if (key === shKey) return SH; shKey = key;
+      const c = SH && SH.width === N ? SH : document.createElement('canvas'); c.width = c.height = N; SH = c;
+      const g = c.getContext('2d'); g.setTransform(1, 0, 0, 1, 0, 0); g.clearRect(0, 0, N, N); g.setTransform(k, 0, 0, k, N / 2, N / 2);
+      g.save(); g.beginPath(); g.arc(0, 0, R * 0.99, 0, TAU); g.arc(0, 0, S.rl, 0, TAU, true); g.clip('evenodd');
+      const wedge = (A, wd, col) => { const cg = g.createConicGradient(LA - Math.PI / 2, 0, 0); const st = []; for (const c0 of [0.25, 0.75]) { st.push([c0 - wd, 0], [c0 - wd * 0.35, A * 0.55], [c0, A], [c0 + wd * 0.35, A * 0.55], [c0 + wd, 0]); } st.sort((a, b) => a[0] - b[0]); for (const [o, a] of st) cg.addColorStop(Math.max(0, Math.min(1, o)), rgba(col, a)); return cg; };
+      const A = p.reflet * (p.motif === 'noir' ? 0.42 : 0.32);
+      g.fillStyle = wedge(A, 0.07, '#ffffff'); g.fillRect(-R, -R, 2 * R, 2 * R);
+      g.fillStyle = wedge(A * 0.6, 0.018, '#ffffff'); g.fillRect(-R, -R, 2 * R, 2 * R);
+      if (p.irisation > 0) {
+        g.globalCompositeOperation = 'lighter';
+        const hues = ['#ff3b6b', '#ffd23b', '#3bffb0', '#3b8bff'];
+        hues.forEach((hc, i) => { const cg = g.createConicGradient(LA - Math.PI / 2 + (i - 1.5) * 0.045, 0, 0); for (const c0 of [0.25, 0.75]) { cg.addColorStop(Math.max(0, c0 - 0.03), rgba(hc, 0)); cg.addColorStop(c0, rgba(hc, p.irisation * 0.16 * p.reflet)); cg.addColorStop(Math.min(1, c0 + 0.03), rgba(hc, 0)); } g.fillStyle = cg; g.fillRect(-R, -R, 2 * R, 2 * R); });
+        g.globalCompositeOperation = 'source-over';
+      }
+      // reflet large et doux de la pièce
+      const lg = g.createLinearGradient(Math.cos(LA) * R, Math.sin(LA) * R, -Math.cos(LA) * R, -Math.sin(LA) * R); lg.addColorStop(0, `rgba(255,255,255,${0.08 * p.reflet})`); lg.addColorStop(0.5, 'rgba(255,255,255,0)'); lg.addColorStop(1, `rgba(0,0,0,${0.12 * p.reflet})`);
+      g.fillStyle = lg; g.fillRect(-R, -R, 2 * R, 2 * R);
+      g.restore();
+      return SH;
+    }
+
+    // ——— décor fixe : fond, socle, plateau ———
+    function rr(g, x, y, w, h, r) { g.beginPath(); g.moveTo(x + r, y); g.arcTo(x + w, y, x + w, y + h, r); g.arcTo(x + w, y + h, x, y + h, r); g.arcTo(x, y + h, x, y, r); g.arcTo(x, y, x + w, y, r); g.closePath(); }
+    function stage(w, h, dpr) {
+      const key = [w, h, dpr, S.R, p.fond, p.socle, p.bras, p.platine, p.echelle].join('|'); if (key === stKey) return ST; stKey = key;
+      const c = ST || document.createElement('canvas'); c.width = Math.ceil(w * dpr); c.height = Math.ceil(h * dpr); ST = c;
+      const g = c.getContext('2d'); g.setTransform(dpr, 0, 0, dpr, 0, 0); const R = S.R;
+      g.fillStyle = p.fond; g.fillRect(0, 0, w, h);
+      const lg = g.createLinearGradient(0, 0, w, h); lg.addColorStop(0, 'rgba(255,255,255,0.08)'); lg.addColorStop(1, 'rgba(0,0,0,0.1)'); g.fillStyle = lg; g.fillRect(0, 0, w, h);
+      if (!S.pl) { g.fillStyle = 'rgba(0,0,0,0.22)'; g.filter = `blur(${R * 0.04}px)`; g.beginPath(); g.arc(S.cx + R * 0.03, S.cy + R * 0.05, R, 0, TAU); g.fill(); g.filter = 'none'; return ST; }
+      const x0 = w / 2 - S.pw / 2, y0 = S.cy - S.ph / 2;
+      g.save(); g.shadowColor = 'rgba(0,0,0,0.35)'; g.shadowBlur = R * 0.12; g.shadowOffsetY = R * 0.05; g.fillStyle = p.socle; rr(g, x0, y0, S.pw, S.ph, R * 0.07); g.fill(); g.restore();
+      const sg = g.createLinearGradient(0, y0, 0, y0 + S.ph); sg.addColorStop(0, mix(p.socle, '#ffffff', 0.1)); sg.addColorStop(1, mix(p.socle, '#000000', 0.18)); g.fillStyle = sg; rr(g, x0, y0, S.pw, S.ph, R * 0.07); g.fill();
+      g.strokeStyle = 'rgba(255,255,255,0.14)'; g.lineWidth = 1; rr(g, x0 + 0.5, y0 + 0.5, S.pw - 1, S.ph - 1, R * 0.07); g.stroke();
+      // creux du plateau
+      g.fillStyle = mix(p.socle, '#000000', 0.35); g.beginPath(); g.arc(S.cx, S.cy, R * 1.075, 0, TAU); g.fill();
+      // bouton marche/arrêt
+      const bx = S.btn.x, by = S.btn.y;
+      g.fillStyle = mix(p.socle, '#000000', 0.3); rr(g, bx - R * 0.11, by - R * 0.09, R * 0.22, R * 0.18, R * 0.02); g.fill();
+      g.fillStyle = mix(p.bras, p.socle, 0.35); rr(g, bx - R * 0.095, by - R * 0.075, R * 0.19, R * 0.15, R * 0.018); g.fill();
+      // glissière de pitch
+      const sx = S.sl.x, sy0 = S.sl.y0, sy1 = S.sl.y1;
+      g.fillStyle = mix(p.socle, '#000000', 0.45); rr(g, sx - R * 0.012, sy0, R * 0.024, sy1 - sy0, R * 0.012); g.fill();
+      g.strokeStyle = rgba(p.bras, 0.5); g.lineWidth = 1; for (let i = 0; i <= 8; i++) { const y = sy0 + (sy1 - sy0) * i / 8; g.beginPath(); g.moveTo(sx - R * 0.06, y); g.lineTo(sx - R * (i === 4 ? 0.1 : 0.035), y); g.stroke(); }
+      // socle du pivot et repose-bras
+      const P = S.P; g.fillStyle = mix(p.socle, '#000000', 0.3); g.beginPath(); g.arc(P.x, P.y, R * 0.17, 0, TAU); g.fill();
+      const pg = g.createRadialGradient(P.x - R * 0.04, P.y - R * 0.05, 0, P.x, P.y, R * 0.14); pg.addColorStop(0, mix(p.bras, '#ffffff', 0.4)); pg.addColorStop(1, mix(p.bras, '#000000', 0.35)); g.fillStyle = pg; g.beginPath(); g.arc(P.x, P.y, R * 0.135, 0, TAU); g.fill();
+      const rs = stylus(S.aRest), rx = rs.x - Math.cos(S.aRest) * R * 0.2, ry = rs.y - Math.sin(S.aRest) * R * 0.2;
+      g.fillStyle = mix(p.socle, '#000000', 0.3); g.beginPath(); g.arc(rx, ry, R * 0.045, 0, TAU); g.fill(); g.fillStyle = mix(p.bras, '#000000', 0.2); g.beginPath(); g.arc(rx, ry, R * 0.03, 0, TAU); g.fill();
+      return ST;
+    }
+
+    // ——— bras ———
+    function drawArm(g, a, lift) {
+      const R = S.R, P = S.P, u = [Math.cos(a), Math.sin(a)], n = [-u[1], u[0]], sp = stylus(a);
+      const be = -0.38, v = [Math.cos(a + be), Math.sin(a + be)], hl = R * 0.15, H = [sp.x - v[0] * hl, sp.y - v[1] * hl];
+      const tw = R * 0.026, metal = p.bras, hi = mix(metal, '#ffffff', 0.45), lo = mix(metal, '#000000', 0.4);
+      const parts = (o, shadow) => {
+        const col = (c) => (shadow ? 'rgba(0,0,0,0.28)' : c);
+        g.save(); g.translate(o[0], o[1]);
+        // contrepoids
+        const c0 = [P.x - u[0] * R * 0.16, P.y - u[1] * R * 0.16], c1 = [P.x - u[0] * R * 0.34, P.y - u[1] * R * 0.34];
+        g.lineCap = 'butt'; g.strokeStyle = col(lo); g.lineWidth = R * 0.11; g.beginPath(); g.moveTo(c0[0], c0[1]); g.lineTo(c1[0], c1[1]); g.stroke();
+        if (!shadow) { g.strokeStyle = metal; g.lineWidth = R * 0.07; g.beginPath(); g.moveTo(c0[0], c0[1]); g.lineTo(c1[0], c1[1]); g.stroke(); g.strokeStyle = hi; g.lineWidth = R * 0.02; g.beginPath(); g.moveTo(c0[0] + n[0] * R * 0.02, c0[1] + n[1] * R * 0.02); g.lineTo(c1[0] + n[0] * R * 0.02, c1[1] + n[1] * R * 0.02); g.stroke(); }
+        // tube en S
+        const m1 = [P.x + (H[0] - P.x) * 0.45 + n[0] * R * 0.09, P.y + (H[1] - P.y) * 0.45 + n[1] * R * 0.09];
+        g.lineCap = 'round'; g.strokeStyle = col(lo); g.lineWidth = tw; g.beginPath(); g.moveTo(c0[0], c0[1]); g.quadraticCurveTo(m1[0], m1[1], H[0], H[1]); g.stroke();
+        if (!shadow) { g.strokeStyle = metal; g.lineWidth = tw * 0.62; g.stroke(); g.strokeStyle = hi; g.lineWidth = tw * 0.22; g.beginPath(); g.moveTo(c0[0] + n[0] * tw * 0.15, c0[1] + n[1] * tw * 0.15); g.quadraticCurveTo(m1[0] + n[0] * tw * 0.15, m1[1] + n[1] * tw * 0.15, H[0], H[1]); g.stroke(); }
+        // coquille et cellule
+        const vn = [-v[1], v[0]], hw = R * 0.045, q = (s, t) => [H[0] + v[0] * hl * s + vn[0] * hw * t, H[1] + v[1] * hl * s + vn[1] * hw * t];
+        const shell = [q(-0.05, -0.8), q(1.02, -1), q(1.02, 1), q(-0.05, 0.8)];
+        g.fillStyle = col(mix(metal, '#000000', 0.15)); g.beginPath(); shell.forEach((pt, i) => (i ? g.lineTo(pt[0], pt[1]) : g.moveTo(pt[0], pt[1]))); g.closePath(); g.fill();
+        if (!shadow) {
+          const cart = [q(0.45, -0.85), q(0.98, -0.85), q(0.98, 0.85), q(0.45, 0.85)]; g.fillStyle = p.encre; g.beginPath(); cart.forEach((pt, i) => (i ? g.lineTo(pt[0], pt[1]) : g.moveTo(pt[0], pt[1]))); g.closePath(); g.fill();
+          const fl = q(0.3, -1); const fl2 = q(0.3, -2.2); g.strokeStyle = metal; g.lineWidth = R * 0.012; g.beginPath(); g.moveTo(fl[0], fl[1]); g.lineTo(fl2[0], fl2[1]); g.stroke();
+        }
+        g.restore();
+      };
+      const off = R * (0.02 + 0.06 * lift);
+      parts([off * 0.6, off], true);
+      // pivot
+      g.fillStyle = 'rgba(0,0,0,0.3)'; g.beginPath(); g.arc(P.x + R * 0.01, P.y + R * 0.02, R * 0.075, 0, TAU); g.fill();
+      parts([0, -R * 0.012 * lift], false);
+      const pg = g.createRadialGradient(P.x - R * 0.02, P.y - R * 0.03, 0, P.x, P.y, R * 0.07); pg.addColorStop(0, mix(p.bras, '#ffffff', 0.5)); pg.addColorStop(1, mix(p.bras, '#000000', 0.3));
+      g.fillStyle = pg; g.beginPath(); g.arc(P.x, P.y, R * 0.065, 0, TAU); g.fill();
+    }
+
+    // ——— automate ———
+    function setState(s) { S.st = s; S.stT = 0; S.a0 = S.a; S.l0 = S.lift; }
+    function step(dt) {
+      const R = S.R, target = S.on ? nom() * (1 + p.pitch / 100) : 0;
+      S.sT += dt;
+      if (S.scr && ptr) {
+        const ang = Math.atan2(ptr.y - S.cy, ptr.x - S.cx); let d = ang - S.scr.a; d = Math.atan2(Math.sin(d), Math.cos(d)); S.scr.a = ang; S.scr.acc += d;
+        const nt = S.scr.th0 + S.scr.acc, om = (nt - S.th) / Math.max(dt, 1e-3); S.om += (om - S.om) * Math.min(1, dt * 20); S.thPrev = S.th; S.th = nt;
+      } else {
+        let tg = target;
+        if (p.scratch > 0 && S.on && S.st === 'play') { const ph = S.sT % 5; if (ph < 1.6) { const x = ph / 1.6; tg = target * (1 - p.scratch * 3.2 * Math.sin(x * TAU * 2.5) * Math.sin(x * Math.PI)); } }
+        const tau = tg > Math.abs(S.om) ? 0.45 : (S.on ? 0.12 : 1.2);
+        S.om += (tg - S.om) * Math.min(1, dt / tau); S.thPrev = S.th; S.th += S.om * dt;
+      }
+      const dth = S.th - S.thPrev;
+      // avance de l'aiguille, liée à la rotation
+      const perRad = (S.rOut - S.rIn) / (p.lecture * nom());
+      const dur = (x) => S.stT >= x;
+      S.stT += dt;
+      if (S.armD) { S.a += (S.armD.a - S.a) * Math.min(1, dt * 18); S.lift += (1 - S.lift) * Math.min(1, dt * 10); return; }
+      switch (S.st) {
+        case 'rest': S.a = S.aRest; S.lift = 0.15; if (p.auto && S.on && S.pl && dur(2.2)) { S.rn = S.rOut; S.cueA = armFor(S.rOut); setState('cue'); } break;
+        case 'cue': { const x = ease(S.stT / 1.3); S.a = S.a0 + (S.cueA - S.a0) * x; S.lift = S.l0 + (1 - S.l0) * Math.min(1, S.stT * 3); if (dur(1.3)) setState('lower'); break; }
+        case 'lower': S.a = armFor(grooveR()); S.lift = 1 - ease(S.stT / 0.7); if (dur(0.7)) setState('play'); break;
+        case 'play':
+          S.rn = Math.max(S.rIn, Math.min(S.rOut, S.rn - dth * perRad)); S.a = armFor(grooveR()); S.lift = 0;
+          if (S.rn <= S.rIn + 1e-6) { S.rn = S.rIn; if (S.out == null) S.out = 0; S.out += dt; if (S.out > 2.4 && p.auto) { S.out = null; setState('lift'); } } else S.out = null;
+          break;
+        case 'lift': S.a = armFor(grooveR()); S.lift = ease(S.stT / 0.5); if (dur(0.6)) setState('return'); break;
+        case 'return': { const x = ease(S.stT / 1.3); S.a = S.a0 + (S.aRest - S.a0) * x; S.lift = 1 - 0.85 * ease((S.stT - 1.0) / 0.3); if (dur(1.3)) setState('rest'); break; }
+        case 'hover': S.lift = 1; break;
+      }
+    }
+
+    // ——— pointeur ———
+    function hitArm(q) {
+      const P = S.P, sp = stylus(S.a), dx = sp.x - P.x, dy = sp.y - P.y, t = Math.max(0, Math.min(1, ((q.x - P.x) * dx + (q.y - P.y) * dy) / (dx * dx + dy * dy)));
+      return Math.hypot(q.x - P.x - dx * t, q.y - P.y - dy * t) < S.R * 0.08 && t > 0.15;
+    }
+    function down(q) {
+      if (!S) return;
+      ptr = { x: q.x, y: q.y, moved: 0, kind: '' };
+      if (S.pl && S.sl && Math.abs(q.x - S.sl.x) < S.R * 0.07 && q.y > S.sl.y0 - S.R * 0.05 && q.y < S.sl.y1 + S.R * 0.05) { ptr.kind = 'pitch'; drag(q); return; }
+      if (S.pl && hitArm(q)) { ptr.kind = 'arm'; S.armD = { a: Math.atan2(q.y - S.P.y, q.x - S.P.x) }; return; }
+      if (Math.hypot(q.x - S.cx, q.y - S.cy) < S.R) { ptr.kind = 'disc'; S.scr = { a: Math.atan2(q.y - S.cy, q.x - S.cx), th0: S.th, acc: 0 }; }
+    }
+    function drag(q) {
+      if (!ptr) return; ptr.moved += Math.hypot(q.x - ptr.x, q.y - ptr.y); ptr.x = q.x; ptr.y = q.y;
+      if (ptr.kind === 'pitch') { const t = (q.y - S.sl.y0) / (S.sl.y1 - S.sl.y0); app.set('pitch', Math.round(Math.max(-16, Math.min(16, (t - 0.5) * 32)) * 2) / 2); }
+      if (ptr.kind === 'arm') { let a = Math.atan2(q.y - S.P.y, q.x - S.P.x); const lo = armFor(S.rIn - S.R * 0.02), hi = S.aRest; const n = (x) => Math.atan2(Math.sin(x - hi), Math.cos(x - hi)); const m = n(lo), d = Math.max(Math.min(0, m), Math.min(Math.max(0, m), n(a))); S.armD.a = hi + d; }
+    }
+    function up() {
+      if (!ptr || !S) { ptr = null; return; }
+      if (ptr.kind === 'arm') {
+        const sp = stylus(S.armD.a), r = Math.hypot(sp.x - S.cx, sp.y - S.cy); S.armD = null;
+        if (r <= S.rOut + S.R * 0.03 && r >= S.rIn) { S.rn = Math.min(S.rOut, r); S.a = armFor(S.rn); S.lift = 1; setState('lower'); S.on = true; }
+        else setState('return');
+      } else if (ptr.kind === 'disc') { S.scr = null; if (ptr.moved < 5) S.on = !S.on; }
+      else if (ptr.kind === '' && ptr.moved < 5) S.on = !S.on;
+      ptr = null;
+    }
+
+    app.loop((t, dt) => {
+      dt = Math.min(1 / 20, dt || 0);
+      const { w, h, dpr } = app.size; buildLogo();
+      const key = [w, h, p.platine, p.echelle, p.rayon, p.centre, p.plages, app.seed].join('|'); if (!S || key !== gKey) { gKey = key; build(w, h); S.p = { pl: S.pl }; }
+      if (app.thumbnail) { if (!S.thumbDone) { S.thumbDone = true; S.st = 'play'; S.rn = S.rIn + (S.rOut - S.rIn) * 0.62; S.lift = 0; S.on = true; S.om = nom(); S.th = 0.6; S.a = armFor(S.rn); S.thPrev = S.th; } }
+      else step(dt);
+      if (!S.pl) { S.lift = 1; }
+      const R = S.R;
+      ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.drawImage(stage(w, h, dpr), 0, 0);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      if (S.pl) {
+        // plateau et ses points stroboscopiques
+        const pg = ctx.createLinearGradient(S.cx - R, S.cy - R, S.cx + R, S.cy + R); pg.addColorStop(0, mix(p.bras, '#ffffff', 0.25)); pg.addColorStop(0.5, mix(p.bras, '#000000', 0.2)); pg.addColorStop(1, mix(p.bras, '#ffffff', 0.1));
+        ctx.fillStyle = pg; ctx.beginPath(); ctx.arc(S.cx, S.cy, R * 1.045, 0, TAU); ctx.fill();
+        ctx.fillStyle = mix(p.bras, '#000000', 0.55); const nd = 90; for (let i = 0; i < nd; i++) { const a = S.th + i * TAU / nd; ctx.fillRect(S.cx + Math.cos(a) * R * 1.027 - R * 0.006, S.cy + Math.sin(a) * R * 1.027 - R * 0.006, R * 0.012, R * 0.012); }
+      }
+      // feutrine
+      ctx.fillStyle = S.pl ? mix(p.socle, '#000000', 0.55) : mix(p.fond, '#000000', 0.5); ctx.beginPath(); ctx.arc(S.cx, S.cy, R * (S.pl ? 1.005 : 0.995), 0, TAU); ctx.fill();
+      // disque tournant
+      const cs = Math.cos(S.th), sn = Math.sin(S.th);
+      ctx.setTransform(cs * dpr, sn * dpr, -sn * dpr, cs * dpr, S.cx * dpr, S.cy * dpr);
+      ctx.drawImage(disc(dpr), -R, -R, 2 * R, 2 * R);
+      // reflet fixe (le voile le fait osciller)
+      const wa = p.voile * 0.12 * Math.sin(S.th) + p.voile * 0.05 * Math.sin(S.th * 2 + 1);
+      ctx.setTransform(Math.cos(wa) * dpr, Math.sin(wa) * dpr, -Math.sin(wa) * dpr, Math.cos(wa) * dpr, S.cx * dpr, S.cy * dpr);
+      ctx.drawImage(sheen(dpr), -R, -R, 2 * R, 2 * R);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      // axe
+      const ax = ctx.createRadialGradient(S.cx - R * 0.006, S.cy - R * 0.008, 0, S.cx, S.cy, R * 0.022); ax.addColorStop(0, '#ffffff'); ax.addColorStop(1, mix(p.bras, '#000000', 0.35));
+      ctx.fillStyle = ax; ctx.beginPath(); ctx.arc(S.cx, S.cy, R * 0.02, 0, TAU); ctx.fill();
+      if (S.pl) {
+        // voyant et curseur de pitch
+        const b = S.btn; ctx.fillStyle = S.on ? '#ff5a3c' : 'rgba(0,0,0,0.4)'; ctx.beginPath(); ctx.arc(b.x + R * 0.13, b.y - R * 0.06, R * 0.014, 0, TAU); ctx.fill();
+        if (S.on) { ctx.fillStyle = 'rgba(255,90,60,0.25)'; ctx.beginPath(); ctx.arc(b.x + R * 0.13, b.y - R * 0.06, R * 0.03, 0, TAU); ctx.fill(); }
+        const ky = S.sl.y0 + (S.sl.y1 - S.sl.y0) * (0.5 + p.pitch / 32);
+        ctx.fillStyle = 'rgba(0,0,0,0.3)'; rr(ctx, S.sl.x - R * 0.045 + 2, ky - R * 0.025 + 3, R * 0.09, R * 0.05, R * 0.01); ctx.fill();
+        ctx.fillStyle = mix(p.bras, '#000000', 0.1); rr(ctx, S.sl.x - R * 0.045, ky - R * 0.025, R * 0.09, R * 0.05, R * 0.01); ctx.fill();
+        ctx.fillStyle = p.encre; ctx.fillRect(S.sl.x - R * 0.04, ky - 0.75, R * 0.08, 1.5);
+        drawArm(ctx, S.a, S.lift);
+      }
+      app.finish(ctx);
+    });
+
+    // ——— SVG ———
+    function toSVG() {
+      const { w, h } = app.size, f = (v) => +v.toFixed(2); buildLogo(); const R = S.R, deg = (a) => f(a * 180 / Math.PI);
+      const lp = (x, y, s) => logoM.map((l) => 'M' + l.map((q) => f(x + q[0] * s) + ' ' + f(y + q[1] * s)).join('L') + 'Z').join('');
+      let o = `<rect width="100%" height="100%" fill="${p.fond}"/>`;
+      const x0 = w / 2 - S.pw / 2, y0 = S.cy - S.ph / 2;
+      if (S.pl) {
+        o += `<rect x="${f(x0)}" y="${f(y0 + R * 0.04)}" width="${f(S.pw)}" height="${f(S.ph)}" rx="${f(R * 0.07)}" fill="#000" opacity="0.2"/><rect x="${f(x0)}" y="${f(y0)}" width="${f(S.pw)}" height="${f(S.ph)}" rx="${f(R * 0.07)}" fill="${p.socle}"/>`;
+        o += `<circle cx="${f(S.cx)}" cy="${f(S.cy)}" r="${f(R * 1.075)}" fill="${mix(p.socle, '#000000', 0.35)}"/><circle cx="${f(S.cx)}" cy="${f(S.cy)}" r="${f(R * 1.045)}" fill="${mix(p.bras, '#000000', 0.1)}"/>`;
+        const b = S.btn; o += `<rect x="${f(b.x - R * 0.095)}" y="${f(b.y - R * 0.075)}" width="${f(R * 0.19)}" height="${f(R * 0.15)}" rx="${f(R * 0.018)}" fill="${mix(p.bras, p.socle, 0.35)}"/>`;
+        o += `<rect x="${f(S.sl.x - R * 0.012)}" y="${f(S.sl.y0)}" width="${f(R * 0.024)}" height="${f(S.sl.y1 - S.sl.y0)}" rx="${f(R * 0.012)}" fill="${mix(p.socle, '#000000', 0.45)}"/>`;
+        const ky = S.sl.y0 + (S.sl.y1 - S.sl.y0) * (0.5 + p.pitch / 32); o += `<rect x="${f(S.sl.x - R * 0.045)}" y="${f(ky - R * 0.025)}" width="${f(R * 0.09)}" height="${f(R * 0.05)}" rx="${f(R * 0.01)}" fill="${mix(p.bras, '#000000', 0.1)}"/>`;
+        o += `<circle cx="${f(S.P.x)}" cy="${f(S.P.y)}" r="${f(R * 0.17)}" fill="${mix(p.socle, '#000000', 0.3)}"/><circle cx="${f(S.P.x)}" cy="${f(S.P.y)}" r="${f(R * 0.135)}" fill="${p.bras}"/>`;
+      }
+      o += `<circle cx="${f(S.cx)}" cy="${f(S.cy)}" r="${f(R * 1.005)}" fill="${S.pl ? mix(p.socle, '#000000', 0.55) : mix(p.fond, '#000000', 0.5)}"/>`;
+      // disque (repère tourné)
+      let d = `<g opacity="${f(1 - p.transparence)}"><circle r="${f(R)}" fill="${p.vinyle}"/>`;
+      if (p.motif === 'marbre') for (const s of S.marb) d += `<path d="M${s.pts.map((q) => f(q[0]) + ' ' + f(q[1])).join('L')}" fill="none" stroke="${s.t < 0.6 ? p.vinyle2 : mix(p.vinyle, p.vinyle2, 0.5)}" stroke-width="${f(s.w)}" stroke-linecap="round" opacity="${f(s.a)}"/>`;
+      else if (p.motif === 'eclats') for (const s of S.spl) d += `<circle cx="${f(s.x)}" cy="${f(s.y)}" r="${f(s.r)}" fill="${s.t < 0.7 ? p.vinyle2 : mix(p.vinyle2, p.etiquette, 0.6)}"/>`;
+      else if (p.motif === 'secteurs') { for (let i = 0; i < 16; i += 2) { const a = i * TAU / 16, b2 = (i + 1) * TAU / 16; d += `<path d="M0 0L${f(Math.cos(a) * R)} ${f(Math.sin(a) * R)}A${f(R)} ${f(R)} 0 0 1 ${f(Math.cos(b2) * R)} ${f(Math.sin(b2) * R)}Z" fill="${p.vinyle2}"/>`; } }
+      else if (p.motif === 'moities') d += `<path d="M0 ${f(-R)}A${f(R)} ${f(R)} 0 0 1 0 ${f(R)}Z" fill="${p.vinyle2}"/>`;
+      else if (p.motif === 'image') { d += `<circle r="${f(R)}" fill="${p.vinyle2}"/>`; for (let r = 0.45; r < 1; r += 0.11) d += `<circle r="${f(R * r)}" fill="none" stroke="${p.vinyle}" stroke-width="${f(R * 0.03)}" opacity="0.25"/>`; d += `<path fill-rule="evenodd" fill="${p.vinyle}" d="${lp(0, 0, R * 1.25)}"/>`; }
+      d += '</g>';
+      const dark = lum(p.vinyle) < 0.5 && p.motif === 'noir', step = Math.max(R * 0.0062 / p.sillons, (S.rOut - S.rIn) / 160);
+      let grooves = ''; for (let r = S.rIn; r <= S.rOut; r += step) { const u = (S.rOut - r) / (S.rOut - S.rIn); let ti = 0; while (ti < S.loud.length - 1 && u > S.tracks[ti + 1]) ti++; const e = Math.min(u - S.tracks[ti], S.tracks[ti + 1] - u) * (S.rOut - S.rIn); if (e < R * 0.006 && (ti > 0 || S.tracks[ti + 1] - u < u)) continue; grooves += `<circle r="${f(r)}" opacity="${f((0.18 + 0.32 * S.loud[ti]) * (dark ? 0.18 : 0.42))}"/>`; }
+      d += `<g fill="none" stroke="${dark ? '#ffffff' : '#000000'}" stroke-width="${f(Math.max(0.5, step * 0.42))}">${grooves}</g>`;
+      d += `<circle r="${f(S.rl)}" fill="${p.etiquette}"/><circle r="${f(S.rl * 0.93)}" fill="none" stroke="${p.encre}" stroke-opacity="0.55" stroke-width="${f(Math.max(1, S.rl * 0.012))}"/>`;
+      if (p.place === 'haut') d += `<path d="M${f(Math.cos(Math.PI * 0.22) * S.rl * 0.68)} ${f(Math.sin(Math.PI * 0.22) * S.rl * 0.68)}A${f(S.rl * 0.68)} ${f(S.rl * 0.68)} 0 0 1 ${f(Math.cos(Math.PI * 0.78) * S.rl * 0.68)} ${f(Math.sin(Math.PI * 0.78) * S.rl * 0.68)}" fill="none" stroke="${p.encre}" stroke-width="${f(S.rl * 0.035)}" stroke-linecap="round"/>`;
+      if (p.motif !== 'image') { const b = logoBox(); d += `<path fill-rule="evenodd" fill="${p.encre}" d="${lp(b.x, b.y, b.s)}"/>`; }
+      d += `<circle r="${f(S.hole)}" fill="${S.pl ? mix(p.socle, '#000000', 0.55) : mix(p.fond, '#000000', 0.5)}"/>`;
+      o += `<g transform="translate(${f(S.cx)} ${f(S.cy)}) rotate(${deg(S.th)})">${d}</g>`;
+      // reflets : secteurs empilés
+      let sh = ''; const A = p.reflet * (p.motif === 'noir' ? 0.42 : 0.32);
+      for (const base of [LA, LA + Math.PI]) for (const [wd, op] of [[0.46, 0.12], [0.36, 0.14], [0.27, 0.16], [0.19, 0.18], [0.12, 0.2], [0.07, 0.25], [0.035, 0.35], [0.015, 0.4]]) {
+        const a0 = base - wd, a1 = base + wd, ro = R * 0.99, ri = S.rl;
+        sh += `<path d="M${f(Math.cos(a0) * ri)} ${f(Math.sin(a0) * ri)}L${f(Math.cos(a0) * ro)} ${f(Math.sin(a0) * ro)}A${f(ro)} ${f(ro)} 0 0 1 ${f(Math.cos(a1) * ro)} ${f(Math.sin(a1) * ro)}L${f(Math.cos(a1) * ri)} ${f(Math.sin(a1) * ri)}A${f(ri)} ${f(ri)} 0 0 0 ${f(Math.cos(a0) * ri)} ${f(Math.sin(a0) * ri)}Z" fill="#ffffff" opacity="${f(A * op)}"/>`;
+      }
+      o += `<g transform="translate(${f(S.cx)} ${f(S.cy)})">${sh}<circle r="${f(R * 0.02)}" fill="${p.bras}"/></g>`;
+      if (S.pl) {
+        const a = S.a, u = [Math.cos(a), Math.sin(a)], n = [-u[1], u[0]], sp = stylus(a), P = S.P, v = [Math.cos(a - 0.38), Math.sin(a - 0.38)], vn = [-v[1], v[0]], hl = R * 0.15, H = [sp.x - v[0] * hl, sp.y - v[1] * hl];
+        const c0 = [P.x - u[0] * R * 0.16, P.y - u[1] * R * 0.16], c1 = [P.x - u[0] * R * 0.34, P.y - u[1] * R * 0.34], m1 = [P.x + (H[0] - P.x) * 0.45 + n[0] * R * 0.09, P.y + (H[1] - P.y) * 0.45 + n[1] * R * 0.09];
+        const q = (s, t) => [H[0] + v[0] * hl * s + vn[0] * R * 0.045 * t, H[1] + v[1] * hl * s + vn[1] * R * 0.045 * t], poly = (pts) => 'M' + pts.map((z) => f(z[0]) + ' ' + f(z[1])).join('L') + 'Z';
+        const off = R * (0.02 + 0.06 * S.lift);
+        const arm = (sh2) => `<path d="M${f(c0[0])} ${f(c0[1])}L${f(c1[0])} ${f(c1[1])}" stroke="${sh2 || mix(p.bras, '#000000', 0.25)}" stroke-width="${f(R * 0.09)}"/><path d="M${f(c0[0])} ${f(c0[1])}Q${f(m1[0])} ${f(m1[1])} ${f(H[0])} ${f(H[1])}" fill="none" stroke="${sh2 || p.bras}" stroke-width="${f(R * 0.022)}" stroke-linecap="round"/><path d="${poly([q(-0.05, -0.8), q(1.02, -1), q(1.02, 1), q(-0.05, 0.8)])}" fill="${sh2 || mix(p.bras, '#000000', 0.15)}"/>`;
+        o += `<g opacity="0.28" transform="translate(${f(off * 0.6)} ${f(off)})">${arm('#000000')}</g>${arm('')}<path d="${poly([q(0.45, -0.85), q(0.98, -0.85), q(0.98, 0.85), q(0.45, 0.85)])}" fill="${p.encre}"/><circle cx="${f(P.x)}" cy="${f(P.y)}" r="${f(R * 0.065)}" fill="${mix(p.bras, '#ffffff', 0.2)}"/>`;
+      }
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">${o}</svg>`;
+    }
+  </script>
+</body>
+</html>
