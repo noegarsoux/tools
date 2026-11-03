@@ -1,0 +1,15 @@
+{
+  "slug": "pantin",
+  "title": "Pantin",
+  "type": "motion",
+  "description": "Le pantin de carton accroché au mur : on tire la ficelle, bras et jambes se lèvent d’un coup et retombent en ballant. Pièces à rayures, pois ou losanges, logo au ventre.",
+  "tags": ["animation", "jouet", "physique", "interaction", "logo", "svg"],
+  "inspiration": [
+    "Les pantins de carton articulés par des attaches parisiennes",
+    "Les costumes d’Arlequin à losanges",
+    "Les jouets à ficelle des marchés de Noël"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}
