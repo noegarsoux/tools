@@ -1,0 +1,15 @@
+{
+  "slug": "jardin-zen",
+  "title": "Jardin zen",
+  "type": "motion",
+  "description": "Un râteau invisible repasse sans fin le gravier d'un jardin sec : sillons droits, vagues, damier ou spirale, anneaux autour des pierres et du logo.",
+  "tags": ["sillons", "lignes", "relief", "japon", "logo", "svg"],
+  "inspiration": [
+    "Le jardin sec du Ryōan-ji à Kyoto",
+    "Le jardin en damier du Tōfuku-ji de Mirei Shigemori",
+    "Les sillons ratissés chaque matin par les moines"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}
