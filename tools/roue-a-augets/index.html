@@ -1,0 +1,301 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Roue à augets</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Roue à augets : la roue à eau de Malkus. Chaque godet i (angle φ = θ + 2πi/n depuis le haut) reçoit le
+    // filet d'eau quand il passe sous le robinet et fuit en proportion de sa masse : dm/dt = Q·fenêtre(φ) − k·m.
+    // Le couple du poids, Σ m·sin φ, moins un frottement visqueux ν·ω, fait tourner la roue : I·dω/dt = Σ m sin φ − ν ω.
+    // Ce système est un modèle mécanique exact des équations de Lorenz : la roue tourne, ralentit, repart dans
+    // l'autre sens, sans jamais se répéter. Le tracé de fond porte ω en abscisse et Σ m cos φ en ordonnée : le papillon.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const BIE = PAL('biennale'), LUZ = PAL('luzern'), MEN = PAL('menthe');
+    const HIST = 2600, CAP = 7;
+
+    let vKey = '', logoM = null, logoKey = '', ptr = null, S = null, gKey = '', logoP = null, logoPK = '';
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.04, vignette: 0.3 },
+      hint: 'Glisser : faire tourner la roue · clic : ouvrir ou fermer le robinet · molette : débit',
+      notes: 'La roue à eau chaotique de Malkus et Howard : des godets percés sont accrochés à une roue, un filet d’eau remplit celui qui passe en haut. Selon le débit, la fuite et le frottement, la roue tourne régulièrement ou hésite, s’arrête et repart dans l’autre sens sans jamais se répéter. Au fond, la vitesse de la roue et la hauteur de son centre de masse dessinent le papillon de Lorenz.',
+      params: {
+        'Roue': {
+          augets: { type: 'range', label: 'Godets', min: 6, max: 24, step: 1, value: 12 },
+          debit: { type: 'range', label: 'Débit', min: 0, max: 2, step: 0.01, value: 1 },
+          fuite: { type: 'range', label: 'Fuite', min: 0.04, max: 0.4, step: 0.01, value: 0.1 },
+          frottement: { type: 'range', label: 'Frottement', min: 0.2, max: 5, step: 0.01, value: 1 },
+          vitesse: { type: 'range', label: 'Vitesse du temps', min: 0.2, max: 3, step: 0.01, value: 1 },
+          rayon: { type: 'range', label: 'Taille de la roue', min: 0.5, max: 1.15, step: 0.01, value: 0.85 },
+          gouttes: { type: 'toggle', label: 'Gouttes', value: true },
+          trace: { type: 'range', label: 'Papillon de Lorenz', min: 0, max: 1, step: 0.01, value: 0.6 },
+          image: { type: 'file', label: 'Image du logo', accept: 'image/*' },
+        },
+        'Couleurs': {
+          couleurs: { type: 'palette', label: 'Godets', value: ['#e5452a', '#2f5fd0', '#f2e640'] },
+          eau: { type: 'color', label: 'Eau', value: '#3d8fd6' },
+          roue: { type: 'color', label: 'Roue', value: '#2b2a2e' },
+          ligne: { type: 'color', label: 'Papillon', value: '#e5452a' },
+          fond: { type: 'color', label: 'Fond', value: '#efe9dd' },
+        },
+      },
+      presets: {
+        'Atelier': {},
+        'Chaos': { debit: 1.6, frottement: 0.7, fuite: 0.12, trace: 0.75 },
+        'Régulière': { frottement: 4.2, debit: 1, trace: 0.4 },
+        'Petite roue': { augets: 6, rayon: 0.7, couleurs: ['#16161a', '#e5452a'] },
+        'Grande roue': { augets: 24, rayon: 1.1, couleurs: ['#2f5fd0', '#16161a', '#e5452a', '#f2e640'] },
+        'Ralenti': { vitesse: 0.45, gouttes: true },
+        'Papillon': { trace: 1, vitesse: 2.4, debit: 1.3, ligne: '#2f5fd0', fond: '#f4f3f0' },
+        'Nuit': { fond: '#0f1420', roue: '#d8dde8', eau: '#6fc3f0', ligne: '#f2e640', couleurs: ['#f2b0c8', '#9dd3f0', '#f2e640'] },
+        'Biennale': { couleurs: [BIE[2], BIE[3], BIE[4]], roue: BIE[0], fond: BIE[1], ligne: BIE[2], eau: BIE[3] },
+        'Luzern': { couleurs: [LUZ[0], LUZ[1], LUZ[2]], roue: LUZ[4], fond: LUZ[3], ligne: LUZ[0], eau: LUZ[1] },
+        'Menthe': { couleurs: [MEN[2], MEN[3]], roue: MEN[0], fond: MEN[1], ligne: MEN[2], eau: MEN[3] },
+      },
+      brand(colors) {
+        const s = colors.slice().sort((a, b) => lum(a) - lum(b)), D = s[0], L = s[s.length - 1], mid = s.length > 2 ? s.slice(1, -1) : [D];
+        const sat = (c) => { const h = hex(c); return Math.max(...h) - Math.min(...h); }, vivid = mid.slice().sort((a, b) => sat(b) - sat(a))[0];
+        return { couleurs: mid, roue: D, fond: L, ligne: vivid, eau: mix(vivid, D, 0.2) };
+      },
+      pointer: {
+        down: (q) => { if (!S) return; ptr = { x: q.x, y: q.y, moved: 0, a: Math.atan2(q.x - S.cx, -(q.y - S.cy)), t: performance.now() }; S.grab = true; S.gw = 0; },
+        drag: (q) => {
+          if (!ptr || !S) return; ptr.moved = Math.max(ptr.moved, Math.hypot(q.x - ptr.x, q.y - ptr.y));
+          const a = Math.atan2(q.x - S.cx, -(q.y - S.cy)); let d = a - ptr.a; d = ((d + Math.PI) % TAU + TAU) % TAU - Math.PI;
+          const now = performance.now(), el = Math.max(0.008, (now - ptr.t) / 1000); ptr.a = a; ptr.t = now;
+          if (ptr.moved > 6) { S.th += d; S.gw = S.gw * 0.6 + 0.4 * d / el / Math.max(0.2, p.vitesse); }
+        },
+        up: () => { if (!S) return; if (ptr && ptr.moved <= 6) S.open = !S.open; else if (ptr) S.om = Math.max(-4, Math.min(4, S.gw)); S.grab = false; ptr = null; },
+        wheel: (q, dy) => app.set('debit', Math.max(0, Math.min(2, +(p.debit + (dy > 0 ? -0.1 : 0.1)).toFixed(2)))),
+      },
+      onChange(k) { if (['*', 'image'].includes(k)) logoKey = ''; if (k === '*' || k === 'augets') gKey = ''; },
+      export: { name: 'roue-a-augets', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    function hex(x) { const n = parseInt(x.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
+    function lum(x) { const c = hex(x); return (c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114) / 255; }
+    function mix(a, b, t) { const A = hex(a), C = hex(b); return '#' + A.map((v, i) => Math.round(v + (C[i] - v) * t).toString(16).padStart(2, '0')).join(''); }
+    function rgba(c, a) { const h = hex(c); return `rgba(${h[0]},${h[1]},${h[2]},${a})`; }
+    function rng(s) { return () => { s |= 0; s = (s + 0x6d2b79f5) | 0; let t = Math.imul(s ^ (s >>> 15), 1 | s); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+    const col = (i) => { const c = p.couleurs; return c.length ? c[((i % c.length) + c.length) % c.length] : '#e5452a'; };
+
+    function buildLogo() {
+      const img0 = p.image || app.logoImg, key = img0 ? (img0.src || 'c') : 'demo'; if (key === logoKey) return; logoKey = key; vKey = '';
+      const M = 200, c = document.createElement('canvas'); c.width = c.height = M; const x = c.getContext('2d', { willReadFrequently: true }), L = M * 0.94, cx = M / 2;
+      if (img0) { const iw = img0.naturalWidth || img0.width, ih = img0.naturalHeight || img0.height, s = L / Math.max(iw, ih); x.drawImage(img0, cx - iw * s / 2, cx - ih * s / 2, iw * s, ih * s); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(cx, cx, L * 0.48, 0, TAU); x.arc(cx, cx, L * 0.27, 0, TAU, true); x.fill('evenodd'); x.fillRect(cx - L * 0.07, cx - L * 0.5, L * 0.14, L); }
+      const d = x.getImageData(0, 0, M, M).data; let transp = 0; for (let i = 3; i < d.length; i += 4) if (d[i] < 128) transp++; const useA = transp > M * M * 0.05;
+      const F = new Float64Array(M * M); for (let i = 0; i < M * M; i++) { const o = i * 4, l = (d[o] * 0.2126 + d[o + 1] * 0.7152 + d[o + 2] * 0.0722) / 255; F[i] = useA ? d[o + 3] / 255 : (d[o + 3] / 255) * Math.min(1, Math.max(0, (0.75 - l) * 2)); }
+      { const G2 = new Float64Array(M * M); for (let j = 1; j < M - 1; j++) for (let i = 1; i < M - 1; i++) { let a = 0; for (let b = -1; b <= 1; b++) for (let c = -1; c <= 1; c++) a += F[(j + b) * M + i + c] * (b || c ? (b && c ? 1 : 2) : 4); G2[j * M + i] = a / 16; } F.set(G2); }
+      for (let k = 0; k < M; k++) F[k] = F[(M - 1) * M + k] = F[k * M] = F[k * M + M - 1] = 0;
+      logoM = contours(F, M, M, 0.5, 0, 0, 1).filter((c) => c.closed && c.pts.length > 6).map((c) => chaikin(chaikin(c.pts, true), true).map((q) => [q[0] / M - 0.5, q[1] / M - 0.5]));
+    }
+    // carrés marchants + chaînage
+    function contours(F, nx, ny, lev, ox, oy, cs) {
+      const pt = new Map(), adj = new Map();
+      const P = (id) => { let q = pt.get(id); if (q) return q; const cell = id >> 1, i = cell % nx, j = (cell - i) / nx; let a, b, ax, ay, bx, by; if (id & 1) { a = F[j * nx + i]; b = F[(j + 1) * nx + i]; ax = bx = i; ay = j; by = j + 1; } else { a = F[j * nx + i]; b = F[j * nx + i + 1]; ay = by = j; ax = i; bx = i + 1; } const t = (lev - a) / (b - a || 1e-9); q = [ox + (ax + (bx - ax) * t) * cs, oy + (ay + (by - ay) * t) * cs]; pt.set(id, q); return q; };
+      const link = (a, b) => { (adj.get(a) || adj.set(a, []).get(a)).push(b); (adj.get(b) || adj.set(b, []).get(b)).push(a); };
+      for (let j = 0; j < ny - 1; j++) for (let i = 0; i < nx - 1; i++) {
+        const A = F[j * nx + i] > lev, B = F[j * nx + i + 1] > lev, C = F[(j + 1) * nx + i + 1] > lev, D = F[(j + 1) * nx + i] > lev, idx = A | (B << 1) | (C << 2) | (D << 3);
+        if (idx === 0 || idx === 15) continue;
+        const T = (j * nx + i) * 2, R = (j * nx + i + 1) * 2 + 1, Bo = ((j + 1) * nx + i) * 2, Le = (j * nx + i) * 2 + 1;
+        const ctr = (F[j * nx + i] + F[j * nx + i + 1] + F[(j + 1) * nx + i + 1] + F[(j + 1) * nx + i]) / 4 > lev;
+        switch (idx) {
+          case 1: case 14: link(Le, T); break; case 2: case 13: link(T, R); break; case 3: case 12: link(Le, R); break;
+          case 4: case 11: link(R, Bo); break; case 6: case 9: link(T, Bo); break; case 7: case 8: link(Le, Bo); break;
+          case 5: if (ctr) { link(Le, Bo); link(T, R); } else { link(Le, T); link(R, Bo); } break;
+          case 10: if (ctr) { link(Le, T); link(R, Bo); } else { link(Le, Bo); link(T, R); } break;
+        }
+      }
+      const seen = new Set(), out = [];
+      const walk = (s) => { const L = [s]; seen.add(s); let cur = s; for (;;) { const nb = (adj.get(cur) || []).find((x) => !seen.has(x)); if (nb === undefined) break; seen.add(nb); L.push(nb); cur = nb; } return L; };
+      for (const [id, nb] of adj) if (nb.length === 1 && !seen.has(id)) out.push({ pts: walk(id).map(P), closed: false });
+      for (const [id] of adj) if (!seen.has(id)) out.push({ pts: walk(id).map(P), closed: true });
+      return out;
+    }
+    function chaikin(pts, closed) {
+      const o = []; const n = pts.length; for (let k = 0; k < (closed ? n : n - 1); k++) { const a = pts[k], b = pts[(k + 1) % n]; o.push([a[0] * 0.75 + b[0] * 0.25, a[1] * 0.75 + b[1] * 0.25], [a[0] * 0.25 + b[0] * 0.75, a[1] * 0.25 + b[1] * 0.75]); }
+      if (!closed) { o.unshift(pts[0]); o.push(pts[n - 1]); } return o;
+    }
+
+    function logoPath() {
+      if (!logoM) return null; if (logoP && logoPK === logoKey) return logoP; logoPK = logoKey; logoP = new Path2D();
+      for (const L of logoM) { logoP.moveTo(L[0][0], L[0][1]); for (let k = 1; k < L.length; k++) logoP.lineTo(L[k][0], L[k][1]); logoP.closePath(); }
+      return logoP;
+    }
+
+    // ——— physique ———
+    function build(w, h) {
+      const n = Math.round(p.augets), R = rng((app.seed || 1) * 7919 + n);
+      const old = S;
+      S = { w, h, n, th: old ? old.th : R() * TAU, w0: 0, m: new Float64Array(n), open: old ? old.open : true, grab: false, gw: 0, hist: [], sc: { x: 3, y: 12 }, drops: [], rip: [], acc: new Float64Array(n), t: 0 };
+      S.om = old ? old.om : (R() - 0.5) * 0.4;
+      for (let i = 0; i < n; i++) S.m[i] = old && old.n === n ? old.m[i] : R() * 2;
+      layout();
+      // on laisse la roue tourner un moment pour que le papillon soit déjà dessiné
+      if (!old) for (let k = 0; k < 900; k++) step(0.05, true);
+    }
+    function layout() {
+      const { w, h } = S, u0 = Math.min(w, h);
+      S.cx = w * 0.5; S.cy = h * 0.5; S.R = u0 * 0.27 * p.rayon;
+      S.bw = Math.min(S.R * TAU / S.n * 0.7, S.R * 0.34); S.bh = S.bw * 1.1;
+      S.pipeY = S.cy - S.R - S.bh * 1.5; S.floor = Math.min(h - u0 * 0.05, S.cy + S.R + S.bh * 1.6);
+      S.lw = Math.max(1, u0 * 0.004);
+    }
+    function step(T, quiet) {
+      // T : durée de simulation (unités de temps du modèle), sous-pas fixes
+      const n = S.n, Q = 3 * p.debit * (S.open ? 1 : 0), k = p.fuite, nu = p.frottement, sub = Math.max(1, Math.ceil(T / 0.004)), dt = T / sub, win = TAU / n;
+      for (let s = 0; s < sub; s++) {
+        let tq = 0;
+        for (let i = 0; i < n; i++) {
+          const a = S.th + TAU * i / n; let f = ((a + Math.PI) % TAU + TAU) % TAU - Math.PI;
+          const inn = Math.max(0, 1 - Math.abs(f) / win), out = k * S.m[i];
+          S.m[i] = Math.min(CAP, S.m[i] + (Q * inn - out) * dt);
+          if (!quiet) S.acc[i] += out * dt;
+          tq += S.m[i] * Math.sin(a);
+        }
+        if (!S.grab) { S.om += (tq - nu * S.om) * dt; S.th += S.om * dt; }
+        S.t += dt;
+      }
+      let z = 0; for (let i = 0; i < n; i++) z += S.m[i] * Math.cos(S.th + TAU * i / n);
+      if (S.grab) return; const wv = S.om; S.hist.push(wv, z); if (S.hist.length > HIST * 2) S.hist.splice(0, S.hist.length - HIST * 2);
+      // échelle du papillon : suit lentement l'amplitude
+      S.sc.x += (Math.max(1.5, Math.abs(wv) * 1.3) - S.sc.x) * (Math.abs(wv) * 1.3 > S.sc.x ? 0.05 : 0.002);
+      S.sc.y += (Math.max(6, Math.abs(z) * 1.3) - S.sc.y) * (Math.abs(z) * 1.3 > S.sc.y ? 0.05 : 0.002);
+    }
+    const pivot = (i) => { const a = S.th + TAU * i / S.n; return [S.cx + S.R * Math.sin(a), S.cy - S.R * Math.cos(a)]; };
+    function bucket(px, py) {
+      const { bw, bh } = S, y0 = py - bh * 0.42, y1 = py + bh * 0.58, a = bw / 2, b = bw * 0.36;
+      return { y0, y1, a, b, wAt: (y) => b + (a - b) * (y1 - y) / (y1 - y0) };
+    }
+    // cible du filet : premier godet sous le robinet, sinon le bassin
+    function streamEnd() {
+      let best = S.floor, bi = -1;
+      for (let i = 0; i < S.n; i++) { const [px, py] = pivot(i), B = bucket(px, py); if (Math.abs(px - S.cx) < B.a * 0.9 && B.y1 > S.pipeY) { const fill = S.m[i] / CAP, yy = Math.max(B.y0, B.y1 - fill * (B.y1 - B.y0)); if (B.y0 > S.pipeY && yy < best) { best = yy; bi = i; } } }
+      // le moyeu arrête le filet
+      if (bi < 0) best = Math.min(best, S.cy - S.R * 0.17);
+      return { y: best, i: bi };
+    }
+
+    function updateDrops(dt) {
+      const g = Math.min(S.w, S.h) * 2.4;
+      if (p.gouttes) for (let i = 0; i < S.n; i++) {
+        const per = 0.9; while (S.acc[i] > per) { S.acc[i] -= per; const [px, py] = pivot(i), B = bucket(px, py); S.drops.push({ x: px + (Math.random() - 0.5) * B.b, y: B.y1, vy: 0, r: S.bw * (0.05 + Math.random() * 0.03) }); }
+      } else S.acc.fill(0);
+      for (const d of S.drops) { d.vy += g * dt; d.y += d.vy * dt; if (d.y > S.floor) { d.dead = 1; if (S.rip.length < 60) S.rip.push({ x: d.x, t: 0 }); } }
+      S.drops = S.drops.filter((d) => !d.dead).slice(-400);
+      for (const r of S.rip) r.t += dt; S.rip = S.rip.filter((r) => r.t < 1.2);
+    }
+
+    // ——— dessin ———
+    function traceChunks() {
+      // découpe l'historique en tronçons d'opacité croissante
+      const H = S.hist, N = H.length / 2, K = 10, out = [], { cx } = S, W = S.w * 0.46, Hh = S.h * 0.4, cy = S.h * 0.5;
+      const X = (v) => cx + v / S.sc.x * W, Y = (z) => cy - z / S.sc.y * Hh;
+      for (let c = 0; c < K; c++) { const a = Math.floor(N * c / K), b = Math.min(N - 1, Math.floor(N * (c + 1) / K)); const pts = []; for (let j = a; j <= b; j++) pts.push([X(H[j * 2]), Y(H[j * 2 + 1])]); out.push({ pts, alpha: (c + 1) / K }); }
+      return out;
+    }
+    function draw(x) {
+      const { w, h, cx, cy, R, n, lw, bw } = S, dk = lum(p.fond) < 0.45, ink = p.roue;
+      // papillon de Lorenz
+      if (p.trace > 0 && S.hist.length > 4) {
+        x.lineJoin = 'round'; x.lineCap = 'round'; x.lineWidth = lw * 1.1;
+        for (const c of traceChunks()) { x.strokeStyle = rgba(p.ligne, c.alpha * c.alpha * p.trace * 0.8); x.beginPath(); c.pts.forEach((q, j) => j ? x.lineTo(q[0], q[1]) : x.moveTo(q[0], q[1])); x.stroke(); }
+        const H = S.hist, L = H.length; const X = cx + H[L - 2] / S.sc.x * w * 0.46, Y = h * 0.5 - H[L - 1] / S.sc.y * h * 0.4;
+        x.fillStyle = rgba(p.ligne, Math.min(1, p.trace * 1.4)); x.beginPath(); x.arc(X, Y, lw * 3, 0, TAU); x.fill();
+      }
+      // pieds
+      x.strokeStyle = ink; x.lineWidth = lw * 3; x.lineCap = 'round';
+      x.beginPath(); x.moveTo(cx, cy); x.lineTo(cx - R * 0.75, S.floor); x.moveTo(cx, cy); x.lineTo(cx + R * 0.75, S.floor); x.stroke();
+      // bassin
+      const wat = mix(p.eau, p.fond, 0.35);
+      x.fillStyle = rgba(wat, 0.55); x.fillRect(cx - R * 1.6, S.floor, R * 3.2, h - S.floor + 2);
+      x.strokeStyle = p.eau; x.lineWidth = lw * 1.2; x.beginPath(); x.moveTo(cx - R * 1.6, S.floor); x.lineTo(cx + R * 1.6, S.floor); x.stroke();
+      x.lineWidth = lw; for (const r of S.rip) { const k = r.t / 1.2; x.strokeStyle = rgba(p.eau, 1 - k); x.beginPath(); x.ellipse(r.x, S.floor, bw * (0.1 + k * 0.9), bw * (0.03 + k * 0.12), 0, 0, TAU); x.stroke(); }
+      // jante et rayons
+      x.strokeStyle = ink; x.lineWidth = lw * 1.4; x.beginPath();
+      for (let i = 0; i < n; i++) { const [px, py] = pivot(i); x.moveTo(cx, cy); x.lineTo(px, py); } x.stroke();
+      x.lineWidth = lw * 2.6; x.beginPath(); x.arc(cx, cy, R, 0, TAU); x.stroke();
+      x.lineWidth = lw * 1.2; x.beginPath(); x.arc(cx, cy, R * 0.62, 0, TAU); x.stroke();
+      // filet d'eau
+      const E = streamEnd(), sw = bw * 0.2 * Math.sqrt(Math.max(0, p.debit));
+      if (S.open && p.debit > 0) {
+        x.fillStyle = p.eau; x.fillRect(cx - sw / 2, S.pipeY, sw, E.y - S.pipeY);
+        x.fillStyle = rgba('#ffffff', 0.35); const ph = (S.t * 3) % 1, seg = bw * 0.5;
+        for (let y = S.pipeY + ph * seg; y < E.y - seg * 0.3; y += seg) x.fillRect(cx - sw * 0.15, y, sw * 0.18, seg * 0.35);
+      }
+      // godets
+      for (let i = 0; i < n; i++) {
+        const [px, py] = pivot(i), B = bucket(px, py), c = col(i), fill = S.m[i] / CAP;
+        x.fillStyle = rgba(c, dk ? 0.22 : 0.16); x.beginPath(); x.moveTo(px - B.a, B.y0); x.lineTo(px + B.a, B.y0); x.lineTo(px + B.b, B.y1); x.lineTo(px - B.b, B.y1); x.closePath(); x.fill();
+        if (fill > 0.004) { const ys = B.y1 - Math.min(1, fill) * (B.y1 - B.y0), wy = B.wAt(ys); x.fillStyle = p.eau; x.beginPath(); x.moveTo(px - B.b, B.y1); x.lineTo(px + B.b, B.y1); x.lineTo(px + wy, ys); x.lineTo(px - wy, ys); x.closePath(); x.fill(); x.fillStyle = rgba('#ffffff', 0.3); x.fillRect(px - wy, ys, wy * 2, Math.max(1, lw * 0.8)); }
+        x.strokeStyle = c; x.lineWidth = lw * 1.5; x.lineJoin = 'round'; x.beginPath(); x.moveTo(px - B.a, B.y0); x.lineTo(px - B.b, B.y1); x.lineTo(px + B.b, B.y1); x.lineTo(px + B.a, B.y0); x.stroke();
+        x.fillStyle = c; x.fillRect(px - B.a - lw, B.y0 - lw * 1.2, B.a * 2 + lw * 2, lw * 2.6);
+        x.fillStyle = ink; x.beginPath(); x.arc(px, py, lw * 1.8, 0, TAU); x.fill();
+      }
+      // gouttes
+      x.fillStyle = p.eau; for (const d of S.drops) { x.beginPath(); x.ellipse(d.x, d.y, d.r, d.r * (1 + Math.min(1.5, d.vy / 900)), 0, 0, TAU); x.fill(); }
+      // moyeu au logo
+      const hr = R * 0.17; x.fillStyle = ink; x.beginPath(); x.arc(cx, cy, hr, 0, TAU); x.fill();
+      const lp = logoPath(); if (lp) { x.save(); x.translate(cx, cy); x.rotate(S.th); x.scale(hr * 1.45, hr * 1.45); x.fillStyle = p.fond; x.fill(lp, 'evenodd'); x.restore(); }
+      // robinet
+      const pw = Math.max(bw * 0.34, lw * 6);
+      x.fillStyle = ink; x.fillRect(cx - pw * 0.6, S.pipeY - pw * 1.6, w - cx + pw, pw); x.fillRect(cx - pw * 0.6, S.pipeY - pw * 1.6, pw * 1.2, pw * 1.6);
+      // volant du robinet : croix droite ouverte, en biais fermée
+      const vx = cx + pw * 1.6, vy = S.pipeY - pw * 1.1, vr = pw * 0.9, va = S.open ? 0 : Math.PI / 4;
+      x.fillStyle = p.fond; x.strokeStyle = ink; x.lineWidth = lw * 1.6; x.beginPath(); x.arc(vx, vy, vr, 0, TAU); x.fill(); x.stroke();
+      x.beginPath(); for (let k = 0; k < 2; k++) { const a = va + k * Math.PI / 2; x.moveTo(vx - Math.cos(a) * vr, vy - Math.sin(a) * vr); x.lineTo(vx + Math.cos(a) * vr, vy + Math.sin(a) * vr); } x.stroke();
+    }
+
+    app.loop((t, dt) => {
+      dt = Math.min(1 / 20, dt || 0);
+      const { w, h, dpr } = app.size; buildLogo();
+      const key = [w, h, app.seed, Math.round(p.augets)].join('|'); if (!S || key !== gKey) { const kept = S && S.n === Math.round(p.augets) && gKey; if (!kept) S = null; gKey = key; build(w, h); }
+      layout();
+      if (!app.thumbnail) { step(dt * p.vitesse, false); updateDrops(dt); }
+      ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.fillStyle = p.fond; ctx.fillRect(0, 0, canvas.width, canvas.height); ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      draw(ctx);
+      app.finish(ctx);
+    });
+
+    // ——— SVG ———
+    function toSVG() {
+      const { w, h } = app.size, f = (v) => +v.toFixed(2), { cx, cy, R, n, lw, bw } = S, ink = p.roue, dk = lum(p.fond) < 0.45;
+      let o = `<rect width="100%" height="100%" fill="${p.fond}"/>`;
+      if (p.trace > 0 && S.hist.length > 4) for (const c of traceChunks()) { const st = Math.max(1, Math.floor(c.pts.length / 200)); let d = ''; c.pts.forEach((q, j) => { if (j % st === 0 || j === c.pts.length - 1) d += (d ? 'L' : 'M') + f(q[0]) + ' ' + f(q[1]); }); o += `<path d="${d}" fill="none" stroke="${p.ligne}" stroke-opacity="${f(c.alpha * c.alpha * p.trace * 0.8)}" stroke-width="${f(lw * 1.1)}" stroke-linejoin="round" stroke-linecap="round"/>`; }
+      o += `<path d="M${f(cx)} ${f(cy)}L${f(cx - R * 0.75)} ${f(S.floor)}M${f(cx)} ${f(cy)}L${f(cx + R * 0.75)} ${f(S.floor)}" stroke="${ink}" stroke-width="${f(lw * 3)}" stroke-linecap="round" fill="none"/>`;
+      o += `<rect x="${f(cx - R * 1.6)}" y="${f(S.floor)}" width="${f(R * 3.2)}" height="${f(h - S.floor)}" fill="${mix(p.eau, p.fond, 0.35)}" fill-opacity="0.55"/><path d="M${f(cx - R * 1.6)} ${f(S.floor)}H${f(cx + R * 1.6)}" stroke="${p.eau}" stroke-width="${f(lw * 1.2)}"/>`;
+      let sp = ''; for (let i = 0; i < n; i++) { const [px, py] = pivot(i); sp += `M${f(cx)} ${f(cy)}L${f(px)} ${f(py)}`; }
+      o += `<path d="${sp}" stroke="${ink}" stroke-width="${f(lw * 1.4)}" fill="none"/><circle cx="${f(cx)}" cy="${f(cy)}" r="${f(R)}" fill="none" stroke="${ink}" stroke-width="${f(lw * 2.6)}"/><circle cx="${f(cx)}" cy="${f(cy)}" r="${f(R * 0.62)}" fill="none" stroke="${ink}" stroke-width="${f(lw * 1.2)}"/>`;
+      const E = streamEnd(), sw = bw * 0.2 * Math.sqrt(Math.max(0, p.debit));
+      if (S.open && p.debit > 0) o += `<rect x="${f(cx - sw / 2)}" y="${f(S.pipeY)}" width="${f(sw)}" height="${f(E.y - S.pipeY)}" fill="${p.eau}"/>`;
+      for (let i = 0; i < n; i++) {
+        const [px, py] = pivot(i), B = bucket(px, py), c = col(i), fill = S.m[i] / CAP;
+        o += `<path d="M${f(px - B.a)} ${f(B.y0)}H${f(px + B.a)}L${f(px + B.b)} ${f(B.y1)}H${f(px - B.b)}Z" fill="${c}" fill-opacity="${dk ? 0.22 : 0.16}"/>`;
+        if (fill > 0.004) { const ys = B.y1 - Math.min(1, fill) * (B.y1 - B.y0), wy = B.wAt(ys); o += `<path d="M${f(px - B.b)} ${f(B.y1)}H${f(px + B.b)}L${f(px + wy)} ${f(ys)}H${f(px - wy)}Z" fill="${p.eau}"/>`; }
+        o += `<path d="M${f(px - B.a)} ${f(B.y0)}L${f(px - B.b)} ${f(B.y1)}H${f(px + B.b)}L${f(px + B.a)} ${f(B.y0)}" fill="none" stroke="${c}" stroke-width="${f(lw * 1.5)}" stroke-linejoin="round"/><rect x="${f(px - B.a - lw)}" y="${f(B.y0 - lw * 1.2)}" width="${f(B.a * 2 + lw * 2)}" height="${f(lw * 2.6)}" fill="${c}"/><circle cx="${f(px)}" cy="${f(py)}" r="${f(lw * 1.8)}" fill="${ink}"/>`;
+      }
+      for (const d of S.drops) o += `<circle cx="${f(d.x)}" cy="${f(d.y)}" r="${f(d.r)}" fill="${p.eau}"/>`;
+      const hr = R * 0.17; o += `<circle cx="${f(cx)}" cy="${f(cy)}" r="${f(hr)}" fill="${ink}"/>`;
+      if (logoM) { let lp = ''; for (const L of logoM) { const st = Math.max(1, Math.floor(L.length / 120)); lp += 'M' + f(L[0][0] * 100) + ' ' + f(L[0][1] * 100); for (let k = st; k < L.length; k += st) lp += 'L' + f(L[k][0] * 100) + ' ' + f(L[k][1] * 100); lp += 'Z'; } o += `<path d="${lp}" transform="translate(${f(cx)} ${f(cy)}) rotate(${f(S.th * 180 / Math.PI)}) scale(${f(hr * 1.45 / 100)})" fill="${p.fond}" fill-rule="evenodd"/>`; }
+      const pw = Math.max(bw * 0.34, lw * 6);
+      o += `<rect x="${f(cx - pw * 0.6)}" y="${f(S.pipeY - pw * 1.6)}" width="${f(w - cx + pw)}" height="${f(pw)}" fill="${ink}"/><rect x="${f(cx - pw * 0.6)}" y="${f(S.pipeY - pw * 1.6)}" width="${f(pw * 1.2)}" height="${f(pw * 1.6)}" fill="${ink}"/>`;
+      { const vx = cx + pw * 1.6, vy = S.pipeY - pw * 1.1, vr = pw * 0.9, va = S.open ? 0 : Math.PI / 4; let d = ''; for (let k = 0; k < 2; k++) { const a = va + k * Math.PI / 2; d += `M${f(vx - Math.cos(a) * vr)} ${f(vy - Math.sin(a) * vr)}L${f(vx + Math.cos(a) * vr)} ${f(vy + Math.sin(a) * vr)}`; } o += `<circle cx="${f(vx)}" cy="${f(vy)}" r="${f(vr)}" fill="${p.fond}" stroke="${ink}" stroke-width="${f(lw * 1.6)}"/><path d="${d}" stroke="${ink}" stroke-width="${f(lw * 1.6)}"/>`; }
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">${o}</svg>`;
+    }
+  </script>
+</body>
+</html>

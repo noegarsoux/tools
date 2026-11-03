@@ -1,0 +1,15 @@
+{
+  "slug": "roue-a-augets",
+  "title": "Roue à augets",
+  "type": "motion",
+  "description": "La roue à eau chaotique de Malkus : les godets se remplissent et fuient, la roue hésite et repart dans l’autre sens en dessinant le papillon de Lorenz.",
+  "tags": ["animation", "physique", "chaos", "interaction", "logo", "svg"],
+  "inspiration": [
+    "La roue à eau de Willem Malkus et Lou Howard, modèle mécanique des équations de Lorenz",
+    "Les roues à augets des moulins",
+    "Le papillon de Lorenz tracé par la vitesse et le centre de masse"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}
