@@ -1,0 +1,15 @@
+{
+  "slug": "bouchons",
+  "title": "Bouchons",
+  "type": "motion",
+  "description": "Des voitures sur une route en boucle, autour d'un cercle ou du logo : sans cause, des bouchons naissent et remontent la file, et leur diagramme espace-temps se raye.",
+  "tags": ["trafic", "automate", "diagramme", "mouvement", "logo", "svg"],
+  "inspiration": [
+    "Nagel et Schreckenberg, automate cellulaire du trafic routier (1992)",
+    "Sugiyama et al., l'expérience des bouchons fantômes sur un anneau (2008)",
+    "Diagrammes espace-temps des ingénieurs du trafic"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}
