@@ -1,0 +1,15 @@
+{
+  "slug": "berceau-de-newton",
+  "title": "Berceau de Newton",
+  "type": "motion",
+  "description": "Un berceau de Newton aux couleurs de la marque : billes chromées ou laquées suspendues à leurs fils, chocs qui traversent la rangée, et billes qu'on soulève soi-même.",
+  "tags": ["physique", "pendule", "chrome", "interaction", "logo", "svg"],
+  "inspiration": [
+    "Le pendule de Newton des bureaux, ses billes d'acier et ses fils en V",
+    "La conservation de la quantité de mouvement rendue visible",
+    "Les reflets du chrome qui déforment la pièce"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}
