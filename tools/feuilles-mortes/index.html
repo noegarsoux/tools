@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Feuilles mortes</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Feuilles mortes : une feuille qui tombe plane d'un côté puis de l'autre, comme un pendule. On la décrit par une
+    // phase φ qui avance : la vitesse latérale suit cos φ, la vitesse de chute ralentit au bout de chaque balancement,
+    // la feuille penche (angle) et se retourne (largeur apparente = cos de sa bascule). Au sol, elles s'empilent sur
+    // une ligne d'horizon qui monte là où elles tombent. Avec le logo, une partie des feuilles vise un point du logo et
+    // s'y pose : le dessin se remplit, reste un moment, puis une rafale balaie tout et l'on recommence.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const BIEN = PAL('biennale'), MEN = PAL('menthe'), KB = PAL('kegelbahn');
+    const SHAPES = {
+      ovale: 'M0 -0.5C0.32 -0.3 0.3 0.22 0 0.46C-0.3 0.22 -0.32 -0.3 0 -0.5ZM-0.025 0.42H0.025V0.62H-0.025Z',
+      ginkgo: 'M0.025 0.16C0.28 0.04 0.52 -0.14 0.5 -0.32Q0.27 -0.5 0.05 -0.4L0 -0.28L-0.05 -0.4Q-0.27 -0.5 -0.5 -0.32C-0.52 -0.14 -0.28 0.04 -0.025 0.16L-0.02 0.6H0.02Z',
+      erable: 'M0 -0.52L0.08 -0.3L0.2 -0.36L0.17 -0.16L0.44 -0.22L0.36 -0.06L0.48 0.02L0.24 0.12L0.28 0.24L0.06 0.2L0.03 0.42L0.03 0.62H-0.03L-0.03 0.42L-0.06 0.2L-0.28 0.24L-0.24 0.12L-0.48 0.02L-0.36 -0.06L-0.44 -0.22L-0.17 -0.16L-0.2 -0.36L-0.08 -0.3Z',
+    };
+
+    let simT = 0, leaves = [], R = null, rKey = '', pile = null, targets = [], logoState = { full: -1, sweep: -1 }, ptr = null, spawnAcc = 0, logoM = null, logoKey = '', lastW = 0, lastH = 0;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.035, vignette: 0.14 },
+      hint: 'Glissez pour souffler sur les feuilles · clic : secouer une branche · molette : taille des feuilles',
+      notes: 'Une feuille ne tombe jamais droit. Elle glisse d\'un côté, ralentit, bascule et repart de l\'autre, en se retournant parfois : les physiciens parlent de chute en « feuille morte », un balancement entre planer et culbuter. Chaque feuille suit ici ce mouvement, poussée par un vent qui tourne doucement, puis se pose sur le tapis qui s\'épaissit au sol. Soufflez avec le doigt pour soulever le tapis, ou cliquez pour secouer une branche. Avec le logo, une partie des feuilles va se ranger à sa place : le dessin se remplit feuille après feuille, reste un instant, puis une rafale balaie tout.',
+      params: {
+        'Feuilles': {
+          quantite: { type: 'range', label: 'Feuilles par seconde', min: 1, max: 60, step: 1, value: 14 },
+          taille: { type: 'range', label: 'Taille', min: 0.015, max: 0.1, step: 0.001, value: 0.04 },
+          forme: { type: 'select', label: 'Essence', options: { melange: 'Mélange', ovale: 'Bouleau', ginkgo: 'Ginkgo', erable: 'Érable' }, value: 'melange' },
+          tapis: { type: 'range', label: 'Feuilles au sol (max)', min: 50, max: 1500, step: 10, value: 600 },
+        },
+        'Chute': {
+          vitesse: { type: 'range', label: 'Vitesse de chute', min: 0.2, max: 2, step: 0.01, value: 0.8 },
+          flottement: { type: 'range', label: 'Balancement', min: 0, max: 1.5, step: 0.01, value: 0.8 },
+          vent: { type: 'range', label: 'Vent', min: -1, max: 1, step: 0.01, value: 0.2 },
+          rafales: { type: 'range', label: 'Rafales', min: 0, max: 1, step: 0.01, value: 0.4 },
+        },
+        'Logo en feuilles': {
+          logo: { type: 'toggle', label: 'Inclure le logo', value: false },
+          tailleLogo: { type: 'range', label: 'Taille du logo', min: 0.3, max: 1, step: 0.01, value: 0.7, show: (q) => q.logo },
+          pause: { type: 'range', label: 'Pause avant la rafale (s)', min: 1, max: 30, step: 0.5, value: 6, show: (q) => q.logo },
+          image: { type: 'file', label: 'Logo', accept: 'image/*', show: (q) => q.logo },
+        },
+        'Couleurs': {
+          fond: { type: 'color', label: 'Fond', value: '#efe6d6' },
+          sol: { type: 'color', label: 'Sol', value: '#d9ccb4' },
+          couleurs: { type: 'palette', label: 'Feuilles', value: ['#c4512b', '#e08a2e', '#efbd3c', '#8c3a22', '#a6a03c'] },
+          accent: { type: 'color', label: 'Feuilles du logo', value: '#7a2416', show: (q) => q.logo },
+        },
+      },
+      presets: {
+        'Automne': {},
+        'Ginkgo': { forme: 'ginkgo', couleurs: ['#f2c230', '#e8b41f', '#f6d55c', '#d99a14'], fond: '#e9eef0', sol: '#cfd8dc', quantite: 22 },
+        'Érables': { forme: 'erable', couleurs: ['#b8231a', '#d9481f', '#e57b25', '#8a1c14'], taille: 0.05, fond: '#f3ead9' },
+        'Bourrasque': { vent: 0.85, rafales: 1, quantite: 30, flottement: 1.2, vitesse: 1.1 },
+        'Lent': { vitesse: 0.35, flottement: 1.4, quantite: 6, taille: 0.06, vent: 0 },
+        'Nuit': { fond: '#14161c', sol: '#1f222b', couleurs: ['#c4512b', '#e08a2e', '#efbd3c', '#6e2a1c'], quantite: 18 },
+        'Logo': { logo: true, quantite: 40, taille: 0.03, tapis: 300, vent: 0.1, accent: '#7a2416' },
+        'Biennale': { fond: BIEN[0], sol: mix(BIEN[0], BIEN[1], 0.08), couleurs: [BIEN[2], BIEN[3], BIEN[4]], accent: BIEN[1], forme: 'ovale' },
+        'Menthe': { fond: MEN[0], sol: mix(MEN[0], MEN[3], 0.25), couleurs: [MEN[2], MEN[3], MEN[1]], accent: MEN[1], forme: 'ginkgo' },
+        'Kegelbahn': { fond: KB[0], sol: '#141010', couleurs: KB.slice(1), accent: KB[3], forme: 'erable' },
+      },
+      brand(colors) {
+        const s = colors.slice().sort((a, b) => lum(a) - lum(b)), L = s[s.length - 1], D = s[0];
+        return { fond: L, sol: mix(L, D, 0.12), couleurs: s.length > 2 ? s.slice(0, -1) : [D, mix(D, L, 0.5)], accent: D };
+      },
+      pointer: {
+        down: (q) => { ptr = { x: q.x, y: q.y, vx: 0, vy: 0, t: simT, moved: 0 }; },
+        drag: (q) => { if (!ptr) return; const dt = Math.max(1e-3, simT - ptr.t); ptr.vx = ptr.vx * 0.5 + 0.5 * (q.x - ptr.x) / dt; ptr.vy = ptr.vy * 0.5 + 0.5 * (q.y - ptr.y) / dt; ptr.moved += Math.hypot(q.x - ptr.x, q.y - ptr.y); ptr.x = q.x; ptr.y = q.y; ptr.t = simT; },
+        up: () => { if (ptr && ptr.moved < 6) for (let k = 0; k < 18; k++) { spawn(ptr.x + (R() - 0.5) * lastW * 0.12, ptr.y + (R() - 0.5) * lastH * 0.08, false); const L = leaves[leaves.length - 1], a = R() * TAU, m = Math.min(lastW, lastH); L.vx = Math.cos(a) * m * (0.2 + R() * 0.5); L.vy = Math.sin(a) * m * 0.3 - m * 0.2; L.rate *= 0.6 + R() * 0.8; } ptr = null; },
+        wheel: (q, dy) => app.set('taille', Math.max(0.015, Math.min(0.1, +(p.taille * (dy > 0 ? 0.92 : 1.08)).toFixed(3)))),
+      },
+      onChange(k) { if (['*', 'logo', 'image'].includes(k)) logoKey = ''; },
+      export: { name: 'feuilles-mortes', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    function hex(x) { const n = parseInt(x.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
+    function lum(x) { const c = hex(x); return (c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114) / 255; }
+    function mix(a, b, t) { const A = hex(a), C = hex(b); return '#' + A.map((v, i) => Math.round(v + (C[i] - v) * t).toString(16).padStart(2, '0')).join(''); }
+    function rng(s) { let a = s >>> 0; return () => { a = (a + 0x6d2b79f5) >>> 0; let t = a; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+
+    // ——— Logo ———
+    function buildLogo() {
+      const img0 = p.image || app.logoImg, key = [p.logo, img0 ? (img0.src || 'c') : 'demo'].join(); if (key === logoKey) return false; logoKey = key;
+      const M = 200, c = document.createElement('canvas'); c.width = c.height = M; const x = c.getContext('2d', { willReadFrequently: true }), L = M * 0.94, cx = M / 2;
+      if (img0) { const iw = img0.naturalWidth || img0.width, ih = img0.naturalHeight || img0.height, s = L / Math.max(iw, ih); x.drawImage(img0, cx - iw * s / 2, cx - ih * s / 2, iw * s, ih * s); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(cx, cx, L * 0.48, 0, TAU); x.arc(cx, cx, L * 0.27, 0, TAU, true); x.fill('evenodd'); x.fillRect(cx - L * 0.07, cx - L * 0.5, L * 0.14, L); }
+      const d = x.getImageData(0, 0, M, M).data; let transp = 0; for (let i = 3; i < d.length; i += 4) if (d[i] < 128) transp++; const useA = transp > M * M * 0.05;
+      const m = new Uint8Array(M * M); for (let i = 0; i < M * M; i++) { const o = i * 4, l = (d[o] * 0.2126 + d[o + 1] * 0.7152 + d[o + 2] * 0.0722) / 255; m[i] = (useA ? d[o + 3] > 128 : d[o + 3] > 128 && l < 0.5) ? 1 : 0; }
+      logoM = { m, M }; return true;
+    }
+
+    // ——— État : feuilles, sol, cibles du logo ———
+    function reset(w, h) {
+      R = rng(app.seed * 7919 + 11); leaves = []; spawnAcc = 0; logoState = { full: -1, sweep: -1 };
+      pile = new Float32Array(64); makeTargets(w, h);
+    }
+    function makeTargets(w, h) {
+      targets = []; if (!p.logo || !logoM) return;
+      const m = Math.min(w, h), S = m * p.tailleLogo, sz = m * p.taille, step = sz * 0.55, cx = w / 2, cy = h * 0.46;
+      for (let y = cy - S / 2; y < cy + S / 2; y += step * 0.86) for (let x = cx - S / 2; x < cx + S / 2; x += step) {
+        const u = Math.floor(((x - cx) / S + 0.5) * logoM.M), v = Math.floor(((y - cy) / S + 0.5) * logoM.M);
+        if (u >= 0 && v >= 0 && u < logoM.M && v < logoM.M && logoM.m[v * logoM.M + u]) targets.push({ x: x + (R() - 0.5) * step * 0.4, y: y + (R() - 0.5) * step * 0.4, taken: false });
+      }
+      for (let i = targets.length - 1; i > 0; i--) { const j = Math.floor(R() * (i + 1)); [targets[i], targets[j]] = [targets[j], targets[i]]; }
+    }
+    const groundY = (x) => { const i = Math.max(0, Math.min(63, Math.floor((x / lastW) * 64))); return lastH * 0.86 - pile[i]; };
+    function spawn(x, y, top) {
+      const C = p.couleurs.length ? p.couleurs : ['#c4512b'], kinds = Object.keys(SHAPES), m = Math.min(lastW, lastH);
+      const L = { x, y, vx: 0, vy: 0, ph: R() * TAU, rate: 2.2 + R() * 1.6, flip: R() * TAU, fr: (R() - 0.5) * 3, ang: (R() - 0.5) * 0.8, sz: m * p.taille * (0.7 + R() * 0.6), col: C[Math.floor(R() * C.length)], kind: p.forme === 'melange' ? kinds[Math.floor(R() * kinds.length)] : p.forme, st: 'fall', t0: simT, tg: null };
+      if (p.logo && top && logoState.sweep < 0) { const T = targets.find((q) => !q.taken); if (T && R() < 0.75) { T.taken = true; L.tg = T; L.x = T.x + (R() - 0.5) * m * 0.3 - p.vent * m * 0.3; L.sz = m * p.taille * (0.85 + R() * 0.3); } }
+      leaves.push(L);
+    }
+
+    function wind(x, y, t, m) {
+      const g = p.rafales * (Math.sin(t * 0.37 + x / m * 1.3) * 0.6 + Math.sin(t * 0.91 - y / m * 2.1 + 1.7) * 0.4);
+      return (p.vent * 0.8 + g) * m * 0.35;
+    }
+
+    function step(t, dt, w, h) {
+      const m = Math.min(w, h), vf = m * 0.32 * p.vitesse;
+      // apparition en haut ; le vent décale la zone d'apparition
+      if (logoState.sweep < 0) { spawnAcc += p.quantite * dt; while (spawnAcc >= 1) { spawnAcc--; spawn(-w * 0.1 + R() * w * 1.2 - p.vent * w * 0.3, -m * 0.06, true); } }
+      const gust = logoState.sweep >= 0 ? Math.min(1, (t - logoState.sweep) * 0.8) : 0;
+      let grounded = 0;
+      for (const L of leaves) {
+        // souffle du doigt
+        if (ptr) { const dx = L.x - ptr.x, dy = L.y - ptr.y, d2 = (dx * dx + dy * dy) / (m * m * 0.02); if (d2 < 3) { const k = Math.exp(-d2) * dt * 6, sp = Math.min(m * 4, Math.hypot(ptr.vx, ptr.vy)); L.vx += (ptr.vx * 0.6 + (dx / (Math.sqrt(dx * dx + dy * dy) || 1)) * sp * 0.25) * k; L.vy += (ptr.vy * 0.6 - sp * 0.35) * k; if (L.st !== 'fall' && sp > m * 0.3) { L.st = 'fall'; if (L.tg) { L.tg.taken = false; L.tg = null; } } } }
+        if (gust > 0 && L.st !== 'fall' && R() < dt * 3 * gust) { L.st = 'fall'; L.vy = -m * (0.2 + R() * 0.4); L.vx = m * (0.4 + R() * 0.6) * (p.vent >= 0 ? 1 : -1); L.tg = null; }
+        if (L.st === 'fall') {
+          L.ph += L.rate * dt * (0.6 + 0.4 * p.vitesse); L.flip += L.fr * dt;
+          const s = Math.sin(L.ph), c = Math.cos(L.ph), fl = p.flottement;
+          let tvx = wind(L.x, L.y, t, m) * (1 + gust * 3) + c * vf * 1.3 * fl, tvy = vf * (1 - 0.75 * fl * Math.min(1, 0.8 * c * c) + 0.25 * Math.abs(s));
+          if (L.tg) { tvx += (L.tg.x - L.x) * 1.6; if (L.y > L.tg.y - m * 0.15) tvx = (L.tg.x - L.x) * 4; }
+          L.vx += (tvx - L.vx) * Math.min(1, dt * 2.5); L.vy += (tvy - L.vy) * Math.min(1, dt * 2.2);
+          L.x += L.vx * dt; L.y += L.vy * dt; L.ang = 0.7 * fl * c + L.vx / (m * 2);
+          // atterrissage : sur une cible du logo, ou sur le tapis
+          if (L.tg && L.y >= L.tg.y) { if (Math.abs(L.x - L.tg.x) < L.sz * 0.6) { L.x = L.tg.x; L.y = L.tg.y; L.st = 'logo'; L.t0 = t; L.ang = (R() - 0.5) * 2.5; L.flip = R() < 0.5 ? 0.15 : Math.PI - 0.15; } else { L.tg.taken = false; L.tg = null; } }
+          else if (L.y >= groundY(L.x) && L.vy > 0) { const i = Math.max(0, Math.min(63, Math.floor((L.x / w) * 64))); pile[i] = Math.min(h * 0.2, pile[i] + L.sz * 0.03); const g0 = groundY(L.x); L.y = g0 + Math.pow(R(), 1.4) * (h - g0); L.st = 'sol'; L.t0 = t; L.ang = (R() - 0.5) * 3; L.flip = R() < 0.5 ? 0.3 : Math.PI - 0.3; }
+        } else if (L.st === 'sol') grounded++;
+      }
+      // le tapis s'efface par le dessous quand il est trop épais ; les feuilles sorties de l'image disparaissent
+      if (grounded > p.tapis) { let k = grounded - p.tapis; for (const L of leaves) { if (k <= 0) break; if (L.st === 'sol' && !L.fade) { L.fade = t; k--; } } }
+      leaves = leaves.filter((L) => !(L.fade && t - L.fade > 1.5) && L.x > -w * 0.3 && L.x < w * 1.3 && L.y < h * 1.2 && L.y > -h * 0.6);
+      for (let i = 0; i < 64; i++) pile[i] = Math.max(0, pile[i] - dt * m * 0.0015);
+      // logo : rempli → pause → rafale → on recommence
+      if (p.logo && targets.length) {
+        const done = targets.every((q) => q.taken) && !leaves.some((L) => L.tg && L.st === 'fall');
+        if (done && logoState.full < 0) logoState.full = t;
+        if (logoState.full >= 0 && logoState.sweep < 0 && t - logoState.full > p.pause) logoState.sweep = t;
+        if (logoState.sweep >= 0 && t - logoState.sweep > 4) { logoState = { full: -1, sweep: -1 }; for (const q of targets) q.taken = false; for (const L of leaves) if (L.st === 'logo') { L.st = 'fall'; L.tg = null; } }
+      }
+    }
+
+    // ——— Dessin ———
+    const paths = {}; for (const k in SHAPES) paths[k] = new Path2D(SHAPES[k]);
+    function leafCol(L) { const c = L.st === 'logo' || L.tg ? p.accent : L.col, back = Math.cos(L.flip) < 0; return back ? mix(c, '#000000', 0.18) : c; }
+    function render(pen, w, h) {
+      pen.bg(p.fond, p.sol, h * 0.86);
+      const order = leaves.slice().sort((a, b) => (a.st === 'fall') - (b.st === 'fall'));
+      for (const L of order) {
+        const a = L.fade ? Math.max(0, 1 - (simT - L.fade) / 1.5) : 1; if (a <= 0) continue;
+        const sx = L.st === 'fall' ? Math.max(0.12, Math.abs(Math.cos(L.flip))) : 0.9;
+        pen.leaf(L.kind, L.x, L.y, L.sz, L.ang, sx, leafCol(L), a);
+      }
+    }
+
+    app.loop((t, dt) => {
+      dt = Math.min(1 / 30, dt || 0);
+      const { w, h, dpr } = app.size; lastW = w; lastH = h;
+      const lg = buildLogo(), key = [app.seed, p.logo, p.tailleLogo, w, h].join();
+      if (!R || key !== rKey || lg) { rKey = key; reset(w, h); if (!app.thumbnail) for (let k = 0; k < 240; k++) step(simT + k / 30, 1 / 30, w, h); }
+      if (app.thumbnail) { reset(w, h); simT = 0; for (let k = 0; k < 900; k++) { simT = k / 30; step(simT, 1 / 30, w, h); } }
+      else { simT += dt; step(simT, dt, w, h); }
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      render({
+        bg(f, s, gy) { ctx.fillStyle = f; ctx.fillRect(0, 0, w, h); ctx.fillStyle = s; ctx.fillRect(0, gy, w, h - gy); },
+        leaf(kind, x, y, sz, ang, sx, col, a) {
+          const c = Math.cos(ang), sn = Math.sin(ang);
+          ctx.setTransform(dpr * c * sz * sx, dpr * sn * sz * sx, -dpr * sn * sz, dpr * c * sz, dpr * x, dpr * y);
+          ctx.globalAlpha = a; ctx.fillStyle = col; ctx.fill(paths[kind]);
+        },
+      }, w, h);
+      ctx.globalAlpha = 1; ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      app.finish(ctx);
+    });
+
+    function toSVG() {
+      const { w, h } = app.size, f = (v) => +v.toFixed(3);
+      let s = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><defs>` + Object.keys(SHAPES).map((k) => `<path id="f-${k}" d="${SHAPES[k]}"/>`).join('') + '</defs>';
+      render({
+        bg(fd, sl, gy) { s += `<rect width="100%" height="100%" fill="${fd}"/><rect x="0" y="${f(gy)}" width="${w}" height="${f(h - gy)}" fill="${sl}"/>`; },
+        leaf(kind, x, y, sz, ang, sx, col, a) { const c = Math.cos(ang), sn = Math.sin(ang); s += `<use href="#f-${kind}" xlink:href="#f-${kind}" fill="${col}"${a < 1 ? ` fill-opacity="${f(a)}"` : ''} transform="matrix(${f(c * sz * sx)} ${f(sn * sz * sx)} ${f(-sn * sz)} ${f(c * sz)} ${f(x)} ${f(y)})"/>`; },
+      }, w, h);
+      return s + '</svg>';
+    }
+  </script>
+</body>
+</html>
