@@ -1,0 +1,15 @@
+{
+  "slug": "avalanches",
+  "title": "Avalanches",
+  "type": "motion",
+  "description": "Un tas de sable abélien : on verse des grains, toute case qui en porte quatre les rend à ses voisines, et des motifs fractals symétriques poussent, avec leurs avalanches.",
+  "tags": ["fractale", "automate", "pixels", "symetrie", "logo", "svg"],
+  "inspiration": [
+    "Bak, Tang et Wiesenfeld, Self-organized criticality (1987)",
+    "Deepak Dhar, le groupe du tas de sable abélien (1990)",
+    "Images de l'identité du tas de sable"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}
