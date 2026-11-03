@@ -1,0 +1,15 @@
+{
+  "slug": "prismes-tournants",
+  "title": "Prismes tournants",
+  "type": "motion",
+  "description": "Un panneau de prismes triangulaires qui pivotent en vague pour passer d'une affiche à l'autre : trois faces, trois visuels de marque, dont le logo.",
+  "tags": ["cinetique", "affichage", "lamelles", "rotation", "logo", "svg"],
+  "inspiration": [
+    "Les panneaux publicitaires à prismes rotatifs des années 1980",
+    "Les stores à lamelles orientables",
+    "Les compositions géométriques du Bauhaus"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}
