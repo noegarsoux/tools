@@ -1,0 +1,15 @@
+{
+  "slug": "taquin",
+  "title": "Taquin",
+  "type": "motion",
+  "description": "Un jeu de taquin dont les pièces forment le logo : il se mélange case par case, puis se résout en rejouant chaque coup à l'envers, et on peut le faire glisser soi-même.",
+  "tags": ["jeu", "puzzle", "grille", "interaction", "logo", "svg"],
+  "inspiration": [
+    "Le taquin de quinze pièces et ses glissements secs",
+    "Les puzzles à pièces glissantes en bois et en plastique",
+    "Les images découpées qui se recomposent"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}
