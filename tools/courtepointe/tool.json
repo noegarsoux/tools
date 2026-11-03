@@ -1,0 +1,15 @@
+{
+  "slug": "courtepointe",
+  "title": "Courtepointe",
+  "type": "motion",
+  "description": "Un patchwork de blocs cousus (demi-carrés, sabliers, vols d'oies, rondins, chemin d'ivrogne) qui pivotent en vague ; le logo se pique en triangles.",
+  "tags": ["textile", "patchwork", "grille", "motif", "logo", "svg"],
+  "inspiration": [
+    "Les quilts de Gee's Bend (Alabama)",
+    "Les blocs traditionnels américains : log cabin, flying geese, drunkard's path",
+    "Les courtepointes amish de Lancaster"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}
