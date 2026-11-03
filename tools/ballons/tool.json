@@ -1,0 +1,15 @@
+{
+  "slug": "ballons",
+  "title": "Ballons",
+  "type": "motion",
+  "description": "Des ballons de baudruche aux couleurs de la marque, en bouquet, en guirlande ou en envol : ils flottent au vent, se bousculent, s'échappent et éclatent au clic.",
+  "tags": ["physique", "fete", "flottaison", "ficelles", "logo", "svg"],
+  "inspiration": [
+    "Les lâchers de ballons des fêtes foraines",
+    "Le Ballon rouge d'Albert Lamorisse",
+    "Les arches de ballons des vitrines"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}
