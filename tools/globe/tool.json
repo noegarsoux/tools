@@ -1,0 +1,15 @@
+{
+  "slug": "globe",
+  "title": "Globe de points",
+  "type": "motion",
+  "description": "Une planète imaginaire faite de milliers de points répartis à l'angle d'or, éclairée en trame, sillonnée d'arcs de vol ; le logo y est posé comme un continent.",
+  "tags": ["points", "3d", "sphere", "trame", "logo", "svg"],
+  "inspiration": [
+    "La spirale de Fibonacci sur la sphère (réseau de González, 2010)",
+    "Les globes en points des tableaux de bord et des cartes de trafic aérien",
+    "Buckminster Fuller, la carte Dymaxion (1943)"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}
