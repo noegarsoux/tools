@@ -1,0 +1,15 @@
+{
+  "slug": "voile-de-vent",
+  "title": "Voile de vent",
+  "type": "motion",
+  "description": "Une façade de milliers de petites plaques suspendues que le vent soulève par vagues ; la lumière y dessine les rafales, et le logo apparaît dans les reflets.",
+  "tags": ["cinetique", "grille", "vent", "lumiere", "logo", "svg"],
+  "inspiration": [
+    "Les façades cinétiques de Ned Kahn",
+    "Les champs de blé couchés par le vent",
+    "Les écailles et les plumages qui frémissent"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}

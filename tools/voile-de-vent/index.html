@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Voile de vent</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Voile de vent : chaque plaque pend à une charnière horizontale et se soulève d'un angle φ vers nous.
+    // C'est un pendule amorti, poussé par un vent fait de trois ondes qui se croisent (les rafales).
+    // À l'écran une plaque soulevée paraît plus courte (cos φ) et renvoie plus ou moins la lumière :
+    // la teinte est prise sur la palette selon cette brillance, quantifiée pour dessiner par lots.
+    // Le doigt souffle ; un clic fait une bouffée. Les plaques du logo ont un angle de repos différent.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2, NQ = 20;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const BIEN = PAL('biennale'), MEN = PAL('menthe'), KB = PAL('kegelbahn');
+
+    let simT = 0, F = null, fKey = '', ptr = null, puffs = [], logoM = null, logoKey = '';
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: false,
+      finish: { grain: 0.025, vignette: 0.12 },
+      hint: 'Glissez pour souffler sur les plaques · clic : une bouffée · molette : nombre de plaques',
+      notes: 'L\'artiste américain Ned Kahn habille des façades entières de milliers de petites plaques d\'aluminium suspendues, libres de pivoter. Le vent, invisible, devient alors une image : chaque rafale soulève une vague de plaques qui renvoient le ciel, et l\'on voit passer les tourbillons sur le bâtiment. Ici chaque plaque est un petit pendule amorti, poussé par un vent fait de plusieurs ondes qui se croisent. Sa couleur dépend de l\'angle sous lequel elle prend la lumière. Soufflez dessus avec le doigt, ou cliquez pour une bouffée. Les plaques du logo sont accrochées un peu de biais : au repos il brille dans les reflets, et le vent le fait apparaître et disparaître.',
+      params: {
+        'Plaques': {
+          colonnes: { type: 'range', label: 'Plaques par ligne', min: 12, max: 140, step: 1, value: 64 },
+          forme: { type: 'select', label: 'Forme', options: { carre: 'Carrée', ronde: 'Ronde', ecaille: 'Écaille', losange: 'Losange' }, value: 'carre' },
+          jeu: { type: 'range', label: 'Jour entre les plaques', min: 0, max: 0.5, step: 0.01, value: 0.12 },
+          chevauchement: { type: 'range', label: 'Chevauchement', min: 0, max: 0.5, step: 0.01, value: 0 },
+        },
+        'Vent': {
+          vent: { type: 'range', label: 'Force du vent', min: 0, max: 1, step: 0.01, value: 0.45 },
+          rafales: { type: 'range', label: 'Taille des rafales', min: 0.1, max: 1, step: 0.01, value: 0.45 },
+          direction: { type: 'range', label: 'Direction (°)', min: 0, max: 360, step: 1, value: 20 },
+          vitesse: { type: 'range', label: 'Vitesse', min: 0, max: 2, step: 0.01, value: 0.7 },
+          souplesse: { type: 'range', label: 'Souplesse', min: 0.2, max: 2, step: 0.01, value: 0.9 },
+        },
+        'Lumière': {
+          lumiere: { type: 'range', label: 'Angle de la lumière', min: -1, max: 1, step: 0.01, value: 0.35 },
+          contraste: { type: 'range', label: 'Contraste', min: 0.3, max: 3, step: 0.01, value: 1.4 },
+        },
+        'Logo dans les reflets': {
+          logo: { type: 'toggle', label: 'Inclure le logo', value: false },
+          tailleLogo: { type: 'range', label: 'Taille du logo', min: 0.3, max: 1.2, step: 0.01, value: 0.75, show: (q) => q.logo },
+          inclinaison: { type: 'range', label: 'Inclinaison des plaques du logo', min: 0.1, max: 1.2, step: 0.01, value: 0.6, show: (q) => q.logo },
+          image: { type: 'file', label: 'Logo', accept: 'image/*', show: (q) => q.logo },
+        },
+        'Couleurs': {
+          fond: { type: 'color', label: 'Structure', value: '#14171b' },
+          couleurs: { type: 'palette', label: 'De l\'ombre au reflet', value: ['#2b3440', '#7d8a96', '#d9e1e8', '#ffffff'] },
+          accent: { type: 'color', label: 'Teinte du logo', value: '#e8b04a', show: (q) => q.logo },
+        },
+      },
+      presets: {
+        'Façade': {},
+        'Écailles': { forme: 'ecaille', chevauchement: 0.35, jeu: 0, colonnes: 46, couleurs: ['#1d3b36', '#3f7f6c', '#a8d5b5', '#f2f7e8'] },
+        'Champ de blé': { forme: 'losange', colonnes: 70, jeu: 0.05, vent: 0.7, rafales: 0.7, direction: 0, contraste: 2.2, couleurs: ['#6b4a1c', '#c4943a', '#f0d27e', '#fff6d8'], fond: '#3a2a14' },
+        'Pastilles': { forme: 'ronde', colonnes: 40, jeu: 0.18, couleurs: ['#1b1b1b', '#e5452a', '#f2b0c8', '#ffffff'], fond: '#0c0c0c' },
+        'Tempête': { vent: 1, rafales: 0.25, vitesse: 1.6, souplesse: 1.5, colonnes: 72 },
+        'Brise': { vent: 0.18, rafales: 0.9, vitesse: 0.35, colonnes: 36, contraste: 2 },
+        'Logo': { logo: true, colonnes: 64, vent: 0.25, inclinaison: 0.7 },
+        'Biennale': { fond: BIEN[1], couleurs: [BIEN[1], BIEN[2], BIEN[3], BIEN[0]], accent: BIEN[4], colonnes: 52 },
+        'Menthe': { fond: MEN[1], couleurs: [MEN[1], MEN[3], MEN[2], MEN[0]], accent: MEN[0], forme: 'ecaille', chevauchement: 0.3, jeu: 0 },
+        'Kegelbahn': { fond: KB[0], couleurs: [KB[0], KB[2], KB[1], KB[3]], accent: KB[3], forme: 'ronde', colonnes: 56 },
+      },
+      brand(colors) {
+        const s = colors.slice().sort((a, b) => lum(a) - lum(b)), D = s[0];
+        return { fond: mix(D, '#000000', 0.3), couleurs: s.length > 1 ? s : [D, '#ffffff'], accent: s[Math.floor(s.length / 2)] };
+      },
+      pointer: {
+        down: (q) => { ptr = { x: q.x, y: q.y, vx: 0, vy: 0, t: simT, x0: q.x, y0: q.y, moved: 0 }; },
+        drag: (q) => { if (!ptr) return; const dt = Math.max(1e-3, simT - ptr.t); ptr.vx = (q.x - ptr.x) / dt; ptr.vy = (q.y - ptr.y) / dt; ptr.moved += Math.hypot(q.x - ptr.x, q.y - ptr.y); ptr.x = q.x; ptr.y = q.y; ptr.t = simT; },
+        up: () => { if (ptr && ptr.moved < 6) puffs.push({ x: ptr.x, y: ptr.y, t0: simT }); ptr = null; },
+        wheel: (q, dy) => app.set('colonnes', Math.max(12, Math.min(140, p.colonnes + (dy > 0 ? 4 : -4)))),
+      },
+      onChange(k) { if (['*', 'logo', 'image'].includes(k)) logoKey = ''; },
+      export: { name: 'voile-de-vent', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    function hex(x) { const n = parseInt(x.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
+    function lum(x) { const c = hex(x); return (c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114) / 255; }
+    function mix(a, b, t) { const A = hex(a), C = hex(b); return '#' + A.map((v, i) => Math.round(v + (C[i] - v) * t).toString(16).padStart(2, '0')).join(''); }
+
+    // ——— Logo ———
+    function buildLogo() {
+      const img0 = p.image || app.logoImg, key = [p.logo, img0 ? (img0.src || 'c') : 'demo'].join(); if (key === logoKey) return; logoKey = key; fKey = '';
+      const M = 200, c = document.createElement('canvas'); c.width = c.height = M; const x = c.getContext('2d', { willReadFrequently: true }), L = M * 0.94, cx = M / 2;
+      if (img0) { const iw = img0.naturalWidth || img0.width, ih = img0.naturalHeight || img0.height, s = L / Math.max(iw, ih); x.drawImage(img0, cx - iw * s / 2, cx - ih * s / 2, iw * s, ih * s); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(cx, cx, L * 0.48, 0, TAU); x.arc(cx, cx, L * 0.27, 0, TAU, true); x.fill('evenodd'); x.fillRect(cx - L * 0.07, cx - L * 0.5, L * 0.14, L); }
+      const d = x.getImageData(0, 0, M, M).data; let transp = 0; for (let i = 3; i < d.length; i += 4) if (d[i] < 128) transp++; const useA = transp > M * M * 0.05;
+      const m = new Uint8Array(M * M); for (let i = 0; i < M * M; i++) { const o = i * 4, l = (d[o] * 0.2126 + d[o + 1] * 0.7152 + d[o + 2] * 0.0722) / 255; m[i] = (useA ? d[o + 3] > 128 : d[o + 3] > 128 && l < 0.5) ? 1 : 0; }
+      logoM = { m, M };
+    }
+
+    // ——— Grille de plaques ———
+    function field(w, h) {
+      buildLogo();
+      const key = [p.colonnes, p.chevauchement, p.logo, p.tailleLogo, logoKey, w, h].join(); if (key === fKey && F) return F; fKey = key;
+      const s = w / p.colonnes, py = s * (1 - p.chevauchement), nx = p.colonnes + 1, ny = Math.ceil(h / py) + 1, n = nx * ny, S = Math.min(w, h) * p.tailleLogo;
+      const X = new Float32Array(n), Y = new Float32Array(n), A = new Float32Array(n), V = new Float32Array(n), L = new Uint8Array(n);
+      for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+        const o = j * nx + i, x = (i + 0.5) * s - ((p.forme === 'ecaille' && j & 1) ? s * 0.5 : 0), y = j * py - s * 0.15; X[o] = x; Y[o] = y;
+        if (p.logo && logoM) { const u = Math.floor(((x - w / 2) / S + 0.5) * logoM.M), v = Math.floor(((y + s * 0.5 - h / 2) / S + 0.5) * logoM.M); L[o] = u >= 0 && v >= 0 && u < logoM.M && v < logoM.M && logoM.m[v * logoM.M + u] ? 1 : 0; }
+        if (F && F.nx === nx && F.ny === ny) { A[o] = F.A[o]; V[o] = F.V[o]; }
+      }
+      F = { s, py, nx, ny, n, X, Y, A, V, L };
+      return F;
+    }
+
+    // vent : trois ondes qui avancent dans la direction choisie, à des échelles différentes
+    function wind(x, y, t, m) {
+      const d = (p.direction * Math.PI) / 180, ux = Math.cos(d), uy = Math.sin(d), lam = m * (0.25 + p.rafales * 1.1), T = t * p.vitesse;
+      const a = (x * ux + y * uy) / lam, b = (-x * uy + y * ux) / lam;
+      const g = Math.sin(a * 2.1 - T * 2.3 + Math.sin(b * 1.3 + T * 0.4) * 1.2) * 0.5 + Math.sin(a * 3.7 + b * 1.9 - T * 3.1) * 0.3 + Math.sin(a * 1.1 - b * 2.6 - T * 1.5) * 0.35;
+      return Math.max(0, g + 0.35);
+    }
+
+    function step(t, dt, w, h) {
+      const { n, X, Y, A, V, L } = F, m = Math.min(w, h), k = (TAU * p.souplesse) ** 2, c = 2 * 0.25 * TAU * p.souplesse, W0 = p.vent * k * 0.9, rest = p.logo ? p.inclinaison : 0;
+      const jets = []; if (ptr) { const sp = Math.min(3, Math.hypot(ptr.vx, ptr.vy) / (m * 0.8)); jets.push([ptr.x, ptr.y, m * 0.12, 0.6 + sp * 2.5]); }
+      for (const q of puffs) { const a = t - q.t0; if (a < 1.2) jets.push([q.x, q.y, m * (0.05 + a * 0.5), 3 * (1 - a / 1.2)]); }
+      for (let o = 0; o < n; o++) {
+        const x = X[o], y = Y[o]; let f = W0 * wind(x, y, t, m);
+        for (const J of jets) { const dd = ((x - J[0]) ** 2 + (y - J[1]) ** 2) / (J[2] * J[2]); if (dd < 4) f += k * 0.6 * J[3] * Math.exp(-dd); }
+        const r = L[o] ? rest : 0, acc = -k * (A[o] - r) - c * V[o] + f * Math.cos(A[o]);
+        V[o] += acc * dt; A[o] += V[o] * dt; if (A[o] > 1.45) { A[o] = 1.45; V[o] *= -0.3; } if (A[o] < -0.9) { A[o] = -0.9; V[o] *= -0.3; }
+      }
+      puffs = puffs.filter((q) => t - q.t0 < 1.2);
+    }
+
+    // brillance d'une plaque selon son angle (lumière venant d'en haut et de face)
+    const bright = (a) => { const v = 0.5 + 0.5 * Math.cos((a - 0.7 - 0.5 * p.lumiere) * 2.1); return Math.max(0, Math.min(1, 0.5 + (v - 0.5) * p.contraste)); };
+    function ramp(u) { const C = p.couleurs.length ? p.couleurs : ['#000000', '#ffffff']; if (C.length < 2) return C[0]; const q = u * (C.length - 1), a = Math.min(C.length - 2, Math.floor(q)); return mix(C[a], C[a + 1], q - a); }
+
+    function shape(P, x, y, wd, ht) {
+      const hw = wd / 2;
+      if (p.forme === 'ronde') { const r = Math.min(hw, wd / 2); P.moveTo(x + hw, y + ht / 2); P.ellipse(x, y + ht / 2, hw, Math.max(0.1, ht / 2), 0, 0, TAU); return; }
+      if (p.forme === 'losange') { P.moveTo(x, y); P.lineTo(x + hw, y + ht / 2); P.lineTo(x, y + ht); P.lineTo(x - hw, y + ht / 2); P.closePath(); return; }
+      if (p.forme === 'ecaille') { P.moveTo(x - hw, y); P.lineTo(x + hw, y); P.lineTo(x + hw, y + ht * 0.45); P.quadraticCurveTo(x + hw, y + ht, x, y + ht); P.quadraticCurveTo(x - hw, y + ht, x - hw, y + ht * 0.45); P.closePath(); return; }
+      P.moveTo(x - hw, y); P.lineTo(x + hw, y); P.lineTo(x + hw, y + ht); P.lineTo(x - hw, y + ht); P.closePath();
+    }
+    // liseré sombre quand les plaques se touchent ou se recouvrent
+    const edge = () => p.jeu < 0.04 || p.chevauchement > 0.02;
+    function render(pen, w, h) {
+      const { s, n, X, Y, A, L } = F, wd = s * (1 - p.jeu), base = p.forme === 'ronde' || p.forme === 'losange' ? wd : s * (1 - p.jeu * 0.5);
+      pen.bg(p.fond);
+      // couleurs quantifiées : NQ niveaux pour les plaques, NQ pour celles du logo (teintées d'accent)
+      const cols = []; for (let q = 0; q < NQ; q++) { const c = ramp(q / (NQ - 1)); cols.push(c); }
+      const colsL = cols.map((c, q) => mix(c, p.accent, 0.35 + 0.25 * (q / (NQ - 1))));
+      const groups = new Map();
+      for (let o = 0; o < n; o++) {
+        const a = A[o], ht = base * Math.max(0.06, Math.cos(a)), q = Math.round(bright(a) * (NQ - 1)), key = (L[o] && p.logo ? 'L' : 'N') + q;
+        let G = groups.get(key); if (!G) groups.set(key, (G = { col: L[o] && p.logo ? colsL[q] : cols[q], items: [], q })); G.items.push(o, ht);
+      }
+      // l'ordre des lignes compte pour les écailles : on dessine de haut en bas, groupe par groupe et ligne par ligne
+      if (p.chevauchement > 0.02) {
+        const rows = new Map(); for (const G of groups.values()) for (let k = 0; k < G.items.length; k += 2) { const o = G.items[k], j = Math.floor(o / F.nx); let R = rows.get(j); if (!R) rows.set(j, (R = new Map())); let Q = R.get(G.col); if (!Q) R.set(G.col, (Q = [])); Q.push(o, G.items[k + 1]); }
+        [...rows.keys()].sort((a, b) => a - b).forEach((j) => { for (const [col, Q] of rows.get(j)) pen.shapes(Q, col, wd); });
+      } else for (const G of groups.values()) pen.shapes(G.items, G.col, wd);
+    }
+
+    const sprites = new Map(); let spKey = '';
+    function sprite(col, wd, dpr) {
+      const bh = p.forme === 'ronde' || p.forme === 'losange' ? wd : F.s * (1 - p.jeu * 0.5), k = [wd, bh, p.forme, p.jeu, p.chevauchement, p.fond, dpr].join(); if (k !== spKey) { spKey = k; sprites.clear(); }
+      let S = sprites.get(col); if (S) return S;
+      const pad = Math.max(1, F.s * 0.04), W = wd + pad * 2, H = bh + pad * 2, c = document.createElement('canvas'); c.width = Math.max(1, Math.ceil(W * dpr)); c.height = Math.max(1, Math.ceil(H * dpr));
+      const g = c.getContext('2d'); g.setTransform(dpr, 0, 0, dpr, 0, 0); const P = new Path2D(); shape(P, W / 2, pad, wd, bh); g.fillStyle = col; g.fill(P);
+      if (edge()) { g.strokeStyle = mix(col, p.fond, 0.45); g.lineWidth = Math.max(0.6, F.s * 0.04); g.stroke(P); }
+      S = { c, W, H, pad, bh }; sprites.set(col, S); return S;
+    }
+
+    app.loop((t, dt) => {
+      dt = Math.min(1 / 30, dt || 0);
+      const { w, h, dpr } = app.size; field(w, h);
+      if (app.thumbnail) { simT = 7.3; for (let k = 0; k < 90; k++) step(simT - (90 - k) / 60, 1 / 60, w, h); }
+      else { simT += dt; const sub = 2; for (let k = 0; k < sub; k++) step(simT - dt + (k + 1) * dt / sub, dt / sub, w, h); }
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      render({
+        bg(c) { ctx.fillStyle = c; ctx.fillRect(0, 0, w, h); },
+        // à l'écran : une vignette par teinte, étirée en hauteur selon l'angle de la plaque
+        shapes(items, col, wd) {
+          if (p.forme === 'carre' && !edge()) { ctx.fillStyle = col; for (let k = 0; k < items.length; k += 2) { const o = items[k]; ctx.fillRect(F.X[o] - wd / 2, F.Y[o], wd, items[k + 1]); } return; }
+          const S = sprite(col, wd, dpr), bh = S.bh; for (let k = 0; k < items.length; k += 2) { const o = items[k], ht = items[k + 1]; ctx.drawImage(S.c, F.X[o] - S.W / 2, F.Y[o] - S.pad * ht / bh, S.W, S.H * ht / bh); } },
+      }, w, h);
+      ctx.imageSmoothingEnabled = true;
+      app.finish(ctx);
+    });
+
+    function toSVG() {
+      const { w, h } = app.size, f = (v) => +v.toFixed(2); field(w, h);
+      let s = `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">`;
+      const pathPen = () => { let d = ''; return { d: () => d, moveTo: (x, y) => (d += `M${f(x)} ${f(y)}`), lineTo: (x, y) => (d += `L${f(x)} ${f(y)}`), quadraticCurveTo: (a, b, x, y) => (d += `Q${f(a)} ${f(b)} ${f(x)} ${f(y)}`), closePath: () => (d += 'Z'), ellipse: (cx, cy, rx, ry) => (d += `M${f(cx - rx)} ${f(cy)}A${f(rx)} ${f(ry)} 0 1 0 ${f(cx + rx)} ${f(cy)}A${f(rx)} ${f(ry)} 0 1 0 ${f(cx - rx)} ${f(cy)}Z`) }; };
+      render({
+        bg(c) { s += `<rect width="100%" height="100%" fill="${c}"/>`; },
+        shapes(items, col, wd) { const P = pathPen(); for (let k = 0; k < items.length; k += 2) { const o = items[k]; shape(P, F.X[o], F.Y[o], wd, items[k + 1]); } s += `<path d="${P.d()}" fill="${col}"` + (edge() ? ` stroke="${mix(col, p.fond, 0.45)}" stroke-width="${f(Math.max(0.6, F.s * 0.04))}"` : '') + '/>'; },
+      }, w, h);
+      return s + '</svg>';
+    }
+  </script>
+</body>
+</html>
