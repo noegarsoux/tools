@@ -1,0 +1,15 @@
+{
+  "slug": "boule-a-neige",
+  "title": "Boule à neige",
+  "type": "motion",
+  "description": "Une boule à neige avec le logo en relief : on la secoue, les flocons et les paillettes tourbillonnent dans le liquide, puis retombent et blanchissent le logo.",
+  "tags": ["particules", "fluide", "verre", "interaction", "logo", "svg"],
+  "inspiration": [
+    "Les boules à neige souvenirs, leur dôme de verre et leur socle",
+    "La lente retombée des flocons dans un liquide visqueux",
+    "Les paillettes qui scintillent dans un tourbillon"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}
