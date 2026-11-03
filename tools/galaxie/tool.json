@@ -1,0 +1,15 @@
+{
+  "slug": "galaxie",
+  "title": "Galaxie",
+  "type": "motion",
+  "description": "Des milliers d’étoiles sur des orbites ovales décalées : leurs embouteillages dessinent des bras spiraux qui tournent, et un logo semé dans le disque s’enroule.",
+  "tags": ["espace", "particules", "spirale", "lumiere", "logo", "svg"],
+  "inspiration": [
+    "Lin et Shu, théorie des ondes de densité (1964)",
+    "Agris Kalnajs, modèle des orbites elliptiques emboîtées (1973)",
+    "Photographies de M51 et M83"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}

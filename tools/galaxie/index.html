@@ -1,0 +1,288 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Galaxie</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Galaxie : modèle des orbites ovales emboîtées (Kalnajs). Chaque étoile suit une orbite à m lobes, et l'orientation
+    // de ces orbites tourne un peu d'un rayon au suivant. Là où elles se rapprochent, les étoiles s'embouteillent :
+    // ce sont les bras spiraux, une onde de densité qui tourne plus lentement que les étoiles qui la traversent.
+    // La rotation est différentielle (courbe de rotation plate) : tout ce qu'on sème dans le disque finit enroulé.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const KB = PAL('kegelbahn'), LUZ = PAL('luzern'), THERM = PAL('thermique'), BIEN = PAL('biennale'), MEN = PAL('menthe');
+
+    let n = 0, A = null, E = null, PH = null, ZZ = null, KND = null, W8 = null, CR = null, CG = null, CB = null;
+    let nl = 0, LA = null, LPH = null, LW = null;
+    let simKey = '', colKey = '', patt = 0, held = null, bc = null, bctx = null, bimg = null, acc = null, dust = null, small = null, tiny = null, EXN = null, G1 = null, G2 = null, GT = null, GM = null, BX = null, BF = null, sinceStamp = 1e9, maskKey = null, logoPts = null;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.05, vignette: 0.3 },
+      hint: 'Glissez pour tourner et incliner · touchez pour semer un amas · molette : enroulement',
+      notes: 'Les bras d’une galaxie spirale ne sont pas faits toujours des mêmes étoiles. Chaque étoile suit une orbite un peu ovale, et d’un rayon à l’autre ces ovales sont légèrement tournés : là où ils se resserrent, les étoiles ralentissent et s’entassent, comme des voitures dans un bouchon. Le bouchon tourne lentement pendant que les étoiles le traversent. Les étoiles proches du centre font le tour plus vite que les lointaines : un amas semé dans le disque, ou le logo, s’étire et s’enroule en quelques tours.',
+      params: {
+        'Galaxie': {
+          bras: { type: 'range', label: 'Bras', min: 1, max: 6, step: 1, value: 2 },
+          enroulement: { type: 'range', label: 'Enroulement', min: -4, max: 4, step: 0.05, value: 1.6 },
+          ovale: { type: 'range', label: 'Ovale des orbites', min: 0, max: 0.5, step: 0.01, value: 0.2 },
+          etoiles: { type: 'range', label: 'Étoiles', min: 4000, max: 80000, step: 1000, value: 36000 },
+          bulbe: { type: 'range', label: 'Bulbe', min: 0, max: 0.6, step: 0.01, value: 0.16 },
+          taille: { type: 'range', label: 'Rayon', min: 0.2, max: 0.7, step: 0.01, value: 0.44 },
+        },
+        'Mouvement': {
+          vitesse: { type: 'range', label: 'Vitesse', min: 0, max: 2, step: 0.01, value: 0.5 },
+          onde: { type: 'range', label: 'Vitesse des bras', min: -1, max: 1, step: 0.01, value: 0.25 },
+          inclinaison: { type: 'range', label: 'Inclinaison (°)', min: 0, max: 85, step: 1, value: 34 },
+          orientation: { type: 'range', label: 'Orientation (°)', min: 0, max: 360, step: 1, value: 20 },
+          logo: { type: 'toggle', label: 'Semer le logo', value: false },
+          image: { type: 'file', label: 'Logo', accept: 'image/*', show: (q) => q.logo },
+          resemer: { type: 'range', label: 'Resemer toutes les (s)', min: 0, max: 60, step: 1, value: 24, show: (q) => q.logo },
+        },
+        'Rendu': {
+          eclat: { type: 'range', label: 'Éclat', min: 0.2, max: 4, step: 0.05, value: 1.2 },
+          halo: { type: 'range', label: 'Halo', min: 0, max: 1, step: 0.01, value: 0.5 },
+          poussiere: { type: 'range', label: 'Poussière', min: 0, max: 1, step: 0.01, value: 0.45 },
+        },
+        'Couleurs': {
+          couleurs: { type: 'palette', label: 'Du centre au bord', value: ['#ffe3b0', '#f4eee6', '#8fb4ff'] },
+          jeunes: { type: 'color', label: 'Jeunes étoiles', value: '#5a8cff' },
+          fond: { type: 'color', label: 'Fond', value: '#05060b' },
+        },
+      },
+      presets: {
+        'Spirale': {},
+        'Serrée': { enroulement: 3.2, ovale: 0.14, inclinaison: 12 },
+        'Trois bras': { bras: 3, enroulement: 1.2, ovale: 0.17 },
+        'Flocon': { bras: 5, enroulement: 0.9, ovale: 0.12, inclinaison: 0, bulbe: 0.08, poussiere: 0.2 },
+        'De profil': { inclinaison: 80, orientation: 0, poussiere: 0.8, bulbe: 0.3 },
+        'Logo enroulé': { logo: true, inclinaison: 0, vitesse: 0.22, bulbe: 0.05, resemer: 30, couleurs: ['#ffe3b0', '#f4eee6', '#8fb4ff'] },
+        'Négatif': { fond: '#f2efe8', couleurs: ['#1a1410', '#2a2a40', '#3a6fd0'], jeunes: '#e5502a', eclat: 3.2, halo: 0.15, poussiere: 0.2 },
+        'Kegelbahn': { fond: KB[0], couleurs: [KB[3], KB[1], KB[2]], jeunes: KB[5] },
+        'Luzern': { fond: LUZ[3], couleurs: [LUZ[4], LUZ[0], LUZ[1]], jeunes: LUZ[2], bras: 3 },
+        'Thermique': { fond: '#0c0c14', couleurs: [THERM[3], THERM[2], THERM[4]], jeunes: THERM[1] },
+      },
+      brand(colors) {
+        const lum = (x) => { const c = hex(x); return c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114; };
+        const s = colors.slice().sort((a, b) => lum(a) - lum(b)), rest = s.slice(1).reverse();
+        while (rest.length < 3) rest.push(rest[rest.length - 1] || '#ffffff');
+        return { fond: s[0], couleurs: rest.slice(0, 3), jeunes: rest[3] || rest[2] };
+      },
+      pointer: {
+        down: (q) => { held = { x0: q.x, y0: q.y, x: q.x, y: q.y, moved: false, inc: p.inclinaison, ori: p.orientation }; },
+        drag: (q) => {
+          if (!held) return; if (Math.hypot(q.x - held.x0, q.y - held.y0) > 6) held.moved = true; if (!held.moved) return;
+          const u = Math.min(app.size.w, app.size.h);
+          app.set('orientation', Math.round(((held.ori + (q.x - held.x0) / u * 220) % 360 + 360) % 360));
+          app.set('inclinaison', Math.round(Math.max(0, Math.min(85, held.inc + (q.y - held.y0) / u * 140))));
+        },
+        up: () => { if (held && !held.moved) cluster(held.x0, held.y0); held = null; },
+        wheel: (q, dy) => app.set('enroulement', Math.max(-4, Math.min(4, +(p.enroulement + (dy > 0 ? -0.1 : 0.1)).toFixed(2)))),
+      },
+      onChange(k) {
+        if (k === 'image') maskKey = null;
+        if (k === '*' || ['etoiles', 'bulbe'].includes(k)) simKey = '';
+        if (k === 'logo' || k === 'image' || k === '*') { nl = 0; sinceStamp = 1e9; }
+        colKey = '';
+      },
+      onSeed() { simKey = ''; nl = 0; sinceStamp = 1e9; },
+      export: { name: 'galaxie', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    const hex = (x) => { const n2 = parseInt(x.slice(1), 16); return [(n2 >> 16) & 255, (n2 >> 8) & 255, n2 & 255]; };
+    function mulberry(a) { return () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+
+    // ——— Étoiles : disque exponentiel, bulbe, jeunes étoiles, poussière ———
+    function build() {
+      const r = mulberry(app.seed * 2711 + 9), gauss = () => Math.sqrt(-2 * Math.log(r() + 1e-9)) * Math.cos(TAU * r());
+      const nd = Math.round(p.etoiles), nb = Math.round(nd * p.bulbe), ny = Math.round(nd * 0.16), ndu = Math.round(nd * 0.3);
+      n = nd + nb + ny + ndu;
+      A = new Float32Array(n); E = new Float32Array(n); PH = new Float32Array(n); ZZ = new Float32Array(n); KND = new Uint8Array(n); W8 = new Float32Array(n);
+      let k = 0;
+      for (let i = 0; i < nd; i++, k++) { A[k] = Math.min(1.15, -0.3 * Math.log(1 - r() * 0.975)) + 0.02; E[k] = 1; PH[k] = r() * TAU; ZZ[k] = gauss() * 0.018; KND[k] = 0; W8[k] = 0.5 + r() * 0.8; }
+      for (let i = 0; i < nb; i++, k++) { const a = Math.abs(gauss()) * 0.085 + 0.004; A[k] = a; E[k] = 0; PH[k] = r() * TAU; ZZ[k] = gauss() * a * 0.75; KND[k] = 1; W8[k] = 0.6 + r() * 0.9; }
+      for (let i = 0; i < ny; i++, k++) { A[k] = 0.18 + r() * 0.85; E[k] = 1; PH[k] = r() * TAU; ZZ[k] = gauss() * 0.008; KND[k] = 2; W8[k] = 0.8 + r() * 1.6; }
+      for (let i = 0; i < ndu; i++, k++) { A[k] = 0.1 + Math.pow(r(), 0.8) * 0.85; E[k] = 1; PH[k] = r() * TAU; ZZ[k] = gauss() * 0.006; KND[k] = 4; W8[k] = 0.6 + r() * 0.8; }
+      CR = new Float32Array(n); CG = new Float32Array(n); CB = new Float32Array(n); colKey = '';
+    }
+    function colours() {
+      // couleur de chaque étoile : dégradé du centre au bord, jeunes étoiles à part
+      const C = p.couleurs.map(hex), Y = hex(p.jeunes), m = C.length;
+      const grad = (t) => { t = Math.max(0, Math.min(1, t)) * (m - 1); const i = Math.min(m - 2, Math.floor(t)), f = t - i; if (m === 1) return C[0]; return [C[i][0] + (C[i + 1][0] - C[i][0]) * f, C[i][1] + (C[i + 1][1] - C[i][1]) * f, C[i][2] + (C[i + 1][2] - C[i][2]) * f]; };
+      for (let i = 0; i < n; i++) { const c = KND[i] === 2 ? Y : grad(KND[i] === 1 ? A[i] * 1.5 : Math.pow(A[i] / 0.9, 0.7)); CR[i] = c[0]; CG[i] = c[1]; CB[i] = c[2]; }
+    }
+
+    // ——— Vue : rotation dans le plan, inclinaison ———
+    function view() {
+      const { w, h } = app.size, R = Math.min(w, h) * p.taille, inc = p.inclinaison * Math.PI / 180, az = p.orientation * Math.PI / 180;
+      return { R, cx: w / 2, cy: h / 2, ci: Math.cos(inc), si: Math.sin(inc), ca: Math.cos(az), sa: Math.sin(az) };
+    }
+    const omega = (a) => 0.36 / Math.sqrt(a * a + 0.0016) * (a < 0.06 ? a / 0.06 : 1) + 0.2;
+    // écran → plan de la galaxie (en rayons)
+    function toPlane(sx, sy, V) { const X = (sx - V.cx) / V.R, Y = (sy - V.cy) / V.R / Math.max(0.12, V.ci); return [X * V.ca + Y * V.sa, -X * V.sa + Y * V.ca]; }
+    function addStars(pts, w8) {
+      // étoiles semées : orbites circulaires, elles suivent la rotation différentielle
+      const m = nl + pts.length, a2 = new Float32Array(m), p2 = new Float32Array(m), w2 = new Float32Array(m);
+      if (nl) { a2.set(LA.subarray(0, nl)); p2.set(LPH.subarray(0, nl)); w2.set(LW.subarray(0, nl)); }
+      pts.forEach(([x, y], j) => { a2[nl + j] = Math.hypot(x, y); p2[nl + j] = Math.atan2(y, x); w2[nl + j] = w8; });
+      LA = a2; LPH = p2; LW = w2; nl = m;
+      if (nl > 30000) { const cut = nl - 30000; LA = LA.slice(cut); LPH = LPH.slice(cut); LW = LW.slice(cut); nl = 30000; }
+    }
+    function cluster(sx, sy) {
+      const V = view(), [x, y] = toPlane(sx, sy, V), r = mulberry((Math.random() * 1e9) | 0), pts = [];
+      for (let i = 0; i < 1600; i++) { const a = r() * TAU, d = Math.sqrt(r()) * 0.07; pts.push([x + Math.cos(a) * d, y + Math.sin(a) * d]); }
+      addStars(pts, 1.6);
+    }
+    function logoSample() {
+      const img0 = p.image || app.logoImg, key = (img0 ? (img0.src || 'c') : 'demo');
+      if (key !== maskKey || !logoPts) {
+        maskKey = key; const S = 220, c = document.createElement('canvas'); c.width = c.height = S; const x = c.getContext('2d', { willReadFrequently: true });
+        if (img0) { const iw = img0.naturalWidth || img0.width, ih = img0.naturalHeight || img0.height, k = S * 0.92 / Math.max(iw, ih); x.drawImage(img0, (S - iw * k) / 2, (S - ih * k) / 2, iw * k, ih * k); }
+        else { x.fillStyle = '#000'; x.beginPath(); x.arc(S / 2, S / 2, S * 0.46, 0, TAU); x.arc(S / 2, S / 2, S * 0.26, 0, TAU, true); x.fill('evenodd'); x.fillRect(S * 0.44, S * 0.04, S * 0.12, S * 0.92); }
+        const d = x.getImageData(0, 0, S, S).data; let transp = 0; for (let i = 3; i < d.length; i += 4) if (d[i] < 128) transp++;
+        const useA = transp > S * S * 0.05; logoPts = [];
+        for (let yy = 0; yy < S; yy++) for (let xx = 0; xx < S; xx++) { const i = (yy * S + xx) * 4, l = (d[i] * 0.2126 + d[i + 1] * 0.7152 + d[i + 2] * 0.0722) / 255; if (useA ? d[i + 3] > 128 : d[i + 3] > 128 && l < 0.5) logoPts.push([xx / S - 0.5, yy / S - 0.5]); }
+      }
+      return logoPts;
+    }
+    function stampLogo() {
+      // le logo est posé droit à l'écran, puis projeté dans le plan du disque
+      const V = view(), L = logoSample(), r = mulberry(app.seed * 77 + 1), pts = [], k = Math.min(1, 14000 / Math.max(1, L.length)), sz = V.R * 0.95;
+      for (const [x, y] of L) { if (r() > k) continue; for (let j = 0; j < 2; j++) pts.push(toPlane(V.cx + (x + (r() - 0.5) / 220) * sz, V.cy + (y + (r() - 0.5) / 220) * sz * Math.max(0.12, V.ci), V)); }
+      nl = 0; addStars(pts, 0.45);
+    }
+
+    // ——— Rendu : accumulation de lumière (et de poussière), puis exposition ———
+    let LUT = null;
+    function ensure(w, h, dpr) {
+      const RW = Math.max(160, Math.min(820, Math.round(w * Math.min(dpr, 1.25) * 0.8))), RH = Math.max(100, Math.round(RW * h / w));
+      if (!bc || bc.width !== RW || bc.height !== RH) {
+        bc = document.createElement('canvas'); bc.width = RW; bc.height = RH; bctx = bc.getContext('2d'); bimg = bctx.createImageData(RW, RH);
+        acc = new Float32Array(RW * RH * 4); dust = new Float32Array(RW * RH);
+        small = document.createElement('canvas'); small.width = Math.max(8, Math.round(RW / 6)); small.height = Math.max(8, Math.round(RH / 6)); tiny = document.createElement('canvas'); tiny.width = Math.max(4, Math.round(RW / 18)); tiny.height = Math.max(4, Math.round(RH / 18));
+      }
+      if (!LUT) { LUT = new Float32Array(2048); EXN = new Float32Array(2048); for (let i = 0; i < 2048; i++) { LUT[i] = 1 - Math.exp(-i / 256); EXN[i] = Math.exp(-i / 256); } }
+      return [RW, RH];
+    }
+    function splat(buf, RW, RH, x, y, wr, wg, wb, ww) {
+      const xi = Math.floor(x), yi = Math.floor(y); if (xi < 0 || yi < 0 || xi >= RW - 1 || yi >= RH - 1) return;
+      const fx = x - xi, fy = y - yi, o = (yi * RW + xi) * 4, a = (1 - fx) * (1 - fy), b = fx * (1 - fy), c = (1 - fx) * fy, d = fx * fy, o2 = o + RW * 4;
+      buf[o] += wr * a; buf[o + 1] += wg * a; buf[o + 2] += wb * a; buf[o + 3] += ww * a;
+      buf[o + 4] += wr * b; buf[o + 5] += wg * b; buf[o + 6] += wb * b; buf[o + 7] += ww * b;
+      buf[o2] += wr * c; buf[o2 + 1] += wg * c; buf[o2 + 2] += wb * c; buf[o2 + 3] += ww * c;
+      buf[o2 + 4] += wr * d; buf[o2 + 5] += wg * d; buf[o2 + 6] += wb * d; buf[o2 + 7] += ww * d;
+    }
+    // position projetée de l'étoile i (en pixels du tampon)
+    // table de sinus (16384 pas) : trois lectures au lieu de trois appels trigonométriques par étoile
+    const SN = new Float32Array(16384), SK = 16384 / TAU; for (let i = 0; i < 16384; i++) SN[i] = Math.sin(i / SK);
+    function project(a, e, ph, z, V, k, shift, out) {
+      const m = Math.round(p.bras), th = p.enroulement * a * Math.PI + patt + shift, ip = (ph * SK) | 0;
+      const rr = a * (1 + e * p.ovale * Math.min(1, a / 0.2) * SN[(((m * (ph - th)) * SK | 0) + 4096) & 16383]);
+      const x = rr * SN[(ip + 4096) & 16383], y = rr * SN[ip & 16383], xr = x * V.ca - y * V.sa, yr = x * V.sa + y * V.ca;
+      out[0] = (V.cx + xr * V.R) * k; out[1] = (V.cy + (yr * V.ci - z * V.si) * V.R) * k; out[2] = yr * V.si + z * V.ci;
+    }
+    const P3 = [0, 0, 0];
+    function render(w, h, dpr) {
+      const [RW, RH] = ensure(w, h, dpr), V = view(), k = RW / w;
+      acc.fill(0); dust.fill(0);
+      const area = (RW * RH) / 6e5, norm = 4.5 / Math.max(1, n / 40000) * area * 0.5 * 255;
+      for (let i = 0; i < n; i++) {
+        const kd = KND[i];
+        if (kd === 4) { project(A[i], E[i], PH[i], ZZ[i], V, k, -0.42 / Math.round(p.bras), P3); const xi = P3[0] | 0, yi = P3[1] | 0; if (xi >= 0 && yi >= 0 && xi < RW && yi < RH) dust[yi * RW + xi] += W8[i]; continue; }
+        project(A[i], E[i], PH[i], ZZ[i], V, k, 0, P3);
+        const wv = W8[i] * norm / 255 * (kd === 1 ? 1.3 : 1);
+        splat(acc, RW, RH, P3[0], P3[1], CR[i] * wv, CG[i] * wv, CB[i] * wv, wv);
+      }
+      if (nl) {
+        const L = hex(p.couleurs[p.couleurs.length - 1]), Y = hex(p.jeunes);
+        for (let i = 0; i < nl; i++) { project(LA[i], 0, LPH[i], 0, V, k, 0, P3); const wv = LW[i] * norm / 255 * 1.4; splat(acc, RW, RH, P3[0], P3[1], (Y[0] + L[0]) * 0.5 * wv, (Y[1] + L[1]) * 0.5 * wv, (Y[2] + L[2]) * 0.5 * wv, wv); }
+      }
+      // poussière : densité lissée (petit flou en croix), qui éteint la lumière
+      const dk = p.poussiere * 0.9 * Math.max(1, n / 40000) ** -1 / area * 1.2;
+      const F = hex(p.fond), d = bimg.data, ex = p.eclat * 256, light = F[0] * 0.299 + F[1] * 0.587 + F[2] * 0.114 < 128, sg = light ? 1 : -1;
+      // halo : la lumière de l'image précédente, moyennée par carrés de 8 et floutée, rajoutée (ou retirée sur fond clair)
+      const GW = (RW >> 3) + 2, GH = (RH >> 3) + 2;
+      if (!G1 || G1.length !== GW * GH * 3) { G1 = new Float32Array(GW * GH * 3); G2 = new Float32Array(GW * GH * 3); GT = new Float32Array(GW * GH * 3); GM = new Float32Array(GW * GH); BX = null; }
+      G2.fill(0);
+      const hk = p.halo * 1.1 / 64;
+      if (!BX || BX.length !== RW) { BX = new Int32Array(RW); BF = new Float32Array(RW); for (let x = 0; x < RW; x++) { const gx = (x - 4) / 8, g0 = Math.max(0, Math.floor(gx)); BX[x] = Math.min(GW - 2, g0); BF[x] = Math.max(0, Math.min(1, gx - g0)); } }
+      for (let y = 1; y < RH - 1; y++) {
+        const gy = (y - 4) / 8, gy0 = Math.min(GH - 2, Math.max(0, Math.floor(gy))), fy = Math.max(0, Math.min(1, gy - gy0)), rowc = (y >> 3) * GW, r0 = gy0 * GW, r1 = r0 + GW, hy0 = (1 - fy) * hk, hy1 = fy * hk;
+        for (let x = 1; x < RW - 1; x++) {
+          const i = y * RW + x, o = i * 4, wgt = acc[o + 3];
+          let T = 0, r = F[0], g = F[1], b = F[2];
+          if (wgt > 1e-5) {
+            T = LUT[Math.min(2047, (wgt * ex) | 0)];
+            if (dk > 0) { const dd = (dust[i] * 4 + dust[i - 1] + dust[i + 1] + dust[i - RW] + dust[i + RW]) * dk; T *= EXN[Math.min(2047, (dd * 256) | 0)]; }
+            const inv = 1 / wgt; r += (acc[o] * inv - r) * T; g += (acc[o + 1] * inv - g) * T; b += (acc[o + 2] * inv - b) * T;
+            const c = (rowc + (x >> 3)) * 3; G2[c] += r - F[0]; G2[c + 1] += g - F[1]; G2[c + 2] += b - F[2];
+          }
+          if (hk > 0) {
+            const c0 = r0 + BX[x], c2 = r1 + BX[x];
+            if (GM[c0] + GM[c0 + 1] + GM[c2] + GM[c2 + 1] > 0.3) {
+              const fx = BF[x], gx = 1 - fx, w0 = gx * hy0, w1 = fx * hy0, w2 = gx * hy1, w3 = fx * hy1, a0 = c0 * 3, a2 = c2 * 3;
+              r += G1[a0] * w0 + G1[a0 + 3] * w1 + G1[a2] * w2 + G1[a2 + 3] * w3;
+              g += G1[a0 + 1] * w0 + G1[a0 + 4] * w1 + G1[a2 + 1] * w2 + G1[a2 + 4] * w3;
+              b += G1[a0 + 2] * w0 + G1[a0 + 5] * w1 + G1[a2 + 2] * w2 + G1[a2 + 5] * w3;
+            }
+          }
+          d[o] = r; d[o + 1] = g; d[o + 2] = b; d[o + 3] = 255;
+        }
+      }
+      // flou du halo (deux passes de boîte, rayon 2) : il servira à l'image suivante
+      for (let pass = 0; pass < 2; pass++) {
+        for (let y = 0; y < GH; y++) for (let x = 0; x < GW; x++) for (let c = 0; c < 3; c++) { let s2 = 0; for (let k2 = -2; k2 <= 2; k2++) s2 += G2[(y * GW + Math.min(GW - 1, Math.max(0, x + k2))) * 3 + c]; GT[(y * GW + x) * 3 + c] = s2 / 5; }
+        for (let y = 0; y < GH; y++) for (let x = 0; x < GW; x++) for (let c = 0; c < 3; c++) { let s2 = 0; for (let k2 = -2; k2 <= 2; k2++) s2 += GT[(Math.min(GH - 1, Math.max(0, y + k2)) * GW + x) * 3 + c]; G2[(y * GW + x) * 3 + c] = s2 / 5; }
+      }
+      const tmp = G1; G1 = G2; G2 = tmp;
+      for (let c = 0; c < GW * GH; c++) GM[c] = Math.abs(G1[c * 3]) + Math.abs(G1[c * 3 + 1]) + Math.abs(G1[c * 3 + 2]);
+      bctx.putImageData(bimg, 0, 0);
+      ctx.fillStyle = p.fond; ctx.fillRect(0, 0, w, h);
+      ctx.imageSmoothingEnabled = true; ctx.drawImage(bc, 1, 1, RW - 2, RH - 2, 1 / k, 1 / k, w - 2 / k, h - 2 / k);
+    }
+
+    app.loop((t, dt) => {
+      dt = Math.min(0.05, dt || 0);
+      const { w, h, dpr } = app.size;
+      const key = [p.etoiles, p.bulbe, app.seed].join();
+      if (key !== simKey || !A) { build(); simKey = key; patt = 0; }
+      const ck = [p.couleurs.join(), p.jeunes, n].join(); if (ck !== colKey) { colours(); colKey = ck; }
+      if (p.logo) { sinceStamp += dt; if (sinceStamp > (p.resemer > 0 ? p.resemer : 1e12) || (nl === 0 && sinceStamp > 0.5e9)) { stampLogo(); sinceStamp = 0; } }
+      if (dt > 0) {
+        const v = p.vitesse * dt;
+        for (let i = 0; i < n; i++) PH[i] += omega(A[i]) * v;
+        for (let i = 0; i < nl; i++) LPH[i] += omega(LA[i]) * v;
+        patt += p.onde * 0.3 * v;
+      }
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      render(w, h, dpr);
+      app.finish(ctx);
+    });
+
+    // ——— Export SVG : les étoiles en points (sous-échantillonnées), la couleur et l'opacité de l'image ———
+    function toSVG() {
+      const { w, h } = app.size, V = view(), out = [`<rect width="100%" height="100%" fill="${p.fond}"/>`], step = Math.max(1, Math.ceil(n / 14000)), f = (v) => +v.toFixed(1);
+      const bins = new Map(), q8 = (v) => Math.round(v / 16) * 16, col = (r, g, b) => '#' + [r, g, b].map((v) => Math.max(0, Math.min(255, q8(v))).toString(16).padStart(2, '0')).join('');
+      const rad = Math.max(0.5, Math.min(w, h) * 0.0012);
+      for (let i = 0; i < n; i += step) {
+        if (KND[i] === 4) continue; project(A[i], E[i], PH[i], ZZ[i], V, 1, 0, P3); if (P3[0] < 0 || P3[1] < 0 || P3[0] > w || P3[1] > h) continue;
+        const c = col(CR[i], CG[i], CB[i]); let b = bins.get(c); if (!b) bins.set(c, b = []); b.push(`<circle cx="${f(P3[0])}" cy="${f(P3[1])}" r="${f(rad * (KND[i] === 2 ? 1.5 : 1) * Math.sqrt(W8[i]))}"/>`);
+      }
+      if (nl) { const L = hex(p.jeunes), c = col(L[0], L[1], L[2]); let b = bins.get(c); if (!b) bins.set(c, b = []); for (let i = 0; i < nl; i += Math.max(1, Math.ceil(nl / 6000))) { project(LA[i], 0, LPH[i], 0, V, 1, 0, P3); b.push(`<circle cx="${f(P3[0])}" cy="${f(P3[1])}" r="${f(rad * 1.2)}"/>`); } }
+      for (const [c, L] of bins) out.push(`<g fill="${c}" fill-opacity="0.7">${L.join('')}</g>`);
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">${out.join('')}</svg>`;
+    }
+  </script>
+</body>
+</html>
