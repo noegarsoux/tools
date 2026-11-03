@@ -1,0 +1,245 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ampoules</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Ampoules : des chaînes d'ampoules (le cadre, chaque boucle du contour du logo, chaque guirlande) ;
+    // chaque ampoule connaît sa place i le long de sa chaîne. Le motif donne une luminosité b(i, t) :
+    // chenillard (motif qui avance d'une ampoule à la fois), vague, scintillement, balayage, alternance.
+    // Le verre est un dégradé radial, le halo est ajouté en mode « lighter » pour que les lumières s'additionnent.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2, NL = 10;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const BIEN = PAL('biennale'), MEN = PAL('menthe'), KB = PAL('kegelbahn');
+    const MOTIFS = ['chenillard', 'vague', 'scintille', 'balayage', 'alterne'];
+
+    let simT = 0, L = null, lKey = '', vKey = '', logoM = null, logoKey = '', ptr = null, boost = null;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.05, vignette: 0.22 },
+      hint: 'Survolez ou glissez pour allumer · clic : motif suivant · molette : écart des ampoules',
+      notes: 'Les enseignes de théâtre et les baraques foraines dessinaient leurs lettres et leurs cadres avec des rangées d\'ampoules, et faisaient courir la lumière de l\'une à l\'autre : le chenillard. Ici, des ampoules suivent le cadre et le contour du logo (ou le remplissent), pendent en guirlandes de guinguette ou forment une grille. Elles s\'allument en chenillard, en vague, scintillent au hasard, sont balayées par un projecteur ou alternent ; leurs halos s\'additionnent. Glissez pour allumer celles que vous touchez, cliquez pour changer de motif.',
+      params: {
+        'Ampoules': {
+          disposition: { type: 'select', label: 'Disposition', options: { enseigne: 'Enseigne (cadre et logo)', guirlandes: 'Guirlandes', grille: 'Grille' }, value: 'enseigne' },
+          espacement: { type: 'range', label: 'Écart des ampoules', min: 0.012, max: 0.08, step: 0.001, value: 0.03 },
+          taille: { type: 'range', label: 'Taille des ampoules', min: 0.15, max: 0.5, step: 0.01, value: 0.3 },
+          cadre: { type: 'toggle', label: 'Cadre d\'ampoules', value: true },
+          remplir: { type: 'toggle', label: 'Remplir le logo', value: false },
+          guirlandes: { type: 'range', label: 'Guirlandes', min: 1, max: 9, step: 1, value: 4, show: (q) => q.disposition === 'guirlandes' },
+        },
+        'Lumière': {
+          motif: { type: 'select', label: 'Motif', options: { chenillard: 'Chenillard', vague: 'Vague', scintille: 'Scintillement', balayage: 'Balayage', alterne: 'Alternance' }, value: 'chenillard' },
+          vitesse: { type: 'range', label: 'Vitesse', min: 0.1, max: 3, step: 0.01, value: 1 },
+          longueur: { type: 'range', label: 'Longueur du motif (ampoules)', min: 2, max: 24, step: 1, value: 6 },
+          halo: { type: 'range', label: 'Halo', min: 0, max: 1, step: 0.01, value: 0.6 },
+          eteintes: { type: 'range', label: 'Lueur des ampoules éteintes', min: 0, max: 0.6, step: 0.01, value: 0.12 },
+          alterner: { type: 'toggle', label: 'Alterner les couleurs', value: false },
+        },
+        'Logo en lumière': { tailleLogo: { type: 'range', label: 'Taille du logo', min: 0.3, max: 0.95, step: 0.01, value: 0.66 }, image: { type: 'file', label: 'Logo', accept: 'image/*' } },
+        'Couleurs': {
+          fond: { type: 'color', label: 'Fond', value: '#141016' },
+          panneau: { type: 'color', label: 'Panneau et fils', value: '#3a2a2a' },
+          couleurs: { type: 'palette', label: 'Ampoules', value: ['#ffd27a', '#ff6a3d', '#ffffff'] },
+        },
+      },
+      presets: {
+        'Enseigne': {},
+        'Logo plein': { remplir: true, cadre: false, espacement: 0.024, motif: 'vague', longueur: 14, tailleLogo: 0.8 },
+        'Guinguette': { disposition: 'guirlandes', guirlandes: 4, espacement: 0.045, taille: 0.34, motif: 'scintille', couleurs: ['#ffd27a', '#ff8a5c', '#ffe9b8'], alterner: true },
+        'Grille': { disposition: 'grille', espacement: 0.035, motif: 'balayage', couleurs: ['#ffd27a', '#e5452a'] },
+        'Chenillard rapide': { vitesse: 2.6, longueur: 3, eteintes: 0.05 },
+        'Néon froid': { couleurs: ['#bfe8ff', '#7fb8ff', '#ffffff'], fond: '#070b14', panneau: '#1a2233', motif: 'vague', longueur: 18 },
+        'Alternance': { motif: 'alterne', alterner: true, couleurs: ['#ff4f4f', '#ffd27a'], vitesse: 0.8 },
+        'Biennale': { fond: BIEN[1], panneau: '#2a2a2a', couleurs: [BIEN[4], BIEN[2], BIEN[3], BIEN[0]], alterner: true },
+        'Menthe': { fond: '#0e1514', panneau: MEN[1], couleurs: [MEN[2], MEN[0], MEN[3]], motif: 'vague', disposition: 'guirlandes', guirlandes: 5 },
+        'Kegelbahn': { fond: KB[0], panneau: '#221c26', couleurs: KB.slice(1), alterner: true, motif: 'scintille', disposition: 'grille', espacement: 0.03 },
+      },
+      brand(colors) {
+        const s = colors.slice().sort((a, b) => lum(a) - lum(b)), D = s[0];
+        return { fond: mix(D, '#000000', 0.55), panneau: mix(D, '#000000', 0.2), couleurs: s.length > 1 ? s.slice(1) : ['#ffd27a'] };
+      },
+      pointer: {
+        move: (q) => { ptr = ptr && ptr.down ? ptr : { x: q.x, y: q.y }; ptr.x = q.x; ptr.y = q.y; light(q.x, q.y); },
+        down: (q) => { ptr = { x: q.x, y: q.y, moved: 0, down: true }; },
+        drag: (q) => { if (!ptr) return; ptr.moved += Math.hypot(q.x - ptr.x, q.y - ptr.y); ptr.x = q.x; ptr.y = q.y; light(q.x, q.y); },
+        up: () => { if (ptr && ptr.down && ptr.moved < 6) app.set('motif', MOTIFS[(MOTIFS.indexOf(p.motif) + 1) % MOTIFS.length]); ptr = null; },
+        wheel: (q, dy) => app.set('espacement', Math.max(0.012, Math.min(0.08, +(p.espacement + (dy > 0 ? 0.002 : -0.002)).toFixed(3)))),
+      },
+      onChange(k) { if (['*', 'image'].includes(k)) logoKey = ''; },
+      export: { name: 'ampoules', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    function hex(x) { const n = parseInt(x.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
+    function lum(x) { const c = hex(x); return (c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114) / 255; }
+    function mix(a, b, t) { const A = hex(a), C = hex(b); return '#' + A.map((v, i) => Math.round(v + (C[i] - v) * t).toString(16).padStart(2, '0')).join(''); }
+    function rng(s) { let a = s >>> 0; return () => { a = (a + 0x6d2b79f5) >>> 0; let t = a; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+
+    function buildLogo() {
+      const img0 = p.image || app.logoImg, key = img0 ? (img0.src || 'c') : 'demo'; if (key === logoKey) return; logoKey = key; vKey = '';
+      const M = 200, c = document.createElement('canvas'); c.width = c.height = M; const x = c.getContext('2d', { willReadFrequently: true }), L = M * 0.94, cx = M / 2;
+      if (img0) { const iw = img0.naturalWidth || img0.width, ih = img0.naturalHeight || img0.height, s = L / Math.max(iw, ih); x.drawImage(img0, cx - iw * s / 2, cx - ih * s / 2, iw * s, ih * s); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(cx, cx, L * 0.48, 0, TAU); x.arc(cx, cx, L * 0.27, 0, TAU, true); x.fill('evenodd'); x.fillRect(cx - L * 0.07, cx - L * 0.5, L * 0.14, L); }
+      const d = x.getImageData(0, 0, M, M).data; let transp = 0; for (let i = 3; i < d.length; i += 4) if (d[i] < 128) transp++; const useA = transp > M * M * 0.05;
+      const F = new Float64Array(M * M); for (let i = 0; i < M * M; i++) { const o = i * 4, l = (d[o] * 0.2126 + d[o + 1] * 0.7152 + d[o + 2] * 0.0722) / 255; F[i] = useA ? d[o + 3] / 255 : (d[o + 3] / 255) * Math.min(1, Math.max(0, (0.75 - l) * 2)); }
+      { const G2 = new Float64Array(M * M); for (let j = 1; j < M - 1; j++) for (let i = 1; i < M - 1; i++) { let a = 0; for (let b = -1; b <= 1; b++) for (let c = -1; c <= 1; c++) a += F[(j + b) * M + i + c] * (b || c ? (b && c ? 1 : 2) : 4); G2[j * M + i] = a / 16; } F.set(G2); }
+      for (let k = 0; k < M; k++) F[k] = F[(M - 1) * M + k] = F[k * M] = F[k * M + M - 1] = 0;
+      logoM = contours(F, M, M, 0.5, 0, 0, 1).filter((c) => c.closed && c.pts.length > 6).map((c) => chaikin(chaikin(c.pts, true), true).map((q) => [q[0] / M - 0.5, q[1] / M - 0.5]));
+    }
+    // carrés marchants + chaînage
+    function contours(F, nx, ny, lev, ox, oy, cs) {
+      const pt = new Map(), adj = new Map();
+      const P = (id) => { let q = pt.get(id); if (q) return q; const cell = id >> 1, i = cell % nx, j = (cell - i) / nx; let a, b, ax, ay, bx, by; if (id & 1) { a = F[j * nx + i]; b = F[(j + 1) * nx + i]; ax = bx = i; ay = j; by = j + 1; } else { a = F[j * nx + i]; b = F[j * nx + i + 1]; ay = by = j; ax = i; bx = i + 1; } const t = (lev - a) / (b - a || 1e-9); q = [ox + (ax + (bx - ax) * t) * cs, oy + (ay + (by - ay) * t) * cs]; pt.set(id, q); return q; };
+      const link = (a, b) => { (adj.get(a) || adj.set(a, []).get(a)).push(b); (adj.get(b) || adj.set(b, []).get(b)).push(a); };
+      for (let j = 0; j < ny - 1; j++) for (let i = 0; i < nx - 1; i++) {
+        const A = F[j * nx + i] > lev, B = F[j * nx + i + 1] > lev, C = F[(j + 1) * nx + i + 1] > lev, D = F[(j + 1) * nx + i] > lev, idx = A | (B << 1) | (C << 2) | (D << 3);
+        if (idx === 0 || idx === 15) continue;
+        const T = (j * nx + i) * 2, R = (j * nx + i + 1) * 2 + 1, Bo = ((j + 1) * nx + i) * 2, Le = (j * nx + i) * 2 + 1;
+        const ctr = (F[j * nx + i] + F[j * nx + i + 1] + F[(j + 1) * nx + i + 1] + F[(j + 1) * nx + i]) / 4 > lev;
+        switch (idx) {
+          case 1: case 14: link(Le, T); break; case 2: case 13: link(T, R); break; case 3: case 12: link(Le, R); break;
+          case 4: case 11: link(R, Bo); break; case 6: case 9: link(T, Bo); break; case 7: case 8: link(Le, Bo); break;
+          case 5: if (ctr) { link(Le, Bo); link(T, R); } else { link(Le, T); link(R, Bo); } break;
+          case 10: if (ctr) { link(Le, T); link(R, Bo); } else { link(Le, Bo); link(T, R); } break;
+        }
+      }
+      const seen = new Set(), out = [];
+      const walk = (s) => { const L = [s]; seen.add(s); let cur = s; for (;;) { const nb = (adj.get(cur) || []).find((x) => !seen.has(x)); if (nb === undefined) break; seen.add(nb); L.push(nb); cur = nb; } return L; };
+      for (const [id, nb] of adj) if (nb.length === 1 && !seen.has(id)) out.push({ pts: walk(id).map(P), closed: false });
+      for (const [id] of adj) if (!seen.has(id)) out.push({ pts: walk(id).map(P), closed: true });
+      return out;
+    }
+    function chaikin(pts, closed) {
+      const o = []; const n = pts.length; for (let k = 0; k < (closed ? n : n - 1); k++) { const a = pts[k], b = pts[(k + 1) % n]; o.push([a[0] * 0.75 + b[0] * 0.25, a[1] * 0.75 + b[1] * 0.25], [a[0] * 0.25 + b[0] * 0.75, a[1] * 0.25 + b[1] * 0.75]); }
+      if (!closed) { o.unshift(pts[0]); o.push(pts[n - 1]); } return o;
+    }
+
+
+    // ——— Placement ———
+    function resample(pts, closed, step) {
+      const P = closed ? pts.concat([pts[0]]) : pts; let tot = 0; const seg = []; for (let k = 1; k < P.length; k++) { const l = Math.hypot(P[k][0] - P[k - 1][0], P[k][1] - P[k - 1][1]); seg.push(l); tot += l; }
+      const n = Math.max(closed ? 3 : 2, Math.round(tot / step)), o = []; let k = 0, acc = 0;
+      for (let i = 0; i < (closed ? n : n + 1); i++) { const s = i * tot / n; while (k < seg.length - 1 && acc + seg[k] < s) { acc += seg[k]; k++; } const t = Math.min(1, (s - acc) / (seg[k] || 1)); o.push([P[k][0] + (P[k + 1][0] - P[k][0]) * t, P[k][1] + (P[k + 1][1] - P[k][1]) * t]); }
+      return o;
+    }
+    function inside(loops, x, y) { let c = false; for (const L0 of loops) for (let i = 0, j = L0.length - 1; i < L0.length; j = i++) { const a = L0[i], b = L0[j]; if ((a[1] > y) !== (b[1] > y) && x < (b[0] - a[0]) * (y - a[1]) / (b[1] - a[1]) + a[0]) c = !c; } return c; }
+    function layout(w, h) {
+      buildLogo();
+      const key = [p.disposition, p.espacement, p.cadre, p.remplir, p.guirlandes, p.tailleLogo, logoKey, w, h, app.seed].join(); if (key === lKey && L) return L; lKey = key;
+      const m = Math.min(w, h), sp = m * p.espacement, bulbs = [], chains = [], R = rng(app.seed * 271 + 9);
+      const add = (pts, g, closed, wire) => { const ch = { pts: [], g, closed, wire }; pts.forEach((q, i) => { const b = { x: q[0], y: q[1], g, i, n: pts.length, r1: R(), r2: R(), ch: chains.length }; bulbs.push(b); ch.pts.push(b); }); chains.push(ch); };
+      const S = m * p.tailleLogo, loops = logoM.map((L0) => L0.map((q) => [w / 2 + q[0] * S, h / 2 + q[1] * S]));
+      if (p.disposition === 'enseigne') {
+        if (p.cadre) { const mg = sp * 1.4, rr = sp * 3, x0 = mg, y0 = mg, x1 = w - mg, y1 = h - mg, pts = []; const arc = (cx, cy, a0) => { for (let k = 0; k <= 8; k++) { const a = a0 + k / 8 * Math.PI / 2; pts.push([cx + Math.cos(a) * rr, cy + Math.sin(a) * rr]); } };
+          arc(x1 - rr, y0 + rr, -Math.PI / 2); arc(x1 - rr, y1 - rr, 0); arc(x0 + rr, y1 - rr, Math.PI / 2); arc(x0 + rr, y0 + rr, Math.PI); add(resample(pts, true, sp), 0, true); }
+        if (p.remplir) { const pts = [], rh = sp * 0.866; for (let y = h / 2 - S / 2, j = 0; y < h / 2 + S / 2; y += rh, j++) for (let x = w / 2 - S / 2 + (j % 2 ? sp / 2 : 0); x < w / 2 + S / 2; x += sp) if (inside(loops, x, y)) pts.push([x, y]); pts.sort((a, b) => a[0] - b[0] || a[1] - b[1]); add(pts, 2, false, false); }
+        else for (const L0 of loops) { let len = 0; for (let k = 0; k < L0.length; k++) { const a = L0[k], b = L0[(k + 1) % L0.length]; len += Math.hypot(b[0] - a[0], b[1] - a[1]); } if (len > sp * 3) add(resample(L0, true, sp * 0.85), 1, true); }
+      } else if (p.disposition === 'guirlandes') {
+        const n = p.guirlandes; for (let j = 0; j < n; j++) { const y0 = h * (n === 1 ? 0.3 : 0.1 + 0.72 * j / (n - 1)), sag = h * (0.07 + 0.05 * (j % 2)), pts = []; for (let x = -sp * 0.5; x < w + sp; x += sp) { const u = x / w * 2 - 1; pts.push([x, y0 + sag * (1 - u * u)]); } add(pts, j % 3, false, { y0, sag }); }
+      } else {
+        const g = sp * 1.15, nx = Math.floor(w / g), ny = Math.floor(h / g), ox = (w - (nx - 1) * g) / 2, oy = (h - (ny - 1) * g) / 2, pts = [], gg = [];
+        for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) { const x = ox + i * g, y = oy + j * g; pts.push([x, y]); }
+        const ch = { pts: [], g: 2, closed: false }; pts.forEach((q, k) => { const lg = inside(loops, q[0], q[1]); const b = { x: q[0], y: q[1], g: lg ? 1 : 2, i: (k % nx) + Math.floor(k / nx), n: nx + ny, r1: R(), r2: R(), ch: 0, grid: true }; bulbs.push(b); ch.pts.push(b); }); chains.push(ch);
+      }
+      L = { bulbs, chains, sp, loops, m }; boost = new Float32Array(bulbs.length); return L;
+    }
+
+    // ——— Luminosité ———
+    function bright(b, t, w) {
+      const v = p.vitesse, Lg = p.longueur; let x;
+      if (p.motif === 'chenillard') { const ph = ((b.i - t * v * 8) % Lg + Lg) % Lg; x = ph < Lg / 2 ? 1 : 0; if (b.grid && b.g === 1) x = 1; }
+      else if (p.motif === 'vague') { x = 0.5 + 0.5 * Math.sin(TAU * (b.i / Lg - t * v * 0.8)); x = x * x; if (b.grid && b.g === 1) x = 0.6 + 0.4 * x; }
+      else if (p.motif === 'scintille') { const f = Math.sin(t * v * (2 + b.r1 * 4) + b.r2 * TAU) + Math.sin(t * v * 1.3 + b.r1 * 17); x = Math.max(0, Math.min(1, (f - 0.6) * 1.5)); if (b.grid) x = b.g === 1 ? Math.max(x, 0.8) : x * 0.55; }
+      else if (p.motif === 'balayage') { const s = ((t * v * 0.3) % 1.4) - 0.2, d = (b.x / w - s) * 7; x = Math.exp(-d * d); if (b.g === 1) x = Math.max(x, b.grid ? 0.9 : 0.35); }
+      else { const ph = Math.floor(t * v * 2.5); x = ((b.i + ph) % 2) ? 1 : 0.0; if (b.grid && b.g === 1) x = 1 - x * 0.3; }
+      return x;
+    }
+    function colorOf(b) { const Cs = p.couleurs.length ? p.couleurs : ['#ffd27a']; const g = b.g === 2 && !b.grid ? 1 : b.g; return Cs[(p.alterner ? b.i + g : g) % Cs.length]; }
+    function light(x, y) { if (!L || !boost) return; const R2 = (L.sp * 2.2) ** 2; for (let k = 0; k < L.bulbs.length; k++) { const b = L.bulbs[k]; if ((b.x - x) ** 2 + (b.y - y) ** 2 < R2) boost[k] = 1; } }
+
+    // ——— Dessin ———
+    function swayOf(ch, t) { return ch.wire ? Math.sin(t * 0.7 + ch.wire.y0 * 0.01) * L.sp * 0.25 : 0; }
+    function scene(pen, w, h, t) {
+      const r = L.sp * p.taille, Lb = L.bulbs;
+      pen.bg(p.fond);
+      // panneaux (bandeau du cadre, lettre en relief) et fils
+      for (const ch of L.chains) {
+        if (ch.wire) { const sw = swayOf(ch, t); pen.wire(ch.pts.map((b) => [b.x + sw * 0.3, b.y + sw - r * 1.2]), Math.max(0.8, r * 0.18)); }
+        else if (ch.g === 0) pen.band(ch.pts.map((b) => [b.x, b.y]), ch.closed, L.sp * 1.25);
+        else if (ch.g === 1 && !ch.pts[0].grid) pen.band(ch.pts.map((b) => [b.x, b.y]), ch.closed, L.sp * 1.15);
+      }
+      if (p.disposition === 'enseigne' && p.remplir) pen.plate(L.loops, L.sp * 0.7);
+      const lv = new Float32Array(Lb.length);
+      for (let k = 0; k < Lb.length; k++) { const b = Lb[k]; lv[k] = Math.max(boost ? boost[k] : 0, p.eteintes + (1 - p.eteintes) * bright(b, t, w)); }
+      const pos = (b) => { const ch = L.chains[b.ch]; if (!ch || !ch.wire) return [b.x, b.y]; const sw = swayOf(ch, t); return [b.x + sw * 0.3, b.y + sw]; };
+      for (let k = 0; k < Lb.length; k++) { const q = pos(Lb[k]); pen.socket(q[0], q[1] - (L.chains[Lb[k].ch] && L.chains[Lb[k].ch].wire ? r * 0.9 : 0), r); }
+      for (let k = 0; k < Lb.length; k++) { const q = pos(Lb[k]); pen.bulb(q[0], q[1], r, colorOf(Lb[k]), lv[k]); }
+      if (p.halo > 0) { const gk = Lb.length > 400 ? 0.7 : 1; pen.glowBegin(); for (let k = 0; k < Lb.length; k++) { if (lv[k] < 0.25) continue; const q = pos(Lb[k]); pen.glow(q[0], q[1], r * (3 + 4 * p.halo) * gk, colorOf(Lb[k]), (lv[k] - 0.15) * p.halo * 0.55); } pen.glowEnd(); }
+    }
+    const spr = new Map(); let sprKey = '';
+    function bulbSprite(c, lvl, r, dpr) {
+      const k0 = [r.toFixed(2), dpr].join(); if (k0 !== sprKey) { sprKey = k0; spr.clear(); } const key = c + lvl; let S = spr.get(key); if (S) return S;
+      const s = Math.ceil(r * 2.2 * dpr) + 2, cv = document.createElement('canvas'); cv.width = cv.height = s; const g = cv.getContext('2d'), o = s / 2, R = r * dpr, b = lvl / (NL - 1);
+      const gr = g.createRadialGradient(o - R * 0.25, o - R * 0.3, R * 0.05, o, o, R); gr.addColorStop(0, mix(c, '#ffffff', 0.15 + 0.75 * b)); gr.addColorStop(0.55, mix(mix(c, '#000000', 0.55), c, 0.2 + 0.8 * b)); gr.addColorStop(1, mix(mix(c, '#000000', 0.7), c, 0.15 + 0.6 * b));
+      g.fillStyle = gr; g.beginPath(); g.arc(o, o, R, 0, TAU); g.fill(); g.fillStyle = `rgba(255,255,255,${0.25 + 0.35 * (1 - b)})`; g.beginPath(); g.arc(o - R * 0.35, o - R * 0.4, R * 0.18, 0, TAU); g.fill();
+      S = { cv, s: s / dpr }; spr.set(key, S); return S;
+    }
+    function glowSprite(c, dpr) {
+      const key = 'g' + c + dpr; let S = spr.get(key); if (S) return S; const s = 128, cv = document.createElement('canvas'); cv.width = cv.height = s; const g = cv.getContext('2d'), o = s / 2;
+      const [R0, G0, B0] = hex(c), gr = g.createRadialGradient(o, o, 0, o, o, o); gr.addColorStop(0, `rgba(${R0},${G0},${B0},0.9)`); gr.addColorStop(0.25, `rgba(${R0},${G0},${B0},0.35)`); gr.addColorStop(1, `rgba(${R0},${G0},${B0},0)`);
+      g.fillStyle = gr; g.fillRect(0, 0, s, s); S = { cv }; spr.set(key, S); return S;
+    }
+
+    app.loop((t, dt) => {
+      dt = Math.min(1 / 20, dt || 0);
+      const { w, h, dpr } = app.size; layout(w, h);
+      if (!app.thumbnail) { simT += dt; for (let k = 0; k < boost.length; k++) boost[k] = Math.max(0, boost[k] - dt * 0.9); }
+      const T = app.thumbnail ? 1.35 : simT;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      scene({
+        bg(c) { ctx.fillStyle = c; ctx.fillRect(0, 0, w, h); },
+        band(pts, closed, lw) { ctx.strokeStyle = p.panneau; ctx.lineWidth = lw; ctx.lineJoin = 'round'; ctx.lineCap = 'round'; ctx.beginPath(); pts.forEach((q, i) => (i ? ctx.lineTo(q[0], q[1]) : ctx.moveTo(q[0], q[1]))); if (closed) ctx.closePath(); ctx.stroke(); ctx.strokeStyle = mix(p.panneau, '#ffffff', 0.08); ctx.lineWidth = lw * 0.12; ctx.stroke(); },
+        plate(loops, pad) { ctx.fillStyle = p.panneau; ctx.strokeStyle = p.panneau; ctx.lineWidth = pad * 2; ctx.lineJoin = 'round'; ctx.beginPath(); for (const L0 of loops) { L0.forEach((q, i) => (i ? ctx.lineTo(q[0], q[1]) : ctx.moveTo(q[0], q[1]))); ctx.closePath(); } ctx.fill('evenodd'); ctx.stroke(); },
+        wire(pts, lw) { ctx.strokeStyle = p.panneau; ctx.lineWidth = lw; ctx.beginPath(); pts.forEach((q, i) => (i ? ctx.lineTo(q[0], q[1]) : ctx.moveTo(q[0], q[1]))); ctx.stroke(); },
+        socket(x, y, r) { ctx.fillStyle = mix(p.panneau, '#000000', 0.45); ctx.beginPath(); ctx.arc(x, y + r * 0.15, r * 1.12, 0, TAU); ctx.fill(); },
+        bulb(x, y, r, c, b) { const S = bulbSprite(c, Math.round(Math.max(0, Math.min(1, b)) * (NL - 1)), r, dpr); ctx.drawImage(S.cv, x - S.s / 2, y - S.s / 2, S.s, S.s); },
+        glowBegin() { ctx.globalCompositeOperation = 'lighter'; },
+        glow(x, y, R, c, a) { const S = glowSprite(c, dpr); ctx.globalAlpha = Math.min(1, a); ctx.drawImage(S.cv, x - R, y - R, R * 2, R * 2); },
+        glowEnd() { ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over'; },
+      }, w, h, T);
+      app.finish(ctx);
+    });
+
+    function toSVG() {
+      const { w, h } = app.size, f = (v) => +v.toFixed(2); layout(w, h);
+      let defs = '', s = ''; const gl = new Map();
+      const gid = (c) => { let id = gl.get(c); if (id) return id; id = 'h' + gl.size; gl.set(c, id); defs += `<radialGradient id="${id}"><stop offset="0" stop-color="${c}" stop-opacity="0.9"/><stop offset="0.25" stop-color="${c}" stop-opacity="0.35"/><stop offset="1" stop-color="${c}" stop-opacity="0"/></radialGradient>`; return id; };
+      const d = (pts, z) => 'M' + pts.map((q) => f(q[0]) + ' ' + f(q[1])).join('L') + (z ? 'Z' : '');
+      scene({
+        bg(c) { s += `<rect width="100%" height="100%" fill="${c}"/>`; },
+        band(pts, closed, lw) { s += `<path d="${d(pts, closed)}" fill="none" stroke="${p.panneau}" stroke-width="${f(lw)}" stroke-linejoin="round" stroke-linecap="round"/>`; },
+        plate(loops, pad) { s += `<path d="${loops.map((L0) => d(L0, true)).join('')}" fill="${p.panneau}" fill-rule="evenodd" stroke="${p.panneau}" stroke-width="${f(pad * 2)}" stroke-linejoin="round"/>`; },
+        wire(pts, lw) { s += `<path d="${d(pts)}" fill="none" stroke="${p.panneau}" stroke-width="${f(lw)}"/>`; },
+        socket(x, y, r) { s += `<circle cx="${f(x)}" cy="${f(y + r * 0.15)}" r="${f(r * 1.12)}" fill="${mix(p.panneau, '#000000', 0.45)}"/>`; },
+        bulb(x, y, r, c, b) { s += `<circle cx="${f(x)}" cy="${f(y)}" r="${f(r)}" fill="${mix(mix(c, '#000000', 0.6), mix(c, '#ffffff', 0.35 * b), 0.2 + 0.8 * b)}"/>`; },
+        glowBegin() { s += '<g style="mix-blend-mode:screen">'; },
+        glow(x, y, R, c, a) { s += `<circle cx="${f(x)}" cy="${f(y)}" r="${f(R)}" fill="url(#${gid(c)})" fill-opacity="${+Math.min(1, a).toFixed(3)}"/>`; },
+        glowEnd() { s += '</g>'; },
+      }, w, h, simT);
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><defs>${defs}</defs>${s}</svg>`;
+    }
+  </script>
+</body>
+</html>

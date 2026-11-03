@@ -1,0 +1,15 @@
+{
+  "slug": "ampoules",
+  "title": "Ampoules",
+  "type": "motion",
+  "description": "Une enseigne de fête foraine : des ampoules suivent le contour du logo et le cadre, s'allument en chenillard, en vague ou en scintillement, avec leur halo.",
+  "tags": ["lumiere", "fete", "enseigne", "contour", "logo", "svg"],
+  "inspiration": [
+    "Les enseignes à ampoules des théâtres de Broadway",
+    "Les manèges et les baraques de fête foraine",
+    "Les guirlandes de guinguette"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}
