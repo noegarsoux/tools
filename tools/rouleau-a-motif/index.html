@@ -1,0 +1,337 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Rouleau à motif</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Rouleau à motif : un rouleau de peintre dont la surface porte un décor en relief. Quand il avance d'une
+    // distance ds perpendiculaire à son axe, la ligne de contact déroule la bande de surface correspondante
+    // (coordonnée v, modulo la circonférence) et la dépose sur le mur. L'encre s'épuise avec la distance :
+    // le motif pâlit, puis le peintre retourne au bac. Le mur se couvre couche après couche.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const BIE = PAL('biennale'), LUZ = PAL('luzern'), MEN = PAL('menthe');
+    const DECORS = ['logo', 'chevrons', 'pois', 'losanges', 'fleurs', 'rayures', 'mousse'];
+
+    let vKey = '', logoM = null, logoKey = '', ptr = null, S = null, gKey = '', simT = 0;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.05, vignette: 0.2 },
+      hint: 'Glisser : peindre avec le rouleau · clic sur le bac : recharger et changer de couleur · molette : largeur du rouleau',
+      notes: 'Un rouleau de peintre à décor en relief : en roulant, il déroule son motif sur le mur, qui se répète à chaque tour. L’encre s’épuise, le motif pâlit, et le peintre retourne au bac. Bandes verticales, zigzags ou passes libres se superposent couche après couche, en logo, chevrons, pois, losanges ou fleurs.',
+      params: {
+        'Rouleau': {
+          decor: { type: 'select', label: 'Décor', options: { logo: 'Logo', chevrons: 'Chevrons', pois: 'Pois', losanges: 'Losanges', fleurs: 'Fleurs', rayures: 'Rayures', mousse: 'Mousse (uni)' }, value: 'logo' },
+          largeur: { type: 'range', label: 'Largeur', min: 0.08, max: 0.4, step: 0.01, value: 0.17 },
+          diametre: { type: 'range', label: 'Diamètre', min: 0.3, max: 1.2, step: 0.01, value: 0.6 },
+          encre: { type: 'range', label: 'Charge d’encre', min: 0.2, max: 2, step: 0.01, value: 0.8 },
+          pression: { type: 'range', label: 'Pression', min: 0.3, max: 1, step: 0.01, value: 0.85 },
+          usure: { type: 'range', label: 'Irrégularité', min: 0, max: 1, step: 0.01, value: 0.45 },
+          trajet: { type: 'select', label: 'Trajet', options: { colonnes: 'Bandes verticales', zigzag: 'Zigzag', libre: 'Passes libres' }, value: 'colonnes' },
+          vitesse: { type: 'range', label: 'Vitesse', min: 0.2, max: 3, step: 0.01, value: 1 },
+          image: { type: 'file', label: 'Image du logo', accept: 'image/*' },
+        },
+        'Couleurs': {
+          couleurs: { type: 'palette', label: 'Peintures', value: ['#e5452a', '#2f5fd0', '#111111', '#f2b0c8'] },
+          mur: { type: 'color', label: 'Mur', value: '#efe9dd' },
+          rouleau: { type: 'color', label: 'Manche', value: '#2a2420' },
+          ombres: { type: 'toggle', label: 'Ombre du rouleau', value: true },
+        },
+      },
+      presets: {
+        'Atelier': {},
+        'Chevrons': { decor: 'chevrons', couleurs: ['#111111', '#e5452a'], trajet: 'colonnes', largeur: 0.2 },
+        'Pois': { decor: 'pois', couleurs: ['#2f5fd0', '#f2b0c8', '#e5452a'], mur: '#f4f1ea', trajet: 'zigzag' },
+        'Losanges': { decor: 'losanges', couleurs: ['#7d38e7', '#f25f03'], mur: '#f2eadc', largeur: 0.24 },
+        'Fleurs': { decor: 'fleurs', couleurs: ['#5bb08a', '#e5452a', '#f2c230'], mur: '#f6f0e4', diametre: 0.8, trajet: 'libre' },
+        'Rayures': { decor: 'rayures', couleurs: ['#16161a', '#e5452a', '#2f5fd0'], trajet: 'zigzag', usure: 0.7 },
+        'Mousse': { decor: 'mousse', couleurs: ['#f2c230', '#e5452a', '#2f5fd0'], trajet: 'libre', usure: 0.8, pression: 0.7 },
+        'Grand rouleau': { largeur: 0.36, diametre: 1.1, vitesse: 0.7, decor: 'logo' },
+        'Biennale': { couleurs: [BIE[2], BIE[3], BIE[1]], mur: BIE[0], rouleau: BIE[1], decor: 'logo' },
+        'Luzern': { couleurs: [LUZ[0], LUZ[1], LUZ[3]], mur: LUZ[4], rouleau: LUZ[3], decor: 'losanges', trajet: 'zigzag' },
+        'Menthe': { couleurs: [MEN[3], MEN[1], MEN[2]], mur: MEN[0], rouleau: MEN[1], decor: 'pois' },
+      },
+      brand(colors) {
+        const s = colors.slice().sort((a, b) => lum(a) - lum(b)), D = s[0], L = s[s.length - 1], mid = s.length > 2 ? s.slice(0, -1) : [D];
+        return { couleurs: mid, mur: mix(L, '#ffffff', 0.3), rouleau: D, decor: 'logo' };
+      },
+      pointer: {
+        down: (q) => { ptr = { x: q.x, y: q.y, moved: 0 }; if (S) { S.user = true; S.userT = simT; } },
+        drag: (q) => { if (!ptr || !S) return; ptr.moved = Math.max(ptr.moved, Math.hypot(q.x - ptr.x, q.y - ptr.y)); S.target = { x: q.x, y: q.y }; S.userT = simT; },
+        up: (q) => {
+          if (!S) return;
+          if (ptr && ptr.moved <= 6) { const T = S.tray; if (q.x > T.x - T.w * 0.6 && q.x < T.x + T.w * 0.6 && q.y > T.y - T.h && q.y < T.y + T.h) { S.ci++; S.ink = 1; } }
+          S.target = null; S.userT = simT; ptr = null;
+        },
+        wheel: (q, dy) => app.set('largeur', Math.max(0.08, Math.min(0.4, +(p.largeur + (dy > 0 ? -0.02 : 0.02)).toFixed(2)))),
+      },
+      onChange(k) { if (['*', 'image'].includes(k)) logoKey = ''; },
+      export: { name: 'rouleau-a-motif', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    function hex(x) { const n = parseInt(x.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
+    function lum(x) { const c = hex(x); return (c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114) / 255; }
+    function mix(a, b, t) { const A = hex(a), C = hex(b); return '#' + A.map((v, i) => Math.round(v + (C[i] - v) * t).toString(16).padStart(2, '0')).join(''); }
+    function rgba(c, a) { const h = hex(c); return `rgba(${h[0]},${h[1]},${h[2]},${a})`; }
+    function rng(s) { let a = s >>> 0; return () => { a = (a + 0x6d2b79f5) >>> 0; let t = a; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+    const ink = (i) => { const c = p.couleurs; return c.length ? c[((i % c.length) + c.length) % c.length] : '#e5452a'; };
+
+    function buildLogo() {
+      const img0 = p.image || app.logoImg, key = img0 ? (img0.src || 'c') : 'demo'; if (key === logoKey) return; logoKey = key; vKey = '';
+      const M = 200, c = document.createElement('canvas'); c.width = c.height = M; const x = c.getContext('2d', { willReadFrequently: true }), L = M * 0.94, cx = M / 2;
+      if (img0) { const iw = img0.naturalWidth || img0.width, ih = img0.naturalHeight || img0.height, s = L / Math.max(iw, ih); x.drawImage(img0, cx - iw * s / 2, cx - ih * s / 2, iw * s, ih * s); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(cx, cx, L * 0.48, 0, TAU); x.arc(cx, cx, L * 0.27, 0, TAU, true); x.fill('evenodd'); x.fillRect(cx - L * 0.07, cx - L * 0.5, L * 0.14, L); }
+      const d = x.getImageData(0, 0, M, M).data; let transp = 0; for (let i = 3; i < d.length; i += 4) if (d[i] < 128) transp++; const useA = transp > M * M * 0.05;
+      const F = new Float64Array(M * M); for (let i = 0; i < M * M; i++) { const o = i * 4, l = (d[o] * 0.2126 + d[o + 1] * 0.7152 + d[o + 2] * 0.0722) / 255; F[i] = useA ? d[o + 3] / 255 : (d[o + 3] / 255) * Math.min(1, Math.max(0, (0.75 - l) * 2)); }
+      { const G2 = new Float64Array(M * M); for (let j = 1; j < M - 1; j++) for (let i = 1; i < M - 1; i++) { let a = 0; for (let b = -1; b <= 1; b++) for (let c = -1; c <= 1; c++) a += F[(j + b) * M + i + c] * (b || c ? (b && c ? 1 : 2) : 4); G2[j * M + i] = a / 16; } F.set(G2); }
+      for (let k = 0; k < M; k++) F[k] = F[(M - 1) * M + k] = F[k * M] = F[k * M + M - 1] = 0;
+      logoM = contours(F, M, M, 0.5, 0, 0, 1).filter((c) => c.closed && c.pts.length > 6).map((c) => chaikin(chaikin(c.pts, true), true).map((q) => [q[0] / M - 0.5, q[1] / M - 0.5]));
+    }
+    // carrés marchants + chaînage
+    function contours(F, nx, ny, lev, ox, oy, cs) {
+      const pt = new Map(), adj = new Map();
+      const P = (id) => { let q = pt.get(id); if (q) return q; const cell = id >> 1, i = cell % nx, j = (cell - i) / nx; let a, b, ax, ay, bx, by; if (id & 1) { a = F[j * nx + i]; b = F[(j + 1) * nx + i]; ax = bx = i; ay = j; by = j + 1; } else { a = F[j * nx + i]; b = F[j * nx + i + 1]; ay = by = j; ax = i; bx = i + 1; } const t = (lev - a) / (b - a || 1e-9); q = [ox + (ax + (bx - ax) * t) * cs, oy + (ay + (by - ay) * t) * cs]; pt.set(id, q); return q; };
+      const link = (a, b) => { (adj.get(a) || adj.set(a, []).get(a)).push(b); (adj.get(b) || adj.set(b, []).get(b)).push(a); };
+      for (let j = 0; j < ny - 1; j++) for (let i = 0; i < nx - 1; i++) {
+        const A = F[j * nx + i] > lev, B = F[j * nx + i + 1] > lev, C = F[(j + 1) * nx + i + 1] > lev, D = F[(j + 1) * nx + i] > lev, idx = A | (B << 1) | (C << 2) | (D << 3);
+        if (idx === 0 || idx === 15) continue;
+        const T = (j * nx + i) * 2, R = (j * nx + i + 1) * 2 + 1, Bo = ((j + 1) * nx + i) * 2, Le = (j * nx + i) * 2 + 1;
+        const ctr = (F[j * nx + i] + F[j * nx + i + 1] + F[(j + 1) * nx + i + 1] + F[(j + 1) * nx + i]) / 4 > lev;
+        switch (idx) {
+          case 1: case 14: link(Le, T); break; case 2: case 13: link(T, R); break; case 3: case 12: link(Le, R); break;
+          case 4: case 11: link(R, Bo); break; case 6: case 9: link(T, Bo); break; case 7: case 8: link(Le, Bo); break;
+          case 5: if (ctr) { link(Le, Bo); link(T, R); } else { link(Le, T); link(R, Bo); } break;
+          case 10: if (ctr) { link(Le, T); link(R, Bo); } else { link(Le, Bo); link(T, R); } break;
+        }
+      }
+      const seen = new Set(), out = [];
+      const walk = (s) => { const L = [s]; seen.add(s); let cur = s; for (;;) { const nb = (adj.get(cur) || []).find((x) => !seen.has(x)); if (nb === undefined) break; seen.add(nb); L.push(nb); cur = nb; } return L; };
+      for (const [id, nb] of adj) if (nb.length === 1 && !seen.has(id)) out.push({ pts: walk(id).map(P), closed: false });
+      for (const [id] of adj) if (!seen.has(id)) out.push({ pts: walk(id).map(P), closed: true });
+      return out;
+    }
+    function chaikin(pts, closed) {
+      const o = []; const n = pts.length; for (let k = 0; k < (closed ? n : n - 1); k++) { const a = pts[k], b = pts[(k + 1) % n]; o.push([a[0] * 0.75 + b[0] * 0.25, a[1] * 0.75 + b[1] * 0.25], [a[0] * 0.25 + b[0] * 0.75, a[1] * 0.25 + b[1] * 0.75]); }
+      if (!closed) { o.unshift(pts[0]); o.push(pts[n - 1]); } return o;
+    }
+
+    // ——— décor : polygones dans le repère de la surface (largeur W, circonférence C) ———
+    function decor(W, C, R) {
+      const out = [], poly = (pts) => out.push(pts), circ = (x, y, r, n = 18) => poly(Array.from({ length: n }, (_, k) => [x + Math.cos(k / n * TAU) * r, y + Math.sin(k / n * TAU) * r]));
+      const nx = Math.max(1, Math.round(W / (C / 2))), cw = W / nx, ch = C / 2;
+      switch (p.decor) {
+        case 'chevrons': { const n = Math.max(2, Math.round(C / (cw * 0.5))), st = C / n, t = st * 0.42; for (let j = 0; j < n; j++) { const y = j * st; poly([[0, y], [W / 2, y + cw * 0.35], [W, y], [W, y + t], [W / 2, y + cw * 0.35 + t], [0, y + t]]); } break; }
+        case 'pois': for (let j = 0; j < 4; j++) for (let i = 0; i <= nx * 2; i++) { const x = (i + (j % 2) * 0.5) * cw / 2, y = (j + 0.5) * C / 4; circ(x, y, Math.min(cw, C / 4) * 0.2); } break;
+        case 'losanges': for (let j = 0; j < 2; j++) for (let i = 0; i <= nx; i++) { const x = (i + (j % 2) * 0.5) * cw, y = (j + 0.5) * ch, a = cw * 0.38, b = ch * 0.45; poly([[x, y - b], [x + a, y], [x, y + b], [x - a, y]]); } break;
+        case 'fleurs': for (let j = 0; j < 2; j++) for (let i = 0; i <= nx; i++) { const x = (i + (j % 2) * 0.5) * cw, y = (j + 0.5) * ch, r = Math.min(cw, ch) * 0.2; for (let k = 0; k < 5; k++) { const a = k / 5 * TAU - Math.PI / 2; circ(x + Math.cos(a) * r * 1.05, y + Math.sin(a) * r * 1.05, r * 0.5, 14); } circ(x, y, r * 0.32, 12); } break;
+        case 'rayures': { const n = Math.max(2, Math.round(C / (W * 0.18))), st = C / n; for (let j = 0; j < n; j++) poly([[0, j * st], [W, j * st + st * 0.6], [W, j * st + st * 1.05], [0, j * st + st * 0.45]]); break; }
+        case 'mousse': { poly([[0, 0], [W, 0], [W, C], [0, C]]); break; }
+        default: {
+          if (!logoM) { circ(W / 2, C / 2, Math.min(W, C) * 0.3); break; }
+          for (let j = 0; j < 2; j++) for (let i = 0; i <= nx; i++) { const x = (i + (j % 2) * 0.5) * cw, y = (j + 0.5) * ch, s = Math.min(cw, ch) * 0.78; for (const L of logoM) { const st = Math.max(1, Math.floor(L.length / 140)), o = []; for (let k = 0; k < L.length; k += st) o.push([x + L[k][0] * s, y + L[k][1] * s]); poly(o); } }
+        }
+      }
+      // le motif boucle sur la circonférence : on recopie ce qui dépasse en haut ou en bas
+      const wrap = [];
+      for (const P of out) { let a = Infinity, b = -Infinity; for (const q of P) { a = Math.min(a, q[1]); b = Math.max(b, q[1]); } if (b > C) wrap.push(P.map((q) => [q[0], q[1] - C])); if (a < 0) wrap.push(P.map((q) => [q[0], q[1] + C])); }
+      return out.concat(wrap);
+    }
+    // tuile de surface (masque alpha) avec usure : la peinture ne se dépose pas partout
+    function makeTile(dpr) {
+      const { Wr, Cr } = S, key = [Wr, Cr, p.decor, p.usure, logoKey, dpr, app.seed].join('|'); if (S.tileKey === key) return; S.tileKey = key;
+      const sc = dpr, W = Math.max(2, Math.round(Wr * sc)), H = Math.max(2, Math.round(Cr * sc)), c = document.createElement('canvas'); c.width = W; c.height = H; const x = c.getContext('2d');
+      const R = rng(app.seed * 7 + 2); S.polys = decor(Wr, Cr, R);
+      x.scale(sc, sc); x.fillStyle = '#000'; x.beginPath(); for (const P of S.polys) { P.forEach((q, k) => (k ? x.lineTo(q[0], q[1]) : x.moveTo(q[0], q[1]))); x.closePath(); }
+      x.fill(p.decor === 'logo' ? 'evenodd' : 'nonzero');
+      // continuité verticale : on recopie le haut et le bas pour que le motif boucle sans couture
+      x.setTransform(1, 0, 0, 1, 0, 0);
+      x.globalCompositeOperation = 'destination-out';
+      const n = Math.round(W * H * 0.004 * (p.decor === 'mousse' ? 3 : 1) * p.usure);
+      for (let k = 0; k < n; k++) { x.fillStyle = `rgba(0,0,0,${(0.3 + R() * 0.7).toFixed(2)})`; const r = (0.6 + R() * (p.decor === 'mousse' ? 3.5 : 2.2)) * sc; x.beginPath(); x.arc(R() * W, R() * H, r, 0, TAU); x.fill(); }
+      x.globalCompositeOperation = 'source-over';
+      S.tile = c; S.tint = {};
+    }
+    function tinted(col) {
+      if (S.tint[col]) return S.tint[col];
+      const c = document.createElement('canvas'); c.width = S.tile.width; c.height = S.tile.height; const x = c.getContext('2d');
+      x.drawImage(S.tile, 0, 0); x.globalCompositeOperation = 'source-in'; x.fillStyle = col; x.fillRect(0, 0, c.width, c.height);
+      return (S.tint[col] = c);
+    }
+
+    // ——— construction ———
+    function build(w, h, dpr) {
+      const R = rng(app.seed * 31 + 11), Wr = Math.max(24, w * p.largeur * 0.9), Cr = Math.max(30, h * p.diametre * 0.42);
+      const old = S;
+      S = { w, h, Wr, Cr, R, pos: { x: w * 0.1, y: h * 0.12 }, th: 0, v: 0, ink: 1, ci: 0, layer: 0, path: [], segs: [], user: false, userT: -99, target: null, lift: 1,
+        paint: document.createElement('canvas'), tray: { x: w * 0.88, y: h * 0.9, w: Math.max(70, Wr * 1.3), h: h * 0.06 }, wallC: null, fadeT: -1 };
+      S.paint.width = Math.round(w * dpr); S.paint.height = Math.round(h * dpr); S.px = S.paint.getContext('2d'); S.px.scale(dpr, dpr);
+      S.dpr = dpr; S.scr = document.createElement('canvas'); S.scr.width = S.paint.width; S.scr.height = S.paint.height; S.sx = S.scr.getContext('2d');
+      makeTile(dpr); plan();
+    }
+    // trajet automatique d'une couche : liste de points {x, y, on}
+    function plan() {
+      const { w, h, Wr, R } = S, m = w * 0.05, top = h * 0.06, bot = h * 0.8, P = [];
+      if (p.trajet === 'zigzag') {
+        const st = Wr * 1.4; let x = m + Wr / 2, up = false;
+        P.push({ x, y: top, on: false });
+        while (x < w - m - Wr / 2) { x = Math.min(w - m - Wr / 2, x + st / 2); up = !up; P.push({ x, y: up ? bot : top, on: true }); }
+      } else if (p.trajet === 'libre') {
+        for (let k = 0; k < 9; k++) { const a = R() * TAU, len = Math.min(w, h) * (0.3 + R() * 0.4), cx = m + Wr / 2 + R() * (w - 2 * m - Wr), cy = top + R() * (bot - top); const x0 = cx - Math.cos(a) * len / 2, y0 = cy - Math.sin(a) * len / 2, x1 = cx + Math.cos(a) * len / 2, y1 = cy + Math.sin(a) * len / 2;
+          P.push({ x: x0, y: y0, on: false }); P.push({ x: x1, y: y1, on: true }); P.push({ x: x0 + (R() - 0.5) * Wr * 0.6, y: y0 + (R() - 0.5) * Wr * 0.6, on: true }); }
+      } else {
+        let x = m + Wr / 2 + (S.layer % 2) * Wr * 0.5;
+        while (x <= w - m - Wr / 2 + 1) { const j = (R() - 0.5) * Wr * 0.1; P.push({ x: x + j, y: top, on: false }); P.push({ x: x + j + (R() - 0.5) * Wr * 0.08, y: bot, on: true }); P.push({ x: x + j, y: top + (R() * 0.1) * h, on: true }); x += Wr * 1.02; }
+      }
+      S.path = P;
+    }
+    function reload() { const T = S.tray; S.path.unshift({ x: T.x - T.w * 0.15, y: T.y, on: false, tray: 1 }, { x: T.x + T.w * 0.15, y: T.y, on: false, tray: 1 }, { x: T.x - T.w * 0.1, y: T.y, on: false, tray: 2 }, { x: S.pos.x, y: S.pos.y, on: false }); }
+
+    // ——— roulage : dépose la bande de surface déroulée ———
+    function roll(nx, ny, on) {
+      const { pos } = S, dx = nx - pos.x, dy = ny - pos.y, d = Math.hypot(dx, dy); if (d < 1e-3) return;
+      // l'axe du rouleau s'aligne perpendiculairement au mouvement (avec un peu d'inertie)
+      let ta = Math.atan2(dy, dx) - Math.PI / 2; const df = Math.atan2(Math.sin(ta - S.th), Math.cos(ta - S.th));
+      if (Math.abs(df) > Math.PI / 2) ta += Math.PI; // le rouleau peut rouler dans les deux sens sans pivoter
+      const df2 = Math.atan2(Math.sin(ta - S.th), Math.cos(ta - S.th));
+      // levé, il garde son orientation ; posé, il se cale d'un coup au début de la passe puis suit en douceur
+      const ma = Math.atan2(dy, dx), turn = S.lastA === undefined ? 0 : Math.abs(Math.atan2(Math.sin(2 * (ma - S.lastA)), Math.cos(2 * (ma - S.lastA)))) / 2;
+      const snapped = on && (!S.wasOn || turn > 0.35);
+      if (snapped) S.th += df2; else if (on) S.th += df2 * Math.min(1, 0.06 + d / (S.Wr * 2));
+      S.wasOn = on; S.lastA = ma;
+      const c = Math.cos(S.th), s = Math.sin(S.th), along = -s * dx + c * dy; // composante perpendiculaire à l'axe
+      const n = Math.max(1, Math.ceil(Math.abs(along) / 1.5)), ds = along / n, ex = dx / n, ey = dy / n;
+      if (on && S.ink > 0.02) {
+        const col = ink(S.ci), tile = tinted(col), sc = tile.width / S.Wr, dpr = S.dpr;
+        const seg = { x: pos.x, y: pos.y, th: S.th, v0: S.v, dv: along, col, a: 0 };
+        // les tranches sont posées à pleine opacité dans un calque de passe, reporté sur le mur d'un bloc
+        // quand la passe s'arrête ou que l'encre a assez pâli : les recouvrements ne font plus de rayures
+        const a = Math.max(0, Math.min(1, p.pression * (0.25 + 0.75 * Math.pow(S.ink, 0.6))));
+        if (S.st && (Math.abs(S.st.a - a) > 0.035 || S.st.col !== col || snapped)) bake();
+        if (!S.st) S.st = { a, col, x0: Infinity, y0: Infinity, x1: -Infinity, y1: -Infinity };
+        const pad = S.Wr * 0.8 + 4, st = S.st; st.x0 = Math.min(st.x0, Math.min(pos.x, nx) - pad); st.y0 = Math.min(st.y0, Math.min(pos.y, ny) - pad); st.x1 = Math.max(st.x1, Math.max(pos.x, nx) + pad); st.y1 = Math.max(st.y1, Math.max(pos.y, ny) + pad);
+        const x = S.sx; x.setTransform(dpr, 0, 0, dpr, 0, 0);
+        for (let k = 0; k < n; k++) {
+          const v = ((S.v % S.Cr) + S.Cr) % S.Cr, hh = Math.abs(ds), y0 = ds >= 0 ? v : v - hh, ov = 0.6;
+          x.save(); x.translate(pos.x + ex * k, pos.y + ey * k); x.rotate(S.th);
+          const sy = ((y0 % S.Cr) + S.Cr) % S.Cr, h1 = Math.min(hh, S.Cr - sy);
+          x.drawImage(tile, 0, sy * sc, tile.width, Math.max(1, h1 * sc), -S.Wr / 2, ds >= 0 ? 0 : -hh, S.Wr, h1 + ov);
+          if (h1 < hh) x.drawImage(tile, 0, 0, tile.width, Math.max(1, (hh - h1) * sc), -S.Wr / 2, (ds >= 0 ? 0 : -hh) + h1, S.Wr, hh - h1 + ov);
+          x.restore();
+          S.v += ds; S.ink = Math.max(0, S.ink - Math.abs(ds) / (p.encre * S.h * 2.6));
+        }
+        const asum = a * n;
+        seg.a = asum / n; logSeg(seg);
+      } else { S.v += along; bake(); }
+      pos.x = nx; pos.y = ny;
+    }
+    function bake() {
+      const st = S.st; if (!st) return; S.st = null; if (!(st.x1 > st.x0)) return;
+      const d = S.dpr, bx = Math.max(0, Math.floor(st.x0 * d)), by = Math.max(0, Math.floor(st.y0 * d)), bw = Math.min(S.paint.width, Math.ceil(st.x1 * d)) - bx, bh = Math.min(S.paint.height, Math.ceil(st.y1 * d)) - by;
+      if (bw <= 0 || bh <= 0) return;
+      const P = S.px; P.save(); P.setTransform(1, 0, 0, 1, 0, 0); P.globalAlpha = st.a; P.drawImage(S.scr, bx, by, bw, bh, bx, by, bw, bh); P.restore();
+      S.sx.save(); S.sx.setTransform(1, 0, 0, 1, 0, 0); S.sx.clearRect(bx, by, bw, bh); S.sx.restore();
+    }
+    function logSeg(s) {
+      const L = S.segs[S.segs.length - 1];
+      if (L && L.col === s.col && Math.abs(L.th - s.th) < 0.01 && Math.abs(L.v0 + L.dv - s.v0) < 0.5 && Math.abs(L.a - s.a) < 0.08 && Math.sign(L.dv) === Math.sign(s.dv) && Math.hypot(L.x + (-Math.sin(L.th)) * L.dv - s.x, L.y + Math.cos(L.th) * L.dv - s.y) < 2) { L.a = (L.a * Math.abs(L.dv) + s.a * Math.abs(s.dv)) / (Math.abs(L.dv) + Math.abs(s.dv)); L.dv += s.dv; return; }
+      S.segs.push(s); if (S.segs.length > 4000) S.segs.shift();
+    }
+    function step(dt) {
+      const sp = p.vitesse * S.h * 0.55 * dt;
+      if (S.target) { const t = S.target, d = Math.hypot(t.x - S.pos.x, t.y - S.pos.y), k = Math.min(1, 0.5); S.lift += (0 - S.lift) * Math.min(1, dt * 12); roll(S.pos.x + (t.x - S.pos.x) * k, S.pos.y + (t.y - S.pos.y) * k, d > 0.2); return; }
+      if (simT - S.userT < 2.5) { S.lift += (1 - S.lift) * Math.min(1, dt * 6); return; }
+      if (!S.path.length) { S.layer++; S.ci++; if (S.layer % 4 === 0) S.fadeT = simT; plan(); }
+      const P = S.path[0]; if (!P) return;
+      if (P.on && S.ink < 0.18 && !S.reloading) { S.reloading = true; reload(); return; }
+      const dx = P.x - S.pos.x, dy = P.y - S.pos.y, d = Math.hypot(dx, dy), on = P.on || P.tray === 1 ? 1 : 0;
+      S.lift += ((P.on ? 0 : 1) - S.lift) * Math.min(1, dt * 8);
+      const mv = Math.min(d, sp * (P.on ? 1 : 1.6));
+      if (P.tray === 1) { S.ink = Math.min(1, S.ink + mv / (S.tray.w * 0.6)); }
+      if (d > 0.5) roll(S.pos.x + dx / d * mv, S.pos.y + dy / d * mv, P.on && S.lift < 0.5);
+      if (d - mv < 0.5) { S.path.shift(); if (P.tray === 2) { S.ink = 1; S.reloading = false; } }
+    }
+
+    // ——— dessin ———
+    function wall(dpr) {
+      const { w, h } = S, key = [w, h, dpr, p.mur, app.seed].join('|'); if (S.wallKey === key) return S.wallC; S.wallKey = key;
+      const c = document.createElement('canvas'); c.width = Math.round(w * dpr); c.height = Math.round(h * dpr); const x = c.getContext('2d'); x.scale(dpr, dpr);
+      x.fillStyle = p.mur; x.fillRect(0, 0, w, h);
+      const R = rng(app.seed * 5 + 1), dk = lum(p.mur) > 0.5 ? '#000000' : '#ffffff';
+      for (let k = 0; k < w * h * 0.0015; k++) { x.fillStyle = rgba(dk, 0.02 + R() * 0.03); x.fillRect(R() * w, R() * h, 1 + R() * 2, 1 + R() * 2); }
+      // plinthe
+      x.fillStyle = mix(p.mur, '#000000', 0.12); x.fillRect(0, h * 0.86, w, h * 0.14); x.fillStyle = mix(p.mur, '#000000', 0.22); x.fillRect(0, h * 0.86, w, Math.max(2, h * 0.006));
+      return (S.wallC = c);
+    }
+    function drawTray(x) {
+      const T = S.tray, col = ink(S.ci);
+      x.fillStyle = mix(p.rouleau, '#ffffff', 0.55); x.beginPath(); x.moveTo(T.x - T.w * 0.6, T.y - T.h * 0.5); x.lineTo(T.x + T.w * 0.6, T.y - T.h * 0.5); x.lineTo(T.x + T.w * 0.5, T.y + T.h * 0.6); x.lineTo(T.x - T.w * 0.5, T.y + T.h * 0.6); x.closePath(); x.fill();
+      x.fillStyle = col; x.beginPath(); x.ellipse(T.x, T.y + T.h * 0.05, T.w * 0.48, T.h * 0.36, 0, 0, TAU); x.fill();
+      x.fillStyle = rgba('#ffffff', 0.25); x.beginPath(); x.ellipse(T.x - T.w * 0.18, T.y - T.h * 0.08, T.w * 0.12, T.h * 0.08, 0, 0, TAU); x.fill();
+    }
+    function drawRoller(x) {
+      const { Wr, Cr, pos } = S, D = Cr / Math.PI, Hb = Math.max(10, D * 0.55), lift = S.lift, col = ink(S.ci);
+      x.save(); x.translate(pos.x, pos.y - lift * 6); x.rotate(S.th);
+      if (p.ombres) { x.fillStyle = rgba('#000000', 0.12 + 0.1 * (1 - lift)); x.beginPath(); x.ellipse(lift * 10, lift * 14 + Hb * 0.2, Wr * 0.55, Hb * 0.75, 0, 0, TAU); x.fill(); }
+      // manche : étrier depuis l'extrémité droite
+      x.strokeStyle = mix(p.rouleau, '#ffffff', 0.35); x.lineWidth = Math.max(2, Hb * 0.12); x.lineCap = 'round';
+      x.beginPath(); x.moveTo(Wr / 2, 0); x.lineTo(Wr / 2 + Hb * 0.5, 0); x.lineTo(Wr / 2 + Hb * 0.5, Hb * 1.4); x.lineTo(Wr * 0.15, Hb * 2.2); x.stroke();
+      x.strokeStyle = p.rouleau; x.lineWidth = Math.max(6, Hb * 0.5); x.beginPath(); x.moveTo(Wr * 0.15, Hb * 2.2); x.lineTo(Wr * 0.02, Hb * 4.2); x.stroke();
+      // cylindre avec son décor qui défile
+      const tile = tinted(col), sc = tile.width / Wr, v = ((S.v % Cr) + Cr) % Cr;
+      x.fillStyle = mix(col, '#ffffff', 0.55 + 0.35 * (1 - S.ink)); x.fillRect(-Wr / 2, -Hb / 2, Wr, Hb);
+      const vis = Math.min(Cr * 0.5, Hb * 1.6), y0 = v - vis / 2, sy = ((y0 % Cr) + Cr) % Cr, h1 = Math.min(vis, Cr - sy);
+      x.globalAlpha = 0.5 + 0.5 * S.ink; x.drawImage(tile, 0, sy * sc, tile.width, Math.max(1, h1 * sc), -Wr / 2, -Hb / 2, Wr, Hb * h1 / vis);
+      if (h1 < vis) x.drawImage(tile, 0, 0, tile.width, Math.max(1, (vis - h1) * sc), -Wr / 2, -Hb / 2 + Hb * h1 / vis, Wr, Hb * (vis - h1) / vis);
+      x.globalAlpha = 1;
+      const g = x.createLinearGradient(0, -Hb / 2, 0, Hb / 2); g.addColorStop(0, rgba('#ffffff', 0.35)); g.addColorStop(0.35, rgba('#ffffff', 0)); g.addColorStop(1, rgba('#000000', 0.35)); x.fillStyle = g; x.fillRect(-Wr / 2, -Hb / 2, Wr, Hb);
+      x.fillStyle = mix(p.rouleau, '#ffffff', 0.2); x.fillRect(-Wr / 2 - 3, -Hb / 2, 3, Hb); x.fillRect(Wr / 2, -Hb / 2, 3, Hb);
+      x.restore();
+    }
+
+    app.loop((t, dt) => {
+      dt = Math.min(1 / 20, dt || 0);
+      const { w, h, dpr } = app.size; buildLogo();
+      const key = [w, h, dpr, p.trajet, p.decor, p.mur, app.seed, logoKey].join('|'); if (!S || key !== gKey) { gKey = key; build(w, h, dpr); }
+      S.Wr = Math.max(24, w * p.largeur * 0.9); S.Cr = Math.max(30, h * p.diametre * 0.42); S.tray.w = Math.max(70, S.Wr * 1.3);
+      makeTile(dpr);
+      if (app.thumbnail) { if (!S.th0) { S.th0 = true; for (let k = 0; k < 900; k++) { simT += 1 / 60; step(1 / 60); } } }
+      else { simT += dt; const n = 3; for (let k = 0; k < n; k++) step(dt / n); }
+      // effacement progressif toutes les quatre couches
+      if (S.fadeT >= 0) { bake(); const u = (simT - S.fadeT) / 2.5; S.px.save(); S.px.setTransform(1, 0, 0, 1, 0, 0); S.px.globalCompositeOperation = 'destination-out'; S.px.fillStyle = `rgba(0,0,0,${Math.min(1, 0.04 + u * 0.08).toFixed(3)})`; S.px.fillRect(0, 0, S.paint.width, S.paint.height); S.px.restore(); if (u > 1.4) { S.fadeT = -1; S.px.save(); S.px.setTransform(1, 0, 0, 1, 0, 0); S.px.clearRect(0, 0, S.paint.width, S.paint.height); S.px.restore(); S.segs = []; } }
+      ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.drawImage(wall(dpr), 0, 0); ctx.drawImage(S.paint, 0, 0); if (S.st) { ctx.globalAlpha = S.st.a; ctx.drawImage(S.scr, 0, 0); ctx.globalAlpha = 1; }
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      drawTray(ctx); drawRoller(ctx);
+      app.finish(ctx);
+    });
+
+    // ——— SVG ———
+    function toSVG() {
+      const { w, h } = app.size, f = (v) => +v.toFixed(2), { Wr, Cr } = S;
+      let defs = '', o = `<rect width="100%" height="100%" fill="${p.mur}"/><rect x="0" y="${f(h * 0.86)}" width="${w}" height="${f(h * 0.14)}" fill="${mix(p.mur, '#000000', 0.12)}"/>`;
+      const pd = S.polys.map((P) => P.map((q, k) => (k ? 'L' : 'M') + f(q[0]) + ' ' + f(q[1])).join('') + 'Z').join('');
+      const cols = [...new Set(S.segs.map((s) => s.col))];
+      cols.forEach((c, i) => { defs += `<pattern id="m${i}" patternUnits="userSpaceOnUse" width="${f(Wr)}" height="${f(Cr)}"><path d="${pd}" fill="${c}" fill-rule="${p.decor === 'logo' ? 'evenodd' : 'nonzero'}"/></pattern>`; });
+      for (const s of S.segs) {
+        const i = cols.indexOf(s.col), y = s.dv >= 0 ? s.v0 : s.v0 + s.dv, L = Math.abs(s.dv); if (L < 0.5) continue;
+        o += `<g transform="translate(${f(s.x)} ${f(s.y)}) rotate(${f(s.th * 180 / Math.PI)}) translate(${f(-Wr / 2)} ${f(-s.v0)})"><rect x="0" y="${f(y)}" width="${f(Wr)}" height="${f(L)}" fill="url(#m${i})" opacity="${f(Math.min(1, s.a))}"/></g>`;
+      }
+      const T = S.tray; o += `<path d="M${f(T.x - T.w * 0.6)} ${f(T.y - T.h * 0.5)}L${f(T.x + T.w * 0.6)} ${f(T.y - T.h * 0.5)}L${f(T.x + T.w * 0.5)} ${f(T.y + T.h * 0.6)}L${f(T.x - T.w * 0.5)} ${f(T.y + T.h * 0.6)}Z" fill="${mix(p.rouleau, '#ffffff', 0.55)}"/><ellipse cx="${f(T.x)}" cy="${f(T.y + T.h * 0.05)}" rx="${f(T.w * 0.48)}" ry="${f(T.h * 0.36)}" fill="${ink(S.ci)}"/>`;
+      const D = Cr / Math.PI, Hb = Math.max(10, D * 0.55);
+      o += `<g transform="translate(${f(S.pos.x)} ${f(S.pos.y - S.lift * 6)}) rotate(${f(S.th * 180 / Math.PI)})"><path d="M${f(Wr / 2)} 0L${f(Wr / 2 + Hb * 0.5)} 0L${f(Wr / 2 + Hb * 0.5)} ${f(Hb * 1.4)}L${f(Wr * 0.15)} ${f(Hb * 2.2)}" fill="none" stroke="${mix(p.rouleau, '#ffffff', 0.35)}" stroke-width="${f(Math.max(2, Hb * 0.12))}" stroke-linecap="round"/><line x1="${f(Wr * 0.15)}" y1="${f(Hb * 2.2)}" x2="${f(Wr * 0.02)}" y2="${f(Hb * 4.2)}" stroke="${p.rouleau}" stroke-width="${f(Math.max(6, Hb * 0.5))}" stroke-linecap="round"/><rect x="${f(-Wr / 2)}" y="${f(-Hb / 2)}" width="${f(Wr)}" height="${f(Hb)}" fill="${mix(ink(S.ci), '#ffffff', 0.55)}"/></g>`;
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><defs>${defs}</defs>${o}</svg>`;
+    }
+  </script>
+</body>
+</html>
