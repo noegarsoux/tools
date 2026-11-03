@@ -1,0 +1,228 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Fibration de Hopf</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Fibration de Hopf : la 3-sphère S³ se découpe en cercles, un par point de la 2-sphère S². Au point (a, b, c) de S²
+    // répond le cercle x(θ) = ((1+c)·cos θ, a·sin θ − b·cos θ, a·cos θ + b·sin θ, (1+c)·sin θ) / √(2(1+c)). On le ramène
+    // dans l'espace par projection stéréographique (x₁, x₂, x₃)/(1 − x₀). Deux fibres quelconques sont enlacées une fois ;
+    // les points d'un même parallèle donnent des cercles posés sur un même tore, et les tores s'emboîtent.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const BIEN = PAL('biennale'), GLY = PAL('glyphes'), SAL = PAL('salon'), MEN = PAL('menthe'), KB = PAL('kegelbahn');
+
+    let fit = null, fitSnap = true, simT = 0, yawU = 0, pitchU = 0, zoomU = 1, drag0 = null, logoPts = null, logoKey = '';
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.03, vignette: 0.16 },
+      hint: 'Glissez pour tourner autour · molette : zoom',
+      notes: 'En 1931, Heinz Hopf découvre une façon étonnante de ranger la sphère de dimension trois : on peut la découper entièrement en cercles, un cercle pour chaque point d\'une sphère ordinaire, et deux de ces cercles sont toujours enlacés comme deux maillons de chaîne. On ne peut pas voir S³ directement, mais la projection stéréographique la déplie dans notre espace : les cercles y restent des cercles (l\'un d\'eux passe par l\'infini et devient une droite). Les points d\'un même parallèle de la petite sphère donnent des cercles couchés sur un même tore ; plusieurs parallèles donnent des tores emboîtés comme des poupées russes. Ici la petite sphère tourne lentement, et toute la gerbe de cercles se réorganise.',
+      params: {
+        'Base': {
+          base: { type: 'select', label: 'Points de la sphère', options: { paralleles: 'Parallèles (tores emboîtés)', spirale: 'Spirale', meridien: 'Un grand cercle', hasard: 'Au hasard' }, value: 'paralleles' },
+          anneaux: { type: 'range', label: 'Parallèles', min: 1, max: 8, step: 1, value: 3, show: (q) => q.base === 'paralleles' },
+          fibres: { type: 'range', label: 'Fibres', min: 4, max: 80, step: 1, value: 26 },
+          etendue: { type: 'range', label: 'Étendue en latitude', min: 0.1, max: 1, step: 0.01, value: 0.38 },
+          hauteur: { type: 'range', label: 'Latitude moyenne', min: -0.8, max: 0.4, step: 0.01, value: -0.4 },
+        },
+        'Mouvement': {
+          bascule: { type: 'range', label: 'Bascule de la sphère', min: 0, max: 1.5, step: 0.01, value: 0.35 },
+          vitesse: { type: 'range', label: 'Vitesse', min: 0, max: 2, step: 0.01, value: 0.4 },
+          rotation: { type: 'range', label: 'Rotation de la vue (°/s)', min: -20, max: 20, step: 0.5, value: 5 },
+          glisse: { type: 'range', label: 'Glissement le long des fibres', min: -1, max: 1, step: 0.01, value: 0.3 },
+        },
+        'Rendu': {
+          style: { type: 'segmented', label: 'Style', options: { fils: 'Fils', perles: 'Perles', mixte: 'Les deux' }, value: 'fils' },
+          epaisseur: { type: 'range', label: 'Épaisseur', min: 0.3, max: 4, step: 0.05, value: 1.3 },
+          perles: { type: 'range', label: 'Perles par fibre', min: 6, max: 60, step: 1, value: 24, show: (q) => q.style !== 'fils' },
+          profondeur: { type: 'range', label: 'Brume de profondeur', min: 0, max: 1, step: 0.01, value: 0.55 },
+          zoom: { type: 'range', label: 'Zoom', min: 0.4, max: 2.5, step: 0.01, value: 1 },
+          inclinaison: { type: 'range', label: 'Inclinaison', min: -80, max: 80, step: 1, value: 24 },
+        },
+        'Logo en fibres': {
+          logo: { type: 'toggle', label: 'Les fibres viennent du logo', value: false },
+          pointsLogo: { type: 'range', label: 'Fibres du logo', min: 40, max: 400, step: 1, value: 180, show: (q) => q.logo },
+          calotte: { type: 'range', label: 'Taille sur la sphère', min: 0.2, max: 1.4, step: 0.01, value: 0.75, show: (q) => q.logo },
+          image: { type: 'file', label: 'Logo', accept: 'image/*', show: (q) => q.logo },
+        },
+        'Couleurs': {
+          fond: { type: 'color', label: 'Fond', value: '#0b0b10' },
+          couleurs: { type: 'palette', label: 'Fibres', value: ['#486cfc', '#7fe0c2', '#edd14b', '#ef5a2f', '#f272ba'] },
+          selon: { type: 'segmented', label: 'Couleur selon', options: { latitude: 'Latitude', longitude: 'Longitude' }, value: 'longitude' },
+        },
+      },
+      presets: {
+        'Tores': {},
+        'Un seul tore': { anneaux: 1, fibres: 40, hauteur: -0.1, bascule: 0.3, epaisseur: 1.1, couleurs: ['#f272ba', '#edd14b', '#7fe0c2'] },
+        'Spirale': { base: 'spirale', fibres: 70, etendue: 0.9, hauteur: -0.1, epaisseur: 0.9, selon: 'latitude', couleurs: ['#2c3566', '#486cfc', '#7fe0c2', '#f4f1ea'] },
+        'Grand cercle': { base: 'meridien', fibres: 40, bascule: 0.9, couleurs: ['#ef5a2f', '#edd14b', '#f4f1ea'], epaisseur: 1.5 },
+        'Perles': { style: 'perles', fibres: 34, anneaux: 3, perles: 36, glisse: 0.6, epaisseur: 1.6, couleurs: ['#486cfc', '#f272ba', '#edd14b'] },
+        'Papier': { fond: '#f1ece1', couleurs: ['#1b1b1f', '#ef5a2f'], style: 'mixte', perles: 16, epaisseur: 0.9, profondeur: 0.75, anneaux: 3, fibres: 22 },
+        'Logo': { logo: true, pointsLogo: 320, calotte: 0.7, epaisseur: 0.9, style: 'perles', perles: 7, glisse: 0.25, selon: 'latitude', couleurs: ['#ef5a2f', '#edd14b'], bascule: 0.25, hauteur: -0.35 },
+        'Biennale': { fond: BIEN[0], couleurs: [BIEN[1], BIEN[2], BIEN[3]], profondeur: 0.6, anneaux: 3 },
+        'Menthe': { fond: MEN[1], couleurs: [MEN[0], MEN[2], MEN[3]], base: 'spirale', fibres: 60 },
+        'Kegelbahn': { fond: KB[0], couleurs: [KB[1], KB[2]], style: 'mixte', anneaux: 5, fibres: 18 },
+      },
+      brand(colors) {
+        const s = colors.slice().sort((a, b) => lum(a) - lum(b));
+        return { fond: s[0], couleurs: s.length > 1 ? s.slice(1) : ['#ffffff'] };
+      },
+      pointer: {
+        down: (q) => { drag0 = { x: q.x, y: q.y, yaw: yawU, pitch: pitchU }; },
+        drag: (q) => { if (!drag0) return; yawU = drag0.yaw + (q.x - drag0.x) * 0.008; pitchU = Math.max(-1.4, Math.min(1.4, drag0.pitch + (q.y - drag0.y) * 0.008)); },
+        up: () => { drag0 = null; },
+        wheel: (q, dy) => { zoomU = Math.max(0.3, Math.min(4, zoomU * (dy > 0 ? 1 / 1.08 : 1.08))); },
+      },
+      onChange(k) { if (['*', 'logo', 'image', 'pointsLogo'].includes(k)) logoKey = ''; if (k === '*') fitSnap = true; },
+      export: { name: 'hopf', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    function hex(x) { const n = parseInt(x.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
+    function lum(x) { const c = hex(x); return (c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114) / 255; }
+    function mix(a, b, t) { const A = hex(a), B = hex(b); return '#' + A.map((v, i) => Math.round(v + (B[i] - v) * t).toString(16).padStart(2, '0')).join(''); }
+
+    // ——— Logo : points du masque, placés plus tard sur une calotte de la sphère ———
+    function buildLogo() {
+      const img0 = p.image || app.logoImg, key = [p.logo, p.pointsLogo, img0 ? (img0.src || 'c') : 'demo'].join(); if (key === logoKey) return; logoKey = key;
+      logoPts = null; if (!p.logo) return;
+      const M = 120, c = document.createElement('canvas'); c.width = c.height = M; const x = c.getContext('2d', { willReadFrequently: true }), L = M * 0.92, cx = M / 2;
+      if (img0) { const iw = img0.naturalWidth || img0.width, ih = img0.naturalHeight || img0.height, s = L / Math.max(iw, ih); x.drawImage(img0, cx - iw * s / 2, cx - ih * s / 2, iw * s, ih * s); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(cx, cx, L * 0.48, 0, TAU); x.arc(cx, cx, L * 0.27, 0, TAU, true); x.fill('evenodd'); x.fillRect(cx - L * 0.07, cx - L * 0.5, L * 0.14, L); }
+      const d = x.getImageData(0, 0, M, M).data; let transp = 0; for (let i = 3; i < d.length; i += 4) if (d[i] < 128) transp++; const useA = transp > M * M * 0.05;
+      const inside = []; for (let j = 0; j < M; j++) for (let i = 0; i < M; i++) { const o = (j * M + i) * 4, l = (d[o] * 0.2126 + d[o + 1] * 0.7152 + d[o + 2] * 0.0722) / 255; if (useA ? d[o + 3] > 128 : d[o + 3] > 128 && l < 0.5) inside.push([i / M * 2 - 1, j / M * 2 - 1]); }
+      if (!inside.length) return;
+      const R = app.rng(), n = p.pointsLogo; logoPts = [];
+      for (let k = 0; k < n; k++) { const q = inside[Math.floor((k + R()) / n * inside.length) % inside.length]; logoPts.push([q[0] + (R() - 0.5) * 2 / M, q[1] + (R() - 0.5) * 2 / M]); }
+    }
+
+    // ——— Points de base sur S², avec leur teinte (0..1) ———
+    function basePoints(t) {
+      const pts = [], N = p.fibres | 0, spin = t * p.vitesse * 0.35, R = app.rng();
+      const lat = (c) => Math.max(-0.96, Math.min(0.55, c));
+      if (p.logo && logoPts) {
+        // calotte azimutale centrée sur l'équateur : (u, v) du logo → angle depuis le centre de la calotte
+        for (const [u, v] of logoPts) {
+          const r = Math.hypot(u, v) * p.calotte * 0.9, az = Math.atan2(v, u), sx = Math.sin(r) * Math.cos(az), sy = -Math.sin(r) * Math.sin(az), sz = Math.cos(r);
+          // centre de la calotte en (cos h, 0, sin h) avec h = latitude moyenne ; axes locaux tangents
+          const h = Math.asin(lat(p.hauteur)), C = [Math.cos(h), 0, Math.sin(h)], E1 = [0, 1, 0], E2 = [-Math.sin(h), 0, Math.cos(h)];
+          pts.push([C[0] * sz + E1[0] * sx + E2[0] * sy, C[1] * sz + E1[1] * sx + E2[1] * sy, C[2] * sz + E1[2] * sx + E2[2] * sy, (v + 1) / 2]);
+        }
+      } else if (p.base === 'paralleles') {
+        const K = p.anneaux | 0;
+        for (let k = 0; k < K; k++) {
+          const c = lat(p.hauteur + (K === 1 ? 0 : (k / (K - 1) - 0.5) * p.etendue * 1.6)), r = Math.sqrt(1 - c * c), off = k * 0.37 + spin;
+          for (let j = 0; j < N; j++) { const f = j / N * TAU + off; pts.push([r * Math.cos(f), r * Math.sin(f), c, p.selon === 'latitude' ? (K === 1 ? 0.5 : k / (K - 1)) : j / N]); }
+        }
+      } else if (p.base === 'spirale') {
+        const turns = 3;
+        for (let j = 0; j < N; j++) { const s = j / Math.max(1, N - 1), c = lat(p.hauteur + (s - 0.5) * p.etendue * 1.8), r = Math.sqrt(1 - c * c), f = s * turns * TAU + spin; pts.push([r * Math.cos(f), r * Math.sin(f), c, p.selon === 'latitude' ? s : (s * turns) % 1]); }
+      } else if (p.base === 'meridien') {
+        for (let j = 0; j < N; j++) { const a = j / N * TAU + spin, x = Math.cos(a), z = Math.sin(a) * p.etendue + p.hauteur * 0.3, y = Math.sin(a) * Math.sqrt(Math.max(0, 1 - p.etendue * p.etendue)), l = Math.hypot(x, y, z); pts.push([x / l, y / l, lat(z / l), j / N]); }
+      } else {
+        for (let j = 0; j < N; j++) { const c = lat(p.hauteur + (R() - 0.5) * p.etendue * 1.8), r = Math.sqrt(1 - c * c), f = R() * TAU + spin; pts.push([r * Math.cos(f), r * Math.sin(f), c, p.selon === 'latitude' ? (c + 1) / 2 : f / TAU % 1]); }
+      }
+      // la sphère bascule lentement autour de l'axe x : les tores se tordent et s'échangent
+      const b = Math.sin(t * p.vitesse * 0.23) * p.bascule, cb = Math.cos(b), sb = Math.sin(b);
+      return pts.map(([a, y, c, h]) => { const y2 = y * cb - c * sb, c2 = Math.max(-0.985, Math.min(0.8, y * sb + c * cb)); return [a, y2, c2, h]; });
+    }
+
+    // ——— Une fibre : cercle de S³, projeté ———
+    function fiber(a, b, c, n, ph) {
+      const k = 1 / Math.sqrt(2 * (1 + c)), out = [];
+      for (let i = 0; i <= n; i++) {
+        const th = i / n * TAU + ph, ct = Math.cos(th), st = Math.sin(th);
+        const x0 = (1 + c) * ct * k, x1 = (a * st - b * ct) * k, x2 = (a * ct + b * st) * k, x3 = (1 + c) * st * k, d = 1 - x0;
+        out.push(d < 0.02 ? null : [x1 / d, x2 / d, x3 / d]);
+      }
+      return out;
+    }
+
+    function camera(w, h, t) {
+      const yaw = t * p.rotation * Math.PI / 180 + yawU, pitch = p.inclinaison * Math.PI / 180 + pitchU, cy = Math.cos(yaw), sy = Math.sin(yaw), cp = Math.cos(pitch), sp = Math.sin(pitch), D = 7, S = 1;
+      return (P) => {
+        const x1 = P[0] * cy - P[1] * sy, z1 = P[0] * sy + P[1] * cy, y1 = P[2];
+        const y2 = y1 * cp - z1 * sp, z2 = y1 * sp + z1 * cp, s = D / (D + z2);
+        return [w / 2 + x1 * S * s, h / 2 - y2 * S * s, z2, s];
+      };
+    }
+    function colorAt(u) {
+      const C = p.couleurs.length ? p.couleurs : ['#ffffff']; if (C.length === 1) return C[0];
+      const v = p.selon === 'longitude' || (p.logo && logoPts) ? 1 - Math.abs(((u % 1) + 1) % 1 * 2 - 1) : Math.max(0, Math.min(1, u));
+      const x = v * (C.length - 1), i = Math.min(C.length - 2, Math.floor(x)); return mix(C[i], C[i + 1], x - i);
+    }
+
+    // ——— Scène : fibres projetées, triées de loin en près ———
+    function scene(w, h, t, live) {
+      buildLogo();
+      const cam = camera(w, h, t), base = basePoints(t), ph = t * p.glisse * 0.8, list = [], n = 120;
+      for (const [a, b, c, hue] of base) {
+        const F = fiber(a, b, c, n, ph), P = F.map((q) => q && Math.hypot(q[0], q[1], q[2]) < 14 ? cam(q) : null);
+        let z = 0, m = 0; for (const q of P) if (q) { z += q[2]; m++; } if (!m) continue;
+        list.push({ P, z: z / m, col: colorAt(hue), F });
+      }
+      list.sort((A, B) => B.z - A.z);
+      // cadrage automatique : centre médian et rayon au 85e centile, lissés d'une image à l'autre
+      const xs = [], ys = []; for (const L of list) for (let i = 0; i < L.P.length; i += 6) { const q = L.P[i]; if (q) { xs.push(q[0]); ys.push(q[1]); } }
+      if (xs.length) {
+        const med = (A) => A.slice().sort((a, b) => a - b)[A.length >> 1], cx = med(xs), cy = med(ys), ds = xs.map((x, i) => Math.hypot(x - cx, ys[i] - cy)).sort((a, b) => a - b);
+        const r = Math.max(1e-3, ds[Math.floor(ds.length * 0.85)]), k = Math.min(w, h) * 0.3 / r * p.zoom * zoomU;
+        if (!fit || fitSnap || app.thumbnail) { fit = { cx, cy, k }; fitSnap = false; } else if (!live) { fit.cx += (cx - fit.cx) * 0.05; fit.cy += (cy - fit.cy) * 0.05; fit.k += (k - fit.k) * 0.03; }
+        for (const L of list) L.P = L.P.map((q) => q && [w / 2 + (q[0] - fit.cx) * fit.k, h / 2 + (q[1] - fit.cy) * fit.k, q[2], q[3]]);
+      }
+      let z0 = Infinity, z1 = -Infinity; for (const L of list) { z0 = Math.min(z0, L.z); z1 = Math.max(z1, L.z); }
+      for (const L of list) { const u = z1 > z0 ? (L.z - z0) / (z1 - z0) : 0; L.fog = u * p.profondeur * 0.75; L.col2 = mix(L.col, p.fond, L.fog); }
+      return { list, cam };
+    }
+
+    app.loop((t, dt) => {
+      dt = Math.min(0.1, dt || 0);
+      if (!app.thumbnail) simT += dt; else simT = 5.5;
+      const { w, h, dpr } = app.size, { list } = scene(w, h, simT);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = p.fond; ctx.fillRect(0, 0, w, h);
+      ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+      const nb = p.perles | 0;
+      for (const L of list) {
+        {
+          ctx.strokeStyle = L.col2; ctx.globalAlpha = p.style === 'perles' ? 0.16 : 1; ctx.beginPath(); let pen = false, ss = 0, m = 0;
+          for (const q of L.P) { if (!q) { pen = false; continue; } if (pen) ctx.lineTo(q[0], q[1]); else { ctx.moveTo(q[0], q[1]); pen = true; } ss += q[3]; m++; }
+          ctx.lineWidth = p.epaisseur * Math.pow(ss / Math.max(1, m), 1.6) * (p.style === 'fils' ? 1 : 0.6); ctx.stroke(); ctx.globalAlpha = 1;
+        }
+        if (p.style !== 'fils') {
+          ctx.fillStyle = L.col2; ctx.beginPath();
+          for (let k = 0; k < nb; k++) { const q = L.P[Math.round(k / nb * 120)]; if (!q) continue; const r = p.epaisseur * 1.5 * Math.pow(q[3], 1.6); ctx.moveTo(q[0] + r, q[1]); ctx.arc(q[0], q[1], r, 0, TAU); }
+          ctx.fill();
+        }
+      }
+      app.finish(ctx);
+    });
+
+    function toSVG() {
+      const { w, h } = app.size, f = (v) => +v.toFixed(2), { list } = scene(w, h, simT, true), nb = p.perles | 0;
+      let s = `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><rect width="100%" height="100%" fill="${p.fond}"/><g fill="none" stroke-linecap="round" stroke-linejoin="round">`;
+      for (const L of list) {
+        {
+          let d = '', pen = false, ss = 0, m = 0;
+          for (const q of L.P) { if (!q) { pen = false; continue; } d += (pen ? 'L' : 'M') + f(q[0]) + ' ' + f(q[1]); pen = true; ss += q[3]; m++; }
+          s += `<path d="${d}" stroke="${L.col2}" stroke-width="${f(p.epaisseur * Math.pow(ss / Math.max(1, m), 1.6) * (p.style === 'fils' ? 1 : 0.6))}"${p.style === 'perles' ? ' stroke-opacity="0.16"' : ''}/>`;
+        }
+        if (p.style !== 'fils') for (let k = 0; k < nb; k++) { const q = L.P[Math.round(k / nb * 120)]; if (!q) continue; s += `<circle cx="${f(q[0])}" cy="${f(q[1])}" r="${f(p.epaisseur * 1.5 * Math.pow(q[3], 1.6))}" fill="${L.col2}"/>`; }
+      }
+      return s + '</g></svg>';
+    }
+  </script>
+</body>
+</html>

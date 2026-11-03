@@ -1,0 +1,15 @@
+{
+  "slug": "hopf",
+  "title": "Fibration de Hopf",
+  "type": "motion",
+  "description": "Des cercles enlacés deux à deux, nés de points sur une sphère et projetés dans l'espace ; les tores s'emboîtent et tournent, et le logo choisit les fibres.",
+  "tags": ["mathematiques", "3d", "cercles", "lignes", "logo", "svg"],
+  "inspiration": [
+    "Heinz Hopf, l'application de la 3-sphère sur la 2-sphère (1931)",
+    "Les animations « Dimensions » d'Étienne Ghys, Aurélien Alvarez et Jos Leys (2008)",
+    "Les visualisations de la fibration de Hopf de Niles Johnson"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}
