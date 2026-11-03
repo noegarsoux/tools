@@ -1,0 +1,336 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Billard de lumière</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Billards : un rayon file en ligne droite dans une table close et rebondit sur le bord, angle de réflexion égal à
+    // l'angle d'incidence. Le cercle et l'ellipse sont intégrables : les rayons y restent sages, l'ellipse renvoie tout
+    // ce qui part d'un foyer vers l'autre. Le stade (Bunimovich), la table de Sinaï et le champignon sont chaotiques :
+    // deux rayons voisins s'écartent très vite. Un faisceau de rayons dessine ainsi des caustiques ou un désordre.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2, EPS = 1e-7;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const BIEN = PAL('biennale'), GLY = PAL('glyphes'), SAL = PAL('salon'), MEN = PAL('menthe'), KB = PAL('kegelbahn');
+
+    let srcU = { x: -0.35, y: 0.12 }, held = false, maskKey = '', mask = null, mW = 0, mH = 0, pts = null, rayLen = null, rayStart = null;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.04, vignette: 0.14 },
+      hint: 'Glissez pour déplacer la source · molette : nombre de rebonds',
+      notes: 'Un billard mathématique : une bille, ou un rayon de lumière, avance en ligne droite et rebondit sur le bord comme sur un miroir. Dans un cercle, la trajectoire garde toujours le même angle et dessine une étoile ou une couronne. Dans une ellipse, un rayon parti d\'un foyer passe forcément par l\'autre : placez la source sur un foyer (le préréglage Foyers) et tout converge. Le stade de Bunimovich, deux demi-cercles reliés par des droites, est chaotique : deux rayons presque parallèles finissent par n\'avoir plus rien en commun. La table de Sinaï ajoute un obstacle rond au centre d\'un carré, le champignon mêle les deux mondes : des rayons piégés pour toujours dans le chapeau, d\'autres qui errent. Un faisceau de nombreux rayons fait apparaître les caustiques, ces lignes où la lumière se concentre.',
+      params: {
+        'Table': {
+          table: { type: 'select', label: 'Forme', options: { ellipse: 'Ellipse', cercle: 'Cercle', stade: 'Stade', polygone: 'Polygone', sinai: 'Sinaï', champignon: 'Champignon' }, value: 'stade' },
+          forme: { type: 'range', label: 'Proportion', min: 0, max: 1, step: 0.01, value: 0.45, show: (q) => q.table !== 'cercle' },
+          cotes: { type: 'range', label: 'Côtés', min: 3, max: 12, step: 1, value: 5, show: (q) => q.table === 'polygone' },
+          bord: { type: 'toggle', label: 'Tracer le bord', value: true },
+          foyer: { type: 'toggle', label: 'Source sur un foyer', value: false, show: (q) => q.table === 'ellipse' },
+        },
+        'Rayons': {
+          faisceau: { type: 'segmented', label: 'Source', options: { eventail: 'Éventail', parallele: 'Faisceau parallèle' }, value: 'eventail' },
+          rayons: { type: 'range', label: 'Rayons', min: 1, max: 400, step: 1, value: 90 },
+          ouverture: { type: 'range', label: 'Ouverture', min: 0, max: 360, step: 1, value: 14, show: (q) => q.faisceau === 'eventail' },
+          largeur: { type: 'range', label: 'Largeur', min: 0.01, max: 1.5, step: 0.01, value: 0.4, show: (q) => q.faisceau === 'parallele' },
+          rebonds: { type: 'range', label: 'Rebonds', min: 1, max: 400, step: 1, value: 14 },
+          direction: { type: 'range', label: 'Direction', min: 0, max: 360, step: 1, value: 20 },
+        },
+        'Mouvement': {
+          rotation: { type: 'range', label: 'Rotation (°/s)', min: -40, max: 40, step: 0.5, value: 6 },
+          derive: { type: 'range', label: 'Dérive de la source', min: 0, max: 1, step: 0.01, value: 0.3 },
+        },
+        'Logo dans la lumière': {
+          logo: { type: 'toggle', label: 'Rayons colorés dans le logo', value: false },
+          image: { type: 'file', label: 'Logo', accept: 'image/*', show: (q) => q.logo },
+        },
+        'Trait': {
+          epaisseur: { type: 'range', label: 'Épaisseur', min: 0.3, max: 4, step: 0.05, value: 0.9 },
+          intensite: { type: 'range', label: 'Intensité', min: 0.03, max: 1, step: 0.01, value: 0.4 },
+          amorti: { type: 'range', label: 'Affaiblissement par rebond', min: 0, max: 0.4, step: 0.005, value: 0.05 },
+          additif: { type: 'toggle', label: 'Lumière additive', value: false },
+          teinte: { type: 'segmented', label: 'Couleur selon', options: { rebond: 'Rebond', rayon: 'Rayon', uni: 'Une seule' }, value: 'rebond' },
+        },
+        'Couleurs': {
+          fond: { type: 'color', label: 'Fond', value: '#0d0d12' },
+          couleurs: { type: 'palette', label: 'Lumière', value: ['#edd14b', '#ef5a2f', '#f272ba', '#486cfc'] },
+          trait: { type: 'color', label: 'Bord', value: '#f4f1ea' },
+          accent: { type: 'color', label: 'Logo', value: '#7fe0c2' },
+        },
+      },
+      presets: {
+        'Stade': {},
+        'Foyers': { table: 'ellipse', forme: 0.6, faisceau: 'eventail', ouverture: 360, rayons: 160, rebonds: 2, rotation: 0, derive: 0, intensite: 0.35, amorti: 0, epaisseur: 0.7, teinte: 'rayon', couleurs: ['#486cfc', '#f272ba', '#edd14b'], foyer: true, additif: true },
+        'Caustique': { table: 'cercle', faisceau: 'parallele', largeur: 1.9, rayons: 240, rebonds: 3, rotation: 3, derive: 0, intensite: 0.22, amorti: 0.1, epaisseur: 0.6, teinte: 'rebond', couleurs: ['#f4f1ea', '#edd14b', '#ef5a2f'], additif: true },
+        'Étoile': { table: 'cercle', faisceau: 'eventail', rayons: 1, rebonds: 220, ouverture: 0, direction: 47, rotation: 0.6, derive: 0, intensite: 0.9, amorti: 0, epaisseur: 0.8, teinte: 'rebond', couleurs: ['#486cfc', '#f272ba', '#edd14b'] },
+        'Sinaï': { table: 'sinai', forme: 0.35, rayons: 40, ouverture: 6, rebonds: 30, rotation: 4, intensite: 0.45, amorti: 0.06, teinte: 'rayon', couleurs: ['#ef5a2f', '#edd14b', '#f4f1ea'], epaisseur: 0.8 },
+        'Champignon': { table: 'champignon', forme: 0.35, rayons: 60, ouverture: 10, rebonds: 40, rotation: 5, intensite: 0.35, amorti: 0.04, teinte: 'rebond', couleurs: ['#7fe0c2', '#486cfc', '#f272ba'], epaisseur: 0.7 },
+        'Pentagone': { table: 'polygone', cotes: 5, forme: 0, rayons: 3, ouverture: 2, rebonds: 160, rotation: 1.5, derive: 0.2, intensite: 0.6, amorti: 0, epaisseur: 0.8, teinte: 'rayon', couleurs: ['#edd14b', '#ef5a2f', '#486cfc'] },
+        'Logo': { logo: true, table: 'stade', forme: 0.5, rayons: 200, ouverture: 40, rebonds: 10, intensite: 0.3, amorti: 0.03, teinte: 'uni', couleurs: ['#5a5a66'], accent: '#ef5a2f', epaisseur: 0.8, bord: true, trait: '#5a5a66' },
+        'Biennale': { table: 'ellipse', forme: 0.35, fond: BIEN[0], couleurs: [BIEN[1], BIEN[2], BIEN[3]], trait: BIEN[4], rayons: 120, ouverture: 30, rebonds: 8, intensite: 0.5, additif: true },
+        'Menthe': { table: 'champignon', forme: 0.6, fond: MEN[1], couleurs: [MEN[2], MEN[3], MEN[0]], trait: MEN[2], rayons: 80, ouverture: 20, rebonds: 24, intensite: 0.5 },
+        'Kegelbahn': { table: 'polygone', cotes: 7, forme: 0.3, fond: KB[0], couleurs: [KB[1], KB[2]], trait: KB[2], rayons: 50, ouverture: 4, rebonds: 40, intensite: 0.5, epaisseur: 0.7 },
+      },
+      brand(colors) {
+        const s = colors.slice().sort((a, b) => lum(a) - lum(b)), rest = s.slice(1);
+        return { fond: s[0], couleurs: rest.length ? rest : ['#ffffff'], trait: s[s.length - 1], accent: s[s.length - 1] };
+      },
+      pointer: {
+        down: (q) => { held = true; moveSrc(q.x, q.y); },
+        drag: (q) => { if (held) moveSrc(q.x, q.y); },
+        up: () => { held = false; },
+        wheel: (q, dy) => app.set('rebonds', Math.max(1, Math.min(400, p.rebonds + (dy > 0 ? -1 : 1)))),
+      },
+      onChange(k) {
+        if (k === 'image' || k === 'logo' || k === '*') maskKey = '';
+        if (k === 'table' || k === 'forme' || k === 'cotes' || k === '*') placeSrc();
+      },
+      onSeed() { const r = app.rng(); srcU = { x: (r() - 0.5) * 0.8, y: (r() - 0.5) * 0.8 }; placeSrc(); },
+      export: { name: 'billard', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    function hex(x) { const n = parseInt(x.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
+    function lum(x) { const c = hex(x); return (c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114) / 255; }
+    function mix(a, b, t) { const A = hex(a), B = hex(b); return '#' + A.map((v, i) => Math.round(v + (B[i] - v) * t).toString(16).padStart(2, '0')).join(''); }
+
+    // ——— La table, en coordonnées unité (boîte [-1, 1]², y vers le bas) ———
+    // primitives : segment (k 0), arc de cercle (k 1, avec un test d'appartenance), ellipse (k 2)
+    function table() {
+      const f = p.forme, P = [];
+      const seg = (ax, ay, bx, by) => P.push({ k: 0, ax, ay, bx, by });
+      const arc = (cx, cy, r, ok) => P.push({ k: 1, cx, cy, r, ok });
+      let inside, foci = null, ex = 1, ey = 1;
+      if (p.table === 'cercle') { arc(0, 0, 1, null); inside = (x, y) => x * x + y * y < 0.995; }
+      else if (p.table === 'ellipse') {
+        const b = 1 - f * 0.65; P.push({ k: 2, a: 1, b }); inside = (x, y) => (x * x) + (y * y) / (b * b) < 0.995; const c = Math.sqrt(1 - b * b); foci = [{ x: -c, y: 0 }, { x: c, y: 0 }]; ey = b;
+      }
+      else if (p.table === 'stade') {
+        const h = 0.08 + f * 0.62, r = 1 - h; ey = r;
+        seg(-h, -r, h, -r); seg(-h, r, h, r); arc(h, 0, r, (x) => x >= h - 1e-9); arc(-h, 0, r, (x) => x <= -h + 1e-9);
+        inside = (x, y) => { const dx = Math.max(0, Math.abs(x) - h); return dx * dx + y * y < r * r * 0.99; };
+      }
+      else if (p.table === 'polygone') {
+        const n = p.cotes, a0 = -Math.PI / 2 + (n % 2 ? 0 : Math.PI / n), V = [];
+        // la proportion aplatit le polygone (comme une ellipse)
+        const sy = 1 - f * 0.5;
+        for (let i = 0; i < n; i++) { const a = a0 + i * TAU / n; V.push([Math.cos(a), Math.sin(a) * sy]); }
+        const cy = (Math.max(...V.map((v) => v[1])) + Math.min(...V.map((v) => v[1]))) / 2; V.forEach((v) => { v[1] -= cy; }); ey = Math.max(...V.map((v) => Math.abs(v[1]))); ex = Math.max(...V.map((v) => Math.abs(v[0])));
+        for (let i = 0; i < n; i++) { const A = V[i], B = V[(i + 1) % n]; seg(A[0], A[1], B[0], B[1]); }
+        // dedans : du même côté de toutes les arêtes
+        inside = (x, y) => { let pos = 0, neg = 0; for (let i = 0; i < n; i++) { const A = V[i], B = V[(i + 1) % n], c = (B[0] - A[0]) * (y - A[1]) - (B[1] - A[1]) * (x - A[0]); if (c > 0.004) pos++; else if (c < -0.004) neg++; else return false; } return !pos || !neg; };
+      }
+      else if (p.table === 'sinai') {
+        const s = 0.95, ro = 0.12 + f * 0.5; ex = ey = s;
+        seg(-s, -s, s, -s); seg(s, -s, s, s); seg(s, s, -s, s); seg(-s, s, -s, -s); arc(0, 0, ro, null);
+        inside = (x, y) => Math.abs(x) < s * 0.995 && Math.abs(y) < s * 0.995 && x * x + y * y > ro * ro * 1.01;
+      }
+      else {
+        // champignon de Bunimovich : un chapeau en demi-disque posé sur un pied rectangulaire
+        const cy = 0.05, r = 0.9, sw = 0.1 + f * 0.45, yb = 0.87; ex = r; ey = 0.87;
+        arc(0, cy, r, (x, y) => y <= cy + 1e-9);
+        seg(-r, cy, -sw, cy); seg(sw, cy, r, cy); seg(-sw, cy, -sw, yb); seg(sw, cy, sw, yb); seg(-sw, yb, sw, yb);
+        inside = (x, y) => (y <= cy && x * x + (y - cy) ** 2 < r * r * 0.99) || (Math.abs(x) < sw * 0.99 && y > cy - 1e-6 && y < yb * 0.995);
+      }
+      return { P, inside, foci, ex, ey };
+    }
+    let T = null, tKey = '';
+    function getTable() { const k = [p.table, p.forme, p.cotes].join(); if (k !== tKey) { tKey = k; T = table(); } return T; }
+
+    // la source reste dans la table ; à chaque changement de table on la ramène dedans
+    function placeSrc() {
+      const Tb = getTable();
+      if (Tb.inside(srcU.x, srcU.y)) return;
+      for (let k = 0; k < 60; k++) { const t = k / 60; const x = srcU.x * (1 - t), y = srcU.y * (1 - t) + (p.table === 'champignon' ? -0.3 * t : 0); if (Tb.inside(x, y)) { srcU = { x, y }; return; } }
+      srcU = { x: 0, y: p.table === 'champignon' ? -0.3 : (p.table === 'sinai' ? -0.7 : 0) };
+    }
+    let view = { cx: 0, cy: 0, R: 1 };
+    function moveSrc(x, y) { const u = { x: (x - view.cx) / view.R, y: (y - view.cy) / view.R }; if (getTable().inside(u.x, u.y)) srcU = u; }
+
+    // ——— Lancer de rayons ———
+    function hit(P, px, py, dx, dy) {
+      let best = Infinity, nx = 0, ny = 0;
+      for (const q of P) {
+        if (q.k === 0) {
+          const ex = q.bx - q.ax, ey = q.by - q.ay, den = dx * ey - dy * ex; if (Math.abs(den) < 1e-12) continue;
+          const wx = q.ax - px, wy = q.ay - py, t = (wx * ey - wy * ex) / den, u = (wx * dy - wy * dx) / den;
+          if (t > EPS && t < best && u >= -1e-9 && u <= 1 + 1e-9) { best = t; nx = -ey; ny = ex; }
+        } else if (q.k === 1) {
+          const fx = px - q.cx, fy = py - q.cy, B = fx * dx + fy * dy, C = fx * fx + fy * fy - q.r * q.r, D = B * B - C; if (D < 0) continue;
+          const s = Math.sqrt(D);
+          for (const t of [-B - s, -B + s]) { if (t > EPS && t < best) { const hx = px + dx * t, hy = py + dy * t; if (!q.ok || q.ok(hx, hy)) { best = t; nx = hx - q.cx; ny = hy - q.cy; } } }
+        } else {
+          const a2 = q.a * q.a, b2 = q.b * q.b, A = dx * dx / a2 + dy * dy / b2, B = px * dx / a2 + py * dy / b2, C = px * px / a2 + py * py / b2 - 1, D = B * B - A * C; if (D < 0) continue;
+          const s = Math.sqrt(D);
+          for (const t of [(-B - s) / A, (-B + s) / A]) if (t > EPS && t < best) { const hx = px + dx * t, hy = py + dy * t; best = t; nx = hx / a2; ny = hy / b2; }
+        }
+      }
+      if (best === Infinity) return null;
+      const l = Math.hypot(nx, ny); return { t: best, nx: nx / l, ny: ny / l };
+    }
+    // tous les rayons : points successifs en coordonnées unité, dans un tableau plat
+    function traceAll(t) {
+      const Tb = getTable(), n = p.rayons, B = Math.max(1, Math.min(p.rebonds, Math.floor(60000 / n)));
+      const need = n * (B + 1) * 2; if (!pts || pts.length < need) pts = new Float32Array(need);
+      rayLen = new Int32Array(n); rayStart = new Int32Array(n);
+      let s = srcU;
+      if (p.table === 'ellipse' && p.foyer) s = Tb.foci[0];
+      else if (p.derive > 0) {
+        const a = p.derive * 0.35, c = { x: s.x + a * Math.sin(t * 0.23) , y: s.y + a * Math.sin(t * 0.31 + 1) };
+        if (Tb.inside(c.x, c.y)) s = c;
+      }
+      const base = (p.direction + t * p.rotation) * Math.PI / 180;
+      let w = 0;
+      for (let i = 0; i < n; i++) {
+        let px, py, dx, dy;
+        const k = n > 1 ? i / (n - 1) - 0.5 : 0;
+        if (p.faisceau === 'eventail') {
+          const a = base + k * p.ouverture * Math.PI / 180 * (p.ouverture >= 360 ? (n - 1) / n : 1); dx = Math.cos(a); dy = Math.sin(a); px = s.x; py = s.y;
+        } else {
+          dx = Math.cos(base); dy = Math.sin(base); px = s.x - dy * k * p.largeur; py = s.y + dx * k * p.largeur;
+          if (!Tb.inside(px, py)) { rayStart[i] = w; rayLen[i] = 0; continue; }
+        }
+        rayStart[i] = w; pts[w++] = px; pts[w++] = py; let m = 1;
+        for (let b = 0; b < B; b++) {
+          const h = hit(Tb.P, px, py, dx, dy); if (!h) break;
+          px += dx * h.t; py += dy * h.t; pts[w++] = px; pts[w++] = py; m++;
+          const d = dx * h.nx + dy * h.ny; dx -= 2 * d * h.nx; dy -= 2 * d * h.ny;
+          const l = Math.hypot(dx, dy); dx /= l; dy /= l;
+          px += dx * 1e-6; py += dy * 1e-6;
+        }
+        rayLen[i] = m;
+      }
+      return { B, s };
+    }
+
+    // ——— Le logo : un masque à l'écran ———
+    function buildMask(w, h) {
+      const img0 = p.image || app.logoImg, key = [w, h, img0 ? (img0.src || 'c') : 'demo'].join();
+      if (key === maskKey) return; maskKey = key;
+      const k = 0.5; mW = Math.ceil(w * k); mH = Math.ceil(h * k);
+      const c = document.createElement('canvas'); c.width = mW; c.height = mH; const x = c.getContext('2d', { willReadFrequently: true });
+      const L = Math.min(mW, mH) * 0.5, cx = mW / 2, cy = mH / 2;
+      if (img0) { const iw = img0.naturalWidth || img0.width, ih = img0.naturalHeight || img0.height, s = L / Math.max(iw, ih); x.drawImage(img0, cx - iw * s / 2, cy - ih * s / 2, iw * s, ih * s); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(cx, cy, L * 0.48, 0, TAU); x.arc(cx, cy, L * 0.27, 0, TAU, true); x.fill('evenodd'); x.fillRect(cx - L * 0.07, cy - L * 0.5, L * 0.14, L); }
+      const N = mW * mH, d = x.getImageData(0, 0, mW, mH).data; let transp = 0; for (let i = 3; i < d.length; i += 4) if (d[i] < 128) transp++;
+      const useA = transp > N * 0.05; mask = new Uint8Array(N);
+      for (let i = 0; i < N; i++) { const l = (d[i * 4] * 0.2126 + d[i * 4 + 1] * 0.7152 + d[i * 4 + 2] * 0.0722) / 255; mask[i] = (useA ? d[i * 4 + 3] > 128 : d[i * 4 + 3] > 128 && l < 0.5) ? 1 : 0; }
+    }
+    const inMask = (x, y) => { const i = (x * 0.5) | 0, j = (y * 0.5) | 0; return i >= 0 && j >= 0 && i < mW && j < mH && mask[j * mW + i] === 1; };
+
+    // ——— Segments regroupés par couleur et par opacité (quelques dizaines de tracés au plus) ———
+    const QC = 12, QA = 14;
+    function bins(w, h, t) {
+      const { B } = traceAll(t), n = p.rayons, R = view.R, cx = view.cx, cy = view.cy, C = p.couleurs.length ? p.couleurs : ['#ffffff'];
+      const out = new Map(), logo = p.logo && mask;
+      const add = (key, x0, y0, x1, y1) => { let L = out.get(key); if (!L) out.set(key, (L = [])); L.push(x0, y0, x1, y1); };
+      for (let i = 0; i < n; i++) {
+        const o = rayStart[i], m = rayLen[i];
+        for (let b = 0; b + 1 < m; b++) {
+          const a = Math.pow(1 - p.amorti, b), aq = Math.max(0, Math.min(QA - 1, Math.round(a * (QA - 1))));
+          if (aq === 0 && p.amorti > 0) break;
+          const cq = p.teinte === 'uni' ? 0 : Math.round((p.teinte === 'rebond' ? (B > 1 ? b / (B - 1) : 0) : (n > 1 ? i / (n - 1) : 0)) * (QC - 1));
+          const x0 = cx + pts[o + b * 2] * R, y0 = cy + pts[o + b * 2 + 1] * R, x1 = cx + pts[o + b * 2 + 2] * R, y1 = cy + pts[o + b * 2 + 3] * R;
+          if (!logo) { add(cq * QA + aq, x0, y0, x1, y1); continue; }
+          // dans le logo, le rayon change de couleur : on découpe le segment par petits pas
+          const len = Math.hypot(x1 - x0, y1 - y0), st = Math.max(1, Math.ceil(len / 3)); let prev = inMask(x0, y0), sx = x0, sy = y0;
+          for (let k = 1; k <= st; k++) {
+            const ex = x0 + (x1 - x0) * k / st, ey = y0 + (y1 - y0) * k / st, cur = k === st ? prev : inMask(ex, ey);
+            if (cur !== prev || k === st) { add(prev ? -1 - aq : cq * QA + aq, sx, sy, ex, ey); sx = ex; sy = ey; prev = cur; }
+          }
+        }
+      }
+      return { out, C };
+    }
+    function colorOfKey(key, C) {
+      if (key < 0) return p.accent;
+      const cq = Math.floor(key / QA), t = cq / (QC - 1);
+      if (C.length === 1) return C[0];
+      const u = t * (C.length - 1), i = Math.min(C.length - 2, Math.floor(u)); return mix(C[i], C[i + 1], u - i);
+    }
+    const alphaOfKey = (key) => { const aq = key < 0 ? -1 - key : key % QA; return p.intensite * aq / (QA - 1); };
+
+    function layoutView(w, h) {
+      const Tb = getTable(), R = Math.min(w * 0.45 / Tb.ex, h * 0.43 / Tb.ey);
+      view = { cx: w / 2, cy: h / 2, R };
+    }
+    function outlinePath(P2, R, cx, cy) {
+      const Tb = getTable();
+      if (p.table === 'ellipse') { const q = Tb.P[0]; P2.ellipse(cx, cy, q.a * R, q.b * R, 0, 0, TAU); return; }
+      for (const q of Tb.P) {
+        if (q.k === 0) { P2.moveTo(cx + q.ax * R, cy + q.ay * R); P2.lineTo(cx + q.bx * R, cy + q.by * R); }
+        else if (q.k === 1) {
+          let a0 = 0, a1 = TAU;
+          if (p.table === 'stade') { if (q.cx > 0) { a0 = -Math.PI / 2; a1 = Math.PI / 2; } else { a0 = Math.PI / 2; a1 = Math.PI * 1.5; } }
+          if (p.table === 'champignon') { a0 = Math.PI; a1 = TAU; }
+          P2.moveTo(cx + (q.cx + Math.cos(a0) * q.r) * R, cy + (q.cy + Math.sin(a0) * q.r) * R); P2.arc(cx + q.cx * R, cy + q.cy * R, q.r * R, a0, a1);
+        }
+      }
+    }
+
+    let simT = 0;
+    app.loop((t, dt) => {
+      dt = Math.min(0.1, dt || 0);
+      if (!app.thumbnail) simT += dt;
+      const { w, h, dpr } = app.size;
+      layoutView(w, h);
+      if (p.logo) buildMask(w, h);
+      const { out, C } = bins(w, h, simT);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.globalCompositeOperation = 'source-over'; ctx.globalAlpha = 1;
+      ctx.fillStyle = p.fond; ctx.fillRect(0, 0, w, h);
+      const dark = lum(p.fond) < 0.5;
+      ctx.globalCompositeOperation = !p.additif ? 'source-over' : dark ? 'lighter' : 'multiply';
+      ctx.lineWidth = p.epaisseur; ctx.lineCap = 'round';
+      for (const [key, L] of out) {
+        const P2 = new Path2D(); for (let i = 0; i < L.length; i += 4) { P2.moveTo(L[i], L[i + 1]); P2.lineTo(L[i + 2], L[i + 3]); }
+        ctx.globalAlpha = alphaOfKey(key); ctx.strokeStyle = colorOfKey(key, C); ctx.stroke(P2);
+      }
+      ctx.globalCompositeOperation = 'source-over'; ctx.globalAlpha = 1;
+      if (p.bord) { const P2 = new Path2D(); outlinePath(P2, view.R, view.cx, view.cy); ctx.strokeStyle = p.trait; ctx.lineWidth = Math.max(1.2, p.epaisseur * 1.6); ctx.stroke(P2); }
+      // la source
+      const s = srcU; if (!app.thumbnail && held) { ctx.fillStyle = p.trait; ctx.beginPath(); ctx.arc(view.cx + s.x * view.R, view.cy + s.y * view.R, 4, 0, TAU); ctx.fill(); }
+      app.finish(ctx);
+    });
+
+    function toSVG() {
+      const { w, h } = app.size, f = (v) => +v.toFixed(2);
+      layoutView(w, h); if (p.logo) buildMask(w, h);
+      const { out, C } = bins(w, h, simT), dark = lum(p.fond) < 0.5;
+      let body = '';
+      for (const [key, L] of out) {
+        let d = ''; for (let i = 0; i < L.length; i += 4) d += `M${f(L[i])} ${f(L[i + 1])}L${f(L[i + 2])} ${f(L[i + 3])}`;
+        body += `<path d="${d}" stroke="${colorOfKey(key, C)}" stroke-opacity="${f(alphaOfKey(key))}"/>`;
+      }
+      let bord = '';
+      if (p.bord) {
+        const Tb = getTable(), R = view.R, cx = view.cx, cy = view.cy; let d = '';
+        if (p.table === 'ellipse') { const q = Tb.P[0]; bord = `<ellipse cx="${f(cx)}" cy="${f(cy)}" rx="${f(q.a * R)}" ry="${f(q.b * R)}"/>`; }
+        else {
+          for (const q of Tb.P) {
+            if (q.k === 0) d += `M${f(cx + q.ax * R)} ${f(cy + q.ay * R)}L${f(cx + q.bx * R)} ${f(cy + q.by * R)}`;
+            else {
+              const r = q.r * R, X = cx + q.cx * R, Y = cy + q.cy * R;
+              if (p.table === 'stade') d += q.cx > 0 ? `M${f(X)} ${f(Y - r)}A${f(r)} ${f(r)} 0 0 1 ${f(X)} ${f(Y + r)}` : `M${f(X)} ${f(Y + r)}A${f(r)} ${f(r)} 0 0 1 ${f(X)} ${f(Y - r)}`;
+              else if (p.table === 'champignon') d += `M${f(X - r)} ${f(Y)}A${f(r)} ${f(r)} 0 0 1 ${f(X + r)} ${f(Y)}`;
+              else d += `M${f(X - r)} ${f(Y)}a${f(r)} ${f(r)} 0 1 0 ${f(2 * r)} 0a${f(r)} ${f(r)} 0 1 0 ${f(-2 * r)} 0z`;
+            }
+          }
+          bord = `<path d="${d}"/>`;
+        }
+        bord = `<g fill="none" stroke="${p.trait}" stroke-width="${f(Math.max(1.2, p.epaisseur * 1.6))}" stroke-linecap="round">${bord}</g>`;
+      }
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><rect width="100%" height="100%" fill="${p.fond}"/><g fill="none" stroke-width="${f(p.epaisseur)}" stroke-linecap="round" ${p.additif ? ` style="mix-blend-mode:${dark ? 'screen' : 'multiply'}"` : ''}>${body}</g>${bord}</svg>`;
+    }
+  </script>
+</body>
+</html>
