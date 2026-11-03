@@ -1,0 +1,15 @@
+{
+  "slug": "patrons",
+  "title": "Patrons de polyèdres",
+  "type": "motion",
+  "description": "Cube, icosaèdre, ballon de football : les solides se déplient en patron à plat puis se replient, face après face, charnière après charnière, avec le logo imprimé dessus.",
+  "tags": ["mathematiques", "geometrie", "3d", "pliage", "logo", "svg"],
+  "inspiration": [
+    "Albrecht Dürer, les premiers patrons de polyèdres dans « Underweysung der Messung » (1525)",
+    "Les solides d'Archimède et de Platon",
+    "Le ballon Telstar, icosaèdre tronqué de la Coupe du monde 1970"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}
