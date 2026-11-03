@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Étoiles de Hankin</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Étoiles de Hankin : on part d'un pavage (carrés, hexagones, 4.8.8…). Du milieu de chaque côté partent deux rayons
+    // inclinés d'un angle θ sur le côté ; dans chaque tuile, le rayon qui penche vers un sommet rencontre celui du côté
+    // voisin qui penche vers le même sommet. Les segments ainsi coupés dessinent les étoiles et rosaces de l'art islamique.
+    // Les rayons partent tous des milieux, partagés par deux tuiles : θ peut donc varier d'une tuile à l'autre sans
+    // jamais casser le motif. Ici θ ondule en vague, le doigt y ajoute des bosses, et le logo décale l'angle de ses tuiles.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2, R3 = Math.sqrt(3), D2R = Math.PI / 180;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const BIEN = PAL('biennale'), MEN = PAL('menthe'), KB = PAL('kegelbahn');
+
+    let simT = 0, bumps = [], logoM = null, logoKey = '', last = null;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: false,
+      finish: { grain: 0.02, vignette: 0.06 },
+      hint: 'Glissez pour ouvrir les étoiles · molette : taille des tuiles',
+      notes: 'En 1925, le bactériologiste anglais Ernest Hanbury Hankin, passionné par les décors des mosquées indiennes, publie une méthode pour retrouver leurs tracés : on dessine un pavage de polygones, puis, du milieu de chaque côté, deux rayons qui se croisent en X. Prolongés jusqu\'à leur rencontre, ils dessinent les étoiles à huit, six ou douze branches des zelliges et des panneaux girih. Il suffit de faire varier l\'angle de contact pour passer d\'une croix discrète à une étoile acérée, puis à une rosace. Craig Kaplan a repris la méthode au début des années 2000 pour en faire un outil de dessin. Ici l\'angle ondule en vague sur la surface, le doigt ouvre les étoiles autour de lui, et le logo ressort par un angle et une couleur à lui.',
+      params: {
+        'Pavage': {
+          pavage: { type: 'select', label: 'Pavage', options: { carre: 'Carrés (4.4.4.4)', hexagone: 'Hexagones (6.6.6)', triangle: 'Triangles (3.3.3.3.3.3)', octo: 'Octogones et carrés (4.8.8)', trihex: 'Trihexagonal (3.6.3.6)', rhombi: 'Rhombitrihexagonal (3.4.6.4)' }, value: 'octo' },
+          taille: { type: 'range', label: 'Taille des tuiles', min: 0.04, max: 0.4, step: 0.005, value: 0.11 },
+          rotation: { type: 'range', label: 'Rotation (°)', min: 0, max: 90, step: 1, value: 0 },
+          pavageVisible: { type: 'toggle', label: 'Montrer le pavage', value: false },
+        },
+        'Étoiles': {
+          angle: { type: 'range', label: 'Angle de contact θ (°)', min: 10, max: 85, step: 0.5, value: 60 },
+          decalage: { type: 'range', label: 'Écart au milieu', min: 0, max: 0.4, step: 0.005, value: 0 },
+          amplitude: { type: 'range', label: 'Ondulation de θ (°)', min: 0, max: 35, step: 0.5, value: 12 },
+          longueur: { type: 'range', label: 'Longueur d\'onde', min: 0.2, max: 3, step: 0.01, value: 1.1 },
+          vitesse: { type: 'range', label: 'Vitesse', min: 0, max: 2, step: 0.01, value: 0.4 },
+        },
+        'Rendu': {
+          style: { type: 'segmented', label: 'Style', options: { traits: 'Traits', aplats: 'Aplats', rubans: 'Rubans' }, value: 'aplats' },
+          epaisseur: { type: 'range', label: 'Épaisseur', min: 0.3, max: 8, step: 0.1, value: 1.4 },
+        },
+        'Logo en relief': {
+          logo: { type: 'toggle', label: 'Logo dans le motif', value: false },
+          angleLogo: { type: 'range', label: 'Écart d\'angle du logo (°)', min: -40, max: 40, step: 0.5, value: -22, show: (q) => q.logo },
+          tailleLogo: { type: 'range', label: 'Taille du logo', min: 0.3, max: 1.8, step: 0.01, value: 1.2, show: (q) => q.logo },
+          image: { type: 'file', label: 'Logo', accept: 'image/*', show: (q) => q.logo },
+        },
+        'Couleurs': {
+          fond: { type: 'color', label: 'Fond', value: '#f1ece1' },
+          couleurs: { type: 'palette', label: 'Étoiles (par sorte de tuile)', value: ['#2c3566', '#486cfc', '#c9d6f2'] },
+          trait: { type: 'color', label: 'Traits', value: '#1b1b1f' },
+          accent: { type: 'color', label: 'Logo', value: '#ef5a2f', show: (q) => q.logo },
+        },
+      },
+      presets: {
+        'Zellige': {},
+        'Girih': { pavage: 'hexagone', angle: 62, style: 'traits', epaisseur: 1.6, taille: 0.1, amplitude: 14 },
+        'Croix': { pavage: 'carre', angle: 45, decalage: 0.18, couleurs: ['#ef5a2f', '#edd14b'], taille: 0.12 },
+        'Rosaces': { pavage: 'rhombi', angle: 68, taille: 0.08, couleurs: ['#1b1b1f', '#486cfc', '#edd14b'], amplitude: 10 },
+        'Rubans': { pavage: 'trihex', angle: 55, style: 'rubans', epaisseur: 5, taille: 0.12, fond: '#16161c', trait: '#f1ece1', couleurs: ['#c9a24a'] },
+        'Triangles': { pavage: 'triangle', angle: 40, style: 'aplats', couleurs: ['#1b1b1f', '#f272ba'], taille: 0.15, amplitude: 20 },
+        'Logo': { logo: true, pavage: 'carre', angle: 58, taille: 0.06, couleurs: ['#c9d6f2'], accent: '#ef5a2f', angleLogo: -26, amplitude: 6 },
+        'Biennale': { fond: BIEN[0], couleurs: [BIEN[2], BIEN[3], BIEN[4]], trait: BIEN[1], pavage: 'octo', angle: 66 },
+        'Menthe': { fond: MEN[1], couleurs: [MEN[2], MEN[3]], trait: MEN[0], pavage: 'rhombi', style: 'aplats', angle: 60 },
+        'Kegelbahn': { fond: KB[0], couleurs: [KB[1]], trait: KB[2], pavage: 'hexagone', style: 'rubans', epaisseur: 4, angle: 70, taille: 0.13 },
+      },
+      brand(colors) {
+        const s = colors.slice().sort((a, b) => lum(a) - lum(b));
+        return { fond: s[s.length - 1], couleurs: s.length > 2 ? s.slice(1, -1) : [s[0]], trait: s[0], accent: s[Math.floor(s.length / 2)] };
+      },
+      pointer: {
+        down: (q) => { last = [q.x, q.y]; addBump(q.x, q.y); },
+        drag: (q) => { if (last && Math.hypot(q.x - last[0], q.y - last[1]) > 14) { addBump(q.x, q.y); last = [q.x, q.y]; } },
+        up: () => { last = null; },
+        wheel: (q, dy) => app.set('taille', Math.max(0.04, Math.min(0.4, +(p.taille * (dy > 0 ? 1 / 1.08 : 1.08)).toFixed(3)))),
+      },
+      onChange(k) { if (['*', 'logo', 'image'].includes(k)) logoKey = ''; },
+      export: { name: 'etoiles-hankin', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    function hex(x) { const n = parseInt(x.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
+    function lum(x) { const c = hex(x); return (c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114) / 255; }
+    function mix(a, b, t) { const A = hex(a), B = hex(b); return '#' + A.map((v, i) => Math.round(v + (B[i] - v) * t).toString(16).padStart(2, '0')).join(''); }
+    function addBump(x, y) { bumps.push({ x, y, t: simT }); if (bumps.length > 80) bumps.shift(); }
+
+    // ——— Logo ———
+    function buildLogo() {
+      const img0 = p.image || app.logoImg, key = [p.logo, img0 ? (img0.src || 'c') : 'demo'].join(); if (key === logoKey) return; logoKey = key;
+      logoM = null; if (!p.logo) return;
+      const M = 200, c = document.createElement('canvas'); c.width = c.height = M; const x = c.getContext('2d', { willReadFrequently: true }), L = M * 0.94, cx = M / 2;
+      if (img0) { const iw = img0.naturalWidth || img0.width, ih = img0.naturalHeight || img0.height, s = L / Math.max(iw, ih); x.drawImage(img0, cx - iw * s / 2, cx - ih * s / 2, iw * s, ih * s); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(cx, cx, L * 0.48, 0, TAU); x.arc(cx, cx, L * 0.27, 0, TAU, true); x.fill('evenodd'); x.fillRect(cx - L * 0.07, cx - L * 0.5, L * 0.14, L); }
+      const d = x.getImageData(0, 0, M, M).data; let transp = 0; for (let i = 3; i < d.length; i += 4) if (d[i] < 128) transp++; const useA = transp > M * M * 0.05;
+      const m = new Uint8Array(M * M); for (let i = 0; i < M * M; i++) { const o = i * 4, l = (d[o] * 0.2126 + d[o + 1] * 0.7152 + d[o + 2] * 0.0722) / 255; m[i] = (useA ? d[o + 3] > 128 : d[o + 3] > 128 && l < 0.5) ? 1 : 0; }
+      logoM = { m, M };
+    }
+    function inLogo(X, Y, w, h) {
+      if (!logoM || !p.logo) return false; const S = Math.min(w, h) * 0.5 * p.tailleLogo, u = Math.floor(((X - w / 2) / S * 0.5 + 0.5) * logoM.M), v = Math.floor(((Y - h / 2) / S * 0.5 + 0.5) * logoM.M);
+      return u >= 0 && v >= 0 && u < logoM.M && v < logoM.M && logoM.m[v * logoM.M + u] === 1;
+    }
+
+    // ——— Pavages : polygones en coordonnées locales (côté a), type = indice de couleur ———
+    const reg = (cx, cy, r, n, a0) => { const V = []; for (let k = 0; k < n; k++) { const a = a0 + k * TAU / n; V.push([cx + Math.cos(a) * r, cy + Math.sin(a) * r]); } return V; };
+    function tiling(a, R) {
+      const out = [], push = (V, type) => { let cx = 0, cy = 0; for (const q of V) { cx += q[0]; cy += q[1]; } cx /= V.length; cy /= V.length; if (Math.hypot(cx, cy) < R) out.push({ V, type }); };
+      const lattice = (e1, e2, fn) => { const n = Math.ceil(R / Math.min(Math.hypot(...e1), Math.hypot(...e2))) + 2; for (let j = -n; j <= n; j++) for (let i = -n; i <= n; i++) fn(i * e1[0] + j * e2[0], i * e1[1] + j * e2[1], i, j); };
+      switch (p.pavage) {
+        case 'carre': lattice([a, 0], [0, a], (x, y) => push([[x, y], [x + a, y], [x + a, y + a], [x, y + a]], 0)); break;
+        case 'hexagone': lattice([R3 * a, 0], [R3 * a / 2, 1.5 * a], (x, y) => push(reg(x, y, a, 6, Math.PI / 6), 0)); break;
+        case 'triangle': lattice([a, 0], [a / 2, R3 * a / 2], (x, y) => {
+          const P = [x, y], A = [x + a, y], B = [x + a / 2, y + R3 * a / 2], C = [x + 1.5 * a, y + R3 * a / 2];
+          push([P, A, B], 0); push([A, C, B], 1);
+        }); break;
+        case 'octo': { const L = a * (1 + Math.SQRT2); lattice([L, 0], [0, L], (x, y) => { push(reg(x, y, a / (2 * Math.sin(Math.PI / 8)), 8, Math.PI / 8), 0); push(reg(x + L / 2, y + L / 2, a / Math.SQRT2, 4, 0), 1); }); break; }
+        case 'trihex': lattice([2 * a, 0], [a, R3 * a], (x, y) => {
+          push(reg(x, y, a, 6, 0), 0);
+          const m = (u, v) => [x + u, y + v];
+          push([m(a, 0), m(1.5 * a, R3 * a / 2), m(0.5 * a, R3 * a / 2)], 1);
+          push([m(1.5 * a, R3 * a / 2), m(2.5 * a, R3 * a / 2), m(2 * a, R3 * a)], 1);
+        }); break;
+        default: { // 3.4.6.4
+          const d = a * (1 + R3), e1 = [d * Math.cos(Math.PI / 6), d * Math.sin(Math.PI / 6)], e2 = [0, d];
+          lattice(e1, e2, (x, y) => {
+            const H = reg(x, y, a, 6, 0); push(H, 0);
+            // trois carrés (vers e1, e2, e2−e1) et deux triangles par maille
+            for (const e of [e1, e2, [e2[0] - e1[0], e2[1] - e1[1]]]) {
+              const l = Math.hypot(e[0], e[1]), ux = e[0] / l, uy = e[1] / l, mx = x + e[0] / 2, my = y + e[1] / 2, hx = a / 2;
+              push([[mx - ux * hx - uy * hx, my - uy * hx + ux * hx], [mx + ux * hx - uy * hx, my + uy * hx + ux * hx], [mx + ux * hx + uy * hx, my + uy * hx - ux * hx], [mx - ux * hx + uy * hx, my - uy * hx - ux * hx]], 1);
+            }
+            for (const [A, B] of [[e1, e2], [e2, [e2[0] - e1[0], e2[1] - e1[1]]]]) {
+              const C = [[x, y], [x + A[0], y + A[1]], [x + B[0], y + B[1]]], gx = (C[0][0] + C[1][0] + C[2][0]) / 3, gy = (C[0][1] + C[1][1] + C[2][1]) / 3;
+              push(C.map((c) => { const D = reg(c[0], c[1], a, 6, 0); let best = D[0], bd = 1e9; for (const q of D) { const dd = (q[0] - gx) ** 2 + (q[1] - gy) ** 2; if (dd < bd) { bd = dd; best = q; } } return best; }), 2);
+            }
+          });
+        }
+      }
+      return out;
+    }
+
+    // ——— Méthode de Hankin dans une tuile ———
+    // renvoie les segments (polylignes R_i → X_i → L_{i+1}) et le contour étoilé de la tuile
+    function hankin(V, th, del) {
+      const n = V.length; let cx = 0, cy = 0; for (const q of V) { cx += q[0]; cy += q[1]; } cx /= n; cy /= n;
+      const E = [], c = Math.cos(th), s = Math.sin(th);
+      for (let i = 0; i < n; i++) {
+        const A = V[i], B = V[(i + 1) % n], len = Math.hypot(B[0] - A[0], B[1] - A[1]), ex = (B[0] - A[0]) / len, ey = (B[1] - A[1]) / len, mx = (A[0] + B[0]) / 2, my = (A[1] + B[1]) / 2;
+        let nx = -ey, ny = ex; if (nx * (cx - mx) + ny * (cy - my) < 0) { nx = -nx; ny = -ny; }
+        const o = del * len / 2;
+        // les deux rayons partent de part et d'autre du milieu et se croisent sur le côté (le X de Hankin)
+        E.push({ r: [mx - ex * o, my - ey * o], dr: [ex * c + nx * s, ey * c + ny * s], l: [mx + ex * o, my + ey * o], dl: [-ex * c + nx * s, -ey * c + ny * s], len });
+      }
+      const lines = [], star = [];
+      for (let i = 0; i < n; i++) {
+        const P = E[i], Q = E[(i + 1) % n], det = P.dr[0] * -Q.dl[1] - P.dr[1] * -Q.dl[0], bx = Q.l[0] - P.r[0], by = Q.l[1] - P.r[1];
+        let t = Math.abs(det) < 1e-9 ? P.len : (bx * -Q.dl[1] - by * -Q.dl[0]) / det; t = Math.max(0, Math.min(P.len * 3, t));
+        const X = [P.r[0] + P.dr[0] * t, P.r[1] + P.dr[1] * t];
+        lines.push([P.r, X, Q.l]); star.push(P.l, P.r, X);
+      }
+      return { lines, star, cx, cy };
+    }
+
+    function build(w, h, t) {
+      buildLogo();
+      const m = Math.min(w, h), a = p.taille * m, R = Math.hypot(w, h) / 2 + a * 3, T = tiling(a, R), rot = p.rotation * D2R, cr = Math.cos(rot), sr = Math.sin(rot);
+      const out = [], X = (q) => [w / 2 + q[0] * cr - q[1] * sr, h / 2 + q[0] * sr + q[1] * cr];
+      for (const tile of T) {
+        const V = tile.V.map(X); let cx = 0, cy = 0; for (const q of V) { cx += q[0]; cy += q[1]; } cx /= V.length; cy /= V.length;
+        if (cx < -a * 2.5 || cy < -a * 2.5 || cx > w + a * 2.5 || cy > h + a * 2.5) continue;
+        // θ : base + vague qui traverse la surface + bosses du doigt
+        const ph = ((cx - w / 2) * 0.8 + (cy - h / 2) * 0.6) / m / p.longueur * TAU;
+        let th = p.angle + p.amplitude * Math.sin(ph - t * p.vitesse * 1.6);
+        for (const b of bumps) { const age = t - b.t, d2 = ((cx - b.x) ** 2 + (cy - b.y) ** 2) / (m * m * 0.015); if (age < 7 && d2 < 9) th += 24 * Math.exp(-d2) * Math.sin(Math.min(1, age * 2.5) * Math.PI / 2) * Math.max(0, 1 - age / 7); }
+        const inv = inLogo(cx, cy, w, h); if (inv) th += p.angleLogo;
+        th = Math.max(4, Math.min(86, th)) * D2R;
+        const H = hankin(V, th, p.decalage);
+        out.push({ V, type: tile.type, inv, ...H });
+      }
+      return out;
+    }
+
+    // intérieur des rubans : la première couleur de la palette
+    function ruban() { return p.couleurs.length ? p.couleurs[0] : p.fond; }
+    function starColor(T) { const C = p.couleurs.length ? p.couleurs : ['#000000']; return T.inv && p.logo ? p.accent : C[T.type % C.length]; }
+
+    app.loop((t, dt) => {
+      dt = Math.min(0.1, dt || 0);
+      if (!app.thumbnail) simT += dt; else simT = 1.3;
+      if (bumps.length && simT - bumps[0].t > 7) bumps = bumps.filter((b) => simT - b.t < 7);
+      const { w, h, dpr } = app.size, B = build(w, h, simT);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = p.fond; ctx.fillRect(0, 0, w, h);
+      ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+      if (p.style === 'aplats' || p.logo) {
+        // étoiles remplies (pair-impair : les branches qui se recoupent s'alternent), regroupées par couleur
+        const G = new Map();
+        for (const T of B) { if (p.style !== 'aplats' && !T.inv) continue; const col = starColor(T); let P = G.get(col); if (!P) G.set(col, (P = new Path2D())); P.moveTo(T.star[0][0], T.star[0][1]); for (let i = 1; i < T.star.length; i++) P.lineTo(T.star[i][0], T.star[i][1]); P.closePath(); }
+        for (const [col, P] of G) { ctx.fillStyle = col; ctx.fill(P, 'nonzero'); }
+      }
+      if (p.pavageVisible) {
+        const P = new Path2D(); for (const T of B) { P.moveTo(T.V[0][0], T.V[0][1]); for (let i = 1; i < T.V.length; i++) P.lineTo(T.V[i][0], T.V[i][1]); P.closePath(); }
+        ctx.strokeStyle = mix(p.trait, p.fond, 0.72); ctx.lineWidth = 0.8; ctx.stroke(P);
+      }
+      const L = new Path2D(); for (const T of B) for (const l of T.lines) { L.moveTo(l[0][0], l[0][1]); L.lineTo(l[1][0], l[1][1]); L.lineTo(l[2][0], l[2][1]); }
+      if (p.style === 'rubans') {
+        ctx.strokeStyle = p.trait; ctx.lineWidth = p.epaisseur * 1.9; ctx.stroke(L);
+        ctx.strokeStyle = ruban(); ctx.lineWidth = p.epaisseur * 1.1; ctx.stroke(L);
+      } else { ctx.strokeStyle = p.trait; ctx.lineWidth = p.style === 'aplats' ? p.epaisseur * 0.8 : p.epaisseur; ctx.stroke(L); }
+      app.finish(ctx);
+    });
+
+    function toSVG() {
+      const { w, h } = app.size, f = (v) => +v.toFixed(1), B = build(w, h, simT), pt = (q) => f(q[0]) + ' ' + f(q[1]);
+      let s = `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><rect width="100%" height="100%" fill="${p.fond}"/>`;
+      if (p.style === 'aplats' || p.logo) {
+        const G = new Map(); for (const T of B) { if (p.style !== 'aplats' && !T.inv) continue; const col = starColor(T); G.set(col, (G.get(col) || '') + 'M' + T.star.map(pt).join('L') + 'z'); }
+        for (const [col, d] of G) s += `<path d="${d}" fill="${col}"/>`;
+      }
+      if (p.pavageVisible) s += `<path d="${B.map((T) => 'M' + T.V.map(pt).join('L') + 'z').join('')}" fill="none" stroke="${mix(p.trait, p.fond, 0.72)}" stroke-width="0.8"/>`;
+      const d = B.map((T) => T.lines.map((l) => 'M' + l.map(pt).join('L')).join('')).join(''), st = (c, wd) => `<path d="${d}" fill="none" stroke="${c}" stroke-width="${f(wd)}" stroke-linejoin="round" stroke-linecap="round"/>`;
+      s += p.style === 'rubans' ? st(p.trait, p.epaisseur * 1.9) + st(ruban(), p.epaisseur * 1.1) : st(p.trait, p.style === 'aplats' ? p.epaisseur * 0.8 : p.epaisseur);
+      return s + '</svg>';
+    }
+  </script>
+</body>
+</html>
