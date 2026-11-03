@@ -1,0 +1,15 @@
+{
+  "slug": "courbe-remplissante",
+  "title": "Courbe remplissante",
+  "type": "motion",
+  "description": "Un seul trait qui passe partout : courbes de Hilbert, Moore, Peano, Gosper et Sierpiński qui se dédoublent d'un ordre à l'autre, s'épaississent dans le logo.",
+  "tags": ["courbe", "fractale", "ligne", "vectoriel", "logo", "svg"],
+  "inspiration": [
+    "Giuseppe Peano (1890) et David Hilbert (1891)",
+    "Bill Gosper, la courbe flowsnake (1973)",
+    "Les systèmes de Lindenmayer"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}
