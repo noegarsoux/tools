@@ -1,0 +1,15 @@
+{
+  "slug": "boulier",
+  "title": "Boulier",
+  "type": "motion",
+  "description": "Des rangées de perles qui glissent sur leurs tiges, se cognent et rebondissent pour dessiner vagues, losanges, un compteur et le logo en creux.",
+  "tags": ["cinetique", "perles", "physique", "grille", "logo", "svg"],
+  "inspiration": [
+    "Le boulier chinois (suanpan) et le soroban japonais",
+    "Les bouliers d'école à dix perles par tringle",
+    "L'art cinétique des années 1960"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}
