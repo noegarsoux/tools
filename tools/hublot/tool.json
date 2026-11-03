@@ -1,0 +1,15 @@
+{
+  "slug": "hublot",
+  "title": "Hublot",
+  "type": "motion",
+  "description": "Le linge aux couleurs de la marque tourne derrière le hublot d’une machine à laver : brassage dans l’eau savonneuse, vidange, puis essorage qui plaque tout.",
+  "tags": ["physique", "souple", "objet", "interaction", "logo", "svg"],
+  "inspiration": [
+    "Le hublot des machines à laver et le linge qui retombe",
+    "Les tambours perforés en inox et leurs aubes",
+    "Le spectacle hypnotique d’une laverie automatique"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}
