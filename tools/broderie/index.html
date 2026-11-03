@@ -1,0 +1,290 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Broderie</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Broderie : le motif est une liste de régions (contours fermés, pair-impair) avec une couleur de fil.
+    // Chaque région devient une suite de points : balayage par lignes parallèles tournées d'un angle,
+    // intersections avec les contours, segments coupés en points (décalés d'un rang à l'autre pour le
+    // remplissage), aller-retour en lacet comme le ferait l'aiguille. Variantes : point de croix sur grille,
+    // points lancés au hasard, contour au point de tige. Un point = trois traits (ombre, fil, reflet) ; le reflet
+    // dépend de l'angle du point par rapport à la lumière, d'où le lustre qui change avec la direction.
+    // Les points déjà brodés s'ajoutent au fur et à mesure dans un calque.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const SAL = PAL('salon'), GLY = PAL('glyphes'), MEN = PAL('menthe'), COD = PAL('code');
+    const MOTIFS = ['logo', 'fleur', 'soleil', 'rameau', 'etoiles'];
+    const LIGHT = -0.8;
+
+    let simT = 0, vKey = '', logoM = null, logoKey = '', ptr = null, E = null, eKey = '', BG = null, bgKey = '';
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.04, vignette: 0.16 },
+      hint: 'Glissez pour broder au point avant · clic : motif suivant · molette : épaisseur du fil',
+      notes: 'Une broderie se monte point par point : l\'aiguille remplit chaque surface en longs points parallèles (passé plat), en points courts décalés (remplissage), en croix sur la grille du canevas ou en points lancés au hasard, puis cerne le motif au point de tige. Le fil de soie accroche la lumière selon sa direction : deux zones de la même couleur brodées dans deux sens ne brillent pas pareil. Ici, le logo ou un motif (fleur, soleil, rameau, étoiles) se brode sur une toile de lin tendue dans un tambour. Glissez pour broder vous-même, cliquez pour passer au motif suivant.',
+      params: {
+        'Motif': {
+          motif: { type: 'select', label: 'Motif', options: { logo: 'Logo', fleur: 'Fleur', soleil: 'Soleil', rameau: 'Rameau', etoiles: 'Étoiles' }, value: 'logo' },
+          tailleMotif: { type: 'range', label: 'Taille du motif', min: 0.3, max: 0.95, step: 0.01, value: 0.62 },
+          enchainer: { type: 'toggle', label: 'Changer de motif une fois brodé', value: true },
+          image: { type: 'file', label: 'Logo', accept: 'image/*' },
+        },
+        'Point': {
+          point: { type: 'select', label: 'Point', options: { plat: 'Passé plat', remplissage: 'Remplissage', croix: 'Point de croix', lances: 'Points lancés' }, value: 'plat' },
+          fil: { type: 'range', label: 'Épaisseur du fil', min: 1, max: 8, step: 0.1, value: 2.6 },
+          densite: { type: 'range', label: 'Serrage', min: 0.5, max: 1.6, step: 0.01, value: 1 },
+          angle: { type: 'range', label: 'Angle des points (°)', min: 0, max: 180, step: 1, value: 35 },
+          contour: { type: 'toggle', label: 'Cerner au point de tige', value: true },
+          vitesse: { type: 'range', label: 'Points par seconde', min: 10, max: 3000, step: 10, value: 220 },
+          brillance: { type: 'range', label: 'Lustre de la soie', min: 0, max: 1, step: 0.01, value: 0.7 },
+        },
+        'Toile': {
+          tambour: { type: 'toggle', label: 'Tambour à broder', value: true },
+          toile: { type: 'color', label: 'Toile', value: '#e9e0cf' },
+          table: { type: 'color', label: 'Table', value: '#3b2f28' },
+          fils: { type: 'palette', label: 'Fils', value: ['#c8372d', '#2f4f9e', '#e8b33a', '#2f7a4a', '#16161a'] },
+        },
+      },
+      presets: {
+        'Écusson': {},
+        'Fleur': { motif: 'fleur', angle: 60, enchainer: false },
+        'Point de croix': { point: 'croix', motif: 'logo', fil: 2.2, toile: '#f2efe6', fils: ['#c8372d', '#2f4f9e', '#16161a'] },
+        'Soleil': { motif: 'soleil', point: 'remplissage', fils: ['#e8b33a', '#e5762a', '#c8372d'], angle: 0 },
+        'Rameau': { motif: 'rameau', fils: ['#2f7a4a', '#7aa04b', '#5a3b23'], toile: '#f0ebe0', angle: 120 },
+        'Points lancés': { point: 'lances', motif: 'etoiles', fil: 2, fils: ['#e8b33a', '#f2efe6', '#c8372d'], toile: '#1c2340', table: '#121212' },
+        'Gros fil': { fil: 6.5, densite: 0.9, tailleMotif: 0.75, vitesse: 120 },
+        'Plein cadre': { tambour: false, tailleMotif: 0.85, motif: 'fleur', vitesse: 600 },
+        'Salon': { toile: SAL[0], fils: SAL.slice(1), motif: 'soleil', point: 'plat' },
+        'Menthe': { toile: MEN[0], fils: [MEN[3], MEN[1], MEN[2]], point: 'croix', motif: 'fleur', fil: 2.4 },
+      },
+      brand(colors) {
+        const s = colors.slice().sort((a, b) => lum(a) - lum(b)), L = s[s.length - 1];
+        return { toile: L, table: mix(s[0], '#3b2f28', 0.5), fils: s.length > 1 ? s.slice(0, -1) : ['#16161a'] };
+      },
+      pointer: {
+        down: (q) => { ptr = { x: q.x, y: q.y, lx: q.x, ly: q.y, moved: 0, ci: Math.floor(Math.random() * 97) }; },
+        drag: (q) => { if (!ptr || !E) return; ptr.moved += Math.hypot(q.x - ptr.x, q.y - ptr.y); ptr.x = q.x; ptr.y = q.y; const d = Math.hypot(q.x - ptr.lx, q.y - ptr.ly), L = p.fil * 4; if (d > L) { const n = Math.floor(d / L); for (let k = 0; k < n; k++) { const ax = ptr.lx + (q.x - ptr.lx) * k / n, ay = ptr.ly + (q.y - ptr.ly) * k / n, bx = ptr.lx + (q.x - ptr.lx) * (k + 0.62) / n, by = ptr.ly + (q.y - ptr.ly) * (k + 0.62) / n; E.user.push({ a: [ax, ay], b: [bx, by], c: ptr.ci }); } ptr.lx = q.x; ptr.ly = q.y; } },
+        up: () => { if (ptr && ptr.moved < 6 && E) { E.sheet++; E.phase = 'efface'; E.tp = simT; } ptr = null; },
+        wheel: (q, dy) => app.set('fil', Math.max(1, Math.min(8, +(p.fil * (dy > 0 ? 0.93 : 1.07)).toFixed(2)))),
+      },
+      onChange(k) { if (['*', 'image'].includes(k)) logoKey = ''; },
+      export: { name: 'broderie', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    function hex(x) { const n = parseInt(x.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
+    function lum(x) { const c = hex(x); return (c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114) / 255; }
+    function mix(a, b, t) { const A = hex(a), C = hex(b); return '#' + A.map((v, i) => Math.round(v + (C[i] - v) * t).toString(16).padStart(2, '0')).join(''); }
+    function rng(s) { let a = s >>> 0; return () => { a = (a + 0x6d2b79f5) >>> 0; let t = a; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+
+    function buildLogo() {
+      const img0 = p.image || app.logoImg, key = img0 ? (img0.src || 'c') : 'demo'; if (key === logoKey) return; logoKey = key; vKey = '';
+      const M = 200, c = document.createElement('canvas'); c.width = c.height = M; const x = c.getContext('2d', { willReadFrequently: true }), L = M * 0.94, cx = M / 2;
+      if (img0) { const iw = img0.naturalWidth || img0.width, ih = img0.naturalHeight || img0.height, s = L / Math.max(iw, ih); x.drawImage(img0, cx - iw * s / 2, cx - ih * s / 2, iw * s, ih * s); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(cx, cx, L * 0.48, 0, TAU); x.arc(cx, cx, L * 0.27, 0, TAU, true); x.fill('evenodd'); x.fillRect(cx - L * 0.07, cx - L * 0.5, L * 0.14, L); }
+      const d = x.getImageData(0, 0, M, M).data; let transp = 0; for (let i = 3; i < d.length; i += 4) if (d[i] < 128) transp++; const useA = transp > M * M * 0.05;
+      const F = new Float64Array(M * M); for (let i = 0; i < M * M; i++) { const o = i * 4, l = (d[o] * 0.2126 + d[o + 1] * 0.7152 + d[o + 2] * 0.0722) / 255; F[i] = useA ? d[o + 3] / 255 : (d[o + 3] / 255) * Math.min(1, Math.max(0, (0.75 - l) * 2)); }
+      { const G2 = new Float64Array(M * M); for (let j = 1; j < M - 1; j++) for (let i = 1; i < M - 1; i++) { let a = 0; for (let b = -1; b <= 1; b++) for (let c = -1; c <= 1; c++) a += F[(j + b) * M + i + c] * (b || c ? (b && c ? 1 : 2) : 4); G2[j * M + i] = a / 16; } F.set(G2); }
+      for (let k = 0; k < M; k++) F[k] = F[(M - 1) * M + k] = F[k * M] = F[k * M + M - 1] = 0;
+      logoM = contours(F, M, M, 0.5, 0, 0, 1).filter((c) => c.closed && c.pts.length > 6).map((c) => chaikin(chaikin(c.pts, true), true).map((q) => [q[0] / M - 0.5, q[1] / M - 0.5]));
+    }
+    // carrés marchants + chaînage
+    function contours(F, nx, ny, lev, ox, oy, cs) {
+      const pt = new Map(), adj = new Map();
+      const P = (id) => { let q = pt.get(id); if (q) return q; const cell = id >> 1, i = cell % nx, j = (cell - i) / nx; let a, b, ax, ay, bx, by; if (id & 1) { a = F[j * nx + i]; b = F[(j + 1) * nx + i]; ax = bx = i; ay = j; by = j + 1; } else { a = F[j * nx + i]; b = F[j * nx + i + 1]; ay = by = j; ax = i; bx = i + 1; } const t = (lev - a) / (b - a || 1e-9); q = [ox + (ax + (bx - ax) * t) * cs, oy + (ay + (by - ay) * t) * cs]; pt.set(id, q); return q; };
+      const link = (a, b) => { (adj.get(a) || adj.set(a, []).get(a)).push(b); (adj.get(b) || adj.set(b, []).get(b)).push(a); };
+      for (let j = 0; j < ny - 1; j++) for (let i = 0; i < nx - 1; i++) {
+        const A = F[j * nx + i] > lev, B = F[j * nx + i + 1] > lev, C = F[(j + 1) * nx + i + 1] > lev, D = F[(j + 1) * nx + i] > lev, idx = A | (B << 1) | (C << 2) | (D << 3);
+        if (idx === 0 || idx === 15) continue;
+        const T = (j * nx + i) * 2, R = (j * nx + i + 1) * 2 + 1, Bo = ((j + 1) * nx + i) * 2, Le = (j * nx + i) * 2 + 1;
+        const ctr = (F[j * nx + i] + F[j * nx + i + 1] + F[(j + 1) * nx + i + 1] + F[(j + 1) * nx + i]) / 4 > lev;
+        switch (idx) {
+          case 1: case 14: link(Le, T); break; case 2: case 13: link(T, R); break; case 3: case 12: link(Le, R); break;
+          case 4: case 11: link(R, Bo); break; case 6: case 9: link(T, Bo); break; case 7: case 8: link(Le, Bo); break;
+          case 5: if (ctr) { link(Le, Bo); link(T, R); } else { link(Le, T); link(R, Bo); } break;
+          case 10: if (ctr) { link(Le, T); link(R, Bo); } else { link(Le, Bo); link(T, R); } break;
+        }
+      }
+      const seen = new Set(), out = [];
+      const walk = (s) => { const L = [s]; seen.add(s); let cur = s; for (;;) { const nb = (adj.get(cur) || []).find((x) => !seen.has(x)); if (nb === undefined) break; seen.add(nb); L.push(nb); cur = nb; } return L; };
+      for (const [id, nb] of adj) if (nb.length === 1 && !seen.has(id)) out.push({ pts: walk(id).map(P), closed: false });
+      for (const [id] of adj) if (!seen.has(id)) out.push({ pts: walk(id).map(P), closed: true });
+      return out;
+    }
+    function chaikin(pts, closed) {
+      const o = []; const n = pts.length; for (let k = 0; k < (closed ? n : n - 1); k++) { const a = pts[k], b = pts[(k + 1) % n]; o.push([a[0] * 0.75 + b[0] * 0.25, a[1] * 0.75 + b[1] * 0.25], [a[0] * 0.25 + b[0] * 0.75, a[1] * 0.25 + b[1] * 0.75]); }
+      if (!closed) { o.unshift(pts[0]); o.push(pts[n - 1]); } return o;
+    }
+
+
+    // ——— Motifs : régions dans un carré unité centré (rayon 0,5) ———
+    const circ = (cx, cy, r, n = 48) => Array.from({ length: n }, (_, k) => [cx + Math.cos(k / n * TAU) * r, cy + Math.sin(k / n * TAU) * r]);
+    function petal(cx, cy, a, len, wd) { const o = []; for (let k = 0; k <= 24; k++) { const t = k / 24, s = Math.sin(t * Math.PI) ** 0.8 * wd * (1 - t * 0.35); o.push([t * len, s]); } for (let k = 23; k > 0; k--) { const t = k / 24, s = Math.sin(t * Math.PI) ** 0.8 * wd * (1 - t * 0.35); o.push([t * len, -s]); } return o.map(([x, y]) => [cx + x * Math.cos(a) - y * Math.sin(a), cy + x * Math.sin(a) + y * Math.cos(a)]); }
+    function star(cx, cy, r, a0) { return Array.from({ length: 10 }, (_, k) => { const a = a0 + k / 10 * TAU - Math.PI / 2, rr = k % 2 ? r * 0.42 : r; return [cx + Math.cos(a) * rr, cy + Math.sin(a) * rr]; }); }
+    function design(kind, R) {
+      if (kind === 'logo') return [{ loops: logoM || [circ(0, 0, 0.4)], c: 0, ang: 0 }];
+      if (kind === 'fleur') { const out = [], n = 6; for (let k = 0; k < n; k++) { const a = k / n * TAU - Math.PI / 2; out.push({ loops: [petal(0, -0.08, a, 0.3, 0.1)], c: 0, ang: a * 180 / Math.PI + 90 }); } out.push({ loops: [petal(0.02, 0.33, -0.5, 0.2, 0.06)], c: 3, ang: 30 }, { loops: [petal(-0.02, 0.3, Math.PI + 0.45, 0.2, 0.06)], c: 3, ang: -30 }); out.push({ loops: [circ(0, -0.08, 0.08)], c: 2, ang: 0 }); out.stem = [[0, 0.02], [0.02, 0.2], [0, 0.46]]; out.stemC = 3; return out; }
+      if (kind === 'soleil') { const out = [{ loops: [circ(0, 0, 0.22)], c: 0, ang: 0 }], n = 14; for (let k = 0; k < n; k++) { const a = k / n * TAU, a1 = a - 0.11, a2 = a + 0.11; out.push({ loops: [[[Math.cos(a1) * 0.26, Math.sin(a1) * 0.26], [Math.cos(a) * (k % 2 ? 0.4 : 0.47), Math.sin(a) * (k % 2 ? 0.4 : 0.47)], [Math.cos(a2) * 0.26, Math.sin(a2) * 0.26]]], c: k % 2 ? 1 : 2, ang: a * 180 / Math.PI }); } out.push({ loops: [circ(0, 0, 0.1)], c: 2, ang: 90 }); return out; }
+      if (kind === 'rameau') { const out = []; for (let k = 0; k < 8; k++) { const t = k / 7, y = 0.4 - t * 0.78, s = k % 2 ? 1 : -1, a = s > 0 ? -0.6 : Math.PI + 0.6; out.push({ loops: [petal(Math.sin(t * 3) * 0.05, y, a, 0.22 - t * 0.06, 0.07)], c: k % 3 === 2 ? 4 : 3, ang: a * 180 / Math.PI + 90 }); } out.push({ loops: [circ(0.02, -0.43, 0.04)], c: 2, ang: 0 }, { loops: [circ(-0.06, -0.38, 0.03)], c: 2, ang: 0 }); out.stemC = 4; out.stem = Array.from({ length: 9 }, (_, k) => [Math.sin(k / 8 * 3) * 0.05, 0.47 - k / 8 * 0.9]); return out; }
+      const out = []; for (let k = 0; k < 7; k++) { const r = 0.06 + R() * 0.11, x = (R() - 0.5) * (0.9 - r * 2), y = (R() - 0.5) * (0.9 - r * 2); out.push({ loops: [star(x, y, r, R() * 0.6)], c: k % 3, ang: R() * 180 }); } return out;
+    }
+
+    // ——— Points ———
+    function inside(loops, x, y) { let c = false; for (const L of loops) for (let i = 0, j = L.length - 1; i < L.length; j = i++) { const a = L[i], b = L[j]; if ((a[1] > y) !== (b[1] > y) && x < (b[0] - a[0]) * (y - a[1]) / (b[1] - a[1]) + a[0]) c = !c; } return c; }
+    function scanFill(loops, ang, sp, maxLen, brick) {
+      const ca = Math.cos(ang), sa = Math.sin(ang), rot = loops.map((L) => L.map(([x, y]) => [x * ca + y * sa, -x * sa + y * ca]));
+      let y0 = Infinity, y1 = -Infinity; for (const L of rot) for (const q of L) { y0 = Math.min(y0, q[1]); y1 = Math.max(y1, q[1]); }
+      const out = []; let row = 0;
+      for (let y = y0 + sp * 0.5; y < y1; y += sp, row++) {
+        const xs = []; for (const L of rot) for (let i = 0, j = L.length - 1; i < L.length; j = i++) { const a = L[i], b = L[j]; if ((a[1] > y) !== (b[1] > y)) xs.push(a[0] + (y - a[1]) / (b[1] - a[1]) * (b[0] - a[0])); }
+        xs.sort((a, b) => a - b); const segs = [];
+        for (let k = 0; k + 1 < xs.length; k += 2) { const x0 = xs[k], x1 = xs[k + 1], len = x1 - x0; if (len < sp * 0.3) continue; const n = Math.max(1, Math.ceil(len / maxLen)), off = brick && n > 1 ? (row % 2 ? 0.5 : 0) : 0, cuts = [x0]; for (let i = 1; i < n + (off ? 1 : 0); i++) { const c = x0 + (i - off) * len / n; if (c > x0 + sp * 0.4 && c < x1 - sp * 0.4) cuts.push(c); } cuts.push(x1); for (let i = 0; i + 1 < cuts.length; i++) segs.push([cuts[i], cuts[i + 1]]); }
+        if (row % 2) segs.reverse();
+        for (const [a, b] of segs) { const [s0, s1] = row % 2 ? [b, a] : [a, b]; out.push([[s0 * ca - y * sa, s0 * sa + y * ca], [s1 * ca - y * sa, s1 * sa + y * ca]]); }
+      }
+      return out;
+    }
+    function crossFill(loops, cell) {
+      let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity; for (const L of loops) for (const q of L) { x0 = Math.min(x0, q[0]); y0 = Math.min(y0, q[1]); x1 = Math.max(x1, q[0]); y1 = Math.max(y1, q[1]); }
+      const out = [], gx = Math.floor(x0 / cell), gy = Math.floor(y0 / cell);
+      for (let j = gy; j * cell < y1; j++) { const row = []; for (let i = gx; i * cell < x1; i++) { const cx = (i + 0.5) * cell, cy = (j + 0.5) * cell; if (inside(loops, cx, cy)) row.push([i * cell, j * cell]); } if ((j - gy) % 2) row.reverse(); for (const [x, y] of row) { const e = cell * 0.08; out.push([[x + e, y + cell - e], [x + cell - e, y + e]], [[x + e, y + e], [x + cell - e, y + cell - e]]); } }
+      return out;
+    }
+    function seedFill(loops, sp, R) {
+      let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity; for (const L of loops) for (const q of L) { x0 = Math.min(x0, q[0]); y0 = Math.min(y0, q[1]); x1 = Math.max(x1, q[0]); y1 = Math.max(y1, q[1]); }
+      const n = Math.round((x1 - x0) * (y1 - y0) / (sp * sp) * 0.9), out = []; for (let k = 0; k < n * 2 && out.length < n; k++) { const x = x0 + R() * (x1 - x0), y = y0 + R() * (y1 - y0); if (!inside(loops, x, y)) continue; const a = R() * Math.PI, l = sp * (1.4 + R() * 1.2); out.push([[x - Math.cos(a) * l / 2, y - Math.sin(a) * l / 2], [x + Math.cos(a) * l / 2, y + Math.sin(a) * l / 2]]); }
+      out.sort((a, b) => a[0][1] - b[0][1]); return out;
+    }
+    function stemLine(pts, closed, sp) {
+      const out = [], P = closed ? pts.concat([pts[0]]) : pts, step = sp * 2.2; let acc = [], tot = 0;
+      for (let i = 0; i + 1 < P.length; i++) { const a = P[i], b = P[i + 1], d = Math.hypot(b[0] - a[0], b[1] - a[1]); acc.push([a, b, tot, d]); tot += d; }
+      const at = (s) => { for (const [a, b, t0, d] of acc) if (s <= t0 + d) { const u = (s - t0) / (d || 1); return [a[0] + (b[0] - a[0]) * u, a[1] + (b[1] - a[1]) * u]; } return P[P.length - 1]; };
+      for (let s = 0; s + step * 0.5 < tot; s += step * 0.5) out.push([at(s), at(Math.min(tot, s + step))]);
+      return out;
+    }
+
+    function embroidery(w, h) {
+      buildLogo();
+      const key = [p.motif, p.tailleMotif, p.point, p.fil, p.densite, p.angle, p.contour, p.fils.join(), logoKey, app.seed, w, h].join();
+      if (key === eKey && E) return E; eKey = key;
+      const sheet = E ? E.sheet : 0; E = { w, h, sheet, user: E ? E.user : [], phase: 'brode', tp: simT, layer: null, done: 0, list: [] };
+      buildSheet(E); E.done = Math.floor(E.list.length * 0.4); E.dirty = true; return E;
+    }
+    function buildSheet(Em) {
+      const { w, h } = Em, R = rng(app.seed * 313 + Em.sheet * 17), m = Math.min(w, h), D = m * p.tailleMotif, cx = w / 2, cy = h / 2;
+      const kind = p.enchainer ? MOTIFS[(MOTIFS.indexOf(p.motif) + Em.sheet) % MOTIFS.length] : p.motif, regs = design(kind, R);
+      const C = p.fils.length ? p.fils : ['#c8372d'], rot = Em.sheet % C.length, tw = p.fil, sp = tw * 0.92 / p.densite, list = [];
+      const T = (q) => [cx + q[0] * D, cy + q[1] * D], dark = C.reduce((b, c, i) => (lum(c) < lum(C[b]) ? i : b), 0);
+      if (regs.stem) { const pts = regs.stem.map(T), col = ((regs.stemC || 2) + rot) % C.length; for (const s of stemLine(pts, false, tw)) list.push({ a: s[0], b: s[1], c: col, k: 1 }); }
+      for (const rg of regs) {
+        const loops = rg.loops.map((L) => L.map(T)), col = (rg.c + rot) % C.length, ang = (p.angle + (rg.ang || 0)) * Math.PI / 180;
+        let st;
+        if (p.point === 'croix') st = crossFill(loops, tw * 2.6 / p.densite);
+        else if (p.point === 'lances') st = seedFill(loops, sp * 1.6, R);
+        else if (p.point === 'remplissage') st = scanFill(loops, ang, sp, tw * 5, true);
+        else st = scanFill(loops, ang, sp, m * 0.16, true);
+        for (const s of st) list.push({ a: s[0], b: s[1], c: col });
+        if (p.contour && p.point !== 'croix') { const oc = kind === 'logo' ? (col + 1) % C.length : dark; if (oc !== col || kind === 'logo') for (const L of loops) for (const s of stemLine(L, true, tw)) list.push({ a: s[0], b: s[1], c: oc, k: 1 }); }
+      }
+      Em.list = list; Em.kind = kind;
+    }
+
+    // ——— Rendu d'un point ———
+    function stitch(g, s, C) {
+      const col = C[s.c % C.length], ax = s.a[0], ay = s.a[1], bx = s.b[0], by = s.b[1], ang = Math.atan2(by - ay, bx - ax), tw = p.fil * (s.k ? 0.85 : 1), lit = 0.5 + 0.5 * Math.cos(2 * (ang - LIGHT)), nx = -Math.sin(ang), ny = Math.cos(ang);
+      g.lineCap = 'round';
+      g.strokeStyle = 'rgba(0,0,0,0.28)'; g.lineWidth = tw * 1.05; g.beginPath(); g.moveTo(ax + tw * 0.22, ay + tw * 0.32); g.lineTo(bx + tw * 0.22, by + tw * 0.32); g.stroke();
+      g.strokeStyle = mix(col, '#000000', 0.22 * (1 - lit)); g.lineWidth = tw; g.beginPath(); g.moveTo(ax, ay); g.lineTo(bx, by); g.stroke();
+      if (p.brillance > 0) { g.strokeStyle = mix(col, '#ffffff', 0.12 + 0.4 * lit * p.brillance); g.lineWidth = tw * 0.32; const o = -tw * 0.18, sh = 0.18; g.beginPath(); g.moveTo(ax + nx * o + (bx - ax) * sh, ay + ny * o + (by - ay) * sh); g.lineTo(bx + nx * o - (bx - ax) * sh, by + ny * o - (by - ay) * sh); g.stroke(); }
+    }
+    function background(w, h, dpr) {
+      const key = [w, h, dpr, p.toile, p.table, p.tambour].join(); if (BG && bgKey === key) return BG; bgKey = key;
+      BG = document.createElement('canvas'); BG.width = Math.ceil(w * dpr); BG.height = Math.ceil(h * dpr); const g = BG.getContext('2d'), R = rng(99); g.setTransform(dpr, 0, 0, dpr, 0, 0);
+      const m = Math.min(w, h), hr = m * 0.47, cx = w / 2, cy = h / 2;
+      g.fillStyle = p.tambour ? p.table : p.toile; g.fillRect(0, 0, w, h);
+      if (p.tambour) { g.save(); g.shadowColor = 'rgba(0,0,0,0.4)'; g.shadowBlur = m * 0.04; g.shadowOffsetY = m * 0.012; g.beginPath(); g.arc(cx, cy, hr * 1.04, 0, TAU); g.fillStyle = p.toile; g.fill(); g.restore(); g.save(); g.beginPath(); g.arc(cx, cy, hr, 0, TAU); g.clip(); }
+      g.fillStyle = p.toile; g.fillRect(0, 0, w, h);
+      // trame du lin
+      const dk = mix(p.toile, '#000000', 0.12), lt = mix(p.toile, '#ffffff', 0.25), st = Math.max(2, m * 0.0042);
+      g.lineWidth = st * 0.45;
+      for (let y = 0; y < h; y += st) { g.strokeStyle = R() < 0.5 ? dk : lt; g.globalAlpha = 0.25 + R() * 0.35; g.beginPath(); g.moveTo(0, y); g.lineTo(w, y + (R() - 0.5) * st); g.stroke(); }
+      for (let x = 0; x < w; x += st) { g.strokeStyle = R() < 0.5 ? dk : lt; g.globalAlpha = 0.18 + R() * 0.3; g.beginPath(); g.moveTo(x, 0); g.lineTo(x + (R() - 0.5) * st, h); g.stroke(); }
+      g.globalAlpha = 1;
+      if (p.tambour) {
+        const gr = g.createRadialGradient(cx, cy, hr * 0.8, cx, cy, hr); gr.addColorStop(0, 'rgba(0,0,0,0)'); gr.addColorStop(1, 'rgba(0,0,0,0.16)'); g.fillStyle = gr; g.fillRect(0, 0, w, h); g.restore();
+        // anneau de bois
+        const wood = '#b98a58'; for (const [r, lw, c] of [[hr * 1.005, m * 0.022, mix(wood, '#000000', 0.25)], [hr, m * 0.018, wood]]) { g.lineWidth = lw; g.strokeStyle = c; g.beginPath(); g.arc(cx, cy, r, 0, TAU); g.stroke(); }
+        g.lineWidth = m * 0.004; g.strokeStyle = mix(wood, '#ffffff', 0.35); g.beginPath(); g.arc(cx, cy, hr - m * 0.005, Math.PI * 1.05, Math.PI * 1.6); g.stroke();
+        g.fillStyle = '#9fa3a8'; g.beginPath(); g.roundRect(cx - m * 0.022, cy - hr - m * 0.05, m * 0.044, m * 0.04, m * 0.008); g.fill(); g.fillStyle = '#d7dadd'; g.fillRect(cx - m * 0.012, cy - hr - m * 0.064, m * 0.024, m * 0.016);
+      }
+      return BG;
+    }
+
+    function step(dt) {
+      if (E.phase === 'brode') { E.done = Math.min(E.list.length, E.done + p.vitesse * dt); if (E.done >= E.list.length) { E.phase = 'pause'; E.tp = simT; } }
+      else if (E.phase === 'pause' && simT - E.tp > 3) { E.sheet++; E.phase = 'efface'; E.tp = simT; } // motif suivant, ou mêmes points dans d'autres fils
+      else if (E.phase === 'efface' && simT - E.tp > 0.7) { buildSheet(E); E.user = []; E.done = 0; E.dirty = true; E.phase = 'brode'; E.tp = simT; }
+    }
+
+    app.loop((t, dt) => {
+      dt = Math.min(1 / 20, dt || 0);
+      const { w, h, dpr } = app.size; embroidery(w, h);
+      if (app.thumbnail) { E.done = E.list.length; E.phase = 'pause'; E.tp = simT + 1e6; }
+      else { simT += dt; step(dt); }
+      const C = p.fils.length ? p.fils : ['#c8372d'];
+      ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.drawImage(background(w, h, dpr), 0, 0);
+      // calque des points brodés
+      if (!E.layer || E.layer.width !== Math.ceil(w * dpr) || E.layer.height !== Math.ceil(h * dpr)) { E.layer = document.createElement('canvas'); E.layer.width = Math.ceil(w * dpr); E.layer.height = Math.ceil(h * dpr); E.dirty = true; }
+      const lk = [p.brillance, C.join(), p.fil].join(); if (E.lk !== lk) { E.lk = lk; E.dirty = true; }
+      const g = E.layer.getContext('2d'); g.setTransform(dpr, 0, 0, dpr, 0, 0);
+      if (E.dirty) { E.dirty = false; g.clearRect(0, 0, w, h); E.drawn = 0; E.udrawn = 0; }
+      const n = Math.floor(E.done); for (; E.drawn < n; E.drawn++) stitch(g, E.list[E.drawn], C);
+      for (; E.udrawn < E.user.length; E.udrawn++) stitch(g, E.user[E.udrawn], C);
+      const fade = E.phase === 'efface' ? 1 - (simT - E.tp) / 0.7 : 1;
+      ctx.globalAlpha = Math.max(0, fade); ctx.drawImage(E.layer, 0, 0); ctx.globalAlpha = 1;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      // l'aiguille et son fil
+      if (E.phase === 'brode' && n > 0 && n < E.list.length) {
+        const s = E.list[n - 1], nx2 = E.list[n], fr = E.done - n, col = C[nx2.c % C.length], tw = p.fil;
+        const px = s.b[0] + (nx2.a[0] - s.b[0]) * fr, py = s.b[1] + (nx2.a[1] - s.b[1]) * fr, a = Math.atan2(nx2.b[1] - nx2.a[1], nx2.b[0] - nx2.a[0]) - 0.6, L = Math.max(18, tw * 12);
+        const ex = px + Math.cos(a) * L, ey = py + Math.sin(a) * L;
+        ctx.lineCap = 'round'; ctx.strokeStyle = col; ctx.lineWidth = tw * 0.8; ctx.beginPath(); ctx.moveTo(ex, ey); ctx.quadraticCurveTo(ex + L * 0.8, ey + L * 0.2, ex + L * 1.4, ey + L * 1.6); ctx.stroke();
+        ctx.strokeStyle = 'rgba(0,0,0,0.3)'; ctx.lineWidth = Math.max(1.2, tw * 0.55); ctx.beginPath(); ctx.moveTo(px + 3, py + 5); ctx.lineTo(ex + 3, ey + 5); ctx.stroke();
+        const gr = ctx.createLinearGradient(px, py, ex, ey); gr.addColorStop(0, '#8d9298'); gr.addColorStop(0.5, '#f4f6f8'); gr.addColorStop(1, '#a9aeb4'); ctx.strokeStyle = gr; ctx.lineWidth = Math.max(1.4, tw * 0.6); ctx.beginPath(); ctx.moveTo(px, py); ctx.lineTo(ex, ey); ctx.stroke();
+      }
+      app.finish(ctx);
+    });
+
+    function toSVG() {
+      const { w, h } = app.size, f = (v) => +v.toFixed(2); embroidery(w, h);
+      const C = p.fils.length ? p.fils : ['#c8372d'], m = Math.min(w, h), hr = m * 0.47, cx = w / 2, cy = h / 2;
+      let s = `<rect width="100%" height="100%" fill="${p.tambour ? p.table : p.toile}"/>`;
+      if (p.tambour) s += `<circle cx="${f(cx)}" cy="${f(cy)}" r="${f(hr)}" fill="${p.toile}"/>`;
+      const all = E.list.slice(0, Math.floor(E.done)).concat(E.user);
+      const line = (a, b) => `M${f(a[0])} ${f(a[1])}L${f(b[0])} ${f(b[1])}`;
+      let sh = '', body = '', hl = '';
+      for (const st of all) {
+        const col = C[st.c % C.length], ang = Math.atan2(st.b[1] - st.a[1], st.b[0] - st.a[0]), tw = p.fil * (st.k ? 0.85 : 1), lit = 0.5 + 0.5 * Math.cos(2 * (ang - LIGHT)), nx = -Math.sin(ang), ny = Math.cos(ang), o = -tw * 0.18, k = 0.18, dx = st.b[0] - st.a[0], dy = st.b[1] - st.a[1];
+        sh += `<path d="${line([st.a[0] + tw * 0.22, st.a[1] + tw * 0.32], [st.b[0] + tw * 0.22, st.b[1] + tw * 0.32])}" stroke-width="${f(tw * 1.05)}"/>`;
+        body += `<path d="${line(st.a, st.b)}" stroke="${mix(col, '#000000', 0.22 * (1 - lit))}" stroke-width="${f(tw)}"/>`;
+        if (p.brillance > 0) hl += `<path d="${line([st.a[0] + nx * o + dx * k, st.a[1] + ny * o + dy * k], [st.b[0] + nx * o - dx * k, st.b[1] + ny * o - dy * k])}" stroke="${mix(col, '#ffffff', 0.12 + 0.4 * lit * p.brillance)}" stroke-width="${f(tw * 0.32)}"/>`;
+      }
+      s += `<g fill="none" stroke-linecap="round"><g stroke="#000" stroke-opacity="0.28">${sh}</g>${body}${hl}</g>`;
+      if (p.tambour) s += `<circle cx="${f(cx)}" cy="${f(cy)}" r="${f(hr * 1.005)}" fill="none" stroke="#8b6842" stroke-width="${f(m * 0.022)}"/><circle cx="${f(cx)}" cy="${f(cy)}" r="${f(hr)}" fill="none" stroke="#b98a58" stroke-width="${f(m * 0.018)}"/>`;
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">${s}</svg>`;
+    }
+  </script>
+</body>
+</html>
