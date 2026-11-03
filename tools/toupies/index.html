@@ -1,0 +1,273 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Toupies</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Toupies : chaque toupie a une face décrite en vecteurs (bandes de secteurs, arcs, spirales, points, logo).
+    // Elle glisse dans une arène en cuvette (rappel vers le centre), sa rotation courbe sa trajectoire, les chocs
+    // échangent vitesses et un peu de rotation. Quand elle tourne vite, l'œil mélange les couleurs le long de
+    // chaque cercle : on dessine alors des anneaux dont la teinte est la moyenne exacte du motif à ce rayon
+    // (fondu progressif entre motif net et anneaux). En ralentissant elle vacille (inclinaison + précession), puis tombe.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2, NR = 28;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const BIEN = PAL('biennale'), MEN = PAL('menthe'), KB = PAL('kegelbahn');
+
+    let simT = 0, tops = [], R = null, sKey = '', drag = null, sparks = [], logoM = null, logoKey = '', W0 = 0, H0 = 0;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.03, vignette: 0.16 },
+      hint: 'Glissez une toupie pour la lancer · clic sur une toupie : la fouetter · clic ailleurs : une nouvelle toupie · molette : nombre',
+      notes: 'Une toupie qui tourne vite efface son propre dessin : l\'œil ne voit plus que la moyenne des couleurs le long de chaque cercle, et un damier rouge et jaune devient un anneau orange. Duchamp en a tiré ses Rotoreliefs, et la toupie de Benham fait même apparaître des couleurs qui n\'y sont pas. Ici les toupies tournent dans une arène en cuvette : la pente les ramène au centre, leur rotation courbe leur trajectoire, elles se cognent et s\'échangent un peu d\'élan. En ralentissant, leur motif réapparaît, elles se mettent à vaciller puis tombent, avant qu\'une nouvelle soit lancée. Fouettez-en une d\'un clic, lancez-la en glissant, ou cliquez dans le vide pour en ajouter.',
+      params: {
+        'Toupies': {
+          nombre: { type: 'range', label: 'Nombre', min: 1, max: 20, step: 1, value: 7 },
+          taille: { type: 'range', label: 'Taille', min: 0.04, max: 0.2, step: 0.005, value: 0.09 },
+          motif: { type: 'select', label: 'Motif', options: { mixte: 'Mélange', secteurs: 'Secteurs', arcs: 'Arcs', spirale: 'Spirale', points: 'Points' }, value: 'mixte' },
+          bandes: { type: 'range', label: 'Bandes', min: 1, max: 5, step: 1, value: 3 },
+        },
+        'Mouvement': {
+          elan: { type: 'range', label: 'Élan de départ', min: 0.3, max: 2, step: 0.01, value: 1 },
+          frottement: { type: 'range', label: 'Frottement', min: 0, max: 1, step: 0.01, value: 0.35 },
+          pente: { type: 'range', label: 'Pente de l\'arène', min: 0, max: 2, step: 0.01, value: 0.8 },
+          rebond: { type: 'range', label: 'Rebond', min: 0.1, max: 1, step: 0.01, value: 0.8 },
+          flou: { type: 'range', label: 'Fondu des couleurs', min: 0, max: 1, step: 0.01, value: 0.85 },
+          relance: { type: 'range', label: 'Relance après la chute (s)', min: 0.5, max: 15, step: 0.5, value: 3 },
+        },
+        'Logo imprimé': {
+          logo: { type: 'toggle', label: 'Inclure le logo', value: false },
+          tailleLogo: { type: 'range', label: 'Taille du logo', min: 0.3, max: 1, step: 0.01, value: 0.8, show: (q) => q.logo },
+          image: { type: 'file', label: 'Logo', accept: 'image/*', show: (q) => q.logo },
+        },
+        'Couleurs': {
+          fond: { type: 'color', label: 'Fond', value: '#1a1c22' },
+          arene: { type: 'color', label: 'Arène', value: '#2a2d36' },
+          couleurs: { type: 'palette', label: 'Toupies', value: ['#e5452a', '#f2e640', '#f4f3f0', '#2f5fd0', '#111111'] },
+          accent: { type: 'color', label: 'Logo', value: '#111111', show: (q) => q.logo },
+        },
+      },
+      presets: {
+        'Arène': {},
+        'Secteurs': { motif: 'secteurs', nombre: 5, taille: 0.12 },
+        'Benham': { motif: 'arcs', couleurs: ['#ffffff', '#111111'], nombre: 4, taille: 0.14, fond: '#d8d4cc', arene: '#ece9e2' },
+        'Spirales': { motif: 'spirale', nombre: 6, couleurs: ['#f2b0c8', '#e5452a', '#f4f3f0', '#111111'] },
+        'Foule': { nombre: 18, taille: 0.055, pente: 1.2, rebond: 0.95 },
+        'Duel': { nombre: 2, taille: 0.16, elan: 1.6, pente: 1.4, frottement: 0.2 },
+        'Logo': { logo: true, nombre: 4, taille: 0.15, motif: 'secteurs', bandes: 2, couleurs: ['#f4f3f0', '#f2e640', '#e5452a'], accent: '#111111' },
+        'Biennale': { fond: BIEN[0], arene: mix(BIEN[0], BIEN[1], 0.06), couleurs: [BIEN[1], BIEN[2], BIEN[3], BIEN[4], '#ffffff'], accent: BIEN[1] },
+        'Menthe': { fond: MEN[1], arene: mix(MEN[1], MEN[3], 0.3), couleurs: [MEN[0], MEN[2], MEN[3], MEN[1]], accent: MEN[1], motif: 'points' },
+        'Kegelbahn': { fond: KB[0], arene: '#141018', couleurs: KB.slice(1), accent: KB[0], motif: 'spirale' },
+      },
+      brand(colors) {
+        const s = colors.slice().sort((a, b) => lum(a) - lum(b)), L = s[s.length - 1], D = s[0];
+        return { fond: D, arene: mix(D, L, 0.1), couleurs: s.length > 1 ? s : [D, L], accent: D };
+      },
+      pointer: {
+        down: (q) => { const T = hit(q.x, q.y); drag = { x: q.x, y: q.y, x0: q.x, y0: q.y, vx: 0, vy: 0, t: simT, T, moved: 0 }; },
+        drag: (q) => {
+          if (!drag) return; const dt = Math.max(1e-3, simT - drag.t); drag.vx = drag.vx * 0.4 + 0.6 * (q.x - drag.x) / dt; drag.vy = drag.vy * 0.4 + 0.6 * (q.y - drag.y) / dt; drag.moved += Math.hypot(q.x - drag.x, q.y - drag.y); drag.x = q.x; drag.y = q.y; drag.t = simT;
+          if (drag.T && drag.moved > 6) { drag.T.x = q.x; drag.T.y = q.y; drag.T.vx = 0; drag.T.vy = 0; }
+        },
+        up: () => {
+          if (!drag) return; const T = drag.T, m = Math.min(W0, H0);
+          if (drag.moved < 6) { if (T) { T.w = Math.max(T.w, T.w0 * 1.2); T.fall = -1; T.vx += (R() - 0.5) * m * 0.4; T.vy += (R() - 0.5) * m * 0.4; } else tops.push(newTop(drag.x, drag.y, true)); }
+          else if (T) { const sp = Math.hypot(drag.vx, drag.vy), k = Math.min(1, m * 3 / (sp || 1)); T.vx = drag.vx * k; T.vy = drag.vy * k; }
+          drag = null;
+        },
+        wheel: (q, dy) => app.set('nombre', Math.max(1, Math.min(20, p.nombre + (dy > 0 ? 1 : -1)))),
+      },
+      onChange(k) { if (['*', 'logo', 'image'].includes(k)) logoKey = ''; },
+      export: { name: 'toupies', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    function hex(x) { const n = parseInt(x.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
+    function lum(x) { const c = hex(x); return (c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114) / 255; }
+    function mix(a, b, t) { const A = hex(a), C = hex(b); return '#' + A.map((v, i) => Math.round(v + (C[i] - v) * t).toString(16).padStart(2, '0')).join(''); }
+    function avg(list) { const s = [0, 0, 0]; let n = 0; for (const [c, wgt] of list) { const v = hex(c); for (let i = 0; i < 3; i++) s[i] += v[i] * v[i] * wgt; n += wgt; } return '#' + s.map((v) => Math.round(Math.sqrt(v / n)).toString(16).padStart(2, '0')).join(''); }
+    function rng(s) { let a = s >>> 0; return () => { a = (a + 0x6d2b79f5) >>> 0; let t = a; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+
+    // ——— Logo ———
+    function buildLogo() {
+      const img0 = p.image || app.logoImg, key = [p.logo, img0 ? (img0.src || 'c') : 'demo'].join(); if (key === logoKey) return false; logoKey = key;
+      const M = 64, c = document.createElement('canvas'); c.width = c.height = M; const x = c.getContext('2d', { willReadFrequently: true }), L = M * 0.94, cx = M / 2;
+      if (img0) { const iw = img0.naturalWidth || img0.width, ih = img0.naturalHeight || img0.height, s = L / Math.max(iw, ih); x.drawImage(img0, cx - iw * s / 2, cx - ih * s / 2, iw * s, ih * s); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(cx, cx, L * 0.48, 0, TAU); x.arc(cx, cx, L * 0.27, 0, TAU, true); x.fill('evenodd'); x.fillRect(cx - L * 0.07, cx - L * 0.5, L * 0.14, L); }
+      const d = x.getImageData(0, 0, M, M).data; let transp = 0; for (let i = 3; i < d.length; i += 4) if (d[i] < 128) transp++; const useA = transp > M * M * 0.05;
+      const m = new Uint8Array(M * M); for (let i = 0; i < M * M; i++) { const o = i * 4, l = (d[o] * 0.2126 + d[o + 1] * 0.7152 + d[o + 2] * 0.0722) / 255; m[i] = (useA ? d[o + 3] > 128 : d[o + 3] > 128 && l < 0.5) ? 1 : 0; }
+      // rangées de rectangles (pour le dessin vectoriel) et couverture par rayon (pour les anneaux)
+      const runs = []; for (let v = 0; v < M; v++) { let st = -1; for (let u = 0; u <= M; u++) { const on = u < M && m[v * M + u]; if (on && st < 0) st = u; if (!on && st >= 0) { runs.push([st, v, u - st]); st = -1; } } }
+      logoM = { m, M, runs }; return true;
+    }
+
+    // ——— Faces : description vectorielle ———
+    function makeFace(Rr) {
+      const C = p.couleurs.length ? p.couleurs : ['#ffffff', '#000000'], pick = () => C[Math.floor(Rr() * C.length)], kinds = ['secteurs', 'arcs', 'spirale', 'points'];
+      const kind = p.motif === 'mixte' ? kinds[Math.floor(Rr() * kinds.length)] : p.motif, nb = p.bandes, bands = [], r0 = 0.14;
+      for (let b = 0; b < nb; b++) {
+        const a = r0 + (1 - r0) * b / nb, z = r0 + (1 - r0) * (b + 1) / nb, c1 = pick(); let c2 = pick(); if (c2 === c1) c2 = C[(C.indexOf(c1) + 1) % C.length];
+        bands.push({ r0: a, r1: z, kind, k: [2, 3, 4, 6, 8, 12][Math.floor(Rr() * 6)], c1, c2, off: Rr() * TAU, q: 0.25 + Rr() * 0.5, tw: (Rr() < 0.5 ? -1 : 1) * (2 + Rr() * 4) });
+      }
+      return { bands, hub: C[Math.floor(Rr() * C.length)], rim: mix(C[0], '#000000', 0.5) };
+    }
+    // dessin d'une face dans un repère unité (rayon 1) ; pen.fill(chemin, couleur)
+    function drawFace(F, pen, logo) {
+      for (const B of F.bands) {
+        pen.ring(B.r0, B.r1, B.c1);
+        if (B.kind === 'secteurs') { for (let j = 0; j < B.k; j += 2) pen.sector(B.r0, B.r1, B.off + (j / B.k) * TAU, B.off + ((j + 1) / B.k) * TAU, B.c2); }
+        else if (B.kind === 'arcs') { const mid = (B.r0 + B.r1) / 2; pen.sector(B.r0 + (B.r1 - B.r0) * 0.15, mid, B.off, B.off + TAU * B.q, B.c2); pen.sector(mid, B.r1 - (B.r1 - B.r0) * 0.15, B.off + Math.PI, B.off + Math.PI + TAU * B.q * 0.7, B.c2); }
+        else if (B.kind === 'spirale') { const n = Math.max(2, Math.min(6, B.k)); for (let j = 0; j < n; j++) { const pts = [], a0 = B.off + (j / n) * TAU, wd = Math.PI / n; for (let s = 0; s <= 8; s++) { const r = B.r0 + (B.r1 - B.r0) * s / 8; pts.push([Math.cos(a0 + r * B.tw) * r, Math.sin(a0 + r * B.tw) * r]); } for (let s = 8; s >= 0; s--) { const r = B.r0 + (B.r1 - B.r0) * s / 8; pts.push([Math.cos(a0 + wd + r * B.tw) * r, Math.sin(a0 + wd + r * B.tw) * r]); } pen.poly(pts, B.c2); } }
+        else { const mid = (B.r0 + B.r1) / 2, rr = (B.r1 - B.r0) * 0.3, n = Math.max(3, Math.round(TAU * mid / (rr * 3))); for (let j = 0; j < n; j++) { const a = B.off + (j / n) * TAU; pen.disc(Math.cos(a) * mid, Math.sin(a) * mid, rr, B.c2); } }
+      }
+      pen.disc(0, 0, 0.14, F.hub); pen.disc(0, 0, 0.05, F.rim);
+      if (logo && logoM) { const S = p.tailleLogo * 1.3, u = S / logoM.M; pen.rects(logoM.runs.map(([x, y, l]) => [-S / 2 + x * u, -S / 2 + y * u, l * u, u]), p.accent); }
+    }
+    // teinte moyenne le long de chaque cercle : ce que l'œil voit quand la toupie tourne vite
+    function rings(F, logo) {
+      const out = [];
+      for (let k = 0; k < NR; k++) {
+        const r = (k + 0.5) / NR; let col = r < 0.05 ? F.rim : r < 0.14 ? F.hub : null;
+        if (!col) { const B = F.bands.find((b) => r >= b.r0 && r < b.r1) || F.bands[F.bands.length - 1], u = (r - B.r0) / (B.r1 - B.r0);
+          let f = 0.5; if (B.kind === 'arcs') f = u > 0.15 && u < 0.85 ? (u < 0.5 ? B.q : B.q * 0.7) : 0; else if (B.kind === 'points') { const rr = 0.3, d = Math.abs(u - 0.5) / rr; f = d < 1 ? Math.sqrt(1 - d * d) * 0.35 : 0; }
+          col = avg([[B.c1, 1 - f], [B.c2, f]]); }
+        if (logo && logoM) { const S = p.tailleLogo * 1.3; let on = 0, n = 48; for (let j = 0; j < n; j++) { const a = (j / n) * TAU, x = Math.cos(a) * r, y = Math.sin(a) * r, u = Math.floor((x / S + 0.5) * logoM.M), v = Math.floor((y / S + 0.5) * logoM.M); if (u >= 0 && v >= 0 && u < logoM.M && v < logoM.M && logoM.m[v * logoM.M + u]) on++; } if (on) col = avg([[col, n - on], [p.accent, on]]); }
+        out.push(col);
+      }
+      return out;
+    }
+
+    // ——— Toupies ———
+    function newTop(x, y, fromClick) {
+      const m = Math.min(W0, H0), A = m * 0.46, cx = W0 / 2, cy = H0 / 2;
+      if (x == null) { const a = R() * TAU; x = cx + Math.cos(a) * A * 0.8; y = cy + Math.sin(a) * A * 0.8; }
+      const dx = x - cx, dy = y - cy, d = Math.hypot(dx, dy) || 1, sp = m * (0.25 + R() * 0.35) * p.elan, w0 = (32 + R() * 16) * p.elan;
+      const T = { x, y, vx: (-dy / d) * sp * (R() < 0.5 ? 1 : -1) - (dx / d) * sp * 0.4, vy: (dx / d) * sp * 0.5 - (dy / d) * sp * 0.4, r: m * p.taille * (0.85 + R() * 0.3), ang: R() * TAU, w: w0, w0, prec: R() * TAU, tilt: 0, fall: -1, born: simT, face: makeFace(R), logo: p.logo && (fromClick || R() < 0.75) };
+      if (fromClick) { T.vx *= 0.3; T.vy *= 0.3; }
+      T.ring = rings(T.face, T.logo); T.spr = null;
+      return T;
+    }
+    const hit = (x, y) => { let b = null; for (const T of tops) if ((T.x - x) ** 2 + (T.y - y) ** 2 < T.r * T.r * 1.2) b = T; return b; };
+    function reset(w, h) { R = rng(app.seed * 4271 + 9); tops = []; sparks = []; for (let i = 0; i < p.nombre; i++) tops.push(newTop()); }
+
+    function step(t, dt, w, h) {
+      const m = Math.min(w, h), A = m * 0.46, cx = w / 2, cy = h / 2, fr = p.frottement;
+      for (const T of tops) {
+        if (drag && drag.T === T && drag.moved > 6) continue;
+        const spinning = T.fall < 0, s = T.w / T.w0;
+        if (spinning) {
+          T.vx += (-(T.x - cx) * p.pente * 1.6 + (-T.vy) * 0.35 * s) * dt; T.vy += (-(T.y - cy) * p.pente * 1.6 + T.vx * 0.35 * s) * dt;
+          const dmp = Math.exp(-(0.15 + fr * 0.6) * dt); T.vx *= dmp; T.vy *= dmp;
+          T.w -= (0.035 + fr * 0.09) * T.w0 * dt + T.w * fr * 0.02 * dt;
+          T.tilt = s < 0.4 ? (1 - s / 0.4) * 0.9 : 0; T.prec += dt * (1.5 + 9 * T.tilt);
+          if (T.w <= T.w0 * 0.05) { T.fall = t; T.w = 0; }
+        } else {
+          const a = Math.min(1, (t - T.fall) * 2.5); T.tilt = 0.9 + 0.35 * a; const dmp = Math.exp(-4 * dt); T.vx *= dmp; T.vy *= dmp; T.w *= Math.exp(-3 * dt);
+        }
+        T.ang += T.w * dt; T.x += T.vx * dt; T.y += T.vy * dt;
+        // bord de l'arène
+        const dx = T.x - cx, dy = T.y - cy, d = Math.hypot(dx, dy) || 1;
+        if (d + T.r > A) { const nx = dx / d, ny = dy / d, vn = T.vx * nx + T.vy * ny; T.x = cx + nx * (A - T.r); T.y = cy + ny * (A - T.r); if (vn > 0) { T.vx -= (1 + p.rebond) * vn * nx; T.vy -= (1 + p.rebond) * vn * ny; const kick = T.w * T.r * 0.08; T.vx += -ny * kick; T.vy += nx * kick; T.w *= 0.97; if (vn > m * 0.25) spark((T.x + nx * T.r), (T.y + ny * T.r), t); } }
+      }
+      // chocs entre toupies : vitesses normales échangées, la rotation pousse de côté
+      for (let i = 0; i < tops.length; i++) for (let j = i + 1; j < tops.length; j++) {
+        const a = tops[i], b = tops[j], dx = b.x - a.x, dy = b.y - a.y, d = Math.hypot(dx, dy) || 1e-6, rr = a.r + b.r; if (d >= rr) continue;
+        const nx = dx / d, ny = dy / d, ov = (rr - d) / 2; a.x -= nx * ov; a.y -= ny * ov; b.x += nx * ov; b.y += ny * ov;
+        const rv = (b.vx - a.vx) * nx + (b.vy - a.vy) * ny; if (rv < 0) {
+          const jn = -(1 + p.rebond) * rv / 2; a.vx -= jn * nx; a.vy -= jn * ny; b.vx += jn * nx; b.vy += jn * ny;
+          const ts = (a.w * a.r + b.w * b.r) * 0.05; a.vx += -ny * ts; a.vy += nx * ts; b.vx -= -ny * ts; b.vy -= nx * ts; a.w *= 0.96; b.w *= 0.96;
+          if (-rv > m * 0.15) spark(a.x + nx * a.r, a.y + ny * a.r, t);
+        }
+      }
+      // relance : les toupies tombées laissent la place
+      tops = tops.filter((T) => !(T.fall >= 0 && t - T.fall > p.relance));
+      while (tops.length < p.nombre) tops.push(newTop());
+      while (tops.length > p.nombre + 6) tops.shift();
+      sparks = sparks.filter((s) => t - s.t < 0.5);
+    }
+    function spark(x, y, t) { if (sparks.length < 40) sparks.push({ x, y, t, a: R() * TAU }); }
+
+    // ——— Rendu ———
+    function mat(T) {
+      // inclinaison : écrasement selon la direction de précession ; puis rotation propre
+      const ct = Math.cos(T.tilt), cp = Math.cos(T.prec), sp = Math.sin(T.prec), ca = Math.cos(T.ang), sa = Math.sin(T.ang);
+      // M = R(prec)·S(1,ct)·R(-prec)·R(ang)·r
+      const a11 = cp * cp + sp * sp * ct, a12 = cp * sp - sp * cp * ct, a21 = sp * cp - cp * sp * ct, a22 = sp * sp + cp * cp * ct;
+      const ox = -sp * Math.sin(T.tilt) * T.r * 0.35, oy = cp * Math.sin(T.tilt) * T.r * 0.35;
+      return [(a11 * ca + a12 * sa) * T.r, (a21 * ca + a22 * sa) * T.r, (-a11 * sa + a12 * ca) * T.r, (-a21 * sa + a22 * ca) * T.r, T.x + ox, T.y + oy, a11 * T.r, a21 * T.r, a12 * T.r, a22 * T.r];
+    }
+    const blurOf = (T) => p.flou * Math.max(0, Math.min(1, (T.w - 6) / 16));
+
+    app.loop((t, dt) => {
+      dt = Math.min(1 / 30, dt || 0);
+      const { w, h, dpr } = app.size; W0 = w; H0 = h;
+      const lg = buildLogo(), key = [app.seed, p.motif, p.bandes, p.taille, p.logo, p.tailleLogo, p.couleurs.join(), p.accent, w, h].join();
+      if (!R || key !== sKey || lg) { sKey = key; reset(w, h); }
+      if (app.thumbnail) { reset(w, h); for (let k = 0; k < 150; k++) step(k / 30, 1 / 30, w, h); for (const T of tops) { T.w = T.w0 * 0.55; } }
+      else { simT += dt; step(simT, dt, w, h); }
+      const m = Math.min(w, h), A = m * 0.46;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = p.fond; ctx.fillRect(0, 0, w, h);
+      // arène en cuvette : anneaux concentriques de plus en plus sombres vers le bord
+      for (let k = 0; k < 10; k++) { ctx.fillStyle = mix(p.arene, p.fond, (1 - k / 10) * 0.55); ctx.beginPath(); ctx.arc(w / 2, h / 2, A * (1 - k * 0.045), 0, TAU); ctx.fill(); }
+      ctx.strokeStyle = mix(p.arene, '#ffffff', 0.12); ctx.lineWidth = Math.max(1, m * 0.004); ctx.beginPath(); ctx.arc(w / 2, h / 2, A, 0, TAU); ctx.stroke();
+      const order = tops.slice().sort((a, b) => a.y - b.y);
+      // ombres
+      ctx.fillStyle = 'rgba(0,0,0,0.28)'; for (const T of order) { const M = mat(T); ctx.setTransform(dpr * M[6], dpr * M[7], dpr * M[8], dpr * M[9], dpr * (M[4] + T.r * 0.12), dpr * (M[5] + T.r * 0.18)); ctx.beginPath(); ctx.arc(0, 0, 1.02, 0, TAU); ctx.fill(); }
+      for (const T of order) {
+        const M = mat(T), b = blurOf(T);
+        // tranche (épaisseur visible quand elle penche)
+        if (T.tilt > 0.02) { ctx.setTransform(dpr * M[6], dpr * M[7], dpr * M[8], dpr * M[9], dpr * (M[4] + Math.sin(T.prec) * T.r * 0.12 * T.tilt), dpr * (M[5] + T.r * 0.16 * Math.sin(T.tilt))); ctx.fillStyle = T.face.rim; ctx.beginPath(); ctx.arc(0, 0, 1, 0, TAU); ctx.fill(); }
+        ctx.setTransform(dpr * M[0], dpr * M[1], dpr * M[2], dpr * M[3], dpr * M[4], dpr * M[5]);
+        if (b < 0.98) { ctx.globalAlpha = 1; drawFace(T.face, canvasPen, T.logo); }
+        if (b > 0.02) { ctx.globalAlpha = b; for (let k = NR - 1; k >= 0; k--) { ctx.fillStyle = T.ring[k]; ctx.beginPath(); ctx.arc(0, 0, (k + 1) / NR, 0, TAU); ctx.fill(); } }
+        ctx.globalAlpha = 1;
+        // liseré
+        ctx.lineWidth = 0.04; ctx.strokeStyle = 'rgba(0,0,0,0.35)'; ctx.beginPath(); ctx.arc(0, 0, 1, 0, TAU); ctx.stroke();
+      }
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      for (const s of sparks) { const a = (simT - s.t) / 0.5; ctx.strokeStyle = `rgba(255,240,200,${1 - a})`; ctx.lineWidth = Math.max(1, m * 0.003); ctx.beginPath(); for (let k = 0; k < 5; k++) { const an = s.a + k * 1.3, r0 = m * 0.01 * (1 + a * 2), r1 = r0 + m * 0.015; ctx.moveTo(s.x + Math.cos(an) * r0, s.y + Math.sin(an) * r0); ctx.lineTo(s.x + Math.cos(an) * r1, s.y + Math.sin(an) * r1); } ctx.stroke(); }
+      app.finish(ctx);
+    });
+    const canvasPen = {
+      ring(r0, r1, c) { ctx.fillStyle = c; ctx.beginPath(); ctx.arc(0, 0, r1, 0, TAU); ctx.arc(0, 0, r0, 0, TAU, true); ctx.fill(); },
+      sector(r0, r1, a0, a1, c) { ctx.fillStyle = c; ctx.beginPath(); ctx.arc(0, 0, r1, a0, a1); ctx.arc(0, 0, r0, a1, a0, true); ctx.closePath(); ctx.fill(); },
+      poly(pts, c) { ctx.fillStyle = c; ctx.beginPath(); pts.forEach((q, k) => (k ? ctx.lineTo(q[0], q[1]) : ctx.moveTo(q[0], q[1]))); ctx.closePath(); ctx.fill(); },
+      disc(x, y, r, c) { ctx.fillStyle = c; ctx.beginPath(); ctx.arc(x, y, r, 0, TAU); ctx.fill(); },
+      rects(L, c) { ctx.fillStyle = c; ctx.beginPath(); for (const q of L) ctx.rect(q[0], q[1], q[2] + 0.002, q[3] + 0.002); ctx.fill(); },
+    };
+
+    function toSVG() {
+      const { w, h } = app.size, f = (v) => +v.toFixed(3), m = Math.min(w, h), A = m * 0.46;
+      let s = `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><rect width="100%" height="100%" fill="${p.fond}"/>`;
+      for (let k = 0; k < 10; k++) s += `<circle cx="${f(w / 2)}" cy="${f(h / 2)}" r="${f(A * (1 - k * 0.045))}" fill="${mix(p.arene, p.fond, (1 - k / 10) * 0.55)}"/>`;
+      const arc = (r, a0, a1, first) => { const x0 = Math.cos(a0) * r, y0 = Math.sin(a0) * r, x1 = Math.cos(a1) * r, y1 = Math.sin(a1) * r, big = Math.abs(a1 - a0) > Math.PI ? 1 : 0, sw = a1 > a0 ? 1 : 0; return `${first ? 'M' : 'L'}${f(x0)} ${f(y0)}A${f(r)} ${f(r)} 0 ${big} ${sw} ${f(x1)} ${f(y1)}`; };
+      const pen = {
+        ring(r0, r1, c) { s += `<path d="M${f(r1)} 0A${f(r1)} ${f(r1)} 0 1 0 ${f(-r1)} 0A${f(r1)} ${f(r1)} 0 1 0 ${f(r1)} 0ZM${f(r0)} 0A${f(r0)} ${f(r0)} 0 1 1 ${f(-r0)} 0A${f(r0)} ${f(r0)} 0 1 1 ${f(r0)} 0Z" fill="${c}" fill-rule="evenodd"/>`; },
+        sector(r0, r1, a0, a1, c) { s += `<path d="${arc(r1, a0, a1, true)}${arc(r0, a1, a0, false)}Z" fill="${c}"/>`; },
+        poly(pts, c) { s += `<path d="M${pts.map((q) => f(q[0]) + ' ' + f(q[1])).join('L')}Z" fill="${c}"/>`; },
+        disc(x, y, r, c) { s += `<circle cx="${f(x)}" cy="${f(y)}" r="${f(r)}" fill="${c}"/>`; },
+        rects(L, c) { s += `<path d="${L.map((q) => `M${f(q[0])} ${f(q[1])}h${f(q[2])}v${f(q[3])}h${f(-q[2])}Z`).join('')}" fill="${c}"/>`; },
+      };
+      for (const T of tops.slice().sort((a, b) => a.y - b.y)) {
+        const M = mat(T), b = blurOf(T);
+        s += `<circle r="1.02" fill="#000000" fill-opacity="0.28" transform="matrix(${f(M[6])} ${f(M[7])} ${f(M[8])} ${f(M[9])} ${f(M[4] + T.r * 0.12)} ${f(M[5] + T.r * 0.18)})"/>`;
+        s += `<g transform="matrix(${M.slice(0, 6).map(f).join(' ')})">`;
+        if (b < 0.5) drawFace(T.face, pen, T.logo); else for (let k = NR - 1; k >= 0; k--) s += `<circle r="${f((k + 1) / NR)}" fill="${T.ring[k]}"/>`;
+        s += `<circle r="1" fill="none" stroke="#000000" stroke-opacity="0.35" stroke-width="0.04"/></g>`;
+      }
+      return s + '</svg>';
+    }
+  </script>
+</body>
+</html>
