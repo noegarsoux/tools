@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Harpe</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Harpe : chaque corde est une suite de nœuds fixés aux deux bouts qui obéit à l'équation des ondes discrétisée,
+    // y⁺ = y + (y − y⁻)(1 − amortissement) + r·(y_{j−1} − 2y_j + y_{j+1}), où r = (c·dt/dx)² règle la hauteur du son.
+    // Pincer une corde, c'est lui imposer un triangle ; la vibration se décompose ensuite en harmoniques qui battent
+    // entre elles. On garde les derniers états de chaque corde pour dessiner la traîne floue de la vibration.
+    // Les cordes sont pincées en arpège, ou au doigt en balayant ; le logo colore les segments qui le traversent.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2, M = 72;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const BIEN = PAL('biennale'), MEN = PAL('menthe'), KB = PAL('kegelbahn');
+
+    let simT = 0, S = [], key0 = '', hist = [], arpT = 0, arpI = 0, arpDir = 1, logoM = null, logoKey = '', last = null;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.025, vignette: 0.1 },
+      hint: 'Cliquez pour pincer · balayez les cordes · molette : tension',
+      notes: 'En 1747, Jean le Rond d\'Alembert écrit l\'équation de la corde vibrante : l\'accélération de chaque point est proportionnelle à la courbure de la corde à cet endroit. Une corde pincée prend la forme d\'un triangle, puis ce triangle se décompose en une somme de sinusoïdes, la fondamentale et ses harmoniques, qui vibrent chacune à sa fréquence ; c\'est leur mélange qui fait le timbre. Ici chaque corde est simulée nœud par nœud, au ralenti, et l\'on garde ses derniers états pour dessiner la traîne de la vibration, comme l\'œil la voit sur une harpe. Les cordes s\'accordent de la plus grave à la plus aiguë, un arpège les pince l\'une après l\'autre, et le doigt peut les balayer.',
+      params: {
+        'Cordes': {
+          disposition: { type: 'select', label: 'Disposition', options: { harpe: 'Harpe', verticale: 'Verticales', horizontale: 'Horizontales', eventail: 'Éventail' }, value: 'harpe' },
+          cordes: { type: 'range', label: 'Nombre de cordes', min: 4, max: 120, step: 1, value: 36 },
+          tension: { type: 'range', label: 'Tension (hauteur)', min: 0.05, max: 0.95, step: 0.01, value: 0.6 },
+          accord: { type: 'range', label: 'Écart grave-aigu', min: 0, max: 1.8, step: 0.01, value: 1.2 },
+          amortissement: { type: 'range', label: 'Amortissement', min: 0, max: 1, step: 0.01, value: 0.12 },
+          vitesse: { type: 'range', label: 'Ralenti (pas par image)', min: 1, max: 10, step: 1, value: 5 },
+        },
+        'Arpège': {
+          arpege: { type: 'range', label: 'Notes par seconde', min: 0, max: 16, step: 0.1, value: 5 },
+          motif: { type: 'select', label: 'Motif', options: { montee: 'Montée', descente: 'Descente', allerRetour: 'Aller-retour', accords: 'Accords', hasard: 'Au hasard' }, value: 'allerRetour' },
+          force: { type: 'range', label: 'Force du pincement', min: 0.1, max: 3, step: 0.01, value: 1 },
+        },
+        'Rendu': {
+          traine: { type: 'range', label: 'Traîne de vibration', min: 1, max: 10, step: 1, value: 6 },
+          epaisseur: { type: 'range', label: 'Épaisseur', min: 0.3, max: 4, step: 0.05, value: 1.2 },
+        },
+        'Logo sur les cordes': {
+          logo: { type: 'toggle', label: 'Logo sur les cordes', value: false },
+          tailleLogo: { type: 'range', label: 'Taille du logo', min: 0.3, max: 1.8, step: 0.01, value: 1.1, show: (q) => q.logo },
+          image: { type: 'file', label: 'Logo', accept: 'image/*', show: (q) => q.logo },
+        },
+        'Couleurs': {
+          fond: { type: 'color', label: 'Fond', value: '#121218' },
+          couleurs: { type: 'palette', label: 'Du grave à l\'aigu', value: ['#486cfc', '#f272ba', '#edd14b'] },
+          accent: { type: 'color', label: 'Logo', value: '#ef5a2f', show: (q) => q.logo },
+        },
+      },
+      presets: {
+        'Harpe': {},
+        'Rideau': { disposition: 'verticale', cordes: 90, epaisseur: 0.7, arpege: 10, motif: 'montee', couleurs: ['#c9d6f2', '#486cfc'], traine: 8 },
+        'Portée': { disposition: 'horizontale', cordes: 12, epaisseur: 2, fond: '#f1ece1', couleurs: ['#1b1b1f'], arpege: 3, motif: 'hasard', force: 1.6, traine: 5 },
+        'Éventail': { disposition: 'eventail', cordes: 48, couleurs: ['#edd14b', '#ef5a2f', '#f272ba'], arpege: 7, motif: 'accords' },
+        'Ralenti': { vitesse: 1, cordes: 20, force: 2.2, traine: 10, amortissement: 0.05, arpege: 1.2, epaisseur: 1.8 },
+        'Accords': { motif: 'accords', arpege: 2.5, cordes: 28, force: 1.4, couleurs: ['#7fe0c2', '#486cfc'], fond: '#0b0c12' },
+        'Logo': { logo: true, disposition: 'verticale', cordes: 110, epaisseur: 1, couleurs: ['#3a3a46'], accent: '#ef5a2f', fond: '#0f0f14', arpege: 8, motif: 'montee', force: 0.7 },
+        'Biennale': { fond: BIEN[0], couleurs: [BIEN[1], BIEN[2], BIEN[3]], disposition: 'harpe' },
+        'Menthe': { fond: MEN[0], couleurs: [MEN[2], MEN[3], MEN[1]], disposition: 'eventail', cordes: 40 },
+        'Kegelbahn': { fond: KB[0], couleurs: [KB[1], KB[2]], disposition: 'verticale', cordes: 60, motif: 'hasard' },
+      },
+      brand(colors) {
+        const s = colors.slice().sort((a, b) => lum(a) - lum(b));
+        return { fond: s[0], couleurs: s.length > 1 ? s.slice(1) : ['#ffffff'], accent: s[Math.floor(s.length / 2)] };
+      },
+      pointer: {
+        down: (q) => { last = [q.x, q.y]; pluckNear(q.x, q.y); },
+        drag: (q) => { if (last) strum(last[0], last[1], q.x, q.y); last = [q.x, q.y]; },
+        up: () => { last = null; },
+        wheel: (q, dy) => app.set('tension', Math.max(0.05, Math.min(0.95, +(p.tension + (dy > 0 ? -0.03 : 0.03)).toFixed(2)))),
+      },
+      onChange(k) { if (['*', 'logo', 'image'].includes(k)) logoKey = ''; },
+      export: { name: 'harpe', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    function hex(x) { const n = parseInt(x.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
+    function lum(x) { const c = hex(x); return (c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114) / 255; }
+    function mix(a, b, t) { const A = hex(a), B = hex(b); return '#' + A.map((v, i) => Math.round(v + (B[i] - v) * t).toString(16).padStart(2, '0')).join(''); }
+
+    // ——— Logo ———
+    function buildLogo() {
+      const img0 = p.image || app.logoImg, key = [p.logo, img0 ? (img0.src || 'c') : 'demo'].join(); if (key === logoKey) return; logoKey = key;
+      logoM = null; if (!p.logo) return;
+      const N = 200, c = document.createElement('canvas'); c.width = c.height = N; const x = c.getContext('2d', { willReadFrequently: true }), L = N * 0.94, cx = N / 2;
+      if (img0) { const iw = img0.naturalWidth || img0.width, ih = img0.naturalHeight || img0.height, s = L / Math.max(iw, ih); x.drawImage(img0, cx - iw * s / 2, cx - ih * s / 2, iw * s, ih * s); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(cx, cx, L * 0.48, 0, TAU); x.arc(cx, cx, L * 0.27, 0, TAU, true); x.fill('evenodd'); x.fillRect(cx - L * 0.07, cx - L * 0.5, L * 0.14, L); }
+      const d = x.getImageData(0, 0, N, N).data; let transp = 0; for (let i = 3; i < d.length; i += 4) if (d[i] < 128) transp++; const useA = transp > N * N * 0.05;
+      const m = new Uint8Array(N * N); for (let i = 0; i < N * N; i++) { const o = i * 4, l = (d[o] * 0.2126 + d[o + 1] * 0.7152 + d[o + 2] * 0.0722) / 255; m[i] = (useA ? d[o + 3] > 128 : d[o + 3] > 128 && l < 0.5) ? 1 : 0; }
+      logoM = { m, M: N };
+    }
+    function inLogo(X, Y, w, h) {
+      if (!logoM || !p.logo) return false; const Sz = Math.min(w, h) * 0.5 * p.tailleLogo, u = Math.floor(((X - w / 2) / Sz * 0.5 + 0.5) * logoM.M), v = Math.floor(((Y - h / 2) / Sz * 0.5 + 0.5) * logoM.M);
+      return u >= 0 && v >= 0 && u < logoM.M && v < logoM.M && logoM.m[v * logoM.M + u] === 1;
+    }
+
+    // ——— Cordes : extrémités, normale, état ———
+    function layout(w, h) {
+      const k = [p.disposition, p.cordes, w, h, app.seed].join(); if (k === key0) return; key0 = k;
+      const N = p.cordes, out = [];
+      for (let i = 0; i < N; i++) {
+        const u = N > 1 ? i / (N - 1) : 0.5; let A, B;
+        if (p.disposition === 'verticale') { const x = w * (0.06 + 0.88 * u); A = [x, h * 0.06]; B = [x, h * 0.94]; }
+        else if (p.disposition === 'horizontale') { const y = h * (0.1 + 0.8 * u); A = [w * 0.05, y]; B = [w * 0.95, y]; }
+        else if (p.disposition === 'eventail') { const a = -Math.PI / 2 + (u - 0.5) * 2.1, hx = w / 2, hy = h * 1.02, R = Math.min(h * 0.95, Math.hypot(w, h) * 0.55); A = [hx + Math.cos(a) * R * 0.12, hy + Math.sin(a) * R * 0.12]; B = [hx + Math.cos(a) * R, hy + Math.sin(a) * R]; }
+        else { // harpe : console courbe en haut, table d'harmonie en diagonale
+          const x = w * (0.1 + 0.8 * u), top = h * (0.08 + 0.1 * Math.sin(u * Math.PI * 1.2 + 0.3)) + h * 0.22 * u, bot = h * (0.94 - 0.18 * u);
+          A = [x, top]; B = [x, bot];
+        }
+        const L = Math.hypot(B[0] - A[0], B[1] - A[1]), n = [-(B[1] - A[1]) / L, (B[0] - A[0]) / L];
+        const old = S[i] && S[i].y.length === M ? S[i] : null;
+        out.push({ A, B, n, L, u, y: old ? old.y : new Float32Array(M), yo: old ? old.yo : new Float32Array(M) });
+      }
+      S = out; hist = [];
+      // quelques cordes déjà pincées : rien n'est jamais tout à fait immobile
+      for (let k2 = 0; k2 < Math.min(6, N); k2++) pluck(Math.floor((k2 + 0.5) / Math.min(6, N) * N), 0.3 + 0.4 * ((k2 * 0.618) % 1), p.force * 0.7 * (k2 & 1 ? -1 : 1));
+    }
+    function pluck(i, s, f) {
+      const c = S[i]; if (!c) return; const m = Math.min(app.size.w, app.size.h), A = f * Math.min(c.L * 0.075, m * 0.06);
+      s = Math.max(0.08, Math.min(0.92, s));
+      for (let j = 1; j < M - 1; j++) { const t = j / (M - 1), v = A * (t < s ? t / s : (1 - t) / (1 - s)); c.y[j] += v; c.yo[j] += v; }
+    }
+    function project(c, x, y) { const dx = x - c.A[0], dy = y - c.A[1]; return [(dx * (c.B[0] - c.A[0]) + dy * (c.B[1] - c.A[1])) / (c.L * c.L), dx * c.n[0] + dy * c.n[1]]; }
+    function pluckNear(x, y) {
+      let best = -1, bd = 1e9, bs = 0.5;
+      for (let i = 0; i < S.length; i++) { const [s, d] = project(S[i], x, y); if (s > 0 && s < 1 && Math.abs(d) < bd) { bd = Math.abs(d); best = i; bs = s; } }
+      if (best >= 0 && bd < Math.min(app.size.w, app.size.h) * 0.08) pluck(best, bs, p.force * 1.3);
+    }
+    function strum(x0, y0, x1, y1) {
+      // une corde est pincée quand le doigt franchit sa position de repos
+      for (let i = 0; i < S.length; i++) {
+        const a = project(S[i], x0, y0), b = project(S[i], x1, y1);
+        if ((a[1] > 0) !== (b[1] > 0)) { const t = a[1] / (a[1] - b[1]), s = a[0] + (b[0] - a[0]) * t; if (s > 0.02 && s < 0.98) pluck(i, s, p.force * (b[1] > 0 ? 1 : -1) * Math.min(2, 0.6 + Math.hypot(x1 - x0, y1 - y0) / 25)); }
+      }
+    }
+
+    function step() {
+      const N = S.length, d = p.amortissement * 0.012;
+      for (let i = 0; i < N; i++) {
+        const c = S[i], r = Math.min(0.97, p.tension * Math.pow(2, (0.5 - c.u) * -p.accord * 1.3)), y = c.y, yo = c.yo, nw = new Float32Array(M);
+        for (let j = 1; j < M - 1; j++) nw[j] = y[j] + (y[j] - yo[j]) * (1 - d) + r * (y[j - 1] - 2 * y[j] + y[j + 1]);
+        c.yo = y; c.y = nw;
+      }
+    }
+    function arpeggio(dt) {
+      if (p.arpege <= 0 || !S.length) return; arpT += dt * p.arpege; const N = S.length, R = Math.random;
+      while (arpT >= 1) {
+        arpT -= 1; const s = 0.25 + R() * 0.5, f = p.force * (0.7 + R() * 0.5) * (R() < 0.5 ? -1 : 1);
+        if (p.motif === 'hasard') pluck(Math.floor(R() * N), s, f);
+        else if (p.motif === 'accords') { const b = Math.floor(R() * N * 0.7); for (const o of [0, 0.12, 0.2, 0.3]) pluck(Math.min(N - 1, b + Math.round(o * N)), s, f * 0.8); }
+        else {
+          pluck(arpI, s, f);
+          if (p.motif === 'montee') arpI = (arpI + 1) % N; else if (p.motif === 'descente') arpI = (arpI - 1 + N) % N;
+          else { arpI += arpDir; if (arpI >= N - 1 || arpI <= 0) { arpDir = -arpDir; arpI = Math.max(0, Math.min(N - 1, arpI)); } }
+        }
+      }
+    }
+
+    // polylignes de la corde i pour un état y : segments hors logo / dans le logo
+    function lines(c, y, w, h, withLogo) {
+      const dx = (c.B[0] - c.A[0]) / (M - 1), dy = (c.B[1] - c.A[1]) / (M - 1), out = [], lg = [];
+      let px = c.A[0], py = c.A[1], run = null, runL = null;
+      for (let j = 1; j < M; j++) {
+        const X = c.A[0] + dx * j + c.n[0] * y[j], Y = c.A[1] + dy * j + c.n[1] * y[j], inL = withLogo && inLogo((X + px) / 2, (Y + py) / 2, w, h);
+        // chaque segment rejoint la polyligne de sa catégorie (dans ou hors du logo)
+        if (inL !== runL || !run) { run = [px, py]; (inL ? lg : out).push(run); runL = inL; }
+        run.push(X, Y); px = X; py = Y;
+      }
+      return { out, lg };
+    }
+    function colOf(u) { const C = p.couleurs.length ? p.couleurs : ['#ffffff']; if (C.length === 1) return C[0]; const x = u * (C.length - 1), i = Math.min(C.length - 2, Math.floor(x)); return mix(C[i], C[i + 1], Math.round((x - i) * 6) / 6); }
+
+    function draw(w, h, emit) {
+      const K = hist.length;
+      for (let k = K - 1; k >= 0; k--) {
+        const snap = hist[k], a = k === 0 ? 1 : 0.42 * (1 - k / (p.traine + 0.5)), lw = p.epaisseur * (k === 0 ? 1 : 0.8);
+        const G = new Map(), LG = [];
+        for (let i = 0; i < S.length; i++) {
+          if (!snap[i]) continue; const L = lines(S[i], snap[i], w, h, !!logoM), col = colOf(S[i].u);
+          let arr = G.get(col); if (!arr) G.set(col, (arr = [])); arr.push(...L.out); LG.push(...L.lg);
+        }
+        for (const [col, arr] of G) emit(arr, col, lw, a);
+        if (LG.length) emit(LG, p.accent, lw * 2.2, Math.min(1, a * 1.2));
+      }
+    }
+
+    app.loop((t, dt) => {
+      dt = Math.min(0.1, dt || 0);
+      const { w, h, dpr } = app.size; buildLogo(); layout(w, h);
+      if (app.thumbnail) { if (!hist.length || simT < 3) { for (let i = 0; i < S.length; i++) pluck(i, 0.25 + 0.5 * ((i * 0.618) % 1), p.force * 0.8 * (i & 1 ? 1 : -1)); for (let n = 0; n < 160; n++) { arpeggio(1 / 60 / 4); step(); if (n % 4 === 0) { hist.unshift(S.map((c) => c.y.slice())); if (hist.length > p.traine) hist.length = p.traine; } } simT = 3; } }
+      else {
+        simT += dt; arpeggio(dt);
+        for (let n = 0; n < p.vitesse; n++) step();
+        hist.unshift(S.map((c) => c.y.slice())); if (hist.length > p.traine) hist.length = p.traine;
+      }
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = p.fond; ctx.fillRect(0, 0, w, h);
+      ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+      // les points d'attache
+      ctx.fillStyle = mix(colOf(0.5), p.fond, 0.4);
+      for (const c of S) { const r = Math.max(1.2, p.epaisseur * 1.3); ctx.beginPath(); ctx.arc(c.A[0], c.A[1], r, 0, TAU); ctx.arc(c.B[0], c.B[1], r, 0, TAU); ctx.fill(); }
+      draw(w, h, (arr, col, lw, a) => {
+        const P = new Path2D(); for (const q of arr) { P.moveTo(q[0], q[1]); for (let k = 2; k < q.length; k += 2) P.lineTo(q[k], q[k + 1]); }
+        ctx.globalAlpha = a; ctx.strokeStyle = col; ctx.lineWidth = lw; ctx.stroke(P);
+      });
+      ctx.globalAlpha = 1;
+      app.finish(ctx);
+    });
+
+    function toSVG() {
+      const { w, h } = app.size, f = (v) => +v.toFixed(1);
+      let s = `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><rect width="100%" height="100%" fill="${p.fond}"/>`;
+      const dot = mix(colOf(0.5), p.fond, 0.4), r = f(Math.max(1.2, p.epaisseur * 1.3));
+      s += `<g fill="${dot}">` + S.map((c) => `<circle cx="${f(c.A[0])}" cy="${f(c.A[1])}" r="${r}"/><circle cx="${f(c.B[0])}" cy="${f(c.B[1])}" r="${r}"/>`).join('') + '</g>';
+      draw(w, h, (arr, col, lw, a) => {
+        s += `<path d="${arr.map((q) => { let d = 'M' + f(q[0]) + ' ' + f(q[1]); for (let k = 2; k < q.length; k += 2) d += 'L' + f(q[k]) + ' ' + f(q[k + 1]); return d; }).join('')}" fill="none" stroke="${col}" stroke-width="${f(lw * 10) / 10}" stroke-opacity="${+a.toFixed(3)}" stroke-linecap="round" stroke-linejoin="round"/>`;
+      });
+      return s + '</svg>';
+    }
+  </script>
+</body>
+</html>
