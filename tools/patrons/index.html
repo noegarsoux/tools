@@ -1,0 +1,286 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Patrons de polyèdres</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Patrons de polyèdres : les faces d'un solide convexe (enveloppe convexe de ses sommets) forment un graphe ; un
+    // arbre couvrant de ce graphe choisit les arêtes qui restent attachées, les autres sont découpées. Chaque face
+    // tourne autour de sa charnière avec sa face mère d'un angle qui va de zéro (solide fermé) à l'angle extérieur
+    // (patron à plat) ; les rotations se composent de la racine vers les feuilles. Le logo, imprimé sur le patron à
+    // plat, se replie avec lui en points.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2, PHI = (1 + Math.sqrt(5)) / 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const BIEN = PAL('biennale'), GLY = PAL('glyphes'), SAL = PAL('salon'), MEN = PAL('menthe'), KB = PAL('kegelbahn');
+
+    let solid = null, solidKey = '', simT = 0, phase = 0, holdT = 0, dir = 1, yawU = 0, tiltU = 0, held = null, cam = null, logoKey = '', dots = [];
+
+    const SOLIDES = { tetraedre: 'Tétraèdre', cube: 'Cube', octaedre: 'Octaèdre', dodecaedre: 'Dodécaèdre', icosaedre: 'Icosaèdre', cuboctaedre: 'Cuboctaèdre', octaedretronque: 'Octaèdre tronqué', rhombicuboctaedre: 'Petit rhombicuboctaèdre', ballon: 'Icosaèdre tronqué (ballon)' };
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: false,
+      finish: { grain: 0.03, vignette: 0.12 },
+      hint: 'Glissez pour tourner le solide · molette : solide suivant',
+      notes: 'Découpez un solide le long de certaines arêtes et dépliez-le : il s\'étale en un seul morceau de papier, son patron. Les faces restent attachées par les arêtes non découpées, qui forment un arbre : chaque face tourne autour de sa charnière avec sa voisine, et les rotations s\'enchaînent de la face posée au sol jusqu\'aux extrémités. Un même solide a beaucoup de patrons : le cube en a onze, l\'icosaèdre tronqué du ballon de football des milliards. Le choix « étoile » déplie en partant du centre, le choix « ruban » suit un long chemin de face en face. Le logo est imprimé sur le patron à plat, en points : il se casse et se replie avec le papier.',
+      params: {
+        'Solide': {
+          solide: { type: 'select', label: 'Solide', options: SOLIDES, value: 'dodecaedre' },
+          arbre: { type: 'segmented', label: 'Découpe', options: { etoile: 'Étoile', ruban: 'Ruban' }, value: 'etoile' },
+        },
+        'Mouvement': {
+          vitesse: { type: 'range', label: 'Vitesse du pliage', min: 0, max: 1, step: 0.01, value: 0.22 },
+          ouverture: { type: 'range', label: 'Ouverture (si vitesse nulle)', min: 0, max: 1, step: 0.01, value: 0.6 },
+          pause: { type: 'range', label: 'Pause (s)', min: 0, max: 6, step: 0.5, value: 1.5 },
+          rotation: { type: 'range', label: 'Rotation (°/s)', min: -40, max: 40, step: 0.5, value: 10 },
+          cascade: { type: 'range', label: 'Décalage des charnières', min: 0, max: 1, step: 0.01, value: 0.5 },
+        },
+        'Logo imprimé': {
+          logo: { type: 'toggle', label: 'Logo sur le patron', value: false },
+          finesse: { type: 'range', label: 'Points du logo', min: 16, max: 110, step: 1, value: 56, show: (q) => q.logo },
+          image: { type: 'file', label: 'Logo', accept: 'image/*', show: (q) => q.logo },
+        },
+        'Rendu': {
+          teinte: { type: 'segmented', label: 'Couleur selon', options: { cotes: 'Type de face', profondeur: 'Rang dans l\'arbre', uni: 'Une seule' }, value: 'profondeur' },
+          ombre: { type: 'range', label: 'Ombre', min: 0, max: 1, step: 0.01, value: 0.55 },
+          aretes: { type: 'range', label: 'Arêtes', min: 0, max: 4, step: 0.1, value: 1.4 },
+        },
+        'Couleurs': {
+          fond: { type: 'color', label: 'Fond', value: '#121216' },
+          couleurs: { type: 'palette', label: 'Faces', value: ['#486cfc', '#f272ba', '#ef5a2f', '#edd14b'] },
+          trait: { type: 'color', label: 'Arêtes', value: '#121216' },
+          accent: { type: 'color', label: 'Logo', value: '#f4f1ea' },
+        },
+      },
+      presets: {
+        'Dodécaèdre': {},
+        'Cube': { solide: 'cube', arbre: 'etoile', couleurs: ['#ef5a2f', '#edd14b', '#486cfc'], teinte: 'profondeur' },
+        'Ballon': { solide: 'ballon', arbre: 'etoile', teinte: 'cotes', couleurs: ['#1b1b1f', '#f4f1ea'], trait: '#6a6a74', aretes: 1, fond: '#2f6f4f', cascade: 0.3 },
+        'Ruban': { solide: 'icosaedre', arbre: 'ruban', teinte: 'profondeur', couleurs: GLY.slice(2, 7), cascade: 0.8 },
+        'Octaèdre tronqué': { solide: 'octaedretronque', teinte: 'cotes', couleurs: ['#7fe0c2', '#486cfc'], trait: '#0d1a22', fond: '#0d1a22' },
+        'Rhombi': { solide: 'rhombicuboctaedre', arbre: 'etoile', teinte: 'cotes', couleurs: ['#edd14b', '#ef5a2f'], aretes: 1.2 },
+        'Papier': { solide: 'cuboctaedre', teinte: 'uni', couleurs: ['#f4f1ea'], fond: '#d9d3c7', trait: '#b9b1a3', ombre: 0.75, aretes: 1 },
+        'Logo': { logo: true, solide: 'cube', teinte: 'uni', couleurs: ['#3a3a44'], accent: '#ef5a2f', trait: '#121216', finesse: 64 },
+        'Biennale': { solide: 'octaedre', fond: BIEN[0], couleurs: [BIEN[1], BIEN[2], BIEN[3]], trait: BIEN[0], accent: BIEN[4] },
+        'Menthe': { solide: 'tetraedre', fond: MEN[1], couleurs: [MEN[2], MEN[3], MEN[0]], trait: MEN[1] },
+        'Kegelbahn': { solide: 'icosaedre', fond: KB[0], couleurs: [KB[1], KB[2]], trait: KB[0], teinte: 'profondeur' },
+      },
+      brand(colors) {
+        const s = colors.slice().sort((a, b) => lum(a) - lum(b)), rest = s.slice(1);
+        return { fond: s[0], couleurs: rest.length ? rest : ['#ffffff'], trait: s[0], accent: s[s.length - 1] };
+      },
+      pointer: {
+        down: (q) => { held = { x: q.x, y: q.y, yaw: yawU, tilt: tiltU }; },
+        drag: (q) => { if (!held) return; yawU = held.yaw + (q.x - held.x) / app.size.w * TAU * 0.7; tiltU = Math.max(-1.2, Math.min(1.2, held.tilt + (q.y - held.y) / app.size.h * Math.PI * 0.7)); },
+        up: () => { held = null; },
+        wheel: (q, dy) => { const k = Object.keys(SOLIDES), i = k.indexOf(p.solide); app.set('solide', k[(i + (dy > 0 ? 1 : -1) + k.length) % k.length]); },
+      },
+      onChange(k) { if (['*', 'solide', 'arbre'].includes(k)) { solidKey = ''; cam = null; } if (['*', 'logo', 'image', 'finesse', 'solide', 'arbre'].includes(k)) logoKey = ''; },
+      export: { name: 'patrons', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    function hex(x) { const n = parseInt(x.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
+    function lum(x) { const c = hex(x); return (c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114) / 255; }
+    function mix(a, b, t) { const A = hex(a), B = hex(b); return '#' + A.map((v, i) => Math.round(Math.max(0, Math.min(255, v + (B[i] - v) * t))).toString(16).padStart(2, '0')).join(''); }
+
+    // ——— Vecteurs ———
+    const sub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]], dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]], nrm = (a) => { const l = Math.hypot(...a) || 1; return [a[0] / l, a[1] / l, a[2] / l]; };
+
+    // ——— Sommets des solides ———
+    function cyc(list) { const out = []; for (const [x, y, z] of list) out.push([x, y, z], [z, x, y], [y, z, x]); return out; }
+    function signs(v) { const out = []; for (const sx of v[0] ? [1, -1] : [1]) for (const sy of v[1] ? [1, -1] : [1]) for (const sz of v[2] ? [1, -1] : [1]) out.push([v[0] * sx, v[1] * sy, v[2] * sz]); return out; }
+    function allPerm(v) { const [a, b, c] = v; return [[a, b, c], [a, c, b], [b, a, c], [b, c, a], [c, a, b], [c, b, a]]; }
+    function uniq(P) { const m = new Map(); for (const q of P) m.set(q.map((x) => Math.round(x * 1e5) + 0).join(), q); return [...m.values()]; }
+    function vertices(name) {
+      switch (name) {
+        case 'tetraedre': return [[1, 1, 1], [1, -1, -1], [-1, 1, -1], [-1, -1, 1]];
+        case 'cube': return signs([1, 1, 1]);
+        case 'octaedre': return uniq(cyc([[1, 0, 0], [-1, 0, 0]]));
+        case 'icosaedre': return uniq(cyc(signs([0, 1, PHI])));
+        case 'dodecaedre': return uniq([...signs([1, 1, 1]), ...cyc(signs([0, 1 / PHI, PHI]))]);
+        case 'cuboctaedre': return uniq(cyc(signs([1, 1, 0])));
+        case 'octaedretronque': return uniq(allPerm([0, 1, 2]).flatMap(signs));
+        case 'rhombicuboctaedre': return uniq(allPerm([1, 1, 1 + Math.SQRT2]).flatMap(signs));
+        default: return uniq(cyc([...signs([0, 1, 3 * PHI]), ...signs([1, 2 + PHI, 2 * PHI]), ...signs([PHI, 2, 2 * PHI + 1])]));
+      }
+    }
+    // enveloppe convexe par force brute : chaque plan qui laisse tous les sommets du même côté porte une face
+    function hull(V) {
+      const n = V.length, faces = [], seen = new Set(), eps = 1e-6;
+      for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) for (let k = j + 1; k < n; k++) {
+        let N = cross(sub(V[j], V[i]), sub(V[k], V[i])); if (Math.hypot(...N) < 1e-9) continue; N = nrm(N);
+        let d = dot(N, V[i]), pos = 0, neg = 0;
+        for (let m = 0; m < n; m++) { const s = dot(N, V[m]) - d; if (s > eps) pos++; else if (s < -eps) neg++; if (pos && neg) break; }
+        if (pos && neg) continue; if (pos) { N = N.map((x) => -x); d = -d; }
+        const key = N.map((x) => Math.round(x * 1e4) + 0).join(); if (seen.has(key)) continue; seen.add(key);
+        const ids = []; for (let m = 0; m < n; m++) if (Math.abs(dot(N, V[m]) - d) < 1e-5) ids.push(m);
+        const c = ids.reduce((a, m) => [a[0] + V[m][0] / ids.length, a[1] + V[m][1] / ids.length, a[2] + V[m][2] / ids.length], [0, 0, 0]);
+        const u = nrm(sub(V[ids[0]], c)), w = cross(N, u);
+        ids.sort((a, b) => Math.atan2(dot(sub(V[a], c), w), dot(sub(V[a], c), u)) - Math.atan2(dot(sub(V[b], c), w), dot(sub(V[b], c), u)));
+        faces.push({ ids, n: N, c });
+      }
+      return faces;
+    }
+
+    // ——— Arbre de dépliage ———
+    function buildSolid() {
+      const key = [p.solide, p.arbre].join(); if (key === solidKey && solid) return; solidKey = key;
+      let V = vertices(p.solide); const R = Math.max(...V.map((v) => Math.hypot(...v))); V = V.map((v) => v.map((x) => x / R));
+      const F = hull(V), edges = new Map();
+      F.forEach((f, fi) => f.ids.forEach((a, k) => { const b = f.ids[(k + 1) % f.ids.length], e = a < b ? a + '-' + b : b + '-' + a; (edges.get(e) || edges.set(e, []).get(e)).push(fi); }));
+      const adj = F.map(() => []); for (const [e, fs] of edges) if (fs.length === 2) { const [a, b] = e.split('-').map(Number); adj[fs[0]].push([fs[1], a, b]); adj[fs[1]].push([fs[0], a, b]); }
+      // la face du dessous (normale vers le bas, y vers le bas à l'écran) est la racine ; on tourne le solide pour
+      // qu'elle soit exactement horizontale, et le patron à plat aussi
+      let root = 0; F.forEach((f, i) => { if (f.n[1] > F[root].n[1]) root = i; });
+      { const a = F[root].n, b = [0, 1, 0], ax = cross(a, b), sn = Math.hypot(...ax), an = Math.atan2(sn, dot(a, b));
+        if (sn > 1e-9) { const k = nrm(ax); V = V.map((v) => rotV(v, k, an)); F.forEach((f) => { f.n = rotV(f.n, k, an); f.c = rotV(f.c, k, an); }); } }
+      const parent = new Int32Array(F.length).fill(-1), hinge = F.map(() => null), depth = new Int32Array(F.length), order = [root], seen = new Uint8Array(F.length); seen[root] = 1;
+      if (p.arbre === 'etoile') {
+        for (let h = 0; h < order.length; h++) { const f = order[h]; for (const [g, a, b] of adj[f]) if (!seen[g]) { seen[g] = 1; parent[g] = f; hinge[g] = [a, b]; depth[g] = depth[f] + 1; order.push(g); } }
+      } else {
+        // ruban : parcours en profondeur qui préfère la voisine la plus éloignée de la racine (long chemin)
+        const st = [root];
+        while (st.length) {
+          const f = st[st.length - 1], cand = adj[f].filter(([g]) => !seen[g]);
+          if (!cand.length) { st.pop(); continue; }
+          cand.sort((x, y) => dot(F[y[0]].n, F[root].n) - dot(F[x[0]].n, F[root].n));
+          const [g, a, b] = cand[cand.length - 1]; seen[g] = 1; parent[g] = f; hinge[g] = [a, b]; depth[g] = depth[f] + 1; order.push(g); st.push(g);
+        }
+      }
+      // angle de chaque charnière : celui qui amène la face dans le plan de sa mère, avec le bon signe
+      const ang = new Float64Array(F.length);
+      for (const g of order) {
+        const f = parent[g]; if (f < 0) continue; const delta = Math.acos(Math.max(-1, Math.min(1, dot(F[g].n, F[f].n)))), [a, b] = hinge[g], ax = nrm(sub(V[b], V[a]));
+        const test = rotV(F[g].n, ax, delta); ang[g] = dot(test, F[f].n) > 0.999 ? delta : -delta;
+      }
+      const maxDepth = Math.max(...depth);
+      solid = { V, F, parent, hinge, depth, order, ang, maxDepth };
+    }
+    function rotV(v, k, a) { const c = Math.cos(a), s = Math.sin(a), kv = cross(k, v), kd = dot(k, v); return [v[0] * c + kv[0] * s + k[0] * kd * (1 - c), v[1] * c + kv[1] * s + k[1] * kd * (1 - c), v[2] * c + kv[2] * s + k[2] * kd * (1 - c)]; }
+    // matrices 3 × 4 (rotation + translation), composées de la racine aux feuilles
+    function rotM(o, k, a) {
+      const c = Math.cos(a), s = Math.sin(a), t = 1 - c, [x, y, z] = k;
+      const R = [t * x * x + c, t * x * y - s * z, t * x * z + s * y, t * x * y + s * z, t * y * y + c, t * y * z - s * x, t * x * z - s * y, t * y * z + s * x, t * z * z + c];
+      return [R[0], R[1], R[2], o[0] - (R[0] * o[0] + R[1] * o[1] + R[2] * o[2]), R[3], R[4], R[5], o[1] - (R[3] * o[0] + R[4] * o[1] + R[5] * o[2]), R[6], R[7], R[8], o[2] - (R[6] * o[0] + R[7] * o[1] + R[8] * o[2])];
+    }
+    function mul(A, B) {
+      return [A[0] * B[0] + A[1] * B[4] + A[2] * B[8], A[0] * B[1] + A[1] * B[5] + A[2] * B[9], A[0] * B[2] + A[1] * B[6] + A[2] * B[10], A[0] * B[3] + A[1] * B[7] + A[2] * B[11] + A[3],
+        A[4] * B[0] + A[5] * B[4] + A[6] * B[8], A[4] * B[1] + A[5] * B[5] + A[6] * B[9], A[4] * B[2] + A[5] * B[6] + A[6] * B[10], A[4] * B[3] + A[5] * B[7] + A[6] * B[11] + A[7],
+        A[8] * B[0] + A[9] * B[4] + A[10] * B[8], A[8] * B[1] + A[9] * B[5] + A[10] * B[9], A[8] * B[2] + A[9] * B[6] + A[10] * B[10], A[8] * B[3] + A[9] * B[7] + A[10] * B[11] + A[11]];
+    }
+    const app3 = (M, v) => [M[0] * v[0] + M[1] * v[1] + M[2] * v[2] + M[3], M[4] * v[0] + M[5] * v[1] + M[6] * v[2] + M[7], M[8] * v[0] + M[9] * v[1] + M[10] * v[2] + M[11]];
+    const appR = (M, v) => [M[0] * v[0] + M[1] * v[1] + M[2] * v[2], M[4] * v[0] + M[5] * v[1] + M[6] * v[2], M[8] * v[0] + M[9] * v[1] + M[10] * v[2]];
+    const ID = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0];
+    // u global de 0 (fermé) à 1 (à plat) ; en cascade, les charnières proches de la racine s'ouvrent les premières
+    function transforms(u) {
+      const S = solid, M = S.F.map(() => ID);
+      for (const g of S.order) {
+        const f = S.parent[g]; if (f < 0) continue;
+        const D = Math.max(1, S.maxDepth), c = p.cascade, s0 = c * (S.depth[g] - 1) / D, span = 1 - c * (D - 1) / D;
+        let v = Math.max(0, Math.min(1, (u - s0) / Math.max(0.05, span))); v = v * v * (3 - 2 * v);
+        const [a, b] = S.hinge[g], o = S.V[a], k = nrm(sub(S.V[b], S.V[a]));
+        M[g] = mul(M[f], rotM(o, k, S.ang[g] * v));
+      }
+      return M;
+    }
+
+    // ——— Logo imprimé sur le patron à plat, en points ———
+    function buildLogo() {
+      const key = [p.logo, p.finesse, p.solide, p.arbre, (p.image || app.logoImg) ? ((p.image || app.logoImg).src || 'c') : 'demo'].join(); if (key === logoKey) return; logoKey = key; dots = [];
+      if (!p.logo) return;
+      const S = solid, M1 = transforms(1), F = S.F, root = S.order[0];
+      // coordonnées du plan du patron : la face racine est horizontale (normale y)
+      const flat = F.map((f, fi) => f.ids.map((i) => { const q = app3(M1[fi], S.V[i]); return [q[0], q[2]]; }));
+      let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity; for (const P of flat) for (const [x, y] of P) { x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y); }
+      const n = p.finesse, cs = Math.max(x1 - x0, y1 - y0) / n, W = Math.ceil((x1 - x0) / cs), H = Math.ceil((y1 - y0) / cs);
+      const c = document.createElement('canvas'); c.width = W; c.height = H; const g = c.getContext('2d', { willReadFrequently: true }), img0 = p.image || app.logoImg;
+      const L = Math.min(W, H) * 0.9, cx = W / 2, cy = H / 2;
+      if (img0) { const iw = img0.naturalWidth || img0.width, ih = img0.naturalHeight || img0.height, s = L / Math.max(iw, ih); g.drawImage(img0, cx - iw * s / 2, cy - ih * s / 2, iw * s, ih * s); }
+      else { g.fillStyle = '#000'; g.beginPath(); g.arc(cx, cy, L * 0.48, 0, TAU); g.arc(cx, cy, L * 0.27, 0, TAU, true); g.fill('evenodd'); g.fillRect(cx - L * 0.07, cy - L * 0.5, L * 0.14, L); }
+      const d = g.getImageData(0, 0, W, H).data; let transp = 0; for (let i = 3; i < d.length; i += 4) if (d[i] < 128) transp++; const useA = transp > W * H * 0.05;
+      const inPoly = (P, x, y) => { let ins = false; for (let i = 0, j = P.length - 1; i < P.length; j = i++) { const [xi, yi] = P[i], [xj, yj] = P[j]; if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) ins = !ins; } return ins; };
+      const yRoot = app3(M1[root], S.V[F[root].ids[0]])[1];
+      for (let j = 0; j < H; j++) for (let i = 0; i < W; i++) {
+        const o = (j * W + i) * 4, l = (d[o] * 0.2126 + d[o + 1] * 0.7152 + d[o + 2] * 0.0722) / 255; if (!(useA ? d[o + 3] > 128 : d[o + 3] > 128 && l < 0.5)) continue;
+        const x = x0 + (i + 0.5) * cs, y = y0 + (j + 0.5) * cs, fi = flat.findIndex((P) => inPoly(P, x, y)); if (fi < 0) continue;
+        // retour dans le repère d'origine de la face : inverse de la transformation rigide à plat
+        const Mx = M1[fi], q = [x - Mx[3], yRoot - Mx[7], y - Mx[11]], orig = [Mx[0] * q[0] + Mx[4] * q[1] + Mx[8] * q[2], Mx[1] * q[0] + Mx[5] * q[1] + Mx[9] * q[2], Mx[2] * q[0] + Mx[6] * q[1] + Mx[10] * q[2]];
+        // légèrement au-dessus de la face pour ne pas disparaître dedans
+        const nn = F[fi].n; dots.push({ f: fi, p: [orig[0] + nn[0] * 0.004, orig[1] + nn[1] * 0.004, orig[2] + nn[2] * 0.004] });
+      }
+      dots.r = cs * 0.42;
+    }
+
+    // ——— Scène : faces projetées, triées de loin en près ———
+    function scene(w, h, u, t) {
+      buildSolid(); buildLogo();
+      const S = solid, M = transforms(u), C = p.couleurs.length ? p.couleurs : ['#ffffff'];
+      const yaw = t * p.rotation * Math.PI / 180 + yawU, tilt = (0.42 + 0.95 * u * u) + tiltU, cY = Math.cos(yaw), sY = Math.sin(yaw), cT = Math.cos(tilt), sT = Math.sin(tilt);
+      // centre et étendue de la forme courante (suivis en douceur)
+      const W3 = S.F.map((f, fi) => f.ids.map((i) => app3(M[fi], S.V[i])));
+      let mn = [Infinity, Infinity, Infinity], mx = [-Infinity, -Infinity, -Infinity]; for (const P of W3) for (const q of P) for (let k = 0; k < 3; k++) { mn[k] = Math.min(mn[k], q[k]); mx[k] = Math.max(mx[k], q[k]); }
+      const ctr = [(mn[0] + mx[0]) / 2, (mn[1] + mx[1]) / 2, (mn[2] + mx[2]) / 2], ext = Math.max(0.8, Math.hypot(mx[0] - mn[0], mx[2] - mn[2]) / 2, (mx[1] - mn[1]) / 2);
+      if (!cam || app.thumbnail) cam = { c: ctr, e: ext }; else { const k = 0.08; cam.c = cam.c.map((v, i) => v + (ctr[i] - v) * k); cam.e += (ext - cam.e) * k; }
+      const D = 7, R = Math.min(w, h) * 0.5 / cam.e;
+      const P = (q) => { const x = q[0] - cam.c[0], y = q[1] - cam.c[1], z = q[2] - cam.c[2]; const x1 = x * cY + z * sY, z1 = -x * sY + z * cY; const y2 = y * cT - z1 * sT, z2 = y * sT + z1 * cT; const s = D / (D - z2 / cam.e); return [w / 2 + x1 * R * s, h / 2 + y2 * R * s, z2, s]; };
+      const L = nrm([0.35, -0.6, 0.75]);
+      const faces = S.F.map((f, fi) => {
+        const pts = W3[fi].map(P), n = appR(M[fi], f.n), nv = [n[0] * cY + n[2] * sY, 0, -n[0] * sY + n[2] * cY]; nv[1] = n[1] * cT - nv[2] * sT; nv[2] = n[1] * sT + nv[2] * cT;
+        const lam = Math.abs(dot(nv, L)), shade = 1 - p.ombre * 0.85 * (1 - lam);
+        let ci; if (p.teinte === 'uni') ci = 0; else if (p.teinte === 'cotes') ci = ([...new Set(S.F.map((g) => g.ids.length))].sort((a, b) => a - b).indexOf(f.ids.length)) % C.length; else ci = S.depth[fi] % C.length;
+        const base = C[ci], col = shade >= 1 ? base : mix('#000000', base, shade);
+        return { pts, z: pts.reduce((a, q) => a + q[2], 0) / pts.length, col, fi, shade };
+      });
+      faces.sort((a, b) => a.z - b.z);
+      const dotsBy = new Map(); if (dots.length) for (const d of dots) { const q = P(app3(M[d.f], d.p)); (dotsBy.get(d.f) || dotsBy.set(d.f, []).get(d.f)).push(q[0], q[1], dots.r * R * q[3]); }
+      return { faces, dotsBy };
+    }
+
+    function clockStep(dt) {
+      if (p.vitesse <= 0) { phase = p.ouverture; return; }
+      if (holdT > 0) { holdT -= dt; if (holdT <= 0) dir = -dir; return; }
+      phase += dir * dt * p.vitesse * 0.35;
+      if (phase >= 1) { phase = 1; holdT = p.pause + 1e-3; } else if (phase <= 0) { phase = 0; holdT = p.pause + 1e-3; }
+    }
+
+    app.loop((t, dt) => {
+      dt = Math.min(0.1, dt || 0);
+      if (!app.thumbnail && !held) { simT += dt; clockStep(dt); }
+      if (app.thumbnail) phase = 0.4;
+      const { w, h, dpr } = app.size, u = p.vitesse <= 0 ? p.ouverture : phase;
+      const S = scene(w, h, u, simT);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = p.fond; ctx.fillRect(0, 0, w, h);
+      ctx.lineJoin = 'round'; ctx.lineWidth = p.aretes; ctx.strokeStyle = p.trait;
+      for (const f of S.faces) {
+        ctx.beginPath(); f.pts.forEach((q, i) => (i ? ctx.lineTo(q[0], q[1]) : ctx.moveTo(q[0], q[1]))); ctx.closePath();
+        ctx.fillStyle = f.col; ctx.fill(); if (p.aretes > 0) ctx.stroke();
+        const D = S.dotsBy.get(f.fi);
+        if (D) { ctx.fillStyle = mix('#000000', p.accent, Math.min(1, f.shade * 1.08)); ctx.beginPath(); for (let i = 0; i < D.length; i += 3) { ctx.moveTo(D[i] + D[i + 2], D[i + 1]); ctx.arc(D[i], D[i + 1], D[i + 2], 0, TAU); } ctx.fill(); }
+      }
+      app.finish(ctx);
+    });
+
+    function toSVG() {
+      const { w, h } = app.size, f = (v) => +v.toFixed(2), S = scene(w, h, p.vitesse <= 0 ? p.ouverture : phase, simT);
+      let s = `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><rect width="100%" height="100%" fill="${p.fond}"/><g stroke="${p.trait}" stroke-width="${f(p.aretes)}" stroke-linejoin="round">`;
+      for (const F of S.faces) {
+        s += `<polygon points="${F.pts.map((q) => f(q[0]) + ',' + f(q[1])).join(' ')}" fill="${F.col}"${p.aretes > 0 ? '' : ' stroke="none"'}/>`;
+        const D = S.dotsBy.get(F.fi);
+        if (D) { let d = ''; for (let i = 0; i < D.length; i += 3) { const r = D[i + 2]; d += `M${f(D[i] - r)} ${f(D[i + 1])}a${f(r)} ${f(r)} 0 1 0 ${f(2 * r)} 0a${f(r)} ${f(r)} 0 1 0 ${f(-2 * r)} 0z`; } s += `<path d="${d}" fill="${mix('#000000', p.accent, Math.min(1, F.shade * 1.08))}" stroke="none"/>`; }
+      }
+      return s + '</g></svg>';
+    }
+  </script>
+</body>
+</html>
