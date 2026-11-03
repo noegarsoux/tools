@@ -1,0 +1,15 @@
+{
+  "slug": "rorschach",
+  "title": "Taches de Rorschach",
+  "type": "motion",
+  "description": "Des taches d'encre symétriques qui s'étalent et respirent, en aplats superposés et éclaboussures ; on dépose de l'encre au doigt et le logo se plie dans le papier.",
+  "tags": ["encre", "symetrie", "organique", "courbes-de-niveau", "logo", "svg"],
+  "inspiration": [
+    "Hermann Rorschach, Psychodiagnostik (1921)",
+    "Les klecksographies de Justinus Kerner (1857)",
+    "Les monotypes et décalcomanies des surréalistes, Óscar Domínguez en tête"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}
