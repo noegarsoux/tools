@@ -1,0 +1,15 @@
+{
+  "slug": "fourmis",
+  "title": "Fourmis de Langton",
+  "type": "motion",
+  "description": "Des fourmis sur une grille : chaque case colorée leur dit de tourner, elles la repeignent et avancent. Quelques lettres de règle suffisent à bâtir autoroutes et cristaux.",
+  "tags": ["mathematiques", "grille", "pixel", "motif", "logo", "svg"],
+  "inspiration": [
+    "Chris Langton, la fourmi de Langton (1986)",
+    "Greg Turk et Jim Propp, les fourmis à plusieurs couleurs (turmites)",
+    "A. K. Dewdney, « Computer Recreations », Scientific American (1989)"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}
