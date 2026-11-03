@@ -1,0 +1,15 @@
+{
+  "slug": "guilloche",
+  "title": "Guilloché",
+  "type": "motion",
+  "description": "Rosaces, bordures et médaillons de billet de banque : des dizaines de sinusoïdes décalées se tressent en cordes, et le logo se lève en relief sous les lignes.",
+  "tags": ["lignes", "motif", "ornement", "gravure", "logo", "svg"],
+  "inspiration": [
+    "Les tours à guillocher d'Abraham-Louis Breguet (vers 1786)",
+    "Les fonds de sécurité des billets de banque et des passeports",
+    "Jacob Perkins et l'impression en taille-douce sur acier (1819)"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}
