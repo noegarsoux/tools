@@ -1,0 +1,377 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mikado</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Mikado : chaque baguette part debout, pied posé sur la table, et bascule comme un pendule inversé
+    // (θ'' = ω² sin θ, ω² ∝ 1/L) dans une direction tirée au hasard. Vue de dessus avec une légère perspective :
+    // un point à la hauteur z s'écarte du centre d'un facteur H/(H − z), et son ombre glisse de z·pente vers
+    // l'opposé de la lumière. L'ordre d'arrivée sur la table fait l'empilement. Une baguette est libre si
+    // aucune baguette arrivée après elle ne la croise ; on retire les libres une à une, les autres tremblent.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const BIT = PAL('bitmap'), GLY = PAL('glyphes'), SAL = PAL('salon'), KEG = PAL('kegelbahn'), MEN = PAL('menthe');
+
+    let simT = 0, vKey = '', logoM = null, logoKey = '', ptr = null, S = null, gKey = '', BG = null, bgKey = '', throwN = 0;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.04, vignette: 0.2 },
+      hint: 'Cliquez une baguette libre pour la retirer, glissez pour l\'emporter · clic dans le vide : relancer · molette : épaisseur',
+      notes: 'Au mikado, on tient le faisceau de baguettes debout et on le lâche : chacune bascule comme un pendule renversé, lentement puis d\'un coup, et le tas se forme dans l\'ordre des chutes. Il faut ensuite retirer les baguettes une à une sans faire bouger les autres. Ici, une baguette n\'est libre que si aucune autre n\'est tombée par-dessus ; le jeu les retire seul, avec parfois une maladresse qui fait trembler le tas. Cliquez une baguette libre pour la prendre, ou dans le vide pour relancer.',
+      params: {
+        'Tas': {
+          disposition: { type: 'segmented', label: 'Lancer', options: { lancer: 'En faisceau', eparpille: 'Éparpillé', logo: 'En logo' }, value: 'lancer' },
+          nombre: { type: 'range', label: 'Baguettes', min: 8, max: 180, step: 1, value: 41 },
+          longueur: { type: 'range', label: 'Longueur', min: 0.15, max: 1, step: 0.01, value: 0.62 },
+          epaisseur: { type: 'range', label: 'Épaisseur', min: 0.003, max: 0.03, step: 0.0005, value: 0.009 },
+          ecart: { type: 'range', label: 'Écart des pieds', min: 0, max: 0.4, step: 0.005, value: 0.06 },
+          lumiere: { type: 'range', label: 'Direction de la lumière', min: 0, max: 360, step: 1, value: 135 },
+          ombre: { type: 'range', label: 'Ombres', min: 0, max: 1, step: 0.01, value: 0.6 },
+          image: { type: 'file', label: 'Logo', accept: 'image/*' },
+        },
+        'Jeu': {
+          jeu: { type: 'toggle', label: 'Retirer seul', value: true },
+          vitesse: { type: 'range', label: 'Vitesse', min: 0.2, max: 3, step: 0.01, value: 1 },
+          maladresse: { type: 'range', label: 'Maladresse', min: 0, max: 1, step: 0.01, value: 0.25 },
+        },
+        'Baguettes': {
+          decor: { type: 'select', label: 'Décor', options: { melange: 'Mélange', anneaux: 'Anneaux', spirale: 'Spirales', uni: 'Peintes' }, value: 'melange' },
+          pointes: { type: 'toggle', label: 'Pointes', value: true },
+          bois: { type: 'color', label: 'Bois', value: '#e3c48f' },
+          couleurs: { type: 'palette', label: 'Couleurs', value: ['#e5452a', '#2f5fd0', '#f2c230', '#16161a', '#2f8a4a'] },
+        },
+        'Table': {
+          table: { type: 'segmented', label: 'Table', options: { bois: 'Bois', feutre: 'Feutre', uni: 'Unie' }, value: 'bois' },
+          fond: { type: 'color', label: 'Couleur', value: '#6e4a2e' },
+        },
+      },
+      presets: {
+        'Partie': {},
+        'Grand tas': { nombre: 120, longueur: 0.5, epaisseur: 0.006, ecart: 0.04, maladresse: 0.15, vitesse: 1.4 },
+        'Logo': { disposition: 'logo', nombre: 140, longueur: 0.45, epaisseur: 0.006, table: 'uni', fond: '#efe9dc', decor: 'uni', couleurs: ['#16161a', '#e5452a'], ombre: 0.45 },
+        'Feutre vert': { table: 'feutre', fond: '#1f5a3a', decor: 'anneaux', bois: '#efd9ae', nombre: 30, longueur: 0.7 },
+        'Géantes': { nombre: 12, longueur: 0.9, epaisseur: 0.024, ecart: 0.12, decor: 'spirale', table: 'uni', fond: '#f2c230', couleurs: ['#16161a', '#e5452a', '#2f5fd0'] },
+        'Aiguilles': { nombre: 160, epaisseur: 0.0035, longueur: 0.4, ecart: 0.02, decor: 'anneaux', table: 'uni', fond: '#16161a', bois: '#d8c3a0', couleurs: ['#e5452a', '#f4f1ea', '#f2c230'], ombre: 0.3 },
+        'Éparpillé': { disposition: 'eparpille', nombre: 60, longueur: 0.35, table: 'feutre', fond: '#2a3a8a', decor: 'melange', pointes: false },
+        'Bitmap': { table: 'uni', fond: BIT[0], couleurs: [BIT[1], BIT[2], BIT[3], BIT[4]], bois: '#ead7b0', decor: 'uni', nombre: 50 },
+        'Salon': { table: 'feutre', fond: SAL[0], couleurs: [SAL[1], SAL[2], SAL[3], SAL[4]], decor: 'spirale', nombre: 36, epaisseur: 0.012, lumiere: 60 },
+        'Kegelbahn': { table: 'uni', fond: KEG[0], couleurs: KEG.slice(1), bois: '#cfae7a', disposition: 'logo', nombre: 110, longueur: 0.5, epaisseur: 0.007, decor: 'anneaux', ombre: 0.8 },
+      },
+      brand(colors) {
+        const s = colors.slice().sort((a, b) => lum(a) - lum(b)), L = s[s.length - 1];
+        return { fond: L, table: 'uni', couleurs: s.length > 1 ? s.slice(0, -1) : ['#16161a'] };
+      },
+      pointer: {
+        down: (q) => {
+          ptr = { x: q.x, y: q.y, x0: q.x, y0: q.y, moved: 0, vx: 0, vy: 0, t: performance.now(), st: null }; if (!S) return; S.hold = simT + 3;
+          const st = hit(q.x, q.y); if (!st) return;
+          if (free(st)) { st.st = 'main'; st.gx = q.x; st.gy = q.y; st.ox0 = st.ox; st.oy0 = st.oy; ptr.st = st; } else shake(st);
+        },
+        drag: (q) => {
+          if (!ptr) return; const now = performance.now(), dtp = Math.max(1, now - ptr.t) / 1000;
+          ptr.vx = ptr.vx * 0.6 + (q.x - ptr.x) / dtp * 0.4; ptr.vy = ptr.vy * 0.6 + (q.y - ptr.y) / dtp * 0.4; ptr.t = now;
+          ptr.moved += Math.hypot(q.x - ptr.x, q.y - ptr.y); ptr.x = q.x; ptr.y = q.y;
+          if (ptr.st) { ptr.st.ox = ptr.st.ox0 + q.x - ptr.st.gx; ptr.st.oy = ptr.st.oy0 + q.y - ptr.st.gy; }
+          if (S) S.hold = simT + 3;
+        },
+        up: () => {
+          if (!ptr) return; const st = ptr.st;
+          if (st) { const v = Math.hypot(ptr.vx, ptr.vy); st.st = 'pris'; st.tp = simT - 0.4; if (v > 80) { st.vx = ptr.vx; st.vy = ptr.vy; } else { st.vx = 0; st.vy = 0; } }
+          else if (ptr.moved < 6 && S && !hit(ptr.x0, ptr.y0)) throwStart(app.size.w, app.size.h);
+          ptr = null;
+        },
+        wheel: (q, dy) => app.set('epaisseur', Math.max(0.003, Math.min(0.03, +(p.epaisseur * (dy > 0 ? 0.92 : 1.08)).toFixed(4)))),
+      },
+      onChange(k) { if (['*', 'image'].includes(k)) logoKey = ''; },
+      onSeed() { gKey = ''; },
+      export: { name: 'mikado', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    function hex(x) { const n = parseInt(x.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
+    function lum(x) { const c = hex(x); return (c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114) / 255; }
+    function mix(a, b, t) { const A = hex(a), C = hex(b); return '#' + A.map((v, i) => Math.round(v + (C[i] - v) * t).toString(16).padStart(2, '0')).join(''); }
+    function rng(s) { let a = s >>> 0; return () => { a = (a + 0x6d2b79f5) >>> 0; let t = a; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+    const ss = (x) => { x = Math.max(0, Math.min(1, x)); return x * x * (3 - 2 * x); };
+
+    function buildLogo() {
+      const img0 = p.image || app.logoImg, key = img0 ? (img0.src || 'c') : 'demo'; if (key === logoKey) return; logoKey = key; vKey = '';
+      const M = 200, c = document.createElement('canvas'); c.width = c.height = M; const x = c.getContext('2d', { willReadFrequently: true }), L = M * 0.94, cx = M / 2;
+      if (img0) { const iw = img0.naturalWidth || img0.width, ih = img0.naturalHeight || img0.height, s = L / Math.max(iw, ih); x.drawImage(img0, cx - iw * s / 2, cx - ih * s / 2, iw * s, ih * s); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(cx, cx, L * 0.48, 0, TAU); x.arc(cx, cx, L * 0.27, 0, TAU, true); x.fill('evenodd'); x.fillRect(cx - L * 0.07, cx - L * 0.5, L * 0.14, L); }
+      const d = x.getImageData(0, 0, M, M).data; let transp = 0; for (let i = 3; i < d.length; i += 4) if (d[i] < 128) transp++; const useA = transp > M * M * 0.05;
+      const F = new Float64Array(M * M); for (let i = 0; i < M * M; i++) { const o = i * 4, l = (d[o] * 0.2126 + d[o + 1] * 0.7152 + d[o + 2] * 0.0722) / 255; F[i] = useA ? d[o + 3] / 255 : (d[o + 3] / 255) * Math.min(1, Math.max(0, (0.75 - l) * 2)); }
+      { const G2 = new Float64Array(M * M); for (let j = 1; j < M - 1; j++) for (let i = 1; i < M - 1; i++) { let a = 0; for (let b = -1; b <= 1; b++) for (let c = -1; c <= 1; c++) a += F[(j + b) * M + i + c] * (b || c ? (b && c ? 1 : 2) : 4); G2[j * M + i] = a / 16; } F.set(G2); }
+      for (let k = 0; k < M; k++) F[k] = F[(M - 1) * M + k] = F[k * M] = F[k * M + M - 1] = 0;
+      logoM = contours(F, M, M, 0.5, 0, 0, 1).filter((c) => c.closed && c.pts.length > 6).map((c) => chaikin(chaikin(c.pts, true), true).map((q) => [q[0] / M - 0.5, q[1] / M - 0.5]));
+    }
+    // carrés marchants + chaînage
+    function contours(F, nx, ny, lev, ox, oy, cs) {
+      const pt = new Map(), adj = new Map();
+      const P = (id) => { let q = pt.get(id); if (q) return q; const cell = id >> 1, i = cell % nx, j = (cell - i) / nx; let a, b, ax, ay, bx, by; if (id & 1) { a = F[j * nx + i]; b = F[(j + 1) * nx + i]; ax = bx = i; ay = j; by = j + 1; } else { a = F[j * nx + i]; b = F[j * nx + i + 1]; ay = by = j; ax = i; bx = i + 1; } const t = (lev - a) / (b - a || 1e-9); q = [ox + (ax + (bx - ax) * t) * cs, oy + (ay + (by - ay) * t) * cs]; pt.set(id, q); return q; };
+      const link = (a, b) => { (adj.get(a) || adj.set(a, []).get(a)).push(b); (adj.get(b) || adj.set(b, []).get(b)).push(a); };
+      for (let j = 0; j < ny - 1; j++) for (let i = 0; i < nx - 1; i++) {
+        const A = F[j * nx + i] > lev, B = F[j * nx + i + 1] > lev, C = F[(j + 1) * nx + i + 1] > lev, D = F[(j + 1) * nx + i] > lev, idx = A | (B << 1) | (C << 2) | (D << 3);
+        if (idx === 0 || idx === 15) continue;
+        const T = (j * nx + i) * 2, R = (j * nx + i + 1) * 2 + 1, Bo = ((j + 1) * nx + i) * 2, Le = (j * nx + i) * 2 + 1;
+        const ctr = (F[j * nx + i] + F[j * nx + i + 1] + F[(j + 1) * nx + i + 1] + F[(j + 1) * nx + i]) / 4 > lev;
+        switch (idx) {
+          case 1: case 14: link(Le, T); break; case 2: case 13: link(T, R); break; case 3: case 12: link(Le, R); break;
+          case 4: case 11: link(R, Bo); break; case 6: case 9: link(T, Bo); break; case 7: case 8: link(Le, Bo); break;
+          case 5: if (ctr) { link(Le, Bo); link(T, R); } else { link(Le, T); link(R, Bo); } break;
+          case 10: if (ctr) { link(Le, T); link(R, Bo); } else { link(Le, Bo); link(T, R); } break;
+        }
+      }
+      const seen = new Set(), out = [];
+      const walk = (s) => { const L = [s]; seen.add(s); let cur = s; for (;;) { const nb = (adj.get(cur) || []).find((x) => !seen.has(x)); if (nb === undefined) break; seen.add(nb); L.push(nb); cur = nb; } return L; };
+      for (const [id, nb] of adj) if (nb.length === 1 && !seen.has(id)) out.push({ pts: walk(id).map(P), closed: false });
+      for (const [id] of adj) if (!seen.has(id)) out.push({ pts: walk(id).map(P), closed: true });
+      return out;
+    }
+    function chaikin(pts, closed) {
+      const o = []; const n = pts.length; for (let k = 0; k < (closed ? n : n - 1); k++) { const a = pts[k], b = pts[(k + 1) % n]; o.push([a[0] * 0.75 + b[0] * 0.25, a[1] * 0.75 + b[1] * 0.25], [a[0] * 0.25 + b[0] * 0.75, a[1] * 0.25 + b[1] * 0.75]); }
+      if (!closed) { o.unshift(pts[0]); o.push(pts[n - 1]); } return o;
+    }
+
+    function inLogo(x, y) { let c = false; for (const lp of logoM) for (let i = 0, j = lp.length - 1; i < lp.length; j = i++) { const a = lp[i], b = lp[j]; if ((a[1] > y) !== (b[1] > y) && x < (b[0] - a[0]) * (y - a[1]) / (b[1] - a[1]) + a[0]) c = !c; } return c; }
+
+    // ——— Lancer ———
+    function throwStart(w, h) {
+      buildLogo();
+      const R = rng(app.seed * 7 + throwN * 131 + 1), m = Math.min(w, h), n = p.nombre | 0, C = p.couleurs.length ? p.couleurs : ['#e5452a'], sticks = [];
+      const lgS = m * 0.86;
+      for (let i = 0; i < n; i++) {
+        const d = m * p.epaisseur * (0.9 + R() * 0.2); let L = m * p.longueur * (0.9 + R() * 0.2), b, a;
+        if (p.disposition === 'lancer') { const r = m * p.ecart * Math.sqrt(R()), t = R() * TAU; b = [w / 2 + Math.cos(t) * r, h / 2 + Math.sin(t) * r]; a = R() * TAU; }
+        else if (p.disposition === 'eparpille') { a = R() * TAU; const mx = w * (0.08 + R() * 0.84), my = h * (0.08 + R() * 0.84); b = [mx - Math.cos(a) * L / 2, my - Math.sin(a) * L / 2]; }
+        else {
+          let best = null;
+          for (let k = 0; k < 40 && !best; k++) {
+            const px = (R() - 0.5), py = (R() - 0.5); if (!inLogo(px, py)) continue; const an = R() * Math.PI, cx = Math.cos(an), cy = Math.sin(an), st = 0.004;
+            let t0 = 0, t1 = 0; while (t0 > -1.5 && inLogo(px + cx * (t0 - st), py + cy * (t0 - st))) t0 -= st; while (t1 < 1.5 && inLogo(px + cx * (t1 + st), py + cy * (t1 + st))) t1 += st;
+            let len = (t1 - t0) * lgS; if (len < m * 0.06) continue; const Lm = L; if (len > Lm) { const sh = R() * (len - Lm) / lgS; t0 += sh; len = Lm; }
+            best = [w / 2 + (px + cx * t0) * lgS, h / 2 + (py + cy * t0) * lgS, an, len];
+          }
+          if (!best) { const t = R() * TAU; best = [w / 2, h / 2, t, L * 0.3]; }
+          if (R() < 0.5) { b = [best[0], best[1]]; a = best[2]; } else { b = [best[0] + Math.cos(best[2]) * best[3], best[1] + Math.sin(best[2]) * best[3]]; a = best[2] + Math.PI; }
+          L = best[3];
+        }
+        sticks.push({ i, b, a, L, d, th: 0.015 + R() * 0.2, thv: 0, st: 'chute', ord: -1, lvl: 0, z: 0, ox: 0, oy: 0, vx: 0, vy: 0, tr: -9, k: p.disposition === 'lancer' ? 0.55 + R() * 0.45 : 0, deco: decoOf(R, L, d, C.length), spr: null });
+      }
+      S = { sticks, phase: 'chute', tp: simT, ordN: 0, next: 0, hold: -1, w, h, m, R };
+      throwN++;
+    }
+    function decoOf(R, L, d, nc) {
+      const tL = tipL(d), out = [], kinds = ['anneaux', 'anneaux', 'spirale', 'uni'], kind = p.decor === 'melange' ? kinds[Math.floor(R() * 4)] : p.decor;
+      const ci = () => Math.floor(R() * nc);
+      if (kind === 'anneaux') {
+        const k = 1 + Math.floor(R() * 3), rings = []; let x = tL + d * 1.4;
+        for (let j = 0; j < k; j++) { const rw = d * (0.6 + R() * 1.8); rings.push([x, x + rw, ci()]); x += rw + d * (0.5 + R() * 0.8); }
+        for (const [x0, x1, c] of rings) { out.push({ pts: [[x0, -d], [x1, -d], [x1, d], [x0, d]], c }); out.push({ pts: [[L - x1, -d], [L - x0, -d], [L - x0, d], [L - x1, d]], c }); }
+        if (R() < 0.35) { const rw = d * (1 + R() * 2.5); out.push({ pts: [[L / 2 - rw / 2, -d], [L / 2 + rw / 2, -d], [L / 2 + rw / 2, d], [L / 2 - rw / 2, d]], c: ci() }); }
+      } else if (kind === 'spirale') {
+        const c = ci(), per = d * (2.6 + R() * 2), sw = per * 0.45, sk = d * 1.1;
+        for (let x = tL + d; x < L - tL - d - sw - sk; x += per) out.push({ pts: [[x, -d / 2], [x + sw, -d / 2], [x + sw + sk, d / 2], [x + sk, d / 2]], c });
+        out.push({ pts: [[tL, -d], [tL + d * 0.8, -d], [tL + d * 0.8, d], [tL, d]], c }); out.push({ pts: [[L - tL - d * 0.8, -d], [L - tL, -d], [L - tL, d], [L - tL - d * 0.8, d]], c });
+      } else {
+        const c = ci(), c2 = ci(), x0 = tL + d * 0.6, x1 = L - tL - d * 0.6;
+        out.push({ pts: [[x0, -d], [x1, -d], [x1, d], [x0, d]], c });
+        if (c2 !== c && R() < 0.6) { const rw = d * 1.2; for (const x of [x0 + d * 0.9, x1 - d * 0.9 - rw]) out.push({ pts: [[x, -d], [x + rw, -d], [x + rw, d], [x, d]], c: c2 }); }
+      }
+      return out;
+    }
+    const tipL = (d) => p.pointes ? d * 2.8 : d * 0.5;
+    function shape(g, L, d) {
+      const t = tipL(d);
+      if (p.pointes) { g.moveTo(0, 0); g.quadraticCurveTo(t * 0.45, -d * 0.45, t, -d / 2); g.lineTo(L - t, -d / 2); g.quadraticCurveTo(L - t * 0.45, -d * 0.45, L, 0); g.quadraticCurveTo(L - t * 0.45, d * 0.45, L - t, d / 2); g.lineTo(t, d / 2); g.quadraticCurveTo(t * 0.45, d * 0.45, 0, 0); }
+      else { g.moveTo(0, 0); g.quadraticCurveTo(0, -d / 2, d / 2, -d / 2); g.lineTo(L - d / 2, -d / 2); g.quadraticCurveTo(L, -d / 2, L, 0); g.quadraticCurveTo(L, d / 2, L - d / 2, d / 2); g.lineTo(d / 2, d / 2); g.quadraticCurveTo(0, d / 2, 0, 0); }
+      g.closePath();
+    }
+    function sprite(st, dpr) {
+      if (st.spr && st.spr.dpr === dpr) return st.spr;
+      const L = st.L, d = st.d, pad = d * 2 + 2, W = L + pad * 2, H = d + pad * 2, C = p.couleurs.length ? p.couleurs : ['#e5452a'];
+      const c = document.createElement('canvas'); c.width = Math.ceil(W * dpr); c.height = Math.ceil(H * dpr); const g = c.getContext('2d');
+      g.scale(dpr, dpr); g.translate(pad, pad + d / 2);
+      g.beginPath(); shape(g, L, d); g.fillStyle = p.bois; g.fill(); g.save(); g.clip();
+      for (const q of st.deco) { g.fillStyle = C[q.c % C.length]; g.beginPath(); q.pts.forEach((v, k) => k ? g.lineTo(v[0], v[1]) : g.moveTo(v[0], v[1])); g.fill(); }
+      const gr = g.createLinearGradient(0, -d / 2, 0, d / 2); gr.addColorStop(0, 'rgba(255,255,255,0.32)'); gr.addColorStop(0.28, 'rgba(255,255,255,0.12)'); gr.addColorStop(0.55, 'rgba(0,0,0,0)'); gr.addColorStop(1, 'rgba(0,0,0,0.38)');
+      g.fillStyle = gr; g.fillRect(-1, -d, L + 2, d * 2); g.restore();
+      g.strokeStyle = 'rgba(0,0,0,0.28)'; g.lineWidth = Math.max(0.4, d * 0.06); g.beginPath(); shape(g, L, d); g.stroke();
+      const s = document.createElement('canvas'); s.width = c.width; s.height = c.height; const gs = s.getContext('2d');
+      gs.filter = `blur(${Math.max(0.6, d * 0.35 * dpr)}px)`; gs.scale(dpr, dpr); gs.translate(pad, pad + d / 2); gs.fillStyle = '#000'; gs.beginPath(); shape(gs, L, d); gs.fill();
+      st.spr = { c, s, pad, W, H, dpr }; return st.spr;
+    }
+
+    // ——— Géométrie ———
+    function ends(st) { return [st.b[0], st.b[1], st.b[0] + Math.cos(st.a) * st.L, st.b[1] + Math.sin(st.a) * st.L]; }
+    function segD(a, b) {
+      const [x1, y1, x2, y2] = a, [x3, y3, x4, y4] = b;
+      const cr = (ax, ay, bx, by, cx, cy) => (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
+      const d1 = cr(x3, y3, x4, y4, x1, y1), d2 = cr(x3, y3, x4, y4, x2, y2), d3 = cr(x1, y1, x2, y2, x3, y3), d4 = cr(x1, y1, x2, y2, x4, y4);
+      if (((d1 > 0) !== (d2 > 0)) && ((d3 > 0) !== (d4 > 0))) return 0;
+      const pd = (px, py, ax, ay, bx, by) => { const vx = bx - ax, vy = by - ay, t = Math.max(0, Math.min(1, ((px - ax) * vx + (py - ay) * vy) / (vx * vx + vy * vy || 1))); return Math.hypot(px - ax - vx * t, py - ay - vy * t); };
+      return Math.min(pd(x1, y1, x3, y3, x4, y4), pd(x2, y2, x3, y3, x4, y4), pd(x3, y3, x1, y1, x2, y2), pd(x4, y4, x1, y1, x2, y2));
+    }
+    const touch = (a, b) => segD(ends(a), ends(b)) < (a.d + b.d) * 0.55;
+    const above = (st) => S.sticks.filter((o) => o !== st && o.st === 'tas' && o.ord > st.ord && touch(st, o));
+    const free = (st) => st.st === 'tas' && above(st).length === 0;
+    function hit(x, y) {
+      if (!S) return null; let best = null;
+      for (const st of S.sticks) { if (st.st !== 'tas') continue; const e = ends(st), dd = segD(e, [x, y, x, y]); if (dd < Math.max(st.d * 1.1, 6) && (!best || st.ord > best.ord)) best = st; }
+      return best;
+    }
+    function shake(st) { st.tr = simT; for (const o of above(st)) o.tr = simT + 0.04; }
+
+    // ——— Simulation ———
+    function step(dt) {
+      const m = S.m, w0 = Math.sqrt(9 * m / 0.6) * p.vitesse;
+      let falling = 0, pile = 0, fly = 0;
+      for (const st of S.sticks) {
+        if (st.st === 'chute') {
+          falling++; const om2 = w0 * w0 * (m * 0.6 / Math.max(st.L, m * 0.1)) / m;
+          st.thv += om2 * Math.sin(st.th) * dt; st.th += st.thv * dt;
+          if (st.th >= Math.PI / 2) {
+            st.th = Math.PI / 2;
+            if (st.thv > 2.2) st.thv = -st.thv * 0.16;
+            else { st.st = 'tas'; st.thv = 0; st.b = [st.b[0] - Math.cos(st.a) * st.k * st.L / 2, st.b[1] - Math.sin(st.a) * st.k * st.L / 2]; st.k = 0; st.ord = S.ordN++; st.lvl = S.sticks.filter((o) => o !== st && o.st === 'tas' && touch(st, o)).length; }
+          }
+        } else if (st.st === 'tas') pile++;
+        else if (st.st === 'pris') {
+          fly++; const t = simT - st.tp;
+          if (t > 0.4) {
+            if (!st.vx && !st.vy) { const e = ends(st), mx = (e[0] + e[2]) / 2, my = (e[1] + e[3]) / 2, ux = Math.cos(st.a), uy = Math.sin(st.a), sg = (mx - S.w / 2) * ux + (my - S.h / 2) * uy >= 0 ? 1 : -1; st.dx = ux * sg; st.dy = uy * sg; st.vx = st.dx * 1e-3; st.vy = st.dy * 1e-3; }
+            const v = Math.hypot(st.vx, st.vy), acc = m * 7 * p.vitesse; st.vx += st.vx / v * acc * dt; st.vy += st.vy / v * acc * dt;
+            st.ox += st.vx * dt; st.oy += st.vy * dt;
+            const e = ends(st), mx = (e[0] + e[2]) / 2 + st.ox, my = (e[1] + e[3]) / 2 + st.oy, R = st.L * 0.6 + m * 0.3;
+            if (mx < -R || mx > S.w + R || my < -R || my > S.h + R) st.st = 'parti';
+          }
+        } else if (st.st === 'main') fly++;
+      }
+      if (S.phase === 'chute' && !falling) { S.phase = 'tas'; S.tp = simT; }
+      if (S.phase === 'tas' && simT - S.tp > 0.9 / p.vitesse) { S.phase = 'jeu'; S.next = simT; }
+      if (S.phase === 'jeu') {
+        if (!pile && !fly) { S.phase = 'fin'; S.tp = simT; }
+        else if (p.jeu && simT >= S.next && simT >= S.hold && pile) {
+          const tas = S.sticks.filter((o) => o.st === 'tas'), fr = tas.filter(free), R = S.R;
+          if (R() < p.maladresse * 0.6 && fr.length < tas.length) { const nf = tas.filter((o) => !fr.includes(o)); shake(nf[Math.floor(R() * nf.length)]); S.next = simT + (0.9 + R() * 0.6) / p.vitesse; }
+          else { const st = fr.length ? fr[Math.floor(R() * fr.length)] : tas.reduce((a, b) => (a.ord > b.ord ? a : b)); st.st = 'pris'; st.tp = simT; S.next = simT + (0.75 + R() * 0.7) / p.vitesse; }
+        }
+      }
+      if (S.phase === 'fin' && simT - S.tp > 0.5 / p.vitesse) throwStart(S.w, S.h);
+    }
+
+    // ——— Table ———
+    function table(w, h, dpr) {
+      const key = [w, h, dpr, p.table, p.fond].join('|'); if (key === bgKey) return BG; bgKey = key;
+      BG = BG || document.createElement('canvas'); BG.width = Math.round(w * dpr); BG.height = Math.round(h * dpr);
+      const g = BG.getContext('2d'), R = rng(5), m = Math.min(w, h); g.setTransform(dpr, 0, 0, dpr, 0, 0);
+      g.fillStyle = p.fond; g.fillRect(0, 0, w, h);
+      if (p.table === 'bois') {
+        const ph = m * 0.17;
+        for (let y = -R() * ph, k = 0; y < h; y += ph, k++) {
+          g.fillStyle = mix(p.fond, R() < 0.5 ? '#000000' : '#ffffff', R() * 0.08); g.fillRect(0, y, w, ph);
+          for (let j = 0; j < 26; j++) { const yy = y + R() * ph, am = ph * (0.02 + R() * 0.06), fr = 0.002 + R() * 0.006, ph0 = R() * TAU; g.strokeStyle = R() < 0.7 ? `rgba(0,0,0,${0.04 + R() * 0.08})` : `rgba(255,255,255,${0.03 + R() * 0.05})`; g.lineWidth = 0.5 + R() * 1.6; g.beginPath(); for (let x = 0; x <= w; x += 8) { const v = yy + Math.sin(x * fr + ph0) * am + Math.sin(x * fr * 3.1 + ph0 * 2) * am * 0.3; x ? g.lineTo(x, v) : g.moveTo(x, v); } g.stroke(); }
+          g.fillStyle = 'rgba(0,0,0,0.35)'; g.fillRect(0, y - 0.8, w, 1.6); g.fillStyle = 'rgba(255,255,255,0.08)'; g.fillRect(0, y + 0.8, w, 1);
+          for (let x = R() * w * 0.6; x < w; x += w * (0.5 + R() * 0.6)) { g.fillStyle = 'rgba(0,0,0,0.3)'; g.fillRect(x, y, 1.4, ph); }
+        }
+      } else if (p.table === 'feutre') {
+        for (let k = 0; k < w * h / 18; k++) { g.fillStyle = R() < 0.5 ? `rgba(0,0,0,${0.03 + R() * 0.06})` : `rgba(255,255,255,${0.02 + R() * 0.05})`; const x = R() * w, y = R() * h, a = R() * TAU, l = 1 + R() * 4; g.fillRect(x, y, Math.cos(a) * l + 0.8, Math.sin(a) * l + 0.8); }
+      }
+      const gr = g.createRadialGradient(w / 2, h / 2, m * 0.1, w / 2, h / 2, Math.hypot(w, h) * 0.6); gr.addColorStop(0, 'rgba(255,255,255,0.07)'); gr.addColorStop(1, 'rgba(0,0,0,0.18)'); g.fillStyle = gr; g.fillRect(0, 0, w, h);
+      return BG;
+    }
+
+    // ——— Pose d'une baguette (écran) : extrémités projetées, ombre, matrice ———
+    function pose(st) {
+      const m = S.m, Hc = m * 3, cx = S.w / 2, cy = S.h / 2, la = p.lumiere * Math.PI / 180, lx = -Math.cos(la), ly = -Math.sin(la), sl = 0.8;
+      let a = st.a, th = st.th, z0 = st.d * (0.5 + 0.55 * Math.min(st.lvl, 4)), lift = 0;
+      const tt = simT - st.tr; if (tt >= 0 && tt < 0.8) { const e = Math.exp(-tt * 5); a += 0.03 * Math.sin(tt * 75) * e; lift = st.d * 1.2 * e * Math.abs(Math.sin(tt * 40)); }
+      if (st.st === 'pris') lift += m * 0.1 * ss((simT - st.tp) / 0.4); if (st.st === 'main') lift += m * 0.1;
+      z0 += lift;
+      const ux = Math.cos(a), uy = Math.sin(a), sk = st.k * st.L / 2 * Math.sin(th), bx = st.b[0] + st.ox - ux * sk, by = st.b[1] + st.oy - uy * sk, hl = st.L * Math.sin(th), z1 = z0 + st.L * Math.cos(th);
+      const tx = bx + ux * hl, ty = by + uy * hl;
+      const pr = (x, y, z) => { const f = Hc / (Hc - z); return [cx + (x - cx) * f, cy + (y - cy) * f, f]; };
+      const P0 = pr(bx, by, z0), P1 = pr(tx, ty, z1);
+      const s0 = [bx + lx * z0 * sl, by + ly * z0 * sl], s1 = [tx + lx * z1 * sl, ty + ly * z1 * sl];
+      return { P0, P1, s0, s1, sa: Math.max(0, 1 - lift / (m * 0.25)) };
+    }
+    function mat(A, B, L, wsc) { const vx = (B[0] - A[0]) / L, vy = (B[1] - A[1]) / L, n = Math.hypot(vx, vy) || 1e-6; return [vx, vy, -vy / n * wsc, vx / n * wsc, A[0], A[1]]; }
+    function order() {
+      const tas = S.sticks.filter((o) => o.st === 'tas').sort((a, b) => a.ord - b.ord);
+      const ch = S.sticks.filter((o) => o.st === 'chute').sort((a, b) => b.th - a.th);
+      return tas.concat(ch, S.sticks.filter((o) => o.st === 'pris' || o.st === 'main'));
+    }
+
+    // le tas au repos est peint dans un calque : on n'y ajoute que les baguettes qui arrivent par-dessus,
+    // et on le refait quand une baguette part ou se met à trembler
+    let LY = null, lySig = [], lyKey = '';
+    function drawStick(g, st, dpr) {
+      const sp = sprite(st, dpr), Q = pose(st), oa = p.ombre * 0.7;
+      if (oa > 0) {
+        const M = mat(Q.s0, Q.s1, st.L, 1); g.globalAlpha = oa * Q.sa;
+        g.setTransform(M[0] * dpr, M[1] * dpr, M[2] * dpr, M[3] * dpr, M[4] * dpr, M[5] * dpr); g.drawImage(sp.s, -sp.pad, -sp.pad - st.d / 2, sp.W, sp.H);
+        g.globalAlpha = 1;
+      }
+      const M = mat(Q.P0, Q.P1, st.L, (Q.P0[2] + Q.P1[2]) / 2);
+      g.setTransform(M[0] * dpr, M[1] * dpr, M[2] * dpr, M[3] * dpr, M[4] * dpr, M[5] * dpr); g.drawImage(sp.c, -sp.pad, -sp.pad - st.d / 2, sp.W, sp.H);
+    }
+    function pileLayer(w, h, dpr) {
+      const stat = S.sticks.filter((o) => o.st === 'tas' && !(simT - o.tr < 0.8)).sort((a, b) => a.ord - b.ord);
+      const key = [w, h, dpr, p.table, p.fond, p.ombre, p.lumiere, gKey, throwN].join('|');
+      let from = 0;
+      if (LY && key === lyKey && lySig.length <= stat.length && lySig.every((o, k) => stat[k] === o)) from = lySig.length;
+      else {
+        lyKey = key; LY = LY || document.createElement('canvas'); LY.width = Math.round(w * dpr); LY.height = Math.round(h * dpr);
+        const g = LY.getContext('2d'); g.setTransform(1, 0, 0, 1, 0, 0); g.drawImage(table(w, h, dpr), 0, 0);
+      }
+      if (from < stat.length) { const g = LY.getContext('2d'); for (let k = from; k < stat.length; k++) drawStick(g, stat[k], dpr); g.setTransform(1, 0, 0, 1, 0, 0); }
+      lySig = stat; return LY;
+    }
+
+    app.loop((t, dt) => {
+      dt = Math.min(1 / 20, dt || 0);
+      const { w, h, dpr } = app.size;
+      buildLogo();
+      const key = [w, h, p.disposition, p.nombre, p.longueur, p.epaisseur, p.ecart, p.decor, p.pointes, p.bois, p.couleurs.join(), app.seed, logoKey].join('|');
+      if (!S || key !== gKey) { gKey = key; throwN = 0; throwStart(w, h); }
+      if (app.thumbnail) { if (!S.th) { S.th = true; for (let k = 0; k < 900 && !(S.phase === 'jeu' && simT - S.tp > 1.4); k++) { simT += 1 / 60; step(1 / 60); } } }
+      else { const n = Math.ceil(dt / (1 / 120)); for (let k = 0; k < n; k++) { simT += dt / n; step(dt / n); } }
+      const L = pileLayer(w, h, dpr), still = new Set(lySig);
+      ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.drawImage(L, 0, 0);
+      for (const st of order()) if (!still.has(st)) drawStick(ctx, st, dpr);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      app.finish(ctx);
+    });
+
+    function toSVG() {
+      const { w, h } = app.size, f = (v) => +v.toFixed(2), m = Math.min(w, h), R = rng(5), C = p.couleurs.length ? p.couleurs : ['#e5452a'];
+      let s = `<rect width="100%" height="100%" fill="${p.fond}"/>`;
+      if (p.table === 'bois') { const ph = m * 0.17; for (let y = -R() * ph; y < h; y += ph) s += `<rect y="${f(y)}" width="${w}" height="${f(ph)}" fill="${mix(p.fond, R() < 0.5 ? '#000000' : '#ffffff', R() * 0.08)}"/><rect y="${f(y - 0.8)}" width="${w}" height="1.6" fill="#000" opacity="0.35"/>`; }
+      let defs = `<linearGradient id="relief" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff" stop-opacity="0.32"/><stop offset="0.28" stop-color="#fff" stop-opacity="0.12"/><stop offset="0.55" stop-color="#000" stop-opacity="0"/><stop offset="1" stop-color="#000" stop-opacity="0.38"/></linearGradient><filter id="flou" x="-0.1" y="-1" width="1.2" height="3"><feGaussianBlur stdDeviation="${f(m * p.epaisseur * 0.35)}"/></filter>`;
+      const oa = p.ombre * 0.7;
+      for (const st of order()) {
+        const Q = pose(st), L = st.L, d = st.d;
+        const pb = { d: '', moveTo(x, y) { this.d += `M${f(x)} ${f(y)}`; }, lineTo(x, y) { this.d += `L${f(x)} ${f(y)}`; }, quadraticCurveTo(a, b, x, y) { this.d += `Q${f(a)} ${f(b)} ${f(x)} ${f(y)}`; }, closePath() { this.d += 'Z'; } }; shape(pb, L, d);
+        if (oa > 0) s += `<path transform="matrix(${mat(Q.s0, Q.s1, L, 1).map((v) => +v.toFixed(5)).join(' ')})" d="${pb.d}" fill="#000" opacity="${f(oa * Q.sa * 0.8)}" filter="url(#flou)"/>`;
+        defs += `<clipPath id="b${st.i}"><path d="${pb.d}"/></clipPath>`;
+        s += `<g transform="matrix(${mat(Q.P0, Q.P1, L, (Q.P0[2] + Q.P1[2]) / 2).map((v) => +v.toFixed(5)).join(' ')})"><g clip-path="url(#b${st.i})"><path d="${pb.d}" fill="${p.bois}"/>`;
+        for (const q of st.deco) s += `<path fill="${C[q.c % C.length]}" d="M${q.pts.map((v) => f(v[0]) + ' ' + f(v[1])).join('L')}Z"/>`;
+        s += `<rect x="-1" y="${f(-d / 2)}" width="${f(L + 2)}" height="${f(d)}" fill="url(#relief)"/></g><path d="${pb.d}" fill="none" stroke="#000" stroke-opacity="0.28" stroke-width="${f(Math.max(0.4, d * 0.06))}"/></g>`;
+      }
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><defs>${defs}</defs>${s}</svg>`;
+    }
+  </script>
+</body>
+</html>
