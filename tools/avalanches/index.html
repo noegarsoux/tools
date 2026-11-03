@@ -1,0 +1,240 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Avalanches</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Avalanches : le tas de sable abélien de Bak, Tang et Wiesenfeld. Chaque case porte 0 à 3 grains ; dès qu'elle
+    // en porte 4, elle s'éboule et en donne un à chacune de ses quatre voisines (ceux qui sortent du cadre sont perdus).
+    // L'ordre des éboulements ne change pas le résultat final : on peut donc ébouler une case de k×4 grains d'un coup.
+    // Versé en un point, le sable dessine un motif fractal à la symétrie du carré ; l'« identité » du tas de sable
+    // s'obtient en stabilisant 6 − stab(6) partout.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const KB = PAL('kegelbahn'), PYR = PAL('pyramides'), BIEN = PAL('biennale'), LUZ = PAL('luzern'), MEN = PAL('menthe'), GR = PAL('good-room');
+
+    let W = 0, H = 0, N = 0, SINK = null, Z = null, HEAT = null, Q = null, inQ = null, qh = 0, qt = 0, qn = 0;
+    let glow = 0, glowT = 0, simKey = '', srcs = [], phase = 0, doneT = 0, edge = false, gen = 0, maskKey = null, mask = null, held = null, buf = null, img = null, rain = 0;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.03, vignette: 0.1 },
+      hint: 'Touchez pour verser un tas · glissez pour semer du sable · molette : débit',
+      notes: 'Chaque case peut porter jusqu’à trois grains. À quatre, elle s’éboule : un grain part vers chacune de ses quatre voisines, qui peuvent s’ébouler à leur tour. Versé en un seul point, le sable dessine un motif fractal à la symétrie du carré, toujours le même quel que soit l’ordre des éboulements. En pluie, le tas se maintient au bord de l’instabilité : un seul grain peut déclencher une avalanche minuscule ou gigantesque. Les quatre couleurs comptent les grains, de zéro à trois.',
+      params: {
+        'Sable': {
+          depart: { type: 'select', label: 'Départ', options: { centre: 'Un point', points: 'Plusieurs points', logo: 'Le logo', identite: 'Identité', pluie: 'Pluie' }, value: 'centre' },
+          finesse: { type: 'range', label: 'Finesse', min: 61, max: 401, step: 2, value: 201 },
+          vitesse: { type: 'range', label: 'Débit', min: 0, max: 1, step: 0.01, value: 0.45 },
+          sources: { type: 'range', label: 'Sources', min: 2, max: 9, step: 1, value: 4, show: (q) => q.depart === 'points' || q.depart === 'logo' },
+          symetrie: { type: 'toggle', label: 'Sources symétriques', value: true, show: (q) => q.depart === 'points' },
+          image: { type: 'file', label: 'Logo', accept: 'image/*', show: (q) => q.depart === 'logo' },
+          boucle: { type: 'toggle', label: 'Recommencer', value: true },
+          pause: { type: 'range', label: 'Pause avant de recommencer (s)', min: 1, max: 20, step: 0.5, value: 5, show: (q) => q.boucle },
+        },
+        'Rendu': {
+          style: { type: 'segmented', label: 'Style', options: { pixels: 'Pixels', carreaux: 'Carreaux', points: 'Points' }, value: 'pixels' },
+          marge: { type: 'range', label: 'Marge', min: 0, max: 0.3, step: 0.01, value: 0.04 },
+          eclat: { type: 'range', label: 'Lueur des avalanches', min: 0, max: 1, step: 0.01, value: 0.55 },
+        },
+        'Couleurs': {
+          couleurs: { type: 'palette', label: '0, 1, 2, 3 grains', value: ['#0e0e10', '#486cfc', '#edd14b', '#ef5a2f'] },
+          lueur: { type: 'color', label: 'Lueur', value: '#f4f1ea' },
+        },
+      },
+      presets: {
+        'Un point': {},
+        'Plusieurs points': { depart: 'points', sources: 4, couleurs: ['#f4f3f0', '#111111', '#e5452a', '#f2b0c8'], lueur: '#f2e640' },
+        'Interférences': { depart: 'points', sources: 7, symetrie: false, finesse: 241, couleurs: GR.slice(0, 4), lueur: '#ffffff' },
+        'Logo': { depart: 'logo', sources: 4, couleurs: ['#111111', '#3a6fd0', '#f4f1ea', '#e5502a'], lueur: '#f2c230' },
+        'Identité': { depart: 'identite', finesse: 181, vitesse: 0.6, couleurs: ['#1a1410', '#7d38e7', '#b9a0e6', '#f25f03'], lueur: '#ffffff', pause: 8 },
+        'Pluie': { depart: 'pluie', finesse: 141, eclat: 0.8, couleurs: ['#0c0c0e', '#2e3b25', '#4f9d7a', '#a4e0bc'], lueur: '#f4f1ea' },
+        'Carreaux': { style: 'carreaux', finesse: 81, marge: 0.12, couleurs: ['#e3e0d6', '#4b6cf0', '#f4c53a', '#e8552b'], lueur: '#1f1e1c' },
+        'Points': { style: 'points', finesse: 101, couleurs: ['#111111', '#f272ba', '#486cfc', '#edd14b'], lueur: '#ffffff' },
+        'Pyramides': { couleurs: [PYR[6], PYR[1], PYR[4], PYR[2]], lueur: PYR[3] },
+        'Biennale': { couleurs: [BIEN[0], BIEN[3], BIEN[2], BIEN[1]], lueur: BIEN[4] },
+        'Menthe': { depart: 'points', sources: 3, couleurs: [MEN[1], MEN[3], MEN[2], MEN[0]], lueur: '#ffffff' },
+      },
+      brand(colors) {
+        const lum = (x) => { const c = hex(x); return c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114; };
+        const s = colors.slice().sort((a, b) => lum(a) - lum(b)), rest = s.slice(1);
+        const four = [s[0]].concat(rest.slice(0, 3)); while (four.length < 4) four.push(four[four.length - 1]);
+        return { couleurs: four, lueur: s[s.length - 1] };
+      },
+      pointer: {
+        down: (qq) => { held = { x0: qq.x, y0: qq.y, moved: false }; },
+        drag: (qq) => { if (!held) return; if (Math.hypot(qq.x - held.x0, qq.y - held.y0) > 6) held.moved = true; if (held.moved) { const i = cellAt(qq.x, qq.y); if (i >= 0) { drop(i, 48); glowT = Math.max(glowT, 1.5); } } },
+        up: () => { if (held && !held.moved) { const i = cellAt(held.x0, held.y0); if (i >= 0) { drop(i, Math.round(N * 0.12)); glowT = 2.5; } doneT = 0; } held = null; },
+        wheel: (qq, dy) => app.set('vitesse', Math.max(0, Math.min(1, +(p.vitesse + (dy > 0 ? -0.04 : 0.04)).toFixed(2)))),
+      },
+      onChange(k) {
+        if (k === 'image') maskKey = null;
+        if (k === '*' || ['depart', 'finesse', 'sources', 'symetrie', 'image'].includes(k)) simKey = '';
+      },
+      onSeed() { simKey = ''; gen = 0; },
+      export: { name: 'avalanches', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    const hex = (x) => { const n = parseInt(x.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; };
+    function mulberry(a) { return () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+
+    // ——— File d'attente des cases instables (chaque case y figure au plus une fois) ———
+    function push(i) { if (inQ[i]) return; inQ[i] = 1; Q[qt] = i; qt = (qt + 1) % N; qn++; }
+    function drop(i, k) { if (SINK[i]) return; Z[i] += k; if (Z[i] >= 4) push(i); }
+    // éboule tant qu'il reste du temps ; renvoie vrai si tout est stable
+    function topple(budget) {
+      const t0 = performance.now(); let ops = 0;
+      while (qn > 0) {
+        const i = Q[qh]; qh = (qh + 1) % N; qn--; inQ[i] = 0;
+        const z = Z[i]; if (z < 4) continue;
+        const k = z >> 2; Z[i] = z & 3; if (glow > 0) HEAT[i] = Math.min(1.2, HEAT[i] + glow * 0.22);
+        const x = i % W, y = (i - x) / W;
+        if (x > 0) { if (!SINK[i - 1]) { Z[i - 1] += k; if (Z[i - 1] >= 4) push(i - 1); } } else edge = true;
+        if (x < W - 1) { if (!SINK[i + 1]) { Z[i + 1] += k; if (Z[i + 1] >= 4) push(i + 1); } } else edge = true;
+        if (y > 0) { if (!SINK[i - W]) { Z[i - W] += k; if (Z[i - W] >= 4) push(i - W); } } else edge = true;
+        if (y < H - 1) { if (!SINK[i + W]) { Z[i + W] += k; if (Z[i + W] >= 4) push(i + W); } } else edge = true;
+        if ((++ops & 2047) === 0 && budget && performance.now() - t0 > budget) return false;
+      }
+      return true;
+    }
+
+    // ——— Logo ———
+    function logoMask() {
+      const img0 = p.image || app.logoImg, key = (img0 ? (img0.src || 'c') : 'demo') + W + 'x' + H;
+      if (key === maskKey && mask) return mask; maskKey = key;
+      const c = document.createElement('canvas'); c.width = W; c.height = H; const x = c.getContext('2d', { willReadFrequently: true });
+      const L = Math.min(W, H) * 0.5, cx = W / 2, cy = H / 2;
+      if (img0) { const iw = img0.naturalWidth || img0.width, ih = img0.naturalHeight || img0.height, k = L / Math.max(iw, ih); x.drawImage(img0, cx - iw * k / 2, cy - ih * k / 2, iw * k, ih * k); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(cx, cy, L * 0.48, 0, TAU); x.arc(cx, cy, L * 0.26, 0, TAU, true); x.fill('evenodd'); x.fillRect(cx - L * 0.06, cy - L * 0.5, L * 0.12, L); }
+      const d = x.getImageData(0, 0, W, H).data, a = new Uint8Array(N); let transp = 0; for (let i = 3; i < d.length; i += 4) if (d[i] < 128) transp++;
+      const useA = transp > N * 0.05;
+      for (let i = 0; i < N; i++) { const l = (d[i * 4] * 0.2126 + d[i * 4 + 1] * 0.7152 + d[i * 4 + 2] * 0.0722) / 255; a[i] = (useA ? d[i * 4 + 3] > 128 : d[i * 4 + 3] > 128 && l < 0.5) ? 1 : 0; }
+      mask = a; return a;
+    }
+
+    // ——— Départs ———
+    const area = (n) => n / 2.13; // un tas de n grains versé en un point couvre environ n/2,13 cases
+    function reset() {
+      const { w, h } = app.size;
+      W = Math.round(p.finesse) | 1; H = Math.max(9, Math.round(W * h / w) | 1); N = W * H;
+      Z = new Int32Array(N); SINK = new Uint8Array(N); HEAT = new Float32Array(N); Q = new Int32Array(N); inQ = new Uint8Array(N); qh = qt = qn = 0;
+      edge = false; doneT = 0; phase = 0; srcs = []; rain = 0;
+      const r = mulberry(app.seed * 4099 + gen * 131 + 7), cx = (W - 1) / 2, cy = (H - 1) / 2, m = Math.min(W, H);
+      if (p.depart === 'centre') srcs.push({ i: Math.round(cy) * W + Math.round(cx), n: 0 });
+      else if (p.depart === 'points') {
+        const n = Math.round(p.sources), rad = m * (0.16 + r() * 0.14), a0 = r() * TAU;
+        for (let k = 0; k < n; k++) {
+          let x, y;
+          if (p.symetrie) { const a = a0 + k / n * TAU; x = cx + Math.cos(a) * rad * (W / m); y = cy + Math.sin(a) * rad; }
+          else { x = W * (0.15 + r() * 0.7); y = H * (0.15 + r() * 0.7); }
+          srcs.push({ i: Math.round(y) * W + Math.round(x), n: 0, f: 0.6 + r() * 0.8 });
+        }
+      } else if (p.depart === 'logo') {
+        // le logo est un trou : le sable qui y tombe disparaît, les motifs poussent autour de sa silhouette
+        const mk = logoMask(); SINK.set(mk);
+        const n = Math.round(p.sources), rad = m * 0.31, a0 = Math.PI / 4 + (gen % 2) * Math.PI / n;
+        for (let k = 0; k < n; k++) { const a = a0 + k / n * TAU; srcs.push({ i: Math.round(cy + Math.sin(a) * rad) * W + Math.round(cx + Math.cos(a) * rad * (W / m) * 0.8), n: 0 }); }
+      } else if (p.depart === 'identite') {
+        Z.fill(6); for (let i = 0; i < N; i++) push(i);
+      } else if (p.depart === 'pluie') {
+        for (let i = 0; i < N; i++) Z[i] = r() < 0.35 ? 3 : 2; for (let i = 0; i < N; i++) push(i);
+      }
+      // amorce : le motif a déjà une taille lisible à la première image
+      if (srcs.length) { const pre = (app.thumbnail ? 0.47 : 0.14) * m; for (const s of srcs) feed(s, pre * pre * Math.PI * 2.13 / (srcs.length > 1 ? srcs.length * 0.7 : 1)); glow = 0; topple(0); }
+    }
+    function feed(s, n) { n = Math.round(n * (s.f || 1)); if (n <= 0) return; s.n += n; drop(s.i, n); }
+
+    // ——— Rendu ———
+    const cols = () => { const C = p.couleurs.map(hex); while (C.length < 4) C.push(C[C.length - 1]); return C; };
+    function frameColor(i, C, L, ec) {
+      const z = Z[i], c = C[z > 3 ? 3 : z], hh = Math.min(1, HEAT[i] * ec), t = z > 3 ? Math.max(hh, 0.85 * ec + 0.15) : hh;
+      return t > 0.003 ? [c[0] + (L[0] - c[0]) * t, c[1] + (L[1] - c[1]) * t, c[2] + (L[2] - c[2]) * t] : c;
+    }
+    function renderPixels(w, h, ox, oy, cw, chh) {
+      if (!buf || buf.width !== W || buf.height !== H) { buf = document.createElement('canvas'); buf.width = W; buf.height = H; img = buf.getContext('2d').createImageData(W, H); }
+      const C = cols(), L = hex(p.lueur), d = img.data, ec = p.eclat;
+      for (let i = 0; i < N; i++) { const c = frameColor(i, C, L, ec), o = i * 4; d[o] = c[0]; d[o + 1] = c[1]; d[o + 2] = c[2]; d[o + 3] = 255; }
+      buf.getContext('2d').putImageData(img, 0, 0);
+      ctx.imageSmoothingEnabled = false; ctx.drawImage(buf, ox, oy, W * cw, H * chh); ctx.imageSmoothingEnabled = true;
+    }
+    function quant(c) { return (Math.round(c[0] / 8) << 10) | (Math.round(c[1] / 8) << 5) | Math.round(c[2] / 8); }
+    function renderShapes(w, h, ox, oy, cs) {
+      // carreaux et points : un tracé par teinte (teintes regroupées par pas de 8)
+      const C = cols(), L = hex(p.lueur), ec = p.eclat, bins = new Map(), pts = p.style === 'points', g = cs * Math.max(0.04, p.marge), s = cs - g, rr = Math.min(s * 0.22, 6);
+      ctx.fillStyle = p.couleurs[0]; ctx.fillRect(0, 0, w, h);
+      for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+        const i = y * W + x, z = Math.min(3, Z[i]); if (!pts && z === 0 && HEAT[i] * ec < 0.02) continue; if (pts && z === 0 && HEAT[i] * ec < 0.1) continue;
+        const c = frameColor(i, C, L, ec), key = quant(c); let b = bins.get(key); if (!b) { b = { c, P: [new Path2D()], n: 0 }; bins.set(key, b); }
+        if (++b.n % 900 === 0) b.P.push(new Path2D()); const P = b.P[b.P.length - 1], X = ox + x * cs + g / 2, Y = oy + y * cs + g / 2;
+        if (pts) { const r = s / 2 * Math.sqrt(Math.max(1, z) / 3); P.moveTo(X + s / 2 + r, Y + s / 2); P.arc(X + s / 2, Y + s / 2, r, 0, TAU); }
+        else if (P.roundRect) P.roundRect(X, Y, s, s, rr); else P.rect(X, Y, s, s);
+      }
+      for (const b of bins.values()) { ctx.fillStyle = `rgb(${b.c.map(Math.round).join()})`; for (const P of b.P) ctx.fill(P); }
+    }
+    function cellAt(x, y) { if (!Z) return -1; const { cs, ox, oy } = layout(app.size.w, app.size.h), gx = Math.floor((x - ox) / cs), gy = Math.floor((y - oy) / cs); return gx < 0 || gy < 0 || gx >= W || gy >= H ? -1 : gy * W + gx; }
+    function layout(w, h) { const cs = Math.max(w / W, h / H); return { cs, ox: (w - W * cs) / 2, oy: (h - H * cs) / 2 }; }
+
+    app.loop((t, dt) => {
+      dt = Math.min(0.05, dt || 0);
+      const { w, h, dpr } = app.size;
+      const key = [p.depart, p.finesse, p.sources, p.symetrie, w, h, app.seed, maskKey].join();
+      if (key !== simKey || !Z) { reset(); simKey = [p.depart, p.finesse, p.sources, p.symetrie, w, h, app.seed, maskKey].join(); }
+      if (dt > 0 && !app.thumbnail) {
+        const v = p.vitesse, m = Math.min(W, H);
+        // la lueur ne marque que les avalanches : la pluie, et les tas versés à la main
+        glowT = Math.max(0, glowT - dt); glow = p.depart === 'pluie' ? 0.35 : Math.min(1, glowT);
+        let stable = topple(10);
+        if (stable && p.depart === 'identite' && phase === 0) {
+          // première stabilisation faite : on repart de 6 − stab(6)
+          for (let i = 0; i < N; i++) { Z[i] = 6 - Z[i]; if (Z[i] >= 4) push(i); } phase = 1; stable = false;
+        }
+        const logoFull = p.depart === 'logo' && srcs.reduce((a, s) => a + s.n, 0) > N * 2.6;
+        if (stable && srcs.length && (p.depart === 'logo' ? !logoFull : !edge)) {
+          // débit : le rayon du motif grandit à vitesse à peu près constante
+          for (const s of srcs) { const r = Math.sqrt(area(s.n) / Math.PI) + 2; feed(s, 2 * Math.PI * r * 2.13 * m * (0.01 + v * v * 0.12) * dt); }
+        }
+        if (p.depart === 'pluie' && qn < N * 0.02) { rain += (0.5 + v * v * 60) * dt * 8; while (rain >= 1) { drop((Math.random() * N) | 0, 1); rain--; } }
+        const finished = stable && qn === 0 && ((srcs.length && (p.depart === 'logo' ? logoFull : edge)) || (p.depart === 'identite' && phase === 1));
+        if (finished) { doneT += dt; if (p.boucle && doneT > p.pause) { gen++; simKey = ''; } }
+        const dec = Math.exp(-dt * 3.2); for (let i = 0; i < N; i++) HEAT[i] *= dec;
+      }
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      const { cs, ox, oy } = layout(w, h);
+      if (p.style === 'pixels') renderPixels(w, h, ox, oy, cs, cs); else renderShapes(w, h, ox, oy, cs);
+      app.finish(ctx);
+    });
+
+    // ——— Export SVG ———
+    function toSVG() {
+      const { w, h } = app.size, { cs, ox, oy } = layout(w, h), C = p.couleurs.slice(), out = [`<rect width="100%" height="100%" fill="${C[0]}"/>`];
+      while (C.length < 4) C.push(C[C.length - 1]);
+      const f = (v) => +v.toFixed(2);
+      if (p.style === 'pixels') {
+        const bins = [[], [], [], []];
+        for (let y = 0; y < H; y++) { let x = 0; while (x < W) { const z = Math.min(3, Z[y * W + x]); let e = x + 1; while (e < W && Math.min(3, Z[y * W + e]) === z) e++; if (z) bins[z].push(`M${f(ox + x * cs)} ${f(oy + y * cs)}h${f((e - x) * cs)}v${f(cs)}h${f(-(e - x) * cs)}z`); x = e; } }
+        bins.forEach((L, z) => { if (L.length) out.push(`<path fill="${C[z]}" shape-rendering="crispEdges" d="${L.join('')}"/>`); });
+      } else {
+        const g = cs * Math.max(0.04, p.marge), s = cs - g, rr = Math.min(s * 0.22, 6), bins = [[], [], [], []];
+        for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+          const z = Math.min(3, Z[y * W + x]); if (!z) continue; const X = ox + x * cs + g / 2, Y = oy + y * cs + g / 2;
+          if (p.style === 'points') bins[z].push(`<circle cx="${f(X + s / 2)}" cy="${f(Y + s / 2)}" r="${f(s / 2 * Math.sqrt(z / 3))}"/>`);
+          else bins[z].push(`<rect x="${f(X)}" y="${f(Y)}" width="${f(s)}" height="${f(s)}" rx="${f(rr)}"/>`);
+        }
+        bins.forEach((L, z) => { if (L.length) out.push(`<g fill="${C[z]}">${L.join('')}</g>`); });
+      }
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">${out.join('')}</svg>`;
+    }
+  </script>
+</body>
+</html>
