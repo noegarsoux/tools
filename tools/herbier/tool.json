@@ -1,0 +1,15 @@
+{
+  "slug": "herbier",
+  "title": "Herbier",
+  "type": "motion",
+  "description": "Des plantes en L-système (fougère, buisson, algue, herbe, ombelle) poussent, ondulent au vent puis fanent ; leurs fleurs dessinent le logo.",
+  "tags": ["l-systeme", "vegetal", "croissance", "generatif", "logo", "svg"],
+  "inspiration": [
+    "« The Algorithmic Beauty of Plants » de Prusinkiewicz et Lindenmayer (1990)",
+    "Les cyanotypes d'algues d'Anna Atkins (1843)",
+    "Les planches d'herbier et de botanique"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}
