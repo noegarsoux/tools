@@ -1,0 +1,15 @@
+{
+  "slug": "broderie",
+  "title": "Broderie",
+  "type": "motion",
+  "description": "Une aiguille brode le logo ou un motif point par point sur une toile tendue dans un tambour : passé plat, remplissage, points de croix, points lancés, fils lustrés.",
+  "tags": ["textile", "fil", "point", "artisanat", "logo", "svg"],
+  "inspiration": [
+    "Les écussons brodés au passé plat",
+    "Les canevas au point de croix",
+    "Les tambours à broder et leurs toiles de lin"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}
