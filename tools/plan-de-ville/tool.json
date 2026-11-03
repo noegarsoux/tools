@@ -1,0 +1,15 @@
+{
+  "slug": "plan-de-ville",
+  "title": "Plan de ville",
+  "type": "motion",
+  "description": "Une ville qui pousse sous nos yeux : avenues, rues qui bifurquent et se raccordent, maisons le long des trottoirs et voitures ; on trace des avenues au doigt.",
+  "tags": ["carte", "generatif", "croissance", "lignes", "logo", "svg"],
+  "inspiration": [
+    "Parish et Müller, la génération procédurale de villes par L-systèmes (2001)",
+    "Les plans de Paris de Turgot (1739)",
+    "Les cartes de Nolli et les plans en noir et blanc des urbanistes"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}
