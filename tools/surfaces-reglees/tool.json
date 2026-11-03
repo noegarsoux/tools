@@ -1,0 +1,15 @@
+{
+  "slug": "surfaces-reglees",
+  "title": "Surfaces réglées",
+  "type": "motion",
+  "description": "Des courbes faites de droites : hyperboloïde, selle, hélicoïde et ruban de Möbius tendus de fils qui tournent dans l'espace et se tordent en respirant.",
+  "tags": ["mathematiques", "geometrie", "lignes", "3d", "logo", "svg"],
+  "inspiration": [
+    "Vladimir Choukhov, la tour hyperboloïde de Chabolovka (1922)",
+    "Naum Gabo, « Linear Construction in Space » (1942-1943)",
+    "Les maquettes à fils de Théodore Olivier, École des ponts et chaussées (vers 1830)"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}
