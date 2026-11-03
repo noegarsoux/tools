@@ -1,0 +1,15 @@
+{
+  "slug": "espace-temps",
+  "title": "Toile d'espace-temps",
+  "type": "motion",
+  "description": "Une grille élastique creusée par des masses en orbite, vue à plat ou en nappe ; on déplace les puits au doigt et le logo pèse de tout son poids.",
+  "tags": ["physique", "grille", "lignes", "3d", "logo", "svg"],
+  "inspiration": [
+    "La nappe de caoutchouc, image pédagogique de la relativité générale",
+    "Les diagrammes de plongement de Schwarzschild",
+    "Les grilles déformées des visualisations d'ondes gravitationnelles (LIGO, 2016)"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}
