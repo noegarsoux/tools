@@ -1,0 +1,15 @@
+{
+  "slug": "kolam",
+  "title": "Kolam",
+  "type": "motion",
+  "description": "Une ligne sans fin qui tourne autour d'une grille de points, rebondit sur des miroirs cachés et se referme ; cliquez pour poser ou ôter un miroir.",
+  "tags": ["lignes", "grille", "symetrie", "trace", "logo", "svg"],
+  "inspiration": [
+    "Les kolams dessinés à la farine de riz sur les seuils du Tamil Nadu",
+    "Les sona (lusona) des Tchokwe d'Angola",
+    "Les courbes miroir de Paulus Gerdes"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}
