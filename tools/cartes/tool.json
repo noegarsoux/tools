@@ -1,0 +1,15 @@
+{
+  "slug": "cartes",
+  "title": "Cartes à jouer",
+  "type": "motion",
+  "description": "Un jeu de cartes au dos de la marque qu'on étale en éventail, qu'on mélange en queue d'aronde, qu'on distribue en grille ou qu'on lâche en cascade rebondissante.",
+  "tags": ["jeu", "cartes", "physique", "interaction", "logo", "svg"],
+  "inspiration": [
+    "Les gestes des croupiers et des prestidigitateurs : éventail, mélange américain, donne",
+    "Les dos de cartes à motifs répétés et leur liseré blanc",
+    "Les cascades de cartes qui rebondissent et laissent leur traînée à l'écran"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}
