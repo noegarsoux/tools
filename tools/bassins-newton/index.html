@@ -1,0 +1,317 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Bassins de Newton</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Bassins de Newton : chaque point du plan complexe sert de départ à la méthode de Newton pour trouver une racine
+    // d'un polynôme, z ← z − a·p(z)/p'(z). Pour un polynôme donné par ses racines, p/p' = 1 / Σ 1/(z − rᵢ).
+    // Chaque point prend la couleur de la racine où il aboutit ; les frontières entre bassins sont fractales :
+    // près d'elles, les trois couleurs (ou plus) se touchent partout. Le nombre d'itérations dessine des bandes.
+    const canvas = document.querySelector('canvas');
+    const gl = canvas.getContext('webgl2', { alpha: false, antialias: false, depth: false, stencil: false, preserveDrawingBuffer: true });
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const BIEN = PAL('biennale'), LU = PAL('luzern'), MEN = PAL('menthe'), KB = PAL('kegelbahn'), TH = PAL('thermique'), PY = PAL('pyramides');
+    const MAXR = 8, MAXC = 8, MAXI = 48;
+
+    let roots = [], rootsKey = '', grab = null, spin = 0, frame = 0, logoDirty = true, logoOk = false;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.03, vignette: 0.15 },
+      hint: 'Glissez une racine pour la déplacer · glissez ailleurs pour tout tourner · molette : relaxation',
+      notes: 'La méthode de Newton cherche une racine d’un polynôme en suivant sa tangente : z devient z − p(z)/p′(z). Partie de chaque point de l’image, elle aboutit à l’une des racines ; le point prend la couleur de cette racine. Les frontières entre bassins sont fractales : là où deux couleurs se touchent, toutes les autres se glissent aussi, à toutes les échelles. La relaxation multiplie le pas : au-dessus de 1, les bassins s’effilochent ; avec une torsion, le pas tourne et les bandes deviennent des spirales.',
+      params: {
+        'Polynôme': {
+          racines: { type: 'range', label: 'Nombre de racines', min: 2, max: 8, step: 1, value: 3 },
+          disposition: { type: 'segmented', label: 'Disposition', options: { polygone: 'Polygone', hasard: 'Hasard', ligne: 'Ligne' }, value: 'polygone' },
+          relaxation: { type: 'range', label: 'Relaxation (pas)', min: 0.3, max: 1.95, step: 0.01, value: 1 },
+          torsion: { type: 'range', label: 'Torsion du pas (°)', min: -60, max: 60, step: 0.5, value: 0 },
+          zoom: { type: 'range', label: 'Zoom', min: 0.3, max: 6, step: 0.01, value: 1 },
+        },
+        'Mouvement': {
+          orbite: { type: 'range', label: 'Orbite des racines', min: 0, max: 1, step: 0.01, value: 0.35 },
+          vitesse: { type: 'range', label: 'Vitesse', min: 0, max: 2, step: 0.01, value: 0.4 },
+          rotation: { type: 'range', label: 'Rotation (°/s)', min: -30, max: 30, step: 0.5, value: 2 },
+          respiration: { type: 'range', label: 'Respiration du pas', min: 0, max: 0.6, step: 0.01, value: 0 },
+        },
+        'Rendu': {
+          rendu: { type: 'segmented', label: 'Rendu', options: { aplat: 'Aplats', bandes: 'Bandes', lignes: 'Lignes' }, value: 'bandes' },
+          bande: { type: 'range', label: 'Largeur des bandes (itérations)', min: 0.5, max: 6, step: 0.1, value: 1, show: (q) => q.rendu !== 'aplat' },
+          ombre: { type: 'range', label: 'Ombre des itérations', min: 0, max: 1, step: 0.01, value: 0.45 },
+          trait: { type: 'range', label: 'Épaisseur des lignes', min: 0.5, max: 4, step: 0.1, value: 1.4, show: (q) => q.rendu === 'lignes' },
+          montrer: { type: 'toggle', label: 'Montrer les racines', value: true },
+        },
+        'Marque': {
+          logo: { type: 'toggle', label: 'Autre pas dans le logo', value: false },
+          relaxLogo: { type: 'range', label: 'Pas dans le logo', min: 0.3, max: 1.95, step: 0.01, value: 1.6, show: (q) => q.logo },
+          tailleLogo: { type: 'range', label: 'Taille du logo', min: 0.2, max: 0.95, step: 0.01, value: 0.6, show: (q) => q.logo },
+        },
+        'Couleurs': {
+          fond: { type: 'color', label: 'Fond', value: '#0e0e10' },
+          couleurs: { type: 'palette', label: 'Une couleur par racine', value: ['#ef5a2f', '#edd14b', '#486cfc', '#f272ba', '#f4f1ea'] },
+          accent: { type: 'color', label: 'Racines et non-convergence', value: '#f4f1ea' },
+        },
+      },
+      presets: {
+        'Trois racines': {},
+        'Aplats': { rendu: 'aplat', ombre: 0.7, racines: 5, couleurs: [BIEN[1], BIEN[2], BIEN[3], BIEN[4]], fond: BIEN[0], accent: '#111111', orbite: 0.5 },
+        'Lignes': { rendu: 'lignes', racines: 4, fond: '#f2efe8', couleurs: ['#111111', '#e5452a'], accent: '#e5452a', bande: 1, trait: 1.2, ombre: 0 },
+        'Spirales': { torsion: 34, relaxation: 1.1, racines: 3, couleurs: [LU[1], LU[2], LU[3]], fond: LU[0], bande: 1.4 },
+        'Effiloché': { relaxation: 1.72, racines: 4, disposition: 'hasard', ombre: 0.3, couleurs: TH.slice(1, 5), fond: '#0c0c14' },
+        'Huit racines': { racines: 8, disposition: 'hasard', zoom: 0.8, couleurs: KB.slice(1), fond: KB[0], bande: 2 },
+        'Respiration': { racines: 3, respiration: 0.45, relaxation: 1.3, couleurs: [MEN[2], MEN[3], MEN[0]], fond: MEN[1] },
+        'Logo': { logo: true, relaxLogo: 1.78, racines: 3, rendu: 'bandes', bande: 1.5, ombre: 0.6, couleurs: ['#ef5a2f', '#2e2e34', '#f4f1ea'], accent: '#ef5a2f', orbite: 0.2 },
+        'Pyramides': { racines: 6, disposition: 'ligne', couleurs: PY.slice(1), fond: PY[0], zoom: 1.4, rendu: 'bandes', bande: 2.5 },
+      },
+      brand(colors) {
+        const lum = (x) => { const c = rgbf(x); return c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114; };
+        const s = colors.slice().sort((a, b) => lum(a) - lum(b)), rest = s.slice(1);
+        return { fond: s[0], couleurs: rest.length ? rest : ['#ffffff'], accent: s[s.length - 1] };
+      },
+      pointer: {
+        down: (q) => {
+          const i = nearest(q.x, q.y);
+          grab = i >= 0 ? { i, dx: 0, dy: 0 } : { spin: true, a0: angleAt(q.x, q.y), s0: spin };
+        },
+        drag: (q) => {
+          if (!grab) return;
+          if (grab.spin) { spin = grab.s0 + angleAt(q.x, q.y) - grab.a0; return; }
+          const z = toPlane(q.x, q.y), r = roots[grab.i];
+          // la racine suit le pointeur : on corrige sa position de base pour que l'orbite reste centrée sur elle
+          const cur = rootNow(grab.i, lastT, true); r.bx += z[0] - cur[0]; r.by += z[1] - cur[1];
+        },
+        up: () => { grab = null; },
+        wheel: (q, dy) => { app.set('relaxation', Math.max(0.3, Math.min(1.95, +(p.relaxation + (dy > 0 ? -0.02 : 0.02)).toFixed(2)))); },
+      },
+      onChange(k) { if (k === 'racines' || k === 'disposition' || k === '*') rootsKey = ''; if (k === '*') spin = 0; logoDirty = true; },
+      onSeed() { rootsKey = ''; },
+      export: { name: 'bassins-newton', svg: () => toSVG() },
+    });
+    const p = app.params;
+    const rgbf = (hx) => { const n = parseInt(String(hx).slice(1, 7), 16) || 0; return [(n >> 16 & 255) / 255, (n >> 8 & 255) / 255, (n & 255) / 255]; };
+    let lastT = 0;
+
+    // ——— Racines : position de base (unités du plan), plus une petite orbite propre à chacune ———
+    function makeRoots() {
+      const key = [p.racines, p.disposition].join(); if (key === rootsKey) return; rootsKey = key;
+      const rng = app.rng(), n = p.racines; roots = [];
+      for (let i = 0; i < n; i++) {
+        let bx, by;
+        if (p.disposition === 'polygone') { const a = i / n * Math.PI * 2 - Math.PI / 2; bx = Math.cos(a); by = Math.sin(a); }
+        else if (p.disposition === 'ligne') { bx = (i / (n - 1) - 0.5) * 2.2; by = (rng() - 0.5) * 0.5; }
+        else { const a = rng() * Math.PI * 2, r = 0.35 + rng() * 0.75; bx = Math.cos(a) * r; by = Math.sin(a) * r; }
+        roots.push({ bx, by, ph: rng() * Math.PI * 2, f: 0.6 + rng() * 0.8, rx: 0.5 + rng() * 0.5, ry: 0.5 + rng() * 0.5 });
+      }
+    }
+    function rootNow(i, t, noSpin) {
+      const r = roots[i], o = p.orbite * 0.28, a = t * p.vitesse * r.f + r.ph;
+      let x = r.bx + Math.cos(a) * o * r.rx, y = r.by + Math.sin(a * 1.3) * o * r.ry;
+      if (!noSpin) { const c = Math.cos(spin), s = Math.sin(spin); [x, y] = [x * c - y * s, x * s + y * c]; }
+      return [x, y];
+    }
+    const scaleOf = () => { const { w, h } = app.size; return Math.min(w, h) * 0.36 * p.zoom; };
+    function toPlane(x, y) {
+      const { w, h } = app.size, S = scaleOf(), u = (x - w / 2) / S, v = (y - h / 2) / S, c = Math.cos(-spin), s = Math.sin(-spin);
+      return [u * c - v * s, u * s + v * c];
+    }
+    function angleAt(x, y) { const { w, h } = app.size; return Math.atan2(y - h / 2, x - w / 2); }
+    function nearest(x, y) {
+      const { w, h } = app.size, S = scaleOf(); let best = -1, bd = 28;
+      roots.forEach((r, i) => { const [u, v] = rootNow(i, lastT); const d = Math.hypot(w / 2 + u * S - x, h / 2 + v * S - y); if (d < bd) { bd = d; best = i; } });
+      return best;
+    }
+
+    // ——— Shader ———
+    const VS = `#version 300 es
+    layout(location = 0) in vec2 aP;
+    void main() { gl_Position = vec4(aP, 0., 1.); }`;
+    const FS = `#version 300 es
+    precision highp float;
+    uniform vec2 uSize, uA, uA2;
+    uniform float uDpr, uS, uBand, uShade, uLine, uGrain, uVig, uFrame, uShow;
+    uniform int uN, uNC, uMode;
+    uniform vec2 uR[${MAXR}];
+    uniform vec3 uC[${MAXC}], uBg, uAcc;
+    uniform sampler2D uLogo;
+    uniform vec4 uLogoR;
+    out vec4 o;
+    float hash(vec2 p) { uvec2 q = uvec2(ivec2(p)) * uvec2(1597334673u, 3812015801u); uint n = (q.x ^ q.y) * 1597334673u; n ^= n >> 16; n *= 2246822519u; n ^= n >> 13; return float(n) / 4294967295.; }
+    vec2 cmul(vec2 a, vec2 b) { return vec2(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x); }
+    vec2 cinv(vec2 a) { return vec2(a.x, -a.y) / dot(a, a); }
+    float logoAt(vec2 px) {
+      vec2 uv = (px - uLogoR.xy) / uLogoR.z + 0.5;
+      if (uLogoR.w < 0.5 || uv.x < 0. || uv.y < 0. || uv.x > 1. || uv.y > 1.) return 0.;
+      return texture(uLogo, uv).r;
+    }
+    void main() {
+      vec2 px = vec2(gl_FragCoord.x, uSize.y * uDpr - gl_FragCoord.y) / uDpr;
+      vec2 z = (px - uSize * 0.5) / uS;
+      vec2 a = logoAt(px) > 0.5 ? uA2 : uA;
+      int k = -1; float it = float(${MAXI}), dk = 1.;
+      const float EPS = 1e-3;
+      for (int i = 0; i < ${MAXI}; i++) {
+        // p/p' = 1 / Σ 1/(z − rⱼ)
+        vec2 s = vec2(0.); float dmin = 1e9; int jm = 0;
+        for (int j = 0; j < ${MAXR}; j++) {
+          if (j >= uN) break;
+          vec2 d = z - uR[j]; float dd = dot(d, d);
+          if (dd < dmin) { dmin = dd; jm = j; }
+          s += vec2(d.x, -d.y) / dd;
+        }
+        if (dmin < EPS * EPS) { k = jm; dk = sqrt(dmin); it = float(i); break; }
+        z -= cmul(a, cinv(s));
+      }
+      vec3 col;
+      if (k < 0) col = mix(uBg, uAcc, 0.35);
+      else {
+        // nombre d'itérations lissé : la convergence est quadratique, log(d)/log(eps) double à chaque pas
+        float f = it - log2(max(1., log(max(dk, 1e-30)) / log(EPS)));
+        f = max(f, 0.);
+        vec3 c = uC[k - (k / uNC) * uNC];
+        float sh = uShade * (1. - exp(-f * 0.16));
+        if (uMode == 0) col = mix(c, uBg, sh);
+        else if (uMode == 1) {
+          float b = mod(floor(f / uBand), 2.);
+          col = mix(c, uBg, sh * 0.6 + b * (0.25 + 0.4 * uShade));
+        } else {
+          float g = f / uBand, w = fwidth(g), l = abs(fract(g + 0.5) - 0.5);
+          float line = 1. - smoothstep(w * uLine * 0.5, w * (uLine * 0.5 + 1.), l);
+          col = mix(uBg, c, line * (1. - sh * 0.5));
+        }
+      }
+      // les racines : un point cerclé
+      if (uShow > 0.5) for (int j = 0; j < ${MAXR}; j++) {
+        if (j >= uN) break;
+        float d = length(px - (uSize * 0.5 + uR[j] * uS));
+        col = mix(col, uBg, 1. - smoothstep(6.5, 8., d));
+        col = mix(col, uAcc, 1. - smoothstep(3.2, 4.4, d));
+        col = mix(col, uAcc, (1. - smoothstep(0.7, 1.5, abs(d - 10.))));
+      }
+      vec2 uv = (px - uSize * 0.5) / (uSize * 0.5);
+      col *= 1. - uVig * 0.85 * smoothstep(0.35, 1.25, length(uv));
+      col += (hash(gl_FragCoord.xy + uFrame * 17.31) - 0.5) * uGrain * 0.22;
+      o = vec4(col, 1.);
+    }`;
+    function sh(type, src) { const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s); if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s)); return s; }
+    const prog = gl.createProgram();
+    gl.attachShader(prog, sh(gl.VERTEX_SHADER, VS)); gl.attachShader(prog, sh(gl.FRAGMENT_SHADER, FS));
+    gl.linkProgram(prog);
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
+    const UL = {}, u = (n) => (n in UL ? UL[n] : (UL[n] = gl.getUniformLocation(prog, n)));
+    const vao = gl.createVertexArray(); gl.bindVertexArray(vao);
+    const vb = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, vb);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+    const tLogo = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, tLogo);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+    // ——— Logo : un masque carré (alpha ou sombre sur clair) ———
+    let logoMask = null; const LN = 256;
+    function buildLogo() {
+      const img0 = app.logoImg, cv = document.createElement('canvas'); cv.width = cv.height = LN;
+      const x = cv.getContext('2d', { willReadFrequently: true });
+      if (img0) {
+        const iw = img0.naturalWidth || img0.width, ih = img0.naturalHeight || img0.height, k = LN * 0.96 / Math.max(iw, ih);
+        x.drawImage(img0, (LN - iw * k) / 2, (LN - ih * k) / 2, iw * k, ih * k);
+      } else {
+        x.fillStyle = '#000'; x.beginPath(); x.arc(LN / 2, LN / 2, LN * 0.46, 0, Math.PI * 2); x.arc(LN / 2, LN / 2, LN * 0.27, 0, Math.PI * 2, true); x.fill('evenodd');
+        x.fillRect(LN * 0.43, LN * 0.04, LN * 0.14, LN * 0.92);
+      }
+      const d = x.getImageData(0, 0, LN, LN).data; let transp = 0; for (let i = 3; i < d.length; i += 4) if (d[i] < 128) transp++;
+      const useA = transp > LN * LN * 0.05; logoMask = new Uint8Array(LN * LN);
+      for (let i = 0; i < LN * LN; i++) { const l = (d[i * 4] * 0.2126 + d[i * 4 + 1] * 0.7152 + d[i * 4 + 2] * 0.0722) / 255; logoMask[i] = (useA ? d[i * 4 + 3] > 128 : d[i * 4 + 3] > 128 && l < 0.5) ? 255 : 0; }
+      gl.bindTexture(gl.TEXTURE_2D, tLogo); gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, LN, LN, 0, gl.RED, gl.UNSIGNED_BYTE, logoMask);
+      logoOk = true; logoDirty = false;
+    }
+
+    // paramètres de l'itération à l'instant t (partagés par le shader et l'export)
+    function state(t) {
+      const { w, h } = app.size, U = Math.min(w, h), br = p.respiration * Math.sin(t * p.vitesse * 0.9);
+      const rel = Math.max(0.2, Math.min(1.98, p.relaxation + br)), tw = p.torsion * Math.PI / 180;
+      const R = roots.map((_, i) => rootNow(i, t));
+      return { w, h, S: scaleOf(), R, A: [rel * Math.cos(tw), rel * Math.sin(tw)], A2: [p.relaxLogo * Math.cos(tw), p.relaxLogo * Math.sin(tw)], L: [w / 2, h / 2, U * p.tailleLogo, p.logo && logoOk ? 1 : 0] };
+    }
+
+    app.loop((t, dt) => {
+      dt = Math.min(0.1, dt || 0);
+      makeRoots();
+      if (!app.thumbnail && !(grab && grab.spin)) spin += p.rotation * Math.PI / 180 * dt;
+      lastT = t;
+      if (p.logo && logoDirty) buildLogo();
+      const St = state(t);
+      gl.viewport(0, 0, canvas.width, canvas.height);
+      gl.useProgram(prog);
+      gl.uniform2f(u('uSize'), St.w, St.h); gl.uniform1f(u('uDpr'), canvas.width / St.w); gl.uniform1f(u('uS'), St.S);
+      gl.uniform2f(u('uA'), St.A[0], St.A[1]); gl.uniform2f(u('uA2'), St.A2[0], St.A2[1]);
+      const R = new Float32Array(MAXR * 2); St.R.forEach((r, i) => { R[i * 2] = r[0]; R[i * 2 + 1] = r[1]; });
+      gl.uniform2fv(u('uR[0]'), R); gl.uniform1i(u('uN'), roots.length);
+      const pal = (p.couleurs && p.couleurs.length ? p.couleurs : ['#ffffff']).slice(0, MAXC), flat = [];
+      for (let i = 0; i < MAXC; i++) flat.push(...rgbf(pal[Math.min(i, pal.length - 1)]));
+      gl.uniform3fv(u('uC[0]'), flat); gl.uniform1i(u('uNC'), pal.length);
+      gl.uniform3fv(u('uBg'), rgbf(p.fond)); gl.uniform3fv(u('uAcc'), rgbf(p.accent));
+      gl.uniform1i(u('uMode'), p.rendu === 'aplat' ? 0 : p.rendu === 'bandes' ? 1 : 2);
+      gl.uniform1f(u('uBand'), p.bande); gl.uniform1f(u('uShade'), p.ombre); gl.uniform1f(u('uLine'), p.trait); gl.uniform1f(u('uShow'), p.montrer ? 1 : 0);
+      gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, tLogo); gl.uniform1i(u('uLogo'), 0);
+      gl.uniform4f(u('uLogoR'), St.L[0], St.L[1], St.L[2], St.L[3]);
+      gl.uniform1f(u('uGrain'), p.grain ?? 0); gl.uniform1f(u('uVig'), p.vignette ?? 0); gl.uniform1f(u('uFrame'), (frame++) % 997);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+    });
+
+    // ——— Export SVG : la même itération en JS sur une grille fine, puis des aplats par couleur (bandes horizontales) ———
+    function toSVG() {
+      const St = state(lastT), { w, h, S } = St, cell = 2, nx = Math.ceil(w / cell), ny = Math.ceil(h / cell), C = p.couleurs.map(rgbf), bg = rgbf(p.fond), ac = rgbf(p.accent);
+      const EPS = 1e-3, LE = Math.log(EPS), mode = p.rendu, hx = (c) => '#' + c.map((v) => Math.max(0, Math.min(255, Math.round(v * 255))).toString(16).padStart(2, '0')).join('');
+      const mix = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+      const F = new Float32Array(nx * ny), K = new Int8Array(nx * ny);
+      for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+        const px = (i + 0.5) * cell, py = (j + 0.5) * cell; let zx = (px - w / 2) / S, zy = (py - h / 2) / S;
+        let A = St.A; if (St.L[3]) { const ux = Math.floor(((px - St.L[0]) / St.L[2] + 0.5) * LN), uy = Math.floor(((py - St.L[1]) / St.L[2] + 0.5) * LN); if (ux >= 0 && uy >= 0 && ux < LN && uy < LN && logoMask[uy * LN + ux]) A = St.A2; }
+        let k = -1, it = MAXI, dk = 1;
+        for (let n = 0; n < MAXI; n++) {
+          let sx = 0, sy = 0, dmin = 1e9, jm = 0;
+          for (let q = 0; q < St.R.length; q++) { const dx = zx - St.R[q][0], dy = zy - St.R[q][1], dd = dx * dx + dy * dy; if (dd < dmin) { dmin = dd; jm = q; } sx += dx / dd; sy -= dy / dd; }
+          if (dmin < EPS * EPS) { k = jm; dk = Math.sqrt(dmin); it = n; break; }
+          const m = sx * sx + sy * sy, ix = sx / m, iy = -sy / m;
+          zx -= A[0] * ix - A[1] * iy; zy -= A[0] * iy + A[1] * ix;
+        }
+        K[j * nx + i] = k; F[j * nx + i] = k < 0 ? 0 : Math.max(0, it - Math.log2(Math.max(1, Math.log(Math.max(dk, 1e-30)) / LE)));
+      }
+      // couleurs quantifiées (comme le rendu, sans grain) ; en mode lignes, une cellule est un trait si la bande change à côté
+      const colAt = (i, j) => {
+        const id = j * nx + i, k = K[id]; if (k < 0) return mix(bg, ac, 0.35);
+        const f = F[id], c = C[k % C.length], shd = p.ombre * (1 - Math.exp(-f * 0.16));
+        if (mode === 'aplat') return mix(c, bg, Math.round(shd * 8) / 8);
+        if (mode === 'bandes') return mix(c, bg, Math.round((shd * 0.6) * 8) / 8 + (Math.floor(f / p.bande) % 2) * (0.25 + 0.4 * p.ombre));
+        const b = Math.floor(f / p.bande + 0.5); let edge = false;
+        for (const [di, dj] of [[1, 0], [0, 1]]) { const i2 = i + di, j2 = j + dj; if (i2 < nx && j2 < ny) { const id2 = j2 * nx + i2; if (K[id2] !== k || Math.floor(F[id2] / p.bande + 0.5) !== b) edge = true; } }
+        return edge ? mix(c, bg, Math.round(shd * 0.5 * 4) / 4) : bg;
+      };
+      const runs = new Map(), bgHex = hx(bg);
+      for (let j = 0; j < ny; j++) {
+        let i = 0;
+        while (i < nx) {
+          const c = hx(colAt(i, j)); let e = i + 1; while (e < nx && hx(colAt(e, j)) === c) e++;
+          if (c !== bgHex) { let L = runs.get(c); if (!L) runs.set(c, L = []); L.push(`M${i * cell} ${j * cell}h${(e - i) * cell}v${cell}h${-(e - i) * cell}z`); }
+          i = e;
+        }
+      }
+      const out = [`<rect width="100%" height="100%" fill="${p.fond}"/>`];
+      for (const [c, L] of runs) out.push(`<path fill="${c}" d="${L.join('')}"/>`);
+      if (p.montrer) St.R.forEach((r) => { const x = (w / 2 + r[0] * S).toFixed(1), y = (h / 2 + r[1] * S).toFixed(1); out.push(`<circle cx="${x}" cy="${y}" r="7.2" fill="${p.fond}"/><circle cx="${x}" cy="${y}" r="3.8" fill="${p.accent}"/><circle cx="${x}" cy="${y}" r="10" fill="none" stroke="${p.accent}" stroke-width="1.4"/>`); });
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" shape-rendering="crispEdges">${out.join('')}</svg>`;
+    }
+  </script>
+</body>
+</html>
