@@ -1,0 +1,15 @@
+{
+  "slug": "arbre-pythagore",
+  "title": "Arbre de Pythagore",
+  "type": "motion",
+  "description": "Un carré, un triangle rectangle, deux carrés, et ainsi de suite : un arbre fractal qui ploie au vent, penche avec l'angle et peut se tailler en logo.",
+  "tags": ["fractale", "arbre", "geometrie", "vectoriel", "logo", "svg"],
+  "inspiration": [
+    "Albert E. Bosman, l'arbre de Pythagore (1942)",
+    "Le théorème de Pythagore, carrés sur les côtés d'un triangle rectangle",
+    "L'art topiaire, les arbres taillés en formes"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}
