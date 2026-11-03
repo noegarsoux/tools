@@ -1,0 +1,15 @@
+{
+  "slug": "automates",
+  "title": "Automates élémentaires",
+  "type": "motion",
+  "description": "Une rangée de cellules et une règle à trois voisins : génération après génération, les 256 règles de Wolfram tissent triangles, désordre et structures.",
+  "tags": ["mathematiques", "grille", "motif", "pixel", "logo", "svg"],
+  "inspiration": [
+    "Stephen Wolfram, les automates cellulaires élémentaires (1983)",
+    "Matthew Cook, l'universalité de la règle 110 (2004)",
+    "Les coquillages de Conus textile, motifs de la règle 30"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}
