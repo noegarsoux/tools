@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Toile d'espace-temps</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Toile d'espace-temps : l'image de la nappe de caoutchouc. Chaque masse creuse un puits de potentiel
+    // φ = Σ m / √(d² + s²) (adouci par s pour ne pas diverger). À plat, les nœuds de la grille glissent vers les masses
+    // en suivant le gradient ; en nappe, la grille s'enfonce de φ et on la regarde en perspective. Les masses tournent
+    // les unes autour des autres ; le logo, échantillonné en quelques centaines de points, pèse comme un astre.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const BIEN = PAL('biennale'), GLY = PAL('glyphes'), SAL = PAL('salon'), MEN = PAL('menthe'), KB = PAL('kegelbahn');
+
+    let masses = [], massKey = '', simT = 0, grab = null, logoF = null, logoKey = '', yawU = 0;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.03, vignette: 0.14 },
+      hint: 'Glissez une masse pour la déplacer · touchez ailleurs pour en poser une · molette : finesse de la grille',
+      notes: 'Pour faire sentir la relativité générale, on dessine souvent l\'espace comme une nappe tendue que les masses creusent : une bille qui passe près d\'un puits y roule et s\'y enroule. Ce n\'est qu\'une image, la gravitation courbe l\'espace et le temps à la fois, mais elle dit l\'essentiel : plus la masse est grande et concentrée, plus le puits est profond. Ici chaque masse creuse φ = m / √(d² + s²), adouci pour ne pas plonger à l\'infini. À plat, la grille se pince vers les masses ; en nappe, elle s\'enfonce et on la voit en perspective. Les masses tournent l\'une autour de l\'autre, le logo pèse comme un astre immobile.',
+      params: {
+        'Masses': {
+          nombre: { type: 'range', label: 'Masses', min: 0, max: 8, step: 1, value: 3 },
+          masse: { type: 'range', label: 'Masse', min: 0.1, max: 2, step: 0.01, value: 0.8 },
+          douceur: { type: 'range', label: 'Rayon des puits', min: 0.02, max: 0.4, step: 0.005, value: 0.11 },
+          orbite: { type: 'range', label: 'Rayon des orbites', min: 0, max: 0.9, step: 0.01, value: 0.42 },
+          vitesse: { type: 'range', label: 'Vitesse', min: 0, max: 2, step: 0.01, value: 0.35 },
+        },
+        'Toile': {
+          vue: { type: 'segmented', label: 'Vue', options: { nappe: 'Nappe', plan: 'À plat' }, value: 'nappe' },
+          maillage: { type: 'segmented', label: 'Maillage', options: { carre: 'Carreaux', lignes: 'Lignes' }, value: 'carre' },
+          finesse: { type: 'range', label: 'Lignes', min: 10, max: 120, step: 1, value: 46 },
+          courbure: { type: 'range', label: 'Courbure', min: 0, max: 1, step: 0.01, value: 0.5 },
+          inclinaison: { type: 'range', label: 'Inclinaison', min: 20, max: 85, step: 1, value: 58, show: (q) => q.vue === 'nappe' },
+          rotation: { type: 'range', label: 'Rotation (°/s)', min: -20, max: 20, step: 0.5, value: 3, show: (q) => q.vue === 'nappe' },
+        },
+        'Logo pesant': {
+          logo: { type: 'toggle', label: 'Le logo pèse', value: false },
+          masseLogo: { type: 'range', label: 'Poids du logo', min: 0.2, max: 4, step: 0.05, value: 1.6, show: (q) => q.logo },
+          image: { type: 'file', label: 'Logo', accept: 'image/*', show: (q) => q.logo },
+        },
+        'Trait': {
+          epaisseur: { type: 'range', label: 'Épaisseur', min: 0.3, max: 3, step: 0.05, value: 0.9 },
+          teinte: { type: 'segmented', label: 'Couleur selon', options: { profondeur: 'Profondeur', uni: 'Une seule' }, value: 'profondeur' },
+          astres: { type: 'toggle', label: 'Montrer les masses', value: true },
+        },
+        'Couleurs': {
+          fond: { type: 'color', label: 'Fond', value: '#0b0c12' },
+          couleurs: { type: 'palette', label: 'Du plat au fond des puits', value: ['#3a4466', '#486cfc', '#f272ba', '#edd14b'] },
+          accent: { type: 'color', label: 'Masses et logo', value: '#f4f1ea' },
+        },
+      },
+      presets: {
+        'Nappe': {},
+        'À plat': { vue: 'plan', finesse: 56, courbure: 0.55, couleurs: ['#3a4466', '#7fe0c2', '#f4f1ea'], nombre: 4 },
+        'Binaire': { nombre: 2, masse: 1.4, orbite: 0.25, vitesse: 0.8, douceur: 0.08, finesse: 70, couleurs: ['#2a2a33', '#ef5a2f', '#edd14b'], inclinaison: 64 },
+        'Puits': { nombre: 1, masse: 2, orbite: 0, douceur: 0.06, courbure: 0.8, finesse: 60, inclinaison: 40, couleurs: ['#486cfc', '#f272ba', '#f4f1ea'], maillage: 'carre' },
+        'Lignes': { maillage: 'lignes', finesse: 90, epaisseur: 0.8, couleurs: ['#5a5a66', '#f4f1ea'], nombre: 5, inclinaison: 62, masse: 1, courbure: 0.85 },
+        'Plan quadrillé': { vue: 'plan', maillage: 'carre', finesse: 80, epaisseur: 0.6, teinte: 'uni', couleurs: ['#1b1b1f'], fond: '#f1ece1', accent: '#ef5a2f', courbure: 0.6, nombre: 5 },
+        'Logo': { logo: true, nombre: 2, masse: 0.5, masseLogo: 3.2, finesse: 70, courbure: 0.7, couleurs: ['#3a3a44', '#5a5a66', '#ef5a2f'], accent: '#ef5a2f', inclinaison: 52 },
+        'Biennale': { vue: 'plan', fond: BIEN[0], couleurs: [BIEN[1], BIEN[2]], accent: BIEN[2], finesse: 50, epaisseur: 1.2 },
+        'Menthe': { fond: MEN[1], couleurs: [MEN[2], MEN[3], MEN[0]], accent: MEN[0], nombre: 4 },
+        'Kegelbahn': { fond: KB[0], couleurs: [KB[1], KB[2]], accent: KB[2], maillage: 'lignes', finesse: 70, nombre: 3, courbure: 0.85, inclinaison: 50 },
+      },
+      brand(colors) {
+        const s = colors.slice().sort((a, b) => lum(a) - lum(b)), rest = s.slice(1);
+        return { fond: s[0], couleurs: rest.length ? rest : ['#ffffff'], accent: s[s.length - 1] };
+      },
+      pointer: {
+        down: (q) => pointerDown(q.x, q.y),
+        drag: (q) => { if (grab) { const u = unproject(q.x, q.y); if (u) { grab.m.px = u[0]; grab.m.pz = u[1]; } } },
+        up: () => { if (grab) { const m = grab.m; m.r = Math.hypot(m.px, m.pz); m.a0 = Math.atan2(m.pz, m.px) - m.w * simT; m.free = false; } grab = null; },
+        wheel: (q, dy) => app.set('finesse', Math.max(10, Math.min(120, p.finesse + (dy > 0 ? -2 : 2)))),
+      },
+      onChange(k) { if (['*', 'nombre', 'orbite', 'masse'].includes(k)) massKey = ''; if (['*', 'logo', 'image', 'masseLogo', 'douceur'].includes(k)) logoKey = ''; },
+      onSeed() { massKey = ''; },
+      export: { name: 'espace-temps', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    function hex(x) { const n = parseInt(x.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
+    function lum(x) { const c = hex(x); return (c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114) / 255; }
+    function mix(a, b, t) { const A = hex(a), B = hex(b); return '#' + A.map((v, i) => Math.round(v + (B[i] - v) * t).toString(16).padStart(2, '0')).join(''); }
+
+    // ——— Masses en orbite (troisième loi de Kepler, à peu près) ———
+    function buildMasses() {
+      const key = [p.nombre, p.orbite, p.masse].join(); if (key === massKey) return; massKey = key;
+      const rng = app.rng(); masses = [];
+      for (let i = 0; i < p.nombre; i++) {
+        const r = p.nombre === 1 ? p.orbite * 0.3 : p.orbite * (0.45 + 0.55 * (i + rng() * 0.5) / p.nombre), a0 = i / Math.max(1, p.nombre) * TAU + rng() * 0.6;
+        const w = (0.25 + 0.35 / Math.pow(Math.max(0.15, r), 1.5) * 0.25) * (i % 2 && p.nombre > 2 ? -1 : 1);
+        masses.push({ r, a0, w, m: p.masse * (0.6 + rng() * 0.8), px: 0, pz: 0, free: false });
+      }
+    }
+    function placeMasses(t) { for (const m of masses) { if (grab && grab.m === m) continue; const a = m.a0 + m.w * t * p.vitesse * 2.2; m.px = Math.cos(a) * m.r; m.pz = Math.sin(a) * m.r; } }
+
+    // ——— Le logo : potentiel et déplacement précalculés sur une grille grossière ———
+    const LG = 72;
+    function buildLogo() {
+      const img0 = p.image || app.logoImg, key = [p.logo, p.masseLogo, p.douceur, img0 ? (img0.src || 'c') : 'demo'].join(); if (key === logoKey) return; logoKey = key;
+      logoF = null; if (!p.logo) return;
+      const M = 120, c = document.createElement('canvas'); c.width = c.height = M; const x = c.getContext('2d', { willReadFrequently: true }), L = M * 0.9, cx = M / 2;
+      if (img0) { const iw = img0.naturalWidth || img0.width, ih = img0.naturalHeight || img0.height, s = L / Math.max(iw, ih); x.drawImage(img0, cx - iw * s / 2, cx - ih * s / 2, iw * s, ih * s); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(cx, cx, L * 0.48, 0, TAU); x.arc(cx, cx, L * 0.27, 0, TAU, true); x.fill('evenodd'); x.fillRect(cx - L * 0.07, cx - L * 0.5, L * 0.14, L); }
+      const d = x.getImageData(0, 0, M, M).data; let transp = 0; for (let i = 3; i < d.length; i += 4) if (d[i] < 128) transp++; const useA = transp > M * M * 0.05;
+      const inside = new Uint8Array(M * M), S = [];
+      for (let j = 0; j < M; j++) for (let i = 0; i < M; i++) { const o = (j * M + i) * 4, l = (d[o] * 0.2126 + d[o + 1] * 0.7152 + d[o + 2] * 0.0722) / 255; if (useA ? d[o + 3] > 128 : d[o + 3] > 128 && l < 0.5) { inside[j * M + i] = 1; if ((i + j * 3) % 4 === 0 && j % 2 === 0) S.push([(i + 0.5) / M * 2 - 1, (j + 0.5) / M * 2 - 1]); } }
+      // le logo occupe [-0.55, 0.55]² ; sa masse est répartie sur ses points
+      const ext = 0.55, mm = p.masseLogo / Math.max(1, S.length), s2 = (p.douceur * 0.7) ** 2, phi = new Float32Array(LG * LG), gx = new Float32Array(LG * LG), gz = new Float32Array(LG * LG);
+      for (let j = 0; j < LG; j++) for (let i = 0; i < LG; i++) {
+        const X = (i / (LG - 1)) * 2.8 - 1.4, Z = (j / (LG - 1)) * 2.8 - 1.4; let f = 0, ax = 0, az = 0;
+        for (const [sx, sz] of S) { const dx = sx * ext - X, dz = sz * ext - Z, q = dx * dx + dz * dz + s2, iq = 1 / Math.sqrt(q); f += mm * iq; ax += mm * dx / q; az += mm * dz / q; }
+        phi[j * LG + i] = f; gx[j * LG + i] = ax; gz[j * LG + i] = az;
+      }
+      logoF = { phi, gx, gz, inside, M, ext };
+    }
+    function sampleLogo(X, Z) {
+      const u = (X + 1.4) / 2.8 * (LG - 1), v = (Z + 1.4) / 2.8 * (LG - 1); if (u < 0 || v < 0 || u > LG - 1 || v > LG - 1) return [0, 0, 0];
+      const i = Math.min(LG - 2, Math.floor(u)), j = Math.min(LG - 2, Math.floor(v)), fx = u - i, fz = v - j, o = j * LG + i;
+      const B = (A) => (A[o] * (1 - fx) + A[o + 1] * fx) * (1 - fz) + (A[o + LG] * (1 - fx) + A[o + LG + 1] * fx) * fz;
+      return [B(logoF.phi), B(logoF.gx), B(logoF.gz)];
+    }
+    const inLogo = (X, Z) => { if (!logoF) return false; const e = logoF.ext, i = Math.floor((X / e * 0.5 + 0.5) * logoF.M), j = Math.floor((Z / e * 0.5 + 0.5) * logoF.M); return i >= 0 && j >= 0 && i < logoF.M && j < logoF.M && logoF.inside[j * logoF.M + i] === 1; };
+
+    // ——— Potentiel en un point de la toile : profondeur et déplacement ———
+    function field(X, Z) {
+      const s2 = p.douceur * p.douceur; let f = 0, ax = 0, az = 0;
+      for (const m of masses) { const dx = m.px - X, dz = m.pz - Z, q = dx * dx + dz * dz + s2; f += m.m / Math.sqrt(q); ax += m.m * dx / q; az += m.m * dz / q; }
+      if (logoF) { const L = sampleLogo(X, Z); f += L[0]; ax += L[1]; az += L[2]; }
+      return [f, ax, az];
+    }
+
+    // ——— Caméra ———
+    let camC = null;
+    function camera(w, h, t) {
+      if (p.vue === 'plan') {
+        const S = Math.min(w, h) * 0.5, ax = w / S, az = h / S;
+        return { plan: true, ax, az, P: (X, Y, Z) => [w / 2 + X * S, h / 2 + Z * S, 0], S };
+      }
+      const yaw = t * p.rotation * Math.PI / 180 + yawU, tilt = p.inclinaison * Math.PI / 180, cY = Math.cos(yaw), sY = Math.sin(yaw), cT = Math.cos(tilt), sT = Math.sin(tilt), D = 3.2, R = Math.min(w, h) * 0.56;
+      return { plan: false, ax: 1.25, az: 1.25, R, P: (X, Y, Z) => { const x1 = X * cY - Z * sY, z1 = X * sY + Z * cY; const y2 = Y * cT - z1 * sT, z2 = Y * sT + z1 * cT; const s = D / (D + z2); return [w / 2 + x1 * R * s, h / 2 + y2 * R * s + h * 0.04, s]; } };
+    }
+    function unproject(x, y) {
+      const { w, h } = app.size, C = camera(w, h, simT); let best = null, bd = Infinity;
+      if (C.plan) return [(x - w / 2) / C.S, (y - h / 2) / C.S];
+      for (let j = 0; j <= 40; j++) for (let i = 0; i <= 40; i++) { const X = i / 40 * 2.5 - 1.25, Z = j / 40 * 2.5 - 1.25, q = C.P(X, 0, Z), d = (q[0] - x) ** 2 + (q[1] - y) ** 2; if (d < bd) { bd = d; best = [X, Z]; } }
+      for (let j = -6; j <= 6; j++) for (let i = -6; i <= 6; i++) { const X = best[0] + i * 0.0104, Z = best[1] + j * 0.0104, q = C.P(X, 0, Z), d = (q[0] - x) ** 2 + (q[1] - y) ** 2; if (d < bd) { bd = d; best = [X, Z]; } }
+      return Math.abs(best[0]) < 1.25 && Math.abs(best[1]) < 1.25 ? best : null;
+    }
+    function pointerDown(x, y) {
+      const { w, h } = app.size, C = camera(w, h, simT); let near = null, nd = 40 * 40;
+      for (const m of masses) { const q = C.P(m.px, depthAt(m.px, m.pz), m.pz), d = (q[0] - x) ** 2 + (q[1] - y) ** 2; if (d < nd) { nd = d; near = m; } }
+      if (near) { grab = { m: near }; return; }
+      const u = unproject(x, y); if (!u) return;
+      if (masses.length >= 8) masses.shift();
+      const r = Math.hypot(u[0], u[1]), m = { r, a0: Math.atan2(u[1], u[0]) - 0.3 * simT, w: 0.3 * (Math.random() < 0.5 ? -1 : 1), m: p.masse, px: u[0], pz: u[1] };
+      masses.push(m); grab = { m };
+    }
+    // profondeur : φ ramené à une échelle visuelle (√ pour garder les puits lisibles)
+    const sumM = () => masses.reduce((a, m) => a + m.m, 0) + (logoF ? p.masseLogo : 0);
+    // profondeur saturée : les puits restent dans le cadre, le bord de la toile reste à plat
+    const sink = (f) => p.courbure * 0.4 * f / (1 + f / 5);
+    const depthOf = (f) => sink(f) - sink(sumM() / 1.35);
+    const depthAt = (X, Z) => depthOf(field(X, Z)[0]);
+
+    // ——— Lignes : polylignes écran, chaque segment coloré par la profondeur ———
+    const QC = 14;
+    function build(w, h, t) {
+      buildMasses(); buildLogo(); placeMasses(t);
+      const C = camera(w, h, t), n = p.finesse, ax = C.ax, az = C.az, out = new Map(); let maxF = 0;
+      const kP = p.courbure * 9 * Math.min(0.14, Math.max(p.douceur, 0.05)) ** 2 / Math.max(0.6, sumM() * 0.6), base = sumM() / 1.35, capP = 0.12;
+      maxF = Math.sqrt(base + masses.reduce((a, m) => Math.max(a, m.m), 0) / Math.max(0.04, p.douceur) * 0.9 + (logoF ? p.masseLogo * 3 : 0));
+      const add = (key, a, b) => { let L = out.get(key); if (!L) out.set(key, (L = [])); L.push(a[0], a[1], b[0], b[1]); };
+      const node = (X, Z) => {
+        const [f, gx, gz] = field(X, Z);
+        if (C.plan) { const g = Math.hypot(gx, gz) * kP, sat = 1 / (1 + g / capP); return [C.P(X + gx * kP * sat, 0, Z + gz * kP * sat), Math.sqrt(f)]; }
+        return [C.P(X, depthOf(f), Z), Math.sqrt(f)];
+      };
+      const keyOf = (f, X, Z) => (logoF && inLogo(X, Z)) ? -1 : p.teinte === 'uni' ? 0 : Math.max(0, Math.min(QC - 1, Math.round(Math.max(0, Math.min(1, (f - Math.sqrt(base)) / (maxF - Math.sqrt(base)))) * (QC - 1))));
+      const steps = Math.max(48, Math.round(n * 2.6));
+      const families = p.maillage === 'carre' ? [0, 1] : [0];
+      const nx = C.plan ? Math.round(n * ax / Math.max(ax, az)) : n, nz = C.plan ? Math.round(n * az / Math.max(ax, az)) : n;
+      for (const fam of families) {
+        const lines = fam === 0 ? nz : nx, along = fam === 0 ? ax : az, across = fam === 0 ? az : ax;
+        for (let i = 0; i <= lines; i++) {
+          const c = (i / lines * 2 - 1) * across; let prev = null;
+          for (let s = 0; s <= steps; s++) {
+            const a = (s / steps * 2 - 1) * along, X = fam === 0 ? a : c, Z = fam === 0 ? c : a, [q, f] = node(X, Z);
+            if (prev) add(keyOf((f + prev[1]) / 2, X, Z), prev[0], q);
+            prev = [q, f];
+          }
+        }
+      }
+      return { out, C };
+    }
+    function colorOf(key) {
+      if (key < 0) return p.accent;
+      const Cc = p.couleurs.length ? p.couleurs : ['#ffffff']; if (Cc.length === 1 || p.teinte === 'uni') return Cc[0];
+      const u = key / (QC - 1) * (Cc.length - 1), i = Math.min(Cc.length - 2, Math.floor(u)); return mix(Cc[i], Cc[i + 1], u - i);
+    }
+
+    app.loop((t, dt) => {
+      dt = Math.min(0.1, dt || 0);
+      if (!app.thumbnail) simT += dt;
+      const { w, h, dpr } = app.size;
+      const { out, C } = build(w, h, simT);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = p.fond; ctx.fillRect(0, 0, w, h);
+      ctx.lineWidth = p.epaisseur; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+      for (const [key, L] of [...out].sort((a, b) => a[0] - b[0])) {
+        const P2 = new Path2D(); for (let i = 0; i < L.length; i += 4) { P2.moveTo(L[i], L[i + 1]); P2.lineTo(L[i + 2], L[i + 3]); }
+        ctx.strokeStyle = colorOf(key); ctx.stroke(P2);
+      }
+      if (p.astres) { ctx.fillStyle = p.accent; for (const m of masses) { const q = C.P(m.px, C.plan ? 0 : depthAt(m.px, m.pz), m.pz); ctx.beginPath(); ctx.arc(q[0], q[1], Math.max(2.5, 3 + m.m * 4) * (C.plan ? 1 : q[2]), 0, TAU); ctx.fill(); } }
+      app.finish(ctx);
+    });
+
+    function toSVG() {
+      const { w, h } = app.size, f = (v) => +v.toFixed(2), { out, C } = build(w, h, simT);
+      let s = `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><rect width="100%" height="100%" fill="${p.fond}"/><g fill="none" stroke-width="${f(p.epaisseur)}" stroke-linecap="round">`;
+      for (const [key, L] of [...out].sort((a, b) => a[0] - b[0])) { let d = ''; for (let i = 0; i < L.length; i += 4) d += `M${f(L[i])} ${f(L[i + 1])}L${f(L[i + 2])} ${f(L[i + 3])}`; s += `<path d="${d}" stroke="${colorOf(key)}"/>`; }
+      s += '</g>';
+      if (p.astres) for (const m of masses) { const q = C.P(m.px, C.plan ? 0 : depthAt(m.px, m.pz), m.pz); s += `<circle cx="${f(q[0])}" cy="${f(q[1])}" r="${f(Math.max(2.5, 3 + m.m * 4) * (C.plan ? 1 : q[2]))}" fill="${p.accent}"/>`; }
+      return s + '</svg>';
+    }
+  </script>
+</body>
+</html>
