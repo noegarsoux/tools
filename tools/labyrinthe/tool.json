@@ -1,0 +1,15 @@
+{
+  "slug": "labyrinthe",
+  "title": "Labyrinthe",
+  "type": "motion",
+  "description": "Un labyrinthe se creuse case après case, puis la couleur s'y écoule depuis la source en vagues qui suivent les couloirs ; on choisit la source au doigt.",
+  "tags": ["mathematiques", "grille", "graphe", "motif", "logo", "svg"],
+  "inspiration": [
+    "David Wilson, arbres couvrants uniformes par marches aléatoires (1996)",
+    "Jamis Buck, « Mazes for Programmers » (2015)",
+    "Les labyrinthes de pavement des cathédrales, Chartres et Amiens"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}
