@@ -1,0 +1,241 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Afficheur à palettes</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Afficheur à palettes : chaque pastille est un disque aimanté, une face claire, une face sombre, qui pivote
+    // sur son axe quand la bobine derrière elle change de sens. Le panneau est commandé colonne par colonne :
+    // une nouvelle image traverse donc l'afficheur en un balayage. Les images sont des champs continus (ondes,
+    // spirale, plasma) tramés par une matrice de Bayer, des motifs discrets (pluie, damier), le jeu de la vie, ou le logo.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const BIEN = PAL('biennale'), MEN = PAL('menthe'), KB = PAL('kegelbahn');
+    const BAYER = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5].map((v) => (v + 0.5) / 16);
+    const SCENES = ['logo', 'ondes', 'vie', 'spirale', 'pluie', 'plasma', 'damier'];
+
+    let simT = 0, G = null, gKey = '', life = null, lifeT = 0, drops = [], painted = new Map(), logoM = null, logoKey = '', sceneT0 = 0, sceneI = 0;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.03, vignette: 0.14 },
+      hint: 'Glissez pour retourner les pastilles · molette : taille des pastilles',
+      notes: 'Avant les écrans à diodes, les bus, les gares et les stades affichaient leurs messages avec des pastilles aimantées : un petit disque peint d\'une couleur vive sur une face et en noir sur l\'autre, qui bascule quand on inverse le courant de la bobine placée derrière lui. L\'image ne consomme rien une fois posée, et chaque changement s\'entend : un cliquetis qui court d\'une colonne à l\'autre. Des studios comme Breakfast en ont fait des installations. Ici le panneau enchaîne des ondes, une spirale et un plasma tramés comme une vieille imprimante, une pluie, un damier, le jeu de la vie de Conway et le logo ; le doigt retourne les pastilles qu\'il touche.',
+      params: {
+        'Panneau': {
+          pastilles: { type: 'range', label: 'Pastilles (petit côté)', min: 10, max: 80, step: 1, value: 28 },
+          forme: { type: 'segmented', label: 'Forme', options: { rond: 'Rondes', carre: 'Carrées' }, value: 'rond' },
+          taille: { type: 'range', label: 'Taille dans la case', min: 0.4, max: 1, step: 0.01, value: 0.86 },
+          modules: { type: 'range', label: 'Modules (cases)', min: 0, max: 28, step: 1, value: 7 },
+        },
+        'Programme': {
+          programme: { type: 'select', label: 'Image', options: { cycle: 'Enchaîner', logo: 'Logo', ondes: 'Ondes', spirale: 'Spirale', plasma: 'Plasma', pluie: 'Pluie', damier: 'Damier', vie: 'Jeu de la vie' }, value: 'cycle' },
+          duree: { type: 'range', label: 'Durée d\'une image (s)', min: 2, max: 20, step: 0.5, value: 6 },
+          vitesse: { type: 'range', label: 'Vitesse des motifs', min: 0, max: 3, step: 0.01, value: 1 },
+        },
+        'Mécanique': {
+          balayage: { type: 'range', label: 'Balayage (s)', min: 0, max: 1.5, step: 0.01, value: 0.45 },
+          bascule: { type: 'range', label: 'Durée d\'une bascule (s)', min: 0.04, max: 0.6, step: 0.01, value: 0.16 },
+          reflet: { type: 'range', label: 'Reflet', min: 0, max: 1, step: 0.01, value: 0.5 },
+        },
+        'Logo affiché': {
+          logo: { type: 'toggle', label: 'Afficher le logo', value: false },
+          tailleLogo: { type: 'range', label: 'Taille du logo', min: 0.3, max: 1.8, step: 0.01, value: 1.4, show: (q) => q.logo },
+          image: { type: 'file', label: 'Logo', accept: 'image/*', show: (q) => q.logo },
+        },
+        'Couleurs': {
+          fond: { type: 'color', label: 'Panneau', value: '#0d0d10' },
+          dos: { type: 'color', label: 'Face sombre', value: '#1d1d22' },
+          face: { type: 'color', label: 'Face claire', value: '#edd14b' },
+        },
+      },
+      presets: {
+        'Gare': {},
+        'Ondes': { programme: 'ondes', face: '#f4f1ea', pastilles: 36 },
+        'Jeu de la vie': { programme: 'vie', face: '#7fe0c2', pastilles: 44, forme: 'carre', taille: 0.82 },
+        'Pluie': { programme: 'pluie', face: '#486cfc', fond: '#08080c', dos: '#15151c', pastilles: 32 },
+        'Plasma': { programme: 'plasma', face: '#ef5a2f', pastilles: 50, modules: 0, balayage: 0.2 },
+        'Grosses pastilles': { pastilles: 14, taille: 0.92, balayage: 0.8, bascule: 0.3, programme: 'spirale' },
+        'Logo': { logo: true, programme: 'cycle', face: '#f4f1ea', pastilles: 34 },
+        'Biennale': { fond: BIEN[1], dos: '#222222', face: BIEN[2], logo: false },
+        'Menthe': { fond: MEN[1], dos: mix(MEN[1], MEN[3], 0.18), face: MEN[2], forme: 'carre' },
+        'Kegelbahn': { fond: KB[0], dos: '#141414', face: KB[2], programme: 'damier' },
+      },
+      brand(colors) {
+        const s = colors.slice().sort((a, b) => lum(a) - lum(b));
+        return { fond: s[0], dos: mix(s[0], s.length > 1 ? s[1] : '#ffffff', 0.15), face: s.length > 2 ? s[Math.floor(s.length / 2)] : s[s.length - 1] };
+      },
+      pointer: {
+        down: (q) => paint(q.x, q.y, true),
+        drag: (q) => paint(q.x, q.y, false),
+        wheel: (q, dy) => app.set('pastilles', Math.max(10, Math.min(80, p.pastilles + (dy > 0 ? 2 : -2)))),
+      },
+      onChange(k) { if (['*', 'logo', 'image'].includes(k)) logoKey = ''; if (k === '*' || k === 'programme') { sceneT0 = simT; sceneI = 0; } },
+      export: { name: 'afficheur-palettes', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    function hex(x) { const n = parseInt(x.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
+    function lum(x) { const c = hex(x); return (c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114) / 255; }
+    function mix(a, b, t) { const A = hex(a), B = hex(b); return '#' + A.map((v, i) => Math.round(v + (B[i] - v) * t).toString(16).padStart(2, '0')).join(''); }
+
+    // ——— Logo ———
+    function buildLogo() {
+      const img0 = p.image || app.logoImg, key = [p.logo, img0 ? (img0.src || 'c') : 'demo'].join(); if (key === logoKey) return; logoKey = key;
+      logoM = null;
+      const M = 200, c = document.createElement('canvas'); c.width = c.height = M; const x = c.getContext('2d', { willReadFrequently: true }), L = M * 0.94, cx = M / 2;
+      if (img0) { const iw = img0.naturalWidth || img0.width, ih = img0.naturalHeight || img0.height, s = L / Math.max(iw, ih); x.drawImage(img0, cx - iw * s / 2, cx - ih * s / 2, iw * s, ih * s); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(cx, cx, L * 0.48, 0, TAU); x.arc(cx, cx, L * 0.27, 0, TAU, true); x.fill('evenodd'); x.fillRect(cx - L * 0.07, cx - L * 0.5, L * 0.14, L); }
+      const d = x.getImageData(0, 0, M, M).data; let transp = 0; for (let i = 3; i < d.length; i += 4) if (d[i] < 128) transp++; const useA = transp > M * M * 0.05;
+      const m = new Uint8Array(M * M); for (let i = 0; i < M * M; i++) { const o = i * 4, l = (d[o] * 0.2126 + d[o + 1] * 0.7152 + d[o + 2] * 0.0722) / 255; m[i] = (useA ? d[o + 3] > 128 : d[o + 3] > 128 && l < 0.5) ? 1 : 0; }
+      logoM = { m, M };
+    }
+    function logoAt(u, v) {
+      if (!logoM) return 0; const S = p.tailleLogo, a = Math.floor((u / S * 0.5 + 0.5) * logoM.M), b = Math.floor((v / S * 0.5 + 0.5) * logoM.M);
+      return a >= 0 && b >= 0 && a < logoM.M && b < logoM.M && logoM.m[b * logoM.M + a] === 1 ? 1 : 0;
+    }
+
+    // ——— Grille ———
+    function grid(w, h) {
+      const k = [p.pastilles, w, h].join(); if (k === gKey && G) return G; gKey = k;
+      const m = Math.min(w, h), c = m / (p.pastilles + 1.2), nx = Math.floor(w / c - 0.6), ny = Math.floor(h / c - 0.6), N = nx * ny;
+      G = { c, nx, ny, ox: (w - nx * c) / 2, oy: (h - ny * c) / 2, cur: new Uint8Array(N), tgt: new Uint8Array(N), t0: new Float32Array(N).fill(-1) };
+      life = null; drops = []; painted = new Map();
+      return G;
+    }
+    function scene() {
+      if (p.programme !== 'cycle') return p.programme;
+      const list = SCENES.filter((s) => s !== 'logo' || p.logo);
+      if (simT - sceneT0 > p.duree) { sceneT0 = simT; sceneI = (sceneI + 1) % list.length; if (list[sceneI] === 'vie') life = null; }
+      return list[sceneI % list.length];
+    }
+    function lifeStep(nx, ny) {
+      if (!life || life.length !== nx * ny) { const R = app.rng(); life = new Uint8Array(nx * ny); for (let i = 0; i < life.length; i++) life[i] = R() < 0.32 ? 1 : 0; }
+      const nw = new Uint8Array(nx * ny); let alive = 0, changed = 0;
+      for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+        let n = 0; for (let b = -1; b <= 1; b++) for (let a = -1; a <= 1; a++) { if (!a && !b) continue; n += life[((j + b + ny) % ny) * nx + ((i + a + nx) % nx)]; }
+        const o = j * nx + i, v = life[o] ? (n === 2 || n === 3 ? 1 : 0) : (n === 3 ? 1 : 0); nw[o] = v; alive += v; changed += v !== life[o];
+      }
+      // une colonie éteinte ou figée repart d'un nouveau semis
+      life = alive < nx * ny * 0.03 || changed < 3 ? null : nw;
+    }
+    // valeur voulue de la pastille (i, j)
+    function want(sc, i, j, u, v, t) {
+      const dith = (f) => (f > BAYER[(j & 3) * 4 + (i & 3)] ? 1 : 0), T = t * p.vitesse;
+      switch (sc) {
+        case 'logo': return logoAt(u, v);
+        case 'ondes': { const r = Math.hypot(u, v); return dith(0.5 + 0.5 * Math.sin(r * 9 - T * 2.4)); }
+        case 'spirale': { const r = Math.hypot(u, v), a = Math.atan2(v, u); return dith(0.5 + 0.5 * Math.sin(a * 3 + r * 7 - T * 1.8)); }
+        case 'plasma': return dith(0.5 + (Math.sin(u * 3.1 + T) + Math.sin(v * 3.7 - T * 1.3) + Math.sin((u + v) * 2.3 + T * 0.7) + Math.sin(Math.hypot(u - Math.sin(T * 0.4), v) * 4)) / 8);
+        case 'damier': { const a = T * 0.35, k = 2.4, X = u * Math.cos(a) - v * Math.sin(a), Y = u * Math.sin(a) + v * Math.cos(a); return (Math.floor(X * k) + Math.floor(Y * k)) & 1; }
+        case 'vie': return life ? life[j * G.nx + i] : 0;
+        case 'pluie': return 0;
+      }
+      return 0;
+    }
+
+    function update(w, h, t) {
+      buildLogo(); const g = grid(w, h), sc = scene(), m = Math.min(w, h), { nx, ny, c } = g;
+      if (sc === 'vie') { if (!life || t - lifeT > 0.22 / Math.max(0.2, p.vitesse)) { lifeStep(nx, ny); lifeT = t; } }
+      // pluie : des gouttes tombent dans les colonnes avec une traîne
+      let rain = null;
+      if (sc === 'pluie') {
+        const R = Math.random; if (drops.length < nx * 1.2 && R() < 0.8) drops.push({ i: Math.floor(R() * nx), y: -2, v: 8 + R() * 14, L: 2 + Math.floor(R() * 6) });
+        drops = drops.filter((d) => d.y - d.L < ny + 1); rain = new Uint8Array(nx * ny);
+        for (const d of drops) { d.y += d.v * (1 / 60) * p.vitesse; for (let k = 0; k < d.L; k++) { const j = Math.floor(d.y) - k; if (j >= 0 && j < ny) rain[j * nx + d.i] = 1; } }
+      }
+      for (const [k, e] of painted) if (t > e) painted.delete(k);
+      for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+        const o = j * nx + i, x = g.ox + (i + 0.5) * c, y = g.oy + (j + 0.5) * c, u = (x - w / 2) / (m / 2), v = (y - h / 2) / (m / 2);
+        let want1 = sc === 'pluie' ? rain[o] : want(sc, i, j, u, v, t);
+        if (painted.has(o)) want1 = 1 - want1;
+        if (want1 !== g.tgt[o]) {
+          // l'ordre arrive par la colonne : balayage de gauche à droite, avec un léger jeu mécanique
+          g.tgt[o] = want1;
+          if (g.cur[o] === want1) g.t0[o] = -1; else g.t0[o] = t + p.balayage * (i / Math.max(1, nx - 1)) + ((i * 7 + j * 13) % 5) * 0.004;
+        }
+        if (g.t0[o] >= 0 && t >= g.t0[o] + p.bascule) { g.cur[o] = g.tgt[o]; g.t0[o] = -1; }
+      }
+      return g;
+    }
+    function paint(x, y, toggle) {
+      if (!G) return; const i = Math.floor((x - G.ox) / G.c), j = Math.floor((y - G.oy) / G.c);
+      for (let b = -1; b <= 1; b++) for (let a = -1; a <= 1; a++) {
+        if (toggle && (a || b)) continue; const ii = i + a, jj = j + b; if (ii < 0 || jj < 0 || ii >= G.nx || jj >= G.ny) continue;
+        if (!toggle && Math.hypot(a, b) > 1.2) continue; painted.set(jj * G.nx + ii, simT + 2.5);
+      }
+    }
+
+    // pastilles : face visible et écrasement horizontal pendant la bascule
+    function discs(g, t, w, h) {
+      const out = []; const { nx, ny, c } = g, r = c * p.taille / 2;
+      for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+        const o = j * nx + i, x = g.ox + (i + 0.5) * c, y = g.oy + (j + 0.5) * c;
+        let sx = 1, face = g.cur[o];
+        if (g.t0[o] >= 0 && t >= g.t0[o]) { const f = Math.min(1, (t - g.t0[o]) / p.bascule), a = f * Math.PI; sx = Math.abs(Math.cos(a)); if (f > 0.5) face = g.tgt[o]; }
+        out.push(x, y, r, Math.max(0.06, sx), face);
+      }
+      return out;
+    }
+
+    app.loop((t, dt) => {
+      dt = Math.min(0.1, dt || 0);
+      const { w, h, dpr } = app.size;
+      if (app.thumbnail) { simT = 9.5; sceneT0 = 9; sceneI = SCENES.filter((s2) => s2 !== 'logo' || p.logo).indexOf('ondes'); for (let n = 0; n < 3; n++) update(w, h, simT + n); simT += 3; } else simT += dt;
+      const g = update(w, h, simT);
+      // vignette : image posée, sans pastille en cours de bascule
+      if (app.thumbnail) { g.cur.set(g.tgt); g.t0.fill(-1); }
+      const D = discs(g, simT, w, h);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = p.fond; ctx.fillRect(0, 0, w, h);
+      // modules : chaque bloc de cases est un circuit distinct, séparé par un joint
+      if (p.modules > 0) {
+        ctx.strokeStyle = mix(p.fond, '#000000', 0.5); ctx.lineWidth = Math.max(1, g.c * 0.08); ctx.beginPath();
+        for (let i = p.modules; i < g.nx; i += p.modules) { const x = g.ox + i * g.c; ctx.moveTo(x, g.oy - g.c * 0.3); ctx.lineTo(x, g.oy + g.ny * g.c + g.c * 0.3); }
+        for (let j = p.modules; j < g.ny; j += p.modules) { const y = g.oy + j * g.c; ctx.moveTo(g.ox - g.c * 0.3, y); ctx.lineTo(g.ox + g.nx * g.c + g.c * 0.3, y); }
+        ctx.stroke();
+      }
+      const P = [new Path2D(), new Path2D()], H = new Path2D(), Sh = new Path2D(), sq = p.forme === 'carre';
+      for (let k = 0; k < D.length; k += 5) {
+        const x = D[k], y = D[k + 1], r = D[k + 2], sx = D[k + 3], f = D[k + 4], rx = r * sx;
+        if (sq) P[f].rect(x - rx, y - r, rx * 2, r * 2); else { P[f].moveTo(x + rx, y); P[f].ellipse(x, y, rx, r, 0, 0, TAU); }
+        // ombre de l'axe : un trait sombre à mi-hauteur, visible surtout pendant la bascule
+        Sh.rect(x - rx, y - r * 0.04, rx * 2, r * 0.08);
+        if (f && p.reflet > 0) { if (sq) H.rect(x - rx * 0.7, y - r * 0.8, rx * 0.5, r * 0.3); else { H.moveTo(x - rx * 0.2 + rx * 0.32, y - r * 0.42); H.ellipse(x - rx * 0.2, y - r * 0.42, rx * 0.32, r * 0.2, -0.5, 0, TAU); } }
+      }
+      ctx.fillStyle = p.dos; ctx.fill(P[0]);
+      ctx.fillStyle = p.face; ctx.fill(P[1]);
+      ctx.fillStyle = 'rgba(0,0,0,0.22)'; ctx.fill(Sh);
+      if (p.reflet > 0) { ctx.fillStyle = `rgba(255,255,255,${0.32 * p.reflet})`; ctx.fill(H); }
+      app.finish(ctx);
+    });
+
+    function toSVG() {
+      const { w, h } = app.size, f = (v) => +v.toFixed(2), g = G || grid(w, h), D = discs(g, simT, w, h), sq = p.forme === 'carre';
+      let s = `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><rect width="100%" height="100%" fill="${p.fond}"/>`;
+      if (p.modules > 0) {
+        let d = ''; for (let i = p.modules; i < g.nx; i += p.modules) { const x = f(g.ox + i * g.c); d += `M${x} ${f(g.oy - g.c * 0.3)}V${f(g.oy + g.ny * g.c + g.c * 0.3)}`; }
+        for (let j = p.modules; j < g.ny; j += p.modules) { const y = f(g.oy + j * g.c); d += `M${f(g.ox - g.c * 0.3)} ${y}H${f(g.ox + g.nx * g.c + g.c * 0.3)}`; }
+        s += `<path d="${d}" stroke="${mix(p.fond, '#000000', 0.5)}" stroke-width="${f(Math.max(1, g.c * 0.08))}"/>`;
+      }
+      const grp = ['', ''];
+      for (let k = 0; k < D.length; k += 5) {
+        const x = D[k], y = D[k + 1], r = D[k + 2], rx = r * D[k + 3], fc = D[k + 4];
+        grp[fc] += sq ? `<rect x="${f(x - rx)}" y="${f(y - r)}" width="${f(rx * 2)}" height="${f(r * 2)}"/>` : `<ellipse cx="${f(x)}" cy="${f(y)}" rx="${f(rx)}" ry="${f(r)}"/>`;
+      }
+      s += `<g fill="${p.dos}">${grp[0]}</g><g fill="${p.face}">${grp[1]}</g>`;
+      return s + '</svg>';
+    }
+  </script>
+</body>
+</html>

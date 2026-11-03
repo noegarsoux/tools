@@ -1,0 +1,15 @@
+{
+  "slug": "palettes-magnetiques",
+  "title": "Afficheur à palettes",
+  "type": "motion",
+  "description": "Un panneau de pastilles magnétiques qui basculent colonne par colonne : ondes, spirales, plasma, pluie, jeu de la vie et logo se succèdent en cliquetant.",
+  "tags": ["flip-dot", "pixel", "grille", "mecanique", "logo", "svg"],
+  "inspiration": [
+    "Les afficheurs à pastilles des bus et des gares (années 1970-1990)",
+    "Les installations flip-dot de Breakfast Studio",
+    "Le jeu de la vie de John Conway (1970)"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}
