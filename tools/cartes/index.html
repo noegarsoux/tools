@@ -1,0 +1,352 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Cartes à jouer</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Cartes à jouer : chaque carte a une pose (x, y, rotation, retournement f de 0 = dos à 1 = face, hauteur z).
+    // Les figures (éventail, mélange, donne) posent des interpolations décalées dans le temps d'une pose à une autre,
+    // avec un saut en z (sin π·u) qui grossit la carte et éloigne son ombre. Le retournement écrase la carte en
+    // largeur (|cos π f|) et montre la face passé la moitié. La cascade est une chute libre avec rebonds dont
+    // chaque image est peinte dans un calque qui garde la traînée.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const BIT = PAL('bitmap'), BIE = PAL('biennale'), LUZ = PAL('luzern'), ORB = PAL('orbite');
+
+    let simT = 0, vKey = '', logoM = null, logoKey = '', ptr = null, S = null, gKey = '', SP = null, spKey = '', BG = null, bgKey = '', TR = null;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.04, vignette: 0.22 },
+      hint: 'Cliquez une carte pour la retourner, glissez-la pour la déplacer · clic sur le tapis : figure suivante · molette : taille',
+      notes: 'Un paquet de cartes se prête à des gestes très codifiés : l\'éventail qu\'on ouvre d\'un pouce, le mélange américain où les deux moitiés s\'entrelacent en tombant, la donne qui envoie chaque carte à sa place en tournant. Ici, le dos des cartes porte le motif et les couleurs de la marque, les as portent le logo, et le paquet enchaîne les figures jusqu\'à la cascade, où les cartes rebondissent en laissant leur traînée. Cliquez une carte pour la retourner, ou le tapis pour passer à la figure suivante.',
+      params: {
+        'Paquet': {
+          figure: { type: 'select', label: 'Figure', options: { cycle: 'Toutes, à la suite', eventail: 'Éventail', melange: 'Mélange', donne: 'Donne', cascade: 'Cascade' }, value: 'cycle' },
+          valeurs: { type: 'range', label: 'Cartes par couleur', min: 3, max: 13, step: 1, value: 10 },
+          taille: { type: 'range', label: 'Taille', min: 0.06, max: 0.3, step: 0.005, value: 0.15 },
+          ouverture: { type: 'range', label: 'Ouverture de l\'éventail', min: 0.3, max: 1.6, step: 0.01, value: 1 },
+          vitesse: { type: 'range', label: 'Vitesse', min: 0.2, max: 3, step: 0.01, value: 1 },
+          rebond: { type: 'range', label: 'Rebond', min: 0.3, max: 0.95, step: 0.01, value: 0.78 },
+          image: { type: 'file', label: 'Logo', accept: 'image/*' },
+        },
+        'Dos': {
+          dos: { type: 'segmented', label: 'Motif', options: { losanges: 'Losanges', rayures: 'Rayures', points: 'Points', logo: 'Logo' }, value: 'losanges' },
+          fondDos: { type: 'color', label: 'Couleur du dos', value: '#2f5fd0' },
+          motif: { type: 'color', label: 'Couleur du motif', value: '#f4f1ea' },
+        },
+        'Faces et tapis': {
+          carte: { type: 'color', label: 'Carte', value: '#f7f4ec' },
+          rouge: { type: 'color', label: 'Cœurs et carreaux', value: '#d8352a' },
+          noir: { type: 'color', label: 'Piques et trèfles', value: '#16161a' },
+          tapis: { type: 'segmented', label: 'Tapis', options: { feutre: 'Feutre', uni: 'Uni' }, value: 'feutre' },
+          fond: { type: 'color', label: 'Couleur du tapis', value: '#1d5a3c' },
+          ombre: { type: 'range', label: 'Ombres', min: 0, max: 1, step: 0.01, value: 0.6 },
+        },
+      },
+      presets: {
+        'Casino': {},
+        'Éventail': { figure: 'eventail', valeurs: 13, taille: 0.17, ouverture: 1.3, dos: 'logo', fondDos: '#a32a2a', motif: '#f2c230' },
+        'Mélange': { figure: 'melange', valeurs: 13, taille: 0.2, dos: 'rayures', fondDos: '#16161a', motif: '#e5452a', fond: '#7a1f24' },
+        'Donne': { figure: 'donne', valeurs: 8, taille: 0.11, dos: 'points', fondDos: '#2f8a4a', motif: '#f4f1ea', fond: '#16161a', tapis: 'uni' },
+        'Cascade': { figure: 'cascade', valeurs: 13, taille: 0.13, rebond: 0.82, tapis: 'uni', fond: '#0f7a4a', dos: 'losanges', fondDos: '#e5452a' },
+        'Grandes cartes': { valeurs: 5, taille: 0.28, ouverture: 0.7, dos: 'logo', fondDos: '#16161a', motif: '#f4f1ea', fond: '#2a2a2e', tapis: 'uni' },
+        'Bitmap': { tapis: 'uni', fond: BIT[0], fondDos: BIT[3], motif: BIT[4], carte: '#fbfaf6', rouge: BIT[2], noir: BIT[1], dos: 'rayures', ombre: 0.4 },
+        'Biennale': { tapis: 'uni', fond: BIE[3], fondDos: BIE[2], motif: BIE[4], carte: BIE[0], rouge: BIE[2], noir: BIE[1], dos: 'points', figure: 'donne', valeurs: 6 },
+        'Luzern': { tapis: 'feutre', fond: LUZ[1], fondDos: LUZ[0], motif: LUZ[4], carte: '#ffffff', rouge: LUZ[0], noir: LUZ[3], dos: 'logo', figure: 'cascade', rebond: 0.7 },
+        'Orbite': { tapis: 'uni', fond: ORB[1], fondDos: ORB[0], motif: ORB[1], carte: ORB[2], rouge: ORB[0], noir: ORB[1], dos: 'losanges', figure: 'eventail', ouverture: 1.6, valeurs: 13 },
+      },
+      brand(colors) {
+        const s = colors.slice().sort((a, b) => lum(a) - lum(b)), D = s[0], L = s[s.length - 1], mid = s.length > 2 ? s.slice(1, -1) : [D];
+        return { fond: D, tapis: 'uni', carte: L, noir: D, rouge: mid[mid.length - 1], fondDos: mid[0], motif: L };
+      },
+      pointer: {
+        down: (q) => { ptr = { x: q.x, y: q.y, moved: 0, c: hit(q.x, q.y), gx: q.x, gy: q.y }; if (ptr.c) { const c = ptr.c; c.p = pose(c); c.tw = null; c.phys = null; ptr.c0 = { x: c.p.x, y: c.p.y }; S.hold = simT + 1.5; } },
+        drag: (q) => {
+          if (!ptr) return; ptr.moved += Math.hypot(q.x - ptr.x, q.y - ptr.y); ptr.x = q.x; ptr.y = q.y;
+          const c = ptr.c; if (c && ptr.moved > 4) { c.tw = null; c.phys = null; c.p.x = ptr.c0.x + q.x - ptr.gx; c.p.y = ptr.c0.y + q.y - ptr.gy; c.p.z = 0.6; c.zi = 5000; S.hold = simT + 2; }
+        },
+        up: () => {
+          if (!ptr) return; const c = ptr.c;
+          if (c && ptr.moved > 4) { tween(c, { ...c.p, z: 0 }, simT, 0.25, 0); }
+          else if (c) { tween(c, { ...c.p, f: c.p.f > 0.5 ? 0 : 1, z: 0 }, simT, 0.4, 0.5); S.hold = simT + 1.5; }
+          else if (S) { S.skip = true; }
+          ptr = null;
+        },
+        wheel: (q, dy) => app.set('taille', Math.max(0.06, Math.min(0.3, +(p.taille * (dy > 0 ? 0.94 : 1.06)).toFixed(3)))),
+      },
+      onChange(k) { if (['*', 'image'].includes(k)) logoKey = ''; },
+      export: { name: 'cartes', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    function hex(x) { const n = parseInt(x.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
+    function lum(x) { const c = hex(x); return (c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114) / 255; }
+    function mix(a, b, t) { const A = hex(a), C = hex(b); return '#' + A.map((v, i) => Math.round(v + (C[i] - v) * t).toString(16).padStart(2, '0')).join(''); }
+    function rng(s) { let a = s >>> 0; return () => { a = (a + 0x6d2b79f5) >>> 0; let t = a; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+    const ease = (u) => u < 0.5 ? 4 * u * u * u : 1 - Math.pow(-2 * u + 2, 3) / 2;
+
+    function buildLogo() {
+      const img0 = p.image || app.logoImg, key = img0 ? (img0.src || 'c') : 'demo'; if (key === logoKey) return; logoKey = key; vKey = '';
+      const M = 200, c = document.createElement('canvas'); c.width = c.height = M; const x = c.getContext('2d', { willReadFrequently: true }), L = M * 0.94, cx = M / 2;
+      if (img0) { const iw = img0.naturalWidth || img0.width, ih = img0.naturalHeight || img0.height, s = L / Math.max(iw, ih); x.drawImage(img0, cx - iw * s / 2, cx - ih * s / 2, iw * s, ih * s); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(cx, cx, L * 0.48, 0, TAU); x.arc(cx, cx, L * 0.27, 0, TAU, true); x.fill('evenodd'); x.fillRect(cx - L * 0.07, cx - L * 0.5, L * 0.14, L); }
+      const d = x.getImageData(0, 0, M, M).data; let transp = 0; for (let i = 3; i < d.length; i += 4) if (d[i] < 128) transp++; const useA = transp > M * M * 0.05;
+      const F = new Float64Array(M * M); for (let i = 0; i < M * M; i++) { const o = i * 4, l = (d[o] * 0.2126 + d[o + 1] * 0.7152 + d[o + 2] * 0.0722) / 255; F[i] = useA ? d[o + 3] / 255 : (d[o + 3] / 255) * Math.min(1, Math.max(0, (0.75 - l) * 2)); }
+      { const G2 = new Float64Array(M * M); for (let j = 1; j < M - 1; j++) for (let i = 1; i < M - 1; i++) { let a = 0; for (let b = -1; b <= 1; b++) for (let c = -1; c <= 1; c++) a += F[(j + b) * M + i + c] * (b || c ? (b && c ? 1 : 2) : 4); G2[j * M + i] = a / 16; } F.set(G2); }
+      for (let k = 0; k < M; k++) F[k] = F[(M - 1) * M + k] = F[k * M] = F[k * M + M - 1] = 0;
+      logoM = contours(F, M, M, 0.5, 0, 0, 1).filter((c) => c.closed && c.pts.length > 6).map((c) => chaikin(chaikin(c.pts, true), true).map((q) => [q[0] / M - 0.5, q[1] / M - 0.5]));
+    }
+    // carrés marchants + chaînage
+    function contours(F, nx, ny, lev, ox, oy, cs) {
+      const pt = new Map(), adj = new Map();
+      const P = (id) => { let q = pt.get(id); if (q) return q; const cell = id >> 1, i = cell % nx, j = (cell - i) / nx; let a, b, ax, ay, bx, by; if (id & 1) { a = F[j * nx + i]; b = F[(j + 1) * nx + i]; ax = bx = i; ay = j; by = j + 1; } else { a = F[j * nx + i]; b = F[j * nx + i + 1]; ay = by = j; ax = i; bx = i + 1; } const t = (lev - a) / (b - a || 1e-9); q = [ox + (ax + (bx - ax) * t) * cs, oy + (ay + (by - ay) * t) * cs]; pt.set(id, q); return q; };
+      const link = (a, b) => { (adj.get(a) || adj.set(a, []).get(a)).push(b); (adj.get(b) || adj.set(b, []).get(b)).push(a); };
+      for (let j = 0; j < ny - 1; j++) for (let i = 0; i < nx - 1; i++) {
+        const A = F[j * nx + i] > lev, B = F[j * nx + i + 1] > lev, C = F[(j + 1) * nx + i + 1] > lev, D = F[(j + 1) * nx + i] > lev, idx = A | (B << 1) | (C << 2) | (D << 3);
+        if (idx === 0 || idx === 15) continue;
+        const T = (j * nx + i) * 2, R = (j * nx + i + 1) * 2 + 1, Bo = ((j + 1) * nx + i) * 2, Le = (j * nx + i) * 2 + 1;
+        const ctr = (F[j * nx + i] + F[j * nx + i + 1] + F[(j + 1) * nx + i + 1] + F[(j + 1) * nx + i]) / 4 > lev;
+        switch (idx) {
+          case 1: case 14: link(Le, T); break; case 2: case 13: link(T, R); break; case 3: case 12: link(Le, R); break;
+          case 4: case 11: link(R, Bo); break; case 6: case 9: link(T, Bo); break; case 7: case 8: link(Le, Bo); break;
+          case 5: if (ctr) { link(Le, Bo); link(T, R); } else { link(Le, T); link(R, Bo); } break;
+          case 10: if (ctr) { link(Le, T); link(R, Bo); } else { link(Le, Bo); link(T, R); } break;
+        }
+      }
+      const seen = new Set(), out = [];
+      const walk = (s) => { const L = [s]; seen.add(s); let cur = s; for (;;) { const nb = (adj.get(cur) || []).find((x) => !seen.has(x)); if (nb === undefined) break; seen.add(nb); L.push(nb); cur = nb; } return L; };
+      for (const [id, nb] of adj) if (nb.length === 1 && !seen.has(id)) out.push({ pts: walk(id).map(P), closed: false });
+      for (const [id] of adj) if (!seen.has(id)) out.push({ pts: walk(id).map(P), closed: true });
+      return out;
+    }
+    function chaikin(pts, closed) {
+      const o = []; const n = pts.length; for (let k = 0; k < (closed ? n : n - 1); k++) { const a = pts[k], b = pts[(k + 1) % n]; o.push([a[0] * 0.75 + b[0] * 0.25, a[1] * 0.75 + b[1] * 0.25], [a[0] * 0.25 + b[0] * 0.75, a[1] * 0.25 + b[1] * 0.75]); }
+      if (!closed) { o.unshift(pts[0]); o.push(pts[n - 1]); } return o;
+    }
+
+    // ——— Enseignes (unité, centrées) : tracés compatibles canvas et SVG ———
+    function circ(g, x, y, r) { const k = 0.5523 * r; g.moveTo(x + r, y); g.bezierCurveTo(x + r, y + k, x + k, y + r, x, y + r); g.bezierCurveTo(x - k, y + r, x - r, y + k, x - r, y); g.bezierCurveTo(x - r, y - k, x - k, y - r, x, y - r); g.bezierCurveTo(x + k, y - r, x + r, y - k, x + r, y); g.closePath(); }
+    function suit(g, s) {
+      if (s === 0) { g.moveTo(0, 0.44); g.bezierCurveTo(-0.15, 0.27, -0.5, 0.06, -0.5, -0.16); g.bezierCurveTo(-0.5, -0.43, -0.15, -0.5, 0, -0.24); g.bezierCurveTo(0.15, -0.5, 0.5, -0.43, 0.5, -0.16); g.bezierCurveTo(0.5, 0.06, 0.15, 0.27, 0, 0.44); g.closePath(); }
+      else if (s === 1) { g.moveTo(0, -0.5); g.quadraticCurveTo(0.14, -0.2, 0.38, 0); g.quadraticCurveTo(0.14, 0.2, 0, 0.5); g.quadraticCurveTo(-0.14, 0.2, -0.38, 0); g.quadraticCurveTo(-0.14, -0.2, 0, -0.5); g.closePath(); }
+      else if (s === 2) { g.moveTo(0, -0.5); g.bezierCurveTo(0.15, -0.3, 0.5, -0.12, 0.5, 0.1); g.bezierCurveTo(0.5, 0.32, 0.2, 0.38, 0.05, 0.2); g.quadraticCurveTo(0.06, 0.38, 0.17, 0.48); g.lineTo(-0.17, 0.48); g.quadraticCurveTo(-0.06, 0.38, -0.05, 0.2); g.bezierCurveTo(-0.2, 0.38, -0.5, 0.32, -0.5, 0.1); g.bezierCurveTo(-0.5, -0.12, -0.15, -0.3, 0, -0.5); g.closePath(); }
+      else { circ(g, 0, -0.24, 0.22); circ(g, -0.24, 0.1, 0.22); circ(g, 0.24, 0.1, 0.22); g.moveTo(-0.05, 0.05); g.quadraticCurveTo(-0.05, 0.38, -0.17, 0.48); g.lineTo(0.17, 0.48); g.quadraticCurveTo(0.05, 0.38, 0.05, 0.05); g.closePath(); }
+    }
+    function pips(v) {
+      const C = (ys, xs = [0.3, 0.7]) => xs.flatMap((x) => ys.map((y) => [x, y]));
+      const T = { 1: [], 2: [[0.5, 0.2], [0.5, 0.8]], 3: [[0.5, 0.2], [0.5, 0.5], [0.5, 0.8]], 4: C([0.2, 0.8]), 5: C([0.2, 0.8]).concat([[0.5, 0.5]]), 6: C([0.2, 0.5, 0.8]), 7: C([0.2, 0.5, 0.8]).concat([[0.5, 0.35]]), 8: C([0.2, 0.5, 0.8]).concat([[0.5, 0.35], [0.5, 0.65]]), 9: C([0.2, 0.4, 0.6, 0.8]).concat([[0.5, 0.5]]), 10: C([0.2, 0.4, 0.6, 0.8]).concat([[0.5, 0.3], [0.5, 0.7]]) };
+      if (T[v]) return T[v];
+      const b = C([0.17, 0.33, 0.5, 0.67, 0.83]); return b.concat(v === 11 ? [[0.5, 0.5]] : v === 12 ? [[0.5, 0.25], [0.5, 0.75]] : [[0.5, 0.25], [0.5, 0.5], [0.5, 0.75]]);
+    }
+    const suitCol = (s) => (s < 2 ? p.rouge : p.noir);
+
+    // ——— Sprites ———
+    function rr(g, w, h, r) { g.moveTo(-w / 2 + r, -h / 2); g.lineTo(w / 2 - r, -h / 2); g.quadraticCurveTo(w / 2, -h / 2, w / 2, -h / 2 + r); g.lineTo(w / 2, h / 2 - r); g.quadraticCurveTo(w / 2, h / 2, w / 2 - r, h / 2); g.lineTo(-w / 2 + r, h / 2); g.quadraticCurveTo(-w / 2, h / 2, -w / 2, h / 2 - r); g.lineTo(-w / 2, -h / 2 + r); g.quadraticCurveTo(-w / 2, -h / 2, -w / 2 + r, -h / 2); g.closePath(); }
+    function logoPath(g, x, y, s) { for (const lp of logoM) { lp.forEach((q, k) => k ? g.lineTo(x + q[0] * s, y + q[1] * s) : g.moveTo(x + q[0] * s, y + q[1] * s)); g.closePath(); } }
+    function backArt(g, cw, ch) {
+      const mg = cw * 0.07, iw = cw - mg * 2, ih = ch - mg * 2;
+      g.fillStyle = p.fondDos; g.beginPath(); rr(g, iw, ih, cw * 0.04); g.fill(); g.save(); g.clip();
+      g.fillStyle = p.motif; g.strokeStyle = p.motif;
+      if (p.dos === 'losanges') { const s = cw * 0.11; g.lineWidth = cw * 0.012; for (let k = -30; k < 30; k++) { g.beginPath(); g.moveTo(-iw + k * s, -ih); g.lineTo(iw + k * s, ih); g.moveTo(iw + k * s, -ih); g.lineTo(-iw + k * s, ih); g.stroke(); } g.globalAlpha = 0.9; g.lineWidth = cw * 0.02; g.beginPath(); rr(g, iw - cw * 0.06, ih - cw * 0.06, cw * 0.03); g.stroke(); g.globalAlpha = 1; }
+      else if (p.dos === 'rayures') { const s = cw * 0.075; g.save(); g.rotate(Math.PI / 4); for (let x = -ch; x < ch; x += s * 2) g.fillRect(x, -ch, s, ch * 2); g.restore(); g.fillStyle = p.fondDos; g.beginPath(); circ(g, 0, 0, cw * 0.26); g.fill(); g.fillStyle = p.motif; g.beginPath(); logoPath(g, 0, 0, cw * 0.36); g.fill('evenodd'); }
+      else if (p.dos === 'points') { const s = cw * 0.1; for (let j = -8; j <= 8; j++) for (let i = -6; i <= 6; i++) { const x = i * s + (j % 2 ? s / 2 : 0), y = j * s * 0.87; g.beginPath(); circ(g, x, y, s * 0.24); g.fill(); } }
+      else { g.globalAlpha = 0.18; const s = cw * 0.22; for (let j = -4; j <= 4; j++) for (let i = -3; i <= 3; i++) { g.beginPath(); logoPath(g, i * s + (j % 2 ? s / 2 : 0), j * s, s * 0.6); g.fill('evenodd'); } g.globalAlpha = 1; g.beginPath(); logoPath(g, 0, 0, cw * 0.58); g.fill('evenodd'); }
+      g.restore();
+    }
+    function faceArt(g, cw, ch, s, v) {
+      g.fillStyle = suitCol(s); const ps = cw * (v > 10 ? 0.15 : 0.18);
+      for (const [x, y] of pips(v)) { g.save(); g.translate((x - 0.5) * cw, (y - 0.5) * ch); if (y > 0.5) g.rotate(Math.PI); g.scale(ps, ps); g.beginPath(); suit(g, s); g.fill(); g.restore(); }
+      if (v === 1) { g.beginPath(); logoPath(g, 0, 0, cw * 0.5); g.fill('evenodd'); }
+      for (const [x, y, r] of [[-0.39, -0.4, 0], [0.39, 0.4, Math.PI]]) { g.save(); g.translate(x * cw, y * ch); g.rotate(r); g.scale(cw * 0.09, cw * 0.09); g.beginPath(); suit(g, s); g.fill(); g.restore(); for (let k = 0; k < Math.min(v, 13); k++) { g.save(); g.translate(x * cw, y * ch); g.rotate(r); g.beginPath(); circ(g, 0, cw * (0.08 + k * 0.022), cw * 0.008); g.fill(); g.restore(); } }
+    }
+    function sprites(m, dpr) {
+      buildLogo();
+      const cw = m * p.taille, ch = cw * 1.4, key = [cw, dpr, p.ombre, p.dos, p.fondDos, p.motif, p.carte, p.rouge, p.noir, p.valeurs, logoKey].join('|'); if (key === spKey) return SP; spKey = key;
+      const pad = Math.ceil(cw * 0.12), W = cw + pad * 2, H = ch + pad * 2;
+      const sh = document.createElement('canvas'); sh.width = Math.ceil(W * dpr); sh.height = Math.ceil(H * dpr); { const g = sh.getContext('2d'); g.filter = `blur(${cw * 0.03 * dpr}px)`; g.scale(dpr, dpr); g.translate(W / 2, H / 2); g.fillStyle = '#000'; g.beginPath(); rr(g, cw * 0.98, ch * 0.98, cw * 0.07); g.fill(); }
+      const mk = (art) => { const c = document.createElement('canvas'); c.width = Math.ceil(W * dpr); c.height = Math.ceil(H * dpr); const g = c.getContext('2d'); g.scale(dpr, dpr); if (p.ombre > 0) { g.globalAlpha = p.ombre * 0.5; g.drawImage(sh, cw * 0.018, cw * 0.03, W, H); g.globalAlpha = 1; } g.translate(W / 2, H / 2); g.fillStyle = p.carte; g.beginPath(); rr(g, cw, ch, cw * 0.07); g.fill(); g.strokeStyle = 'rgba(0,0,0,0.25)'; g.lineWidth = Math.max(0.5, cw * 0.006); g.stroke(); art(g); return c; };
+      const back = mk((g) => backArt(g, cw, ch)), faces = [];
+      for (let s = 0; s < 4; s++) for (let v = 1; v <= (p.valeurs | 0); v++) faces.push(mk((g) => faceArt(g, cw, ch, s, v)));
+      SP = { back, faces, sh, W, H, cw, ch }; return SP;
+    }
+
+    // ——— Paquet et figures ———
+    function init(w, h) {
+      const n = 4 * (p.valeurs | 0), m = Math.min(w, h), R = rng(app.seed), cards = [];
+      for (let i = 0; i < n; i++) cards.push({ i, s: Math.floor(i / (p.valeurs | 0)), v: (i % (p.valeurs | 0)) + 1, p: { x: w / 2, y: h / 2, r: 0, f: 0, z: 0 }, tw: null, zi: i, phys: null, gone: false, jr: (R() - 0.5) * 0.05 });
+      const deck = cards.map((c) => c.i); for (let i = deck.length - 1; i > 0; i--) { const j = Math.floor(R() * (i + 1)); [deck[i], deck[j]] = [deck[j], deck[i]]; }
+      S = { cards, deck, w, h, m, R, k: 0, tEnd: 0, hold: -1, ph: '', seq: [], skip: false, trail: false, trA: 0 };
+      if (!TR) TR = document.createElement('canvas');
+      pileSlots(0); S.cards.forEach((c) => { c.p = { ...c.tw.b }; c.tw = null; });
+      run('pile');
+    }
+    function tween(c, b, t0, d, hop, spin = 0) { c.tw = { a: { ...c.p }, b, t0, d, hop, spin }; }
+    function pose(c) {
+      if (!c.tw) return c.p; const T = c.tw, u = Math.max(0, Math.min(1, (simT - T.t0) / T.d)); if (u <= 0) return c.p;
+      const e = ease(u), a = T.a, b = T.b, P = { x: a.x + (b.x - a.x) * e, y: a.y + (b.y - a.y) * e, r: a.r + (b.r - a.r) * e + T.spin * Math.sin(Math.PI * e) , f: a.f + (b.f - a.f) * Math.max(0, Math.min(1, (u - 0.15) / 0.7)), z: a.z + (b.z - a.z) * e + T.hop * Math.sin(Math.PI * u) };
+      return P;
+    }
+    const slot = (k) => ({ x: S.w / 2 + k * 0.12, y: S.h / 2 - k * Math.max(0.25, S.m * 0.0006), r: 0, f: 0, z: 0 });
+    function pileSlots(t0, f = 0, st = 0.006) { const sp = 1 / Math.max(1, p.vitesse); S.deck.forEach((ci, k) => { const c = S.cards[ci]; c.zi = k; tween(c, { ...slot(k), r: c.jr * 0.4, f }, t0 + k * st * sp, 0.55 * sp, 0.05); }); }
+    const FIG = {
+      cycle: ['fan', 'face', 'unface', 'pile', 'split', 'riffle', 'split', 'riffle', 'pile', 'deal', 'gather', 'pile', 'cascade', 'retour'],
+      eventail: ['fan', 'face', 'unface', 'pile'], melange: ['split', 'riffle', 'pile'], donne: ['deal', 'gather', 'pile'], cascade: ['cascade', 'retour'],
+    };
+    function next() {
+      const seq = FIG[p.figure] || FIG.cycle; if (S.seqName !== p.figure) { S.seqName = p.figure; S.k = 0; }
+      const ph = seq[S.k % seq.length]; S.k++; run(ph);
+    }
+    function run(ph) {
+      S.ph = ph; const sp = 1 / Math.max(0.1, p.vitesse), t = simT, n = S.deck.length, cw = S.m * p.taille, ch = cw * 1.4, R = S.R; let hold = 0.5;
+      S.cards.forEach((c) => { c.p = pose(c); c.tw = null; });
+      if (ph === 'pile') { pileSlots(t); hold = 0.5; }
+      else if (ph === 'fan') {
+        const A = Math.min(Math.PI * 1.9, 2.4 * p.ouverture), Rr = Math.min(S.h * 0.42, ch * 1.9 * Math.max(0.7, p.ouverture)), py = S.h / 2 + Rr * 0.55;
+        S.deck.forEach((ci, k) => { const c = S.cards[ci], a = -A / 2 + A * k / Math.max(1, n - 1); c.zi = k; tween(c, { x: S.w / 2 + Math.sin(a) * Rr, y: py - Math.cos(a) * Rr, r: a, f: 0, z: 0 }, t + k * 0.018 * sp, 0.7 * sp, 0.04); });
+        hold = 0.4;
+      } else if (ph === 'face' || ph === 'unface') {
+        const fv = ph === 'face' ? 1 : 0; S.deck.forEach((ci, k) => { const c = S.cards[ci], kk = fv ? k : n - 1 - k; tween(c, { ...c.p, f: fv }, t + kk * 0.045 * sp, 0.38 * sp, 0.25); });
+        hold = fv ? 1.4 : 0.3;
+      } else if (ph === 'split') {
+        const hN = Math.floor(n / 2 + (R() - 0.5) * 4), dx = Math.min(S.w * 0.22, cw * 0.68);
+        S.deck.forEach((ci, k) => { const c = S.cards[ci], L = k < hN, j = L ? k : k - hN, b = slot(j); c.zi = k; tween(c, { x: S.w / 2 + (L ? -dx : dx) + j * 0.12, y: b.y, r: L ? 0.12 : -0.12, f: 0, z: 0 }, t + (L ? 0 : 0.08) * sp, 0.5 * sp, 0.12); });
+        S.half = hN; hold = 0.2;
+      } else if (ph === 'riffle') {
+        const Ld = S.deck.slice(0, S.half), Rd = S.deck.slice(S.half), out = []; let i = 0, j = 0;
+        while (i < Ld.length || j < Rd.length) { const takeL = j >= Rd.length || (i < Ld.length && R() < (Ld.length - i) / (Ld.length - i + Rd.length - j)); const run2 = 1 + Math.floor(R() * R() * 3); for (let q = 0; q < run2; q++) { if (takeL && i < Ld.length) out.push(Ld[i++]); else if (!takeL && j < Rd.length) out.push(Rd[j++]); } }
+        out.forEach((ci, k) => { const c = S.cards[ci], b = slot(k); c.zi = 1000 + k; tween(c, { ...b, r: c.jr, z: 0 }, t + k * 0.03 * sp, 0.28 * sp, 0.18); });
+        S.deck = out; hold = 0.35;
+      } else if (ph === 'deal') {
+        const W = S.w * 0.92, H = S.h * 0.88; let cols = Math.max(1, Math.round(Math.sqrt(n * (W / H) * (ch / cw)))); let rows = Math.ceil(n / cols); while (rows * cols < n) cols++;
+        const sx = Math.min(cw * 1.14, W / cols), sy = Math.min(ch * 1.1, H / rows), x0 = S.w / 2 - sx * (cols - 1) / 2, y0 = S.h / 2 - sy * (rows - 1) / 2;
+        const ord = S.deck.slice().reverse(); S.grid = ord;
+        ord.forEach((ci, k) => { const c = S.cards[ci], col = k % cols, row = Math.floor(k / cols); c.zi = 2000 + k; tween(c, { x: x0 + col * sx, y: y0 + row * sy, r: c.jr, f: 1, z: 0 }, t + k * 0.075 * sp, 0.55 * sp, 0.5, (R() < 0.5 ? -1 : 1) * Math.PI * (0.6 + R() * 0.8)); });
+        hold = 2.2;
+      } else if (ph === 'gather') {
+        const g = S.grid || S.deck; const out = [];
+        g.slice().reverse().forEach((ci, k) => { const c = S.cards[ci]; out.push(ci); c.zi = 3000 + k; tween(c, { ...slot(k), x: S.w / 2 - S.w * 0.28 + k * 0.12, r: -0.05, f: 0, z: 0 }, t + k * 0.022 * sp, 0.45 * sp, 0.2); });
+        S.deck = out; hold = 0.1;
+      } else if (ph === 'cascade') {
+        S.trail = true; S.trA = 1; S.launch = t; S.li = n - 1; const g = TR.getContext('2d'); g.setTransform(1, 0, 0, 1, 0, 0); g.clearRect(0, 0, TR.width, TR.height);
+        S.cards.forEach((c) => { c.gone = false; });
+        hold = 0;
+      } else if (ph === 'retour') {
+        S.trFade = t; S.cards.forEach((c) => { c.gone = false; c.phys = null; });
+        S.deck.forEach((ci, k) => { const c = S.cards[ci]; c.zi = k; c.p = { x: S.w / 2 + (R() - 0.5) * S.w * 0.6, y: -ch * (1 + R()), r: (R() - 0.5) * 3, f: 0, z: 0.4 }; tween(c, { ...slot(k), r: c.jr * 0.4 }, t + 0.5 * sp + k * 0.03 * sp, 0.6 * sp, 0); });
+        hold = 0.5;
+      }
+      S.tEnd = Math.max(t, ...S.cards.map((c) => (c.tw ? c.tw.t0 + c.tw.d : 0))) + hold * sp;
+    }
+    function step(dt) {
+      const sp = Math.max(0.1, p.vitesse), cw = S.m * p.taille, ch = cw * 1.4;
+      if (S.ph === 'cascade') {
+        if (S.li >= 0 && simT >= S.launch) {
+          const c = S.cards[S.deck[S.li]], R = S.R, dir = R() < 0.5 ? -1 : 1; c.p = pose(c); c.tw = null; c.zi = 4000 + (S.deck.length - S.li);
+          c.phys = { vx: dir * S.m * (0.25 + R() * 0.45) * sp, vy: -S.m * R() * 0.6 * sp, vr: 0 };
+          S.li--; S.launch = simT + 0.42 / sp;
+        }
+        let live = 0;
+        for (const c of S.cards) {
+          if (!c.phys || c.gone) continue; live++;
+          const P = c.phys; P.vy += S.m * 2.4 * sp * sp * dt; c.p.x += P.vx * dt; c.p.y += P.vy * dt;
+          if (c.p.y > S.h - ch / 2) { c.p.y = S.h - ch / 2; P.vy = -Math.abs(P.vy) * p.rebond; }
+          if (c.p.x < -cw || c.p.x > S.w + cw) { c.gone = true; c.phys = null; }
+          S.trailDraw = true;
+        }
+        if (S.li < 0 && !live && simT >= S.tEnd) { S.tEnd = simT + 1.2 / sp; S.ph = 'cascade-fin'; }
+        return;
+      }
+      if (S.ph === 'cascade-fin') { if (simT >= S.tEnd || S.skip) { S.skip = false; next(); } return; }
+      if (S.skip) { S.skip = false; next(); return; }
+      if (simT >= S.tEnd && simT >= S.hold && !ptr) next();
+    }
+
+    // ——— Tapis ———
+    function felt(w, h, dpr) {
+      const key = [w, h, dpr, p.tapis, p.fond].join('|'); if (key === bgKey) return BG; bgKey = key;
+      BG = BG || document.createElement('canvas'); BG.width = Math.round(w * dpr); BG.height = Math.round(h * dpr);
+      const g = BG.getContext('2d'), R = rng(3), m = Math.min(w, h); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.fillStyle = p.fond; g.fillRect(0, 0, w, h);
+      if (p.tapis === 'feutre') for (let k = 0; k < w * h / 14; k++) { g.fillStyle = R() < 0.5 ? `rgba(0,0,0,${0.03 + R() * 0.06})` : `rgba(255,255,255,${0.02 + R() * 0.04})`; const a = R() * TAU, l = 1 + R() * 3; g.fillRect(R() * w, R() * h, Math.cos(a) * l + 0.7, Math.sin(a) * l + 0.7); }
+      const gr = g.createRadialGradient(w / 2, h / 2, m * 0.1, w / 2, h / 2, Math.hypot(w, h) * 0.6); gr.addColorStop(0, 'rgba(255,255,255,0.08)'); gr.addColorStop(1, 'rgba(0,0,0,0.22)'); g.fillStyle = gr; g.fillRect(0, 0, w, h);
+      return BG;
+    }
+    function drawCard(g, c, P, sp, dpr, shadow) {
+      const sc = 1 + P.z * 0.18, fx = Math.cos(Math.PI * P.f), cs = Math.cos(P.r), sn = Math.sin(P.r), sxx = Math.max(0.02, Math.abs(fx)) * sc;
+      if (shadow && p.ombre > 0 && P.z > 0.01) {
+        const o = sp.cw * (0.03 + P.z * 0.25); g.globalAlpha = p.ombre * 0.5 * Math.min(1, P.z * 4) * (1 - P.z * 0.4);
+        g.setTransform(cs * sxx * dpr, sn * sxx * dpr, -sn * sc * dpr, cs * sc * dpr, (P.x + o * 0.6) * dpr, (P.y + o) * dpr); g.drawImage(sp.sh, -sp.W / 2, -sp.H / 2, sp.W, sp.H); g.globalAlpha = 1;
+      }
+      g.setTransform(cs * sxx * dpr, sn * sxx * dpr, -sn * sc * dpr, cs * sc * dpr, P.x * dpr, P.y * dpr);
+      g.drawImage(P.f > 0.5 ? sp.faces[c.i] || sp.back : sp.back, -sp.W / 2, -sp.H / 2, sp.W, sp.H);
+      if (Math.abs(fx) < 0.9) { g.fillStyle = `rgba(0,0,0,${(0.9 - Math.abs(fx)) * 0.35})`; g.beginPath(); rr(g, sp.cw, sp.ch, sp.cw * 0.07); g.fill(); }
+    }
+    function hit(x, y) {
+      if (!S) return null; let best = null;
+      for (const c of S.cards) { if (c.gone) continue; const P = pose(c), dx = x - P.x, dy = y - P.y, cs = Math.cos(-P.r), sn = Math.sin(-P.r), lx = dx * cs - dy * sn, ly = dx * sn + dy * cs, cw = S.m * p.taille; if (Math.abs(lx) < cw / 2 && Math.abs(ly) < cw * 0.7 && (!best || c.zi > best.zi)) best = c; }
+      return best;
+    }
+
+    app.loop((t, dt) => {
+      dt = Math.min(1 / 20, dt || 0);
+      const { w, h, dpr } = app.size; buildLogo();
+      const key = [w, h, p.valeurs, app.seed].join('|'); if (!S || key !== gKey) { gKey = key; init(w, h); }
+      S.m = Math.min(w, h); if (S.seqName && S.seqName !== p.figure && S.ph !== 'cascade') S.skip = true;
+      if (TR.width !== Math.round(w * dpr) || TR.height !== Math.round(h * dpr)) { TR.width = Math.round(w * dpr); TR.height = Math.round(h * dpr); }
+      if (app.thumbnail) { if (!S.th) { S.th = true; S.seqName = p.figure; S.k = 0; const seq = FIG[p.figure] || FIG.cycle; for (let k = 0; k < 3000 && !(S.ph === 'face' && simT > S.tEnd - 1.0); k++) { simT += 1 / 60; step(1 / 60); if (seq.indexOf('face') < 0 && simT > 3) break; } } }
+      else { simT += dt; step(dt); }
+      const sp = sprites(S.m, dpr);
+      ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.drawImage(felt(w, h, dpr), 0, 0);
+      if (S.trail) {
+        if (S.trailDraw) { const g = TR.getContext('2d'); for (const c of S.cards) if (c.phys && !c.gone) drawCard(g, c, c.p, sp, dpr, false); S.trailDraw = false; }
+        let a = 1; if (S.trFade !== undefined && S.ph === 'retour') a = Math.max(0, 1 - (simT - S.trFade) / 0.8); if (a <= 0 && S.ph === 'retour') { S.trail = false; S.trFade = undefined; }
+        ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.globalAlpha = a; ctx.drawImage(TR, 0, 0); ctx.globalAlpha = 1;
+      }
+      const list = S.cards.filter((c) => !c.gone && !(c.phys && S.trail)).sort((a, b) => a.zi - b.zi);
+      for (const c of list) drawCard(ctx, c, pose(c), sp, dpr, true);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      app.finish(ctx);
+    });
+
+    function toSVG() {
+      const { w, h } = app.size, f = (v) => +v.toFixed(2), sp = sprites(S.m, 1), cw = sp.cw, ch = sp.ch;
+      const pb = () => ({ d: '', moveTo(x, y) { this.d += `M${f(x)} ${f(y)}`; }, lineTo(x, y) { this.d += `L${f(x)} ${f(y)}`; }, quadraticCurveTo(a, b, x, y) { this.d += `Q${f(a)} ${f(b)} ${f(x)} ${f(y)}`; }, bezierCurveTo(a, b, c, d, x, y) { this.d += `C${f(a)} ${f(b)} ${f(c)} ${f(d)} ${f(x)} ${f(y)}`; }, closePath() { this.d += 'Z'; } });
+      const card = pb(); rr(card, cw, ch, cw * 0.07); const mg = cw * 0.07, inner = pb(); rr(inner, cw - mg * 2, ch - mg * 2, cw * 0.04);
+      const lg = (x, y, s) => { const q = pb(); logoPath(q, x, y, s); return q.d; };
+      let back = `<path d="${inner.d}" fill="${p.fondDos}"/><g clip-path="url(#dos)" fill="${p.motif}" stroke="${p.motif}">`;
+      if (p.dos === 'losanges') { const s = cw * 0.11; let d = ''; for (let k = -30; k < 30; k++) d += `M${f(-cw + k * s)} ${f(-ch)}L${f(cw + k * s)} ${f(ch)}M${f(cw + k * s)} ${f(-ch)}L${f(-cw + k * s)} ${f(ch)}`; back += `<path d="${d}" fill="none" stroke-width="${f(cw * 0.012)}"/>`; }
+      else if (p.dos === 'rayures') { const s = cw * 0.075; back += `<g transform="rotate(45)" stroke="none">`; for (let x = -ch; x < ch; x += s * 2) back += `<rect x="${f(x)}" y="${f(-ch)}" width="${f(s)}" height="${f(ch * 2)}"/>`; back += `</g><circle r="${f(cw * 0.26)}" fill="${p.fondDos}" stroke="none"/><path stroke="none" fill-rule="evenodd" d="${lg(0, 0, cw * 0.36)}"/>`; }
+      else if (p.dos === 'points') { const s = cw * 0.1; back += '<g stroke="none">'; for (let j = -8; j <= 8; j++) for (let i = -6; i <= 6; i++) back += `<circle cx="${f(i * s + (j % 2 ? s / 2 : 0))}" cy="${f(j * s * 0.87)}" r="${f(s * 0.24)}"/>`; back += '</g>'; }
+      else back += `<path stroke="none" fill-rule="evenodd" d="${lg(0, 0, cw * 0.58)}"/>`;
+      back += '</g>';
+      const face = (c) => {
+        let s = ''; const ps = cw * (c.v > 10 ? 0.15 : 0.18), su = pb(); suit(su, c.s);
+        for (const [x, y] of pips(c.v)) s += `<path transform="translate(${f((x - 0.5) * cw)} ${f((y - 0.5) * ch)}) rotate(${y > 0.5 ? 180 : 0}) scale(${f(ps)})" d="${su.d}"/>`;
+        if (c.v === 1) s += `<path fill-rule="evenodd" d="${lg(0, 0, cw * 0.5)}"/>`;
+        for (const [x, y, r] of [[-0.39, -0.4, 180], [0.39, 0.4, 0]]) s += `<path transform="translate(${f(x * cw)} ${f(y * ch)}) rotate(${r === 0 ? 180 : 0}) scale(${f(cw * 0.09)})" d="${su.d}"/>`;
+        return `<g fill="${suitCol(c.s)}">${s}</g>`;
+      };
+      let s = `<rect width="100%" height="100%" fill="${p.fond}"/>`;
+      const list = S.cards.filter((c) => !c.gone).sort((a, b) => a.zi - b.zi);
+      for (const c of list) {
+        const P = pose(c), sc = 1 + P.z * 0.18, sx = Math.max(0.02, Math.abs(Math.cos(Math.PI * P.f))) * sc, cs = Math.cos(P.r), sn = Math.sin(P.r), o = cw * (0.03 + P.z * 0.25);
+        const M = (x, y) => `matrix(${[cs * sx, sn * sx, -sn * sc, cs * sc, x, y].map((v) => +v.toFixed(4)).join(' ')})`;
+        if (p.ombre > 0) s += `<path transform="${M(P.x + o * 0.6, P.y + o)}" d="${card.d}" fill="#000" opacity="${f(p.ombre * 0.5)}" filter="url(#flou)"/>`;
+        s += `<g transform="${M(P.x, P.y)}"><path d="${card.d}" fill="${p.carte}" stroke="#000" stroke-opacity="0.25" stroke-width="${f(Math.max(0.5, cw * 0.006))}"/>${P.f > 0.5 ? face(c) : '<use href="#dosArt"/>'}</g>`;
+      }
+      const defs = `<clipPath id="dos"><path d="${inner.d}"/></clipPath><g id="dosArt">${back}</g><filter id="flou" x="-0.2" y="-0.2" width="1.4" height="1.4"><feGaussianBlur stdDeviation="${f(cw * 0.03)}"/></filter>`;
+      return `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><defs>${defs}</defs>${s}</svg>`;
+    }
+  </script>
+</body>
+</html>
