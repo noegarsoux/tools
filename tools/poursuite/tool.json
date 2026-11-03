@@ -1,0 +1,15 @@
+{
+  "slug": "poursuite",
+  "title": "Tourbillons de poursuite",
+  "type": "motion",
+  "description": "Des polygones dont chaque sommet poursuit le suivant, pavés en carrés, triangles ou hexagones ; une vague de torsion parcourt la grille et le logo inverse le sens.",
+  "tags": ["op-art", "pavage", "spirales", "lignes", "logo", "svg"],
+  "inspiration": [
+    "Le problème des souris de Lucas et Brocard (1877)",
+    "Les « whirls » des carnets de dessin géométrique",
+    "Les pavages tournoyants de l'art optique des années 1960"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}
