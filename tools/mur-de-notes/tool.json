@@ -1,0 +1,15 @@
+{
+  "slug": "mur-de-notes",
+  "title": "Mur de notes",
+  "type": "motion",
+  "description": "Des centaines de notes adhésives collées une à une sur une vitre ou un mur dessinent le logo en gros pixels ; le vent les soulève, en arrache, et on les recolle.",
+  "tags": ["pixel", "papier", "vent", "interaction", "logo", "svg"],
+  "inspiration": [
+    "Les fresques de notes adhésives aux fenêtres des bureaux",
+    "Le pixel art fait main, case par case",
+    "Les papiers qui se soulèvent et s'envolent dans un courant d'air"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}

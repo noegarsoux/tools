@@ -1,0 +1,297 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mur de notes</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Mur de notes : une grille de cases ; chaque case reçoit une couleur cible (logo pixelisé, damier, rayures…).
+    // Les notes se collent une à une dans un ordre choisi. Chaque note n'est collée que par le haut : son bas
+    // se soulève selon le vent (rafales qui balaient le mur + frémissement propre) et le pointeur. Le soulèvement
+    // c ∈ [0, 1] choisit un sprite pré-rendu (bas de la note relevé d'un angle 1,25·c, raccourci par cos, ombre
+    // projetée plus loin). Au-delà d'un seuil, une note se décolle et tombe en tournoyant comme une feuille.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2, K = 8;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const SAL = PAL('salon'), PIX = PAL('pixels'), GR = PAL('good-room'), BIE = PAL('biennale'), MEN = PAL('menthe');
+
+    let simT = 0, vKey = '', logoM = null, logoKey = '', ptr = null, S = null, gKey = '', SP = null, spKey = '', BG = null, bgKey = '';
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.04, vignette: 0.16 },
+      hint: 'Passez vite sur le mur pour souffler · clic sur une note : l\'arracher · clic sur une case vide : la recoller · molette : vent',
+      notes: 'Sur les vitres des bureaux, on dessine parfois de grandes images en notes adhésives, une case par note, comme des pixels. Ici, les notes se collent une à une et forment le logo, un damier, des rayures ou une cible. Collées seulement par le haut, elles frémissent au moindre courant d\'air : le bas se soulève, l\'ombre s\'allonge, et quand une rafale passe, certaines se décollent et tombent en tournoyant, avant qu\'on ne les recolle. Passez vite sur le mur pour souffler, cliquez une note pour l\'arracher.',
+      params: {
+        'Mosaïque': {
+          motif: { type: 'select', label: 'Motif', options: { logo: 'Logo', damier: 'Damier', rayures: 'Rayures', cible: 'Cible', degrade: 'Dégradé' }, value: 'logo' },
+          colonnes: { type: 'range', label: 'Colonnes', min: 8, max: 60, step: 1, value: 28 },
+          echelle: { type: 'range', label: 'Taille du logo', min: 0.3, max: 1.1, step: 0.01, value: 0.8 },
+          fondNotes: { type: 'segmented', label: 'Autour', options: { vide: 'Rien', plein: 'Une couleur', mele: 'Couleurs mêlées' }, value: 'vide' },
+          marge: { type: 'range', label: 'Espace entre notes', min: 0, max: 0.3, step: 0.005, value: 0.06 },
+          desordre: { type: 'range', label: 'Désordre', min: 0, max: 1, step: 0.01, value: 0.35 },
+          image: { type: 'file', label: 'Logo', accept: 'image/*' },
+        },
+        'Pose et vent': {
+          ordre: { type: 'select', label: 'Ordre de pose', options: { rangs: 'Rang par rang', spirale: 'En spirale', hasard: 'Au hasard', diagonale: 'En diagonale' }, value: 'rangs' },
+          vitesse: { type: 'range', label: 'Vitesse', min: 0.2, max: 3, step: 0.01, value: 1 },
+          vent: { type: 'range', label: 'Vent', min: 0, max: 1, step: 0.01, value: 0.4 },
+          rafales: { type: 'range', label: 'Rafales qui arrachent', min: 0, max: 1, step: 0.01, value: 0.5 },
+        },
+        'Couleurs': {
+          couleurs: { type: 'palette', label: 'Notes', value: ['#e5452a', '#f2e640', '#f2b0c8', '#6dbf45'] },
+          mur: { type: 'segmented', label: 'Support', options: { vitre: 'Vitre', platre: 'Mur', liege: 'Liège' }, value: 'vitre' },
+          fond: { type: 'color', label: 'Couleur du support', value: '#1d2a3a' },
+        },
+      },
+      presets: {
+        'Vitrine': {},
+        'Pixels fins': { colonnes: 52, marge: 0.04, desordre: 0.15, ordre: 'diagonale', vent: 0.25, couleurs: ['#16161a', '#f4f1ea'], fondNotes: 'plein', mur: 'platre', fond: '#d8d4cc' },
+        'Gros pixels': { colonnes: 12, marge: 0.08, echelle: 0.9, couleurs: ['#2f5fd0', '#f2e640'], fondNotes: 'plein', ordre: 'spirale', mur: 'platre', fond: '#ebe7df' },
+        'Damier': { motif: 'damier', colonnes: 18, couleurs: ['#f2e640', '#e5452a', '#f2b0c8', '#6dbf45', '#9db0ef'], ordre: 'hasard', mur: 'liege', fond: '#b4865a' },
+        'Rayures': { motif: 'rayures', colonnes: 24, couleurs: ['#e5452a', '#f2e640', '#2f5fd0'], ordre: 'diagonale', vent: 0.55 },
+        'Cible': { motif: 'cible', colonnes: 30, couleurs: ['#e5452a', '#f4f1ea', '#16161a'], ordre: 'spirale', mur: 'platre', fond: '#cfc9bd', desordre: 0.2 },
+        'Coup de vent': { vent: 0.9, rafales: 1, colonnes: 22, fondNotes: 'mele', couleurs: ['#16161a', '#f2e640', '#f2b0c8', '#6dbf45'] },
+        'Dégradé': { motif: 'degrade', colonnes: 34, couleurs: [PIX[3], PIX[1], PIX[5], PIX[2]], ordre: 'rangs', mur: 'vitre', fond: '#111317', marge: 0.03 },
+        'Salon': { couleurs: [SAL[1], SAL[2], SAL[3], SAL[4]], fondNotes: 'mele', mur: 'platre', fond: SAL[0], colonnes: 26 },
+        'Good Room': { couleurs: [GR[0], GR[1], GR[2], GR[3], GR[4]], fondNotes: 'mele', mur: 'liege', fond: '#a77b4f', colonnes: 20, ordre: 'hasard' },
+      },
+      brand(colors) {
+        const s = colors.slice().sort((a, b) => lum(a) - lum(b)), D = s[0], rest = s.slice(1);
+        return { couleurs: rest.length ? [D].concat(rest) : [D, '#f4f1ea'], fond: mix(rest.length ? rest[rest.length - 1] : '#ffffff', '#000000', 0.12), mur: 'platre', fondNotes: 'plein' };
+      },
+      pointer: {
+        down: (q) => {
+          ptr = { x: q.x, y: q.y, px: q.x, py: q.y, moved: 0, sp: 0, t: performance.now() };
+          if (!S) return; const c = cellAt(q.x, q.y); if (!c) return;
+          if (c.note && c.note.st === 'colle') peel(c, -1);
+          else if (!c.note) { c.note = newNote(c, c.ci >= 0 ? c.ci : 1 % pal().length); }
+          S.hold = simT + 2;
+        },
+        move: (q) => { pointerMove(q); },
+        drag: (q) => { pointerMove(q); },
+        up: () => { if (ptr) ptr.down = false; },
+        wheel: (q, dy) => app.set('vent', Math.max(0, Math.min(1, +(p.vent + (dy > 0 ? -0.05 : 0.05)).toFixed(2)))),
+      },
+      onChange(k) { if (['*', 'image'].includes(k)) logoKey = ''; },
+      export: { name: 'mur-de-notes', svg: () => toSVG() },
+    });
+    const p = app.params;
+    function pointerMove(q) { const now = performance.now(), o = ptr || { x: q.x, y: q.y, t: now - 16 }, dtp = Math.max(8, now - o.t) / 1000, sp = Math.hypot(q.x - o.x, q.y - o.y) / dtp; ptr = { ...o, x: q.x, y: q.y, sp: (o.sp || 0) * 0.6 + sp * 0.4, t: now }; }
+
+    function hex(x) { const n = parseInt(x.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
+    function lum(x) { const c = hex(x); return (c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114) / 255; }
+    function mix(a, b, t) { const A = hex(a), C = hex(b); return '#' + A.map((v, i) => Math.round(v + (C[i] - v) * t).toString(16).padStart(2, '0')).join(''); }
+    function rng(s) { let a = s >>> 0; return () => { a = (a + 0x6d2b79f5) >>> 0; let t = a; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+    const pal = () => (p.couleurs.length ? p.couleurs : ['#e5452a', '#f2e640']);
+
+    function buildLogo() {
+      const img0 = p.image || app.logoImg, key = img0 ? (img0.src || 'c') : 'demo'; if (key === logoKey) return; logoKey = key; vKey = '';
+      const M = 200, c = document.createElement('canvas'); c.width = c.height = M; const x = c.getContext('2d', { willReadFrequently: true }), L = M * 0.94, cx = M / 2;
+      if (img0) { const iw = img0.naturalWidth || img0.width, ih = img0.naturalHeight || img0.height, s = L / Math.max(iw, ih); x.drawImage(img0, cx - iw * s / 2, cx - ih * s / 2, iw * s, ih * s); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(cx, cx, L * 0.48, 0, TAU); x.arc(cx, cx, L * 0.27, 0, TAU, true); x.fill('evenodd'); x.fillRect(cx - L * 0.07, cx - L * 0.5, L * 0.14, L); }
+      const d = x.getImageData(0, 0, M, M).data; let transp = 0; for (let i = 3; i < d.length; i += 4) if (d[i] < 128) transp++; const useA = transp > M * M * 0.05;
+      const F = new Float64Array(M * M); for (let i = 0; i < M * M; i++) { const o = i * 4, l = (d[o] * 0.2126 + d[o + 1] * 0.7152 + d[o + 2] * 0.0722) / 255; F[i] = useA ? d[o + 3] / 255 : (d[o + 3] / 255) * Math.min(1, Math.max(0, (0.75 - l) * 2)); }
+      { const G2 = new Float64Array(M * M); for (let j = 1; j < M - 1; j++) for (let i = 1; i < M - 1; i++) { let a = 0; for (let b = -1; b <= 1; b++) for (let c = -1; c <= 1; c++) a += F[(j + b) * M + i + c] * (b || c ? (b && c ? 1 : 2) : 4); G2[j * M + i] = a / 16; } F.set(G2); }
+      for (let k = 0; k < M; k++) F[k] = F[(M - 1) * M + k] = F[k * M] = F[k * M + M - 1] = 0;
+      logoM = contours(F, M, M, 0.5, 0, 0, 1).filter((c) => c.closed && c.pts.length > 6).map((c) => chaikin(chaikin(c.pts, true), true).map((q) => [q[0] / M - 0.5, q[1] / M - 0.5]));
+    }
+    // carrés marchants + chaînage
+    function contours(F, nx, ny, lev, ox, oy, cs) {
+      const pt = new Map(), adj = new Map();
+      const P = (id) => { let q = pt.get(id); if (q) return q; const cell = id >> 1, i = cell % nx, j = (cell - i) / nx; let a, b, ax, ay, bx, by; if (id & 1) { a = F[j * nx + i]; b = F[(j + 1) * nx + i]; ax = bx = i; ay = j; by = j + 1; } else { a = F[j * nx + i]; b = F[j * nx + i + 1]; ay = by = j; ax = i; bx = i + 1; } const t = (lev - a) / (b - a || 1e-9); q = [ox + (ax + (bx - ax) * t) * cs, oy + (ay + (by - ay) * t) * cs]; pt.set(id, q); return q; };
+      const link = (a, b) => { (adj.get(a) || adj.set(a, []).get(a)).push(b); (adj.get(b) || adj.set(b, []).get(b)).push(a); };
+      for (let j = 0; j < ny - 1; j++) for (let i = 0; i < nx - 1; i++) {
+        const A = F[j * nx + i] > lev, B = F[j * nx + i + 1] > lev, C = F[(j + 1) * nx + i + 1] > lev, D = F[(j + 1) * nx + i] > lev, idx = A | (B << 1) | (C << 2) | (D << 3);
+        if (idx === 0 || idx === 15) continue;
+        const T = (j * nx + i) * 2, R = (j * nx + i + 1) * 2 + 1, Bo = ((j + 1) * nx + i) * 2, Le = (j * nx + i) * 2 + 1;
+        const ctr = (F[j * nx + i] + F[j * nx + i + 1] + F[(j + 1) * nx + i + 1] + F[(j + 1) * nx + i]) / 4 > lev;
+        switch (idx) {
+          case 1: case 14: link(Le, T); break; case 2: case 13: link(T, R); break; case 3: case 12: link(Le, R); break;
+          case 4: case 11: link(R, Bo); break; case 6: case 9: link(T, Bo); break; case 7: case 8: link(Le, Bo); break;
+          case 5: if (ctr) { link(Le, Bo); link(T, R); } else { link(Le, T); link(R, Bo); } break;
+          case 10: if (ctr) { link(Le, T); link(R, Bo); } else { link(Le, Bo); link(T, R); } break;
+        }
+      }
+      const seen = new Set(), out = [];
+      const walk = (s) => { const L = [s]; seen.add(s); let cur = s; for (;;) { const nb = (adj.get(cur) || []).find((x) => !seen.has(x)); if (nb === undefined) break; seen.add(nb); L.push(nb); cur = nb; } return L; };
+      for (const [id, nb] of adj) if (nb.length === 1 && !seen.has(id)) out.push({ pts: walk(id).map(P), closed: false });
+      for (const [id] of adj) if (!seen.has(id)) out.push({ pts: walk(id).map(P), closed: true });
+      return out;
+    }
+    function chaikin(pts, closed) {
+      const o = []; const n = pts.length; for (let k = 0; k < (closed ? n : n - 1); k++) { const a = pts[k], b = pts[(k + 1) % n]; o.push([a[0] * 0.75 + b[0] * 0.25, a[1] * 0.75 + b[1] * 0.25], [a[0] * 0.25 + b[0] * 0.75, a[1] * 0.25 + b[1] * 0.75]); }
+      if (!closed) { o.unshift(pts[0]); o.push(pts[n - 1]); } return o;
+    }
+
+    // ——— Grille et motif ———
+    function build(w, h) {
+      buildLogo();
+      const C = pal(), nc = C.length, cols = p.colonnes | 0, cell = w * 0.94 / cols, rows = Math.max(3, Math.floor(h * 0.94 / cell)), x0 = w / 2 - cell * cols / 2, y0 = h / 2 - cell * rows / 2;
+      const R = rng(app.seed), cells = [];
+      // logo rastérisé (sur-échantillonné 4×)
+      let cov = null;
+      if (p.motif === 'logo') {
+        const SS = 4, cv = document.createElement('canvas'); cv.width = cols * SS; cv.height = rows * SS; const g = cv.getContext('2d', { willReadFrequently: true }), sc = Math.min(cols, rows) * SS * p.echelle;
+        g.fillStyle = '#000'; g.beginPath(); for (const lp of logoM) { lp.forEach((q, k) => k ? g.lineTo(cv.width / 2 + q[0] * sc, cv.height / 2 + q[1] * sc) : g.moveTo(cv.width / 2 + q[0] * sc, cv.height / 2 + q[1] * sc)); g.closePath(); } g.fill('evenodd');
+        const d = g.getImageData(0, 0, cv.width, cv.height).data; cov = (i, j) => { let a = 0; for (let b = 0; b < SS; b++) for (let c = 0; c < SS; c++) a += d[((j * SS + b) * cv.width + i * SS + c) * 4 + 3]; return a / (SS * SS * 255); };
+      }
+      for (let j = 0; j < rows; j++) for (let i = 0; i < cols; i++) {
+        let ci = -1; const u = (i + 0.5) / cols - 0.5, v = ((j + 0.5) / rows - 0.5) * rows / cols;
+        if (p.motif === 'logo') ci = cov(i, j) >= 0.5 ? 0 : p.fondNotes === 'vide' ? -1 : p.fondNotes === 'plein' ? 1 % nc : nc > 1 ? 1 + Math.floor(R() * (nc - 1)) : 0;
+        else if (p.motif === 'damier') ci = ((i + j) % 2) ? (Math.floor(i / 2) + Math.floor(j / 2)) % Math.max(1, nc - 1) + (nc > 1 ? 1 : 0) : 0;
+        else if (p.motif === 'rayures') ci = Math.floor((i + j) / 3) % nc;
+        else if (p.motif === 'cible') ci = Math.floor(Math.hypot(u, v) * cols / 2.6) % nc;
+        else { const tt = (j + 0.5) / rows * (nc - 1), b = [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]][j % 4][i % 4] / 16; ci = Math.min(nc - 1, Math.floor(tt + b)); }
+        cells.push({ i, j, x: x0 + (i + 0.5) * cell, y: y0 + (j + 0.5) * cell, ci, note: null, ord: 0, rot: (R() - 0.5) * 0.12 * p.desordre, dx: (R() - 0.5) * cell * 0.08 * p.desordre, dy: (R() - 0.5) * cell * 0.08 * p.desordre, ph: R() * TAU });
+      }
+      // ordre de pose
+      const ci0 = (cols - 1) / 2, cj0 = (rows - 1) / 2;
+      for (const c of cells) {
+        if (p.ordre === 'rangs') c.ord = c.j * cols + (c.j % 2 ? cols - 1 - c.i : c.i);
+        else if (p.ordre === 'diagonale') c.ord = (c.i + c.j) * 1000 + c.i;
+        else if (p.ordre === 'spirale') { const a = Math.atan2(c.j - cj0, c.i - ci0), r = Math.max(Math.abs(c.i - ci0), Math.abs(c.j - cj0)); c.ord = r * 1000 + ((a + TAU) % TAU) * 100; }
+        else c.ord = R();
+      }
+      const order = cells.filter((c) => c.ci >= 0).sort((a, b) => a.ord - b.ord);
+      S = { cells, order, cols, rows, cell, x0, y0, s: cell * (1 - p.marge), w, h, m: Math.min(w, h), fall: [], ph: 'pose', tp: simT, acc: 0, R, hold: -1, gust: 0 };
+    }
+    function cellAt(x, y) { if (!S) return null; const i = Math.floor((x - S.x0) / S.cell), j = Math.floor((y - S.y0) / S.cell); if (i < 0 || j < 0 || i >= S.cols || j >= S.rows) return null; return S.cells[j * S.cols + i]; }
+    function newNote(c, ci) { return { ci, st: 'pose', t0: simT, curl: 0.6, cv: 0 }; }
+    function peel(c, dir) {
+      const n = c.note; if (!n) return; c.note = null; const R = S.R;
+      S.fall.push({ ci: n.ci, x: c.x + c.dx, y: c.y + c.dy, vx: (R() - 0.5) * S.cell * 2 + (S.gust ? S.cell * 4 * Math.cos(S.ga) : 0), vy: dir < 0 ? -S.cell * 2 : S.cell * 0.5, ang: c.rot, va: (R() - 0.5) * 4, ph: 0, dph: (R() < 0.5 ? -1 : 1) * (4 + R() * 5), sw: R() * TAU });
+    }
+
+    // ——— Simulation ———
+    function wind(c) {
+      const t = simT, A = S.ga ?? 0.4, L = S.cell * 9, base = p.vent * (0.18 + 0.12 * Math.sin(t * 1.3 + c.ph));
+      const k = (c.x * Math.cos(A) + c.y * Math.sin(A)) / L, band = Math.pow(Math.max(0, Math.sin(k - t * 1.6 * p.vitesse)), 8);
+      let g = base + p.vent * band * (0.55 + S.gust * 1.1) + 0.05 * p.vent * Math.sin(t * 9 + c.ph * 3);
+      if (ptr && ptr.sp > 0) { const d = Math.hypot(ptr.x - c.x, ptr.y - c.y), R = S.cell * 5; if (d < R) g += (1 - d / R) * Math.min(1.6, ptr.sp / (S.cell * 10)); }
+      return g;
+    }
+    function step(dt) {
+      const sp = Math.max(0.1, p.vitesse);
+      if (ptr) ptr.sp *= Math.exp(-dt * 6);
+      if (S.ph === 'pose') {
+        const rate = Math.max(6, S.order.length / (5 / sp)); S.acc += rate * dt;
+        while (S.acc >= 1) { S.acc -= 1; const c = S.order.find((o) => !o.note); if (!c) break; c.note = newNote(c, c.ci); }
+        if (!S.order.some((o) => !o.note)) { S.ph = 'calme'; S.tp = simT; }
+      } else if (S.ph === 'calme') { if (simT - S.tp > 3.5 / sp && simT >= S.hold) { S.ph = 'rafale'; S.tp = simT; S.ga = S.R() * TAU; } }
+      else if (S.ph === 'rafale') { const u = (simT - S.tp) * sp / 3.2; S.gust = Math.sin(Math.PI * Math.min(1, u)) * p.rafales; if (u >= 1) { S.gust = 0; S.ph = 'pose'; S.tp = simT; } }
+      for (const c of S.cells) {
+        const n = c.note; if (!n) continue;
+        if (n.st === 'pose') { if (simT - n.t0 > 0.35) n.st = 'colle'; continue; }
+        const tg = Math.min(1, wind(c)), k = 60, d = 9; n.cv += (k * (tg - n.curl) - d * n.cv) * dt; n.curl = Math.max(0, Math.min(1, n.curl + n.cv * dt));
+        if (n.curl > 0.82) { const pr = (S.gust * 2.2 + (ptr && ptr.sp > S.cell * 14 && Math.hypot(ptr.x - c.x, ptr.y - c.y) < S.cell * 3 ? 3 : 0) + p.rafales * 0.05) * (n.curl - 0.8) * 5 * dt; if (S.R() < pr) peel(c, 1); }
+      }
+      const g = S.m * 0.9;
+      for (const f of S.fall) {
+        f.ph += f.dph * dt; f.sw += dt * 2.2;
+        const tv = S.cell * 3.2 * (0.55 + 0.45 * Math.abs(Math.cos(f.ph)));
+        f.vy += (g * 0.4) * dt; if (f.vy > tv) f.vy += (tv - f.vy) * Math.min(1, dt * 4);
+        f.vx += (Math.sin(f.sw) * S.cell * 6 + (S.gust ? Math.cos(S.ga) * S.cell * 8 * S.gust : 0) - f.vx * 1.2) * dt;
+        f.x += f.vx * dt; f.y += f.vy * dt; f.ang += f.va * dt;
+      }
+      S.fall = S.fall.filter((f) => f.y < S.h + S.cell * 2 && f.x > -S.w * 0.3 && f.x < S.w * 1.3);
+    }
+
+    // ——— Sprites : une note par couleur et par soulèvement ———
+    function curlGeom(s, cl) { const th = cl * 1.35, hl = s * 0.5 * cl, hf = s - hl, ha = hl * Math.cos(th), dw = s * 0.06 * Math.sin(th); return { th, hl, hf, ha, dw }; }
+    function sprites(dpr) {
+      const s = S.s, C = pal(), key = [s, dpr, C.join()].join('|'); if (key === spKey) return SP; spKey = key;
+      const pad = Math.ceil(s * 0.35), W = s + pad * 2, H = s + pad * 2, notes = [], shads = [];
+      for (let k = 0; k < K; k++) {
+        const cl = k / (K - 1), G = curlGeom(s, cl);
+        for (let c = 0; c < C.length; c++) {
+          const cv = document.createElement('canvas'); cv.width = Math.ceil(W * dpr); cv.height = Math.ceil(H * dpr); const g = cv.getContext('2d'); g.scale(dpr, dpr); g.translate(pad, pad);
+          const col = C[c], gr = g.createLinearGradient(0, 0, 0, G.hf); gr.addColorStop(0, mix(col, '#000000', 0.06)); gr.addColorStop(0.12, mix(col, '#ffffff', 0.05)); gr.addColorStop(1, col);
+          g.fillStyle = gr; g.fillRect(0, 0, s, G.hf + 0.5); if (G.hl > 0.5) { const g3 = g.createLinearGradient(0, G.hf - s * 0.12, 0, G.hf); g3.addColorStop(0, 'rgba(0,0,0,0)'); g3.addColorStop(1, `rgba(0,0,0,${0.18 * Math.sin(G.th)})`); g.fillStyle = g3; g.fillRect(0, G.hf - s * 0.12, s, s * 0.12 + 0.5); }
+          if (G.hl > 0.5) {
+            const g2 = g.createLinearGradient(0, G.hf, 0, G.hf + G.ha); g2.addColorStop(0, mix(col, '#ffffff', 0.34 * Math.sin(G.th))); g2.addColorStop(0.5, mix(col, '#ffffff', 0.16 * Math.sin(G.th))); g2.addColorStop(1, mix(col, '#000000', 0.04 + 0.1 * Math.sin(G.th)));
+            g.fillStyle = g2; g.beginPath(); g.moveTo(0, G.hf); g.lineTo(s, G.hf); g.lineTo(s + G.dw, G.hf + G.ha); g.lineTo(-G.dw, G.hf + G.ha); g.closePath(); g.fill();
+            g.strokeStyle = `rgba(255,255,255,${0.25 * Math.sin(G.th)})`; g.lineWidth = Math.max(0.5, s * 0.02); g.beginPath(); g.moveTo(0, G.hf); g.lineTo(s, G.hf); g.stroke();
+          }
+          g.fillStyle = 'rgba(0,0,0,0.05)'; g.fillRect(0, 0, s, s * 0.14);
+          notes.push(cv);
+        }
+        const sv = document.createElement('canvas'); sv.width = Math.ceil(W * dpr); sv.height = Math.ceil(H * dpr); const g = sv.getContext('2d');
+        g.filter = `blur(${(s * 0.03 + cl * s * 0.06) * dpr}px)`; g.scale(dpr, dpr); g.translate(pad + s * 0.02, pad + s * 0.035); g.fillStyle = '#000';
+        const sl = G.hl * Math.cos(G.th) + G.hl * Math.sin(G.th) * 0.8;
+        g.beginPath(); g.moveTo(0, 0); g.lineTo(s, 0); g.lineTo(s, G.hf); g.lineTo(s + G.dw * 2, G.hf + sl); g.lineTo(-G.dw * 2, G.hf + sl); g.lineTo(0, G.hf); g.closePath(); g.fill();
+        shads.push(sv);
+      }
+      SP = { notes, shads, pad, W, H, nc: C.length }; return SP;
+    }
+
+    // ——— Support ———
+    function wall(w, h, dpr) {
+      const key = [w, h, dpr, p.mur, p.fond].join('|'); if (key === bgKey) return BG; bgKey = key;
+      BG = BG || document.createElement('canvas'); BG.width = Math.round(w * dpr); BG.height = Math.round(h * dpr);
+      const g = BG.getContext('2d'), R = rng(9), m = Math.min(w, h); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.fillStyle = p.fond; g.fillRect(0, 0, w, h);
+      if (p.mur === 'vitre') {
+        const gr = g.createLinearGradient(0, 0, 0, h); gr.addColorStop(0, mix(p.fond, '#ffffff', 0.12)); gr.addColorStop(1, mix(p.fond, '#000000', 0.25)); g.fillStyle = gr; g.fillRect(0, 0, w, h);
+        g.save(); g.rotate(-0.5); for (let k = 0; k < 5; k++) { const x = (R() * 1.6 - 0.2) * w, ww = m * (0.04 + R() * 0.18); const gg = g.createLinearGradient(x, 0, x + ww, 0); gg.addColorStop(0, 'rgba(255,255,255,0)'); gg.addColorStop(0.5, `rgba(255,255,255,${0.03 + R() * 0.05})`); gg.addColorStop(1, 'rgba(255,255,255,0)'); g.fillStyle = gg; g.fillRect(x, -h, ww, h * 3); } g.restore();
+      } else if (p.mur === 'platre') { for (let k = 0; k < w * h / 10; k++) { g.fillStyle = R() < 0.5 ? `rgba(0,0,0,${R() * 0.035})` : `rgba(255,255,255,${R() * 0.05})`; g.fillRect(R() * w, R() * h, 1 + R() * 2, 1 + R() * 2); } }
+      else { for (let k = 0; k < w * h / 9; k++) { const r = 0.5 + R() * R() * 2.5; g.fillStyle = R() < 0.55 ? `rgba(60,30,10,${0.08 + R() * 0.18})` : `rgba(255,230,190,${0.05 + R() * 0.12})`; g.beginPath(); g.arc(R() * w, R() * h, r, 0, TAU); g.fill(); } }
+      const gr = g.createRadialGradient(w / 2, h / 2, m * 0.2, w / 2, h / 2, Math.hypot(w, h) * 0.6); gr.addColorStop(0, 'rgba(255,255,255,0.04)'); gr.addColorStop(1, 'rgba(0,0,0,0.16)'); g.fillStyle = gr; g.fillRect(0, 0, w, h);
+      return BG;
+    }
+
+    app.loop((t, dt) => {
+      dt = Math.min(1 / 20, dt || 0);
+      const { w, h, dpr } = app.size; buildLogo();
+      const key = [w, h, p.motif, p.colonnes, p.echelle, p.fondNotes, p.marge, p.desordre, p.ordre, pal().length, app.seed, logoKey].join('|');
+      if (!S || key !== gKey) { gKey = key; build(w, h); }
+      if (app.thumbnail) { if (!S.th) { S.th = true; for (let k = 0; k < 4000 && !(S.ph === 'rafale' && simT - S.tp > 1.5 / p.vitesse); k++) { simT += 1 / 60; step(1 / 60); } for (const c of S.cells) if (c.note) c.note.st = 'colle'; } }
+      else { simT += dt; step(dt); }
+      const SPR = sprites(dpr), s = S.s, pad = SPR.pad, nc = SPR.nc;
+      ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.drawImage(wall(w, h, dpr), 0, 0);
+      const vis = [];
+      for (let j = S.rows - 1; j >= 0; j--) for (let i = 0; i < S.cols; i++) { const c = S.cells[j * S.cols + i]; if (c.note) vis.push(c); }
+      const geo = (c) => { const n = c.note; let sc = 1, oy = 0, al = 1, cl = n.curl; if (n.st === 'pose') { const u = Math.min(1, (simT - n.t0) / 0.35), e = 1 - Math.pow(1 - u, 3); sc = 1 + 0.25 * (1 - e); oy = -S.cell * 0.3 * (1 - e); al = Math.min(1, u * 3); cl = 0.55 * (1 - e); } return { sc, oy, al, k: Math.round(Math.min(1, cl) * (K - 1)) }; };
+      // ombres puis notes (du bas vers le haut : le bas relevé d'une note passe devant la note du dessous)
+      for (const pass of [0, 1]) for (const c of vis) {
+        const G = geo(c), cs = Math.cos(c.rot) * G.sc, sn = Math.sin(c.rot) * G.sc, x = c.x + c.dx, y = c.y + c.dy + G.oy;
+        ctx.globalAlpha = pass ? G.al : G.al * 0.55;
+        ctx.setTransform(cs * dpr, sn * dpr, -sn * dpr, cs * dpr, x * dpr, y * dpr);
+        ctx.drawImage(pass ? SPR.notes[G.k * nc + (c.note.ci % nc)] : SPR.shads[G.k], -s / 2 - pad, -s / 2 - pad, SPR.W, SPR.H);
+      }
+      for (const f of S.fall) {
+        const fy = Math.cos(f.ph), cs = Math.cos(f.ang), sn = Math.sin(f.ang), k = 2;
+        ctx.globalAlpha = 0.3; ctx.setTransform(cs * dpr, sn * dpr, -sn * fy * dpr, cs * fy * dpr, (f.x + s * 0.25) * dpr, (f.y + s * 0.4) * dpr); ctx.drawImage(SPR.shads[k], -s / 2 - pad, -s / 2 - pad, SPR.W, SPR.H);
+        ctx.globalAlpha = 1; ctx.setTransform(cs * dpr, sn * dpr, -sn * fy * dpr, cs * fy * dpr, f.x * dpr, f.y * dpr); ctx.drawImage(SPR.notes[k * nc + (f.ci % nc)], -s / 2 - pad, -s / 2 - pad, SPR.W, SPR.H);
+        if (fy < 0) { ctx.fillStyle = 'rgba(0,0,0,0.12)'; ctx.fillRect(-s / 2, -s / 2, s, s); }
+      }
+      ctx.globalAlpha = 1; ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      app.finish(ctx);
+    });
+
+    function toSVG() {
+      const { w, h } = app.size, f = (v) => +v.toFixed(2), C = pal(), s = S.s;
+      let out = `<rect width="100%" height="100%" fill="${p.fond}"/>`, sh = '', nt = '';
+      for (let j = S.rows - 1; j >= 0; j--) for (let i = 0; i < S.cols; i++) {
+        const c = S.cells[j * S.cols + i], n = c.note; if (!n) continue;
+        const G = curlGeom(s, n.st === 'pose' ? 0 : n.curl), col = C[n.ci % C.length], tr = `translate(${f(c.x + c.dx)} ${f(c.y + c.dy)}) rotate(${f(c.rot * 180 / Math.PI)}) translate(${f(-s / 2)} ${f(-s / 2)})`;
+        const sl = G.hl * Math.cos(G.th) + G.hl * Math.sin(G.th) * 0.8;
+        sh += `<path transform="${tr} translate(${f(s * 0.02)} ${f(s * 0.035)})" d="M0 0H${f(s)}V${f(G.hf)}L${f(s + G.dw * 2)} ${f(G.hf + sl)}H${f(-G.dw * 2)}L0 ${f(G.hf)}Z"/>`;
+        nt += `<g transform="${tr}"><rect width="${f(s)}" height="${f(G.hf + 0.5)}" fill="${col}"/>`;
+        if (G.hl > 0.5) nt += `<path d="M0 ${f(G.hf)}H${f(s)}L${f(s + G.dw)} ${f(G.hf + G.ha)}H${f(-G.dw)}Z" fill="${mix(col, '#ffffff', 0.12 * Math.sin(G.th))}"/>`;
+        nt += `<rect width="${f(s)}" height="${f(s * 0.14)}" fill="#000" opacity="0.05"/></g>`;
+      }
+      for (const fl of S.fall) nt += `<rect transform="translate(${f(fl.x)} ${f(fl.y)}) rotate(${f(fl.ang * 180 / Math.PI)}) scale(1 ${f(Math.cos(fl.ph))})" x="${f(-s / 2)}" y="${f(-s / 2)}" width="${f(s)}" height="${f(s)}" fill="${C[fl.ci % C.length]}"/>`;
+      out += `<g fill="#000" opacity="0.4" filter="url(#flou)">${sh}</g>${nt}`;
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><defs><filter id="flou" x="-0.1" y="-0.1" width="1.2" height="1.2"><feGaussianBlur stdDeviation="${f(s * 0.05)}"/></filter></defs>${out}</svg>`;
+    }
+  </script>
+</body>
+</html>
