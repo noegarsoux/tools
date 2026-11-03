@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Spirales de nombres premiers</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Spirales de nombres premiers : chaque entier n est posé sur une spirale, et l'on allume les nombres premiers.
+    // En coordonnées polaires (rayon n, angle n radians), 44 et 710 radians font presque un nombre entier de tours :
+    // les entiers d'une même famille modulo 44 ou 710 s'alignent en bras puis en rayons, et les premiers, qui évitent
+    // les familles partageant un facteur avec le module, dessinent des bras pleins et des bras vides.
+    // La spirale d'Ulam enroule les entiers sur une grille carrée ; celle de Sacks place n à l'angle 2π√n.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const KB = PAL('kegelbahn'), BIEN = PAL('biennale'), GLY = PAL('glyphes'), THERM = PAL('thermique'), LUZ = PAL('luzern'), MEN = PAL('menthe');
+
+    const NMAX = 360000;
+    const isP = new Uint8Array(NMAX + 1); isP.fill(1, 2);
+    for (let i = 2; i * i <= NMAX; i++) if (isP[i]) for (let j = i * i; j <= NMAX; j += i) isP[j] = 0;
+    let X = null, Y = null, posKey = '', rot = 0, zoomLog = 0, tZoom = 0, held = null, hl = -1, buf = null, img = null, u32 = null, maskKey = null, mask = null, mw = 0, mh = 0;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: false,
+      finish: { grain: 0.04, vignette: 0.2 },
+      hint: 'Glissez pour tourner · touchez un point pour isoler sa famille · molette : zoom',
+      notes: 'Chaque entier est posé sur une spirale, et seuls les nombres premiers s’allument. Vue de près, la spirale polaire (rayon n, angle n radians) ne montre rien de particulier ; en reculant, six bras apparaissent, puis quarante-quatre, puis des rayons presque droits. Ce n’est pas un secret des nombres premiers mais un effet du module : 44 radians et 710 radians font presque un nombre entier de tours. Les familles de restes qui partagent un facteur avec ce module ne contiennent aucun premier, d’où les bras vides. Les couleurs suivent le reste de la division par le module choisi.',
+      params: {
+        'Spirale': {
+          spirale: { type: 'segmented', label: 'Spirale', options: { polaire: 'Polaire', ulam: 'Ulam', sacks: 'Sacks' }, value: 'polaire' },
+          filtre: { type: 'segmented', label: 'Nombres', options: { premiers: 'Premiers', tous: 'Tous' }, value: 'premiers' },
+          modulo: { type: 'range', label: 'Couleur selon le reste modulo', min: 1, max: 60, step: 1, value: 10 },
+          composes: { type: 'range', label: 'Présence des autres nombres', min: 0, max: 1, step: 0.01, value: 0.18, show: (q) => q.filtre === 'tous' },
+        },
+        'Mouvement': {
+          recul: { type: 'range', label: 'Recul', min: 0, max: 1, step: 0.01, value: 0.55 },
+          respiration: { type: 'range', label: 'Aller-retour du zoom', min: 0, max: 1, step: 0.01, value: 0.75 },
+          periode: { type: 'range', label: 'Période (s)', min: 8, max: 120, step: 1, value: 36, show: (q) => q.respiration > 0 },
+          rotation: { type: 'range', label: 'Rotation (°/s)', min: -30, max: 30, step: 0.5, value: 3 },
+        },
+        'Points': {
+          taille: { type: 'range', label: 'Taille', min: 0.2, max: 3, step: 0.05, value: 1 },
+          logo: { type: 'toggle', label: 'Allumer le logo', value: false },
+          image: { type: 'file', label: 'Logo', accept: 'image/*', show: (q) => q.logo },
+        },
+        'Couleurs': {
+          fond: { type: 'color', label: 'Fond', value: '#0c0c0e' },
+          couleurs: { type: 'palette', label: 'Familles de restes', value: ['#ef5a2f', '#edd14b', '#486cfc', '#f272ba'] },
+          accent: { type: 'color', label: 'Famille isolée et logo', value: '#f4f1ea' },
+        },
+      },
+      presets: {
+        'Polaire': {},
+        'Rayons': { recul: 1, respiration: 0, modulo: 44, couleurs: ['#f4f1ea', '#e5452a', '#f2c230'], rotation: 1 },
+        'Bras': { recul: 0.42, respiration: 0, modulo: 6, couleurs: ['#e5452a', '#3a6fd0'], rotation: 4 },
+        'Ulam': { spirale: 'ulam', recul: 0.8, modulo: 4, couleurs: ['#111111', '#e5452a'], fond: '#f2efe8', accent: '#3a6fd0', rotation: 0, taille: 1.3 },
+        'Sacks': { spirale: 'sacks', recul: 0.74, modulo: 6, couleurs: [KB[1], KB[2]], fond: KB[0], rotation: 2 },
+        'Tous les nombres': { filtre: 'tous', composes: 0.55, recul: 0.6, modulo: 7, couleurs: GLY.slice(2, 7), fond: '#0a0a0a' },
+        'Logo': { logo: true, spirale: 'ulam', recul: 0.62, respiration: 0.3, modulo: 1, couleurs: ['#3a3a3e'], accent: '#e5452a', rotation: 0, taille: 1.2 },
+        'Biennale': { fond: BIEN[0], couleurs: [BIEN[1], BIEN[2], BIEN[3]], accent: BIEN[4], modulo: 12, recul: 0.68 },
+        'Thermique': { fond: '#0c0c14', couleurs: THERM.slice(1), modulo: 30, recul: 0.75 },
+        'Menthe': { spirale: 'sacks', fond: MEN[1], couleurs: [MEN[2], MEN[3], MEN[0]], modulo: 9 },
+      },
+      brand(colors) {
+        const lum = (x) => { const c = hex(x); return c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114; };
+        const s = colors.slice().sort((a, b) => lum(a) - lum(b)), rest = s.slice(1);
+        return { fond: s[0], couleurs: rest.length ? rest : ['#ffffff'], accent: s[s.length - 1] };
+      },
+      pointer: {
+        down: (q) => { held = { x0: q.x, y0: q.y, rot0: rot, moved: false }; },
+        drag: (q) => {
+          if (!held) return; if (Math.hypot(q.x - held.x0, q.y - held.y0) > 6) held.moved = true; if (!held.moved) return;
+          const { w, h } = app.size, a0 = Math.atan2(held.y0 - h / 2, held.x0 - w / 2), a1 = Math.atan2(q.y - h / 2, q.x - w / 2); rot = held.rot0 + (a1 - a0);
+        },
+        up: () => { if (held && !held.moved) pick(held.x0, held.y0); held = null; },
+        wheel: (q, dy) => { zoomLog = Math.max(-6, Math.min(6, zoomLog + (dy > 0 ? 0.12 : -0.12))); },
+      },
+      onChange(k) { if (k === 'image') maskKey = null; if (k === 'modulo' || k === '*') hl = -1; if (k === 'recul' || k === '*') zoomLog = 0; },
+      export: { name: 'spirales-premiers', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    const hex = (x) => { const n = parseInt(x.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; };
+    const toHex = (c) => '#' + c.map((v) => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, '0')).join('');
+
+    // ——— Positions (en unités de la spirale) ———
+    function positions() {
+      if (posKey === p.spirale && X) return; posKey = p.spirale;
+      X = new Float32Array(NMAX + 1); Y = new Float32Array(NMAX + 1);
+      if (p.spirale === 'polaire') for (let n = 1; n <= NMAX; n++) { X[n] = n * Math.cos(n); Y[n] = n * Math.sin(n); }
+      else if (p.spirale === 'sacks') for (let n = 1; n <= NMAX; n++) { const r = Math.sqrt(n), a = TAU * r; X[n] = r * Math.cos(a); Y[n] = r * Math.sin(a); }
+      else {
+        // spirale carrée d'Ulam : 1 au centre, puis droite, haut, gauche, bas, en élargissant
+        let x = 0, y = 0, dx = 1, dy = 0, len = 1, k = 0, turns = 0;
+        for (let n = 1; n <= NMAX; n++) { X[n] = x; Y[n] = -y; x += dx; y += dy; if (++k === len) { k = 0; [dx, dy] = [-dy, dx]; if (++turns % 2 === 0) len++; } }
+      }
+    }
+    const extentOf = (n) => p.spirale === 'polaire' ? n : p.spirale === 'sacks' ? Math.sqrt(n) : Math.sqrt(n) / 2 + 0.5;
+    const spacing = () => p.spirale === 'polaire' ? 0.5 : p.spirale === 'sacks' ? 0.45 : 0.46;
+
+    // ——— Vue : combien d'entiers sont visibles ; le zoom respire en échelle logarithmique ———
+    function view() {
+      const { w, h } = app.size, hd = Math.hypot(w, h) / 2, lo = Math.log(80), hi = Math.log(NMAX * 0.97);
+      const base = lo + (hi - lo) * p.recul, amp = p.respiration * (hi - lo) * 0.36;
+      let L = base + (p.respiration > 0 ? -amp * 0.5 * (1 - Math.cos(tZoom / p.periode * TAU)) : 0) + zoomLog;
+      L = Math.max(Math.log(12), Math.min(hi, L)); const nv = Math.exp(L);
+      return { s: hd / extentOf(nv), nv: Math.min(NMAX, Math.ceil(nv * (p.spirale === 'polaire' ? 1.02 : 1.1))), cx: w / 2, cy: h / 2, c: Math.cos(rot), sn: Math.sin(rot) };
+    }
+
+    // ——— Logo ———
+    function logoMask(w, h) {
+      const img0 = p.image || app.logoImg, key = (img0 ? (img0.src || 'c') : 'demo') + w + 'x' + h;
+      if (key === maskKey && mask) return mask; maskKey = key;
+      mw = Math.max(8, Math.round(w / 3)); mh = Math.max(8, Math.round(h / 3));
+      const c = document.createElement('canvas'); c.width = mw; c.height = mh; const x = c.getContext('2d', { willReadFrequently: true });
+      const L = Math.min(mw, mh) * 0.7, cx = mw / 2, cy = mh / 2;
+      if (img0) { const iw = img0.naturalWidth || img0.width, ih = img0.naturalHeight || img0.height, k = L / Math.max(iw, ih); x.drawImage(img0, cx - iw * k / 2, cy - ih * k / 2, iw * k, ih * k); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(cx, cy, L * 0.48, 0, TAU); x.arc(cx, cy, L * 0.26, 0, TAU, true); x.fill('evenodd'); x.fillRect(cx - L * 0.06, cy - L * 0.5, L * 0.12, L); }
+      const d = x.getImageData(0, 0, mw, mh).data, a = new Uint8Array(mw * mh); let transp = 0; for (let i = 3; i < d.length; i += 4) if (d[i] < 128) transp++;
+      const useA = transp > mw * mh * 0.05;
+      for (let i = 0; i < mw * mh; i++) { const l = (d[i * 4] * 0.2126 + d[i * 4 + 1] * 0.7152 + d[i * 4 + 2] * 0.0722) / 255; a[i] = (useA ? d[i * 4 + 3] > 128 : d[i * 4 + 3] > 128 && l < 0.5) ? 1 : 0; }
+      mask = a; return a;
+    }
+
+    // ——— Couleur et taille de chaque entier (classes : 0..m-1 restes, puis variantes atténuées) ———
+    function classes() {
+      const C = p.couleurs.map(hex), F = hex(p.fond), A = hex(p.accent), m = Math.max(1, Math.round(p.modulo)), out = [];
+      const mix = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+      // les couleurs sont données aux restes premiers avec le module, les seuls qui contiennent des premiers (sauf les diviseurs du module)
+      const gcd = (a, b) => { while (b) [a, b] = [b, a % b]; return a; }; let k = 0;
+      for (let r = 0; r < m; r++) {
+        let c = m === 1 || gcd(r, m) === 1 ? C[k++ % C.length] : C[(C.length - 1) % C.length]; if (hl >= 0 && r !== hl) c = mix(F, c, 0.28);
+        if (hl >= 0 && r === hl) c = A;
+        out.push(c);
+      }
+      return { prime: out, comp: out.map((c) => mix(F, c, p.composes * 0.7)), accent: A, m };
+    }
+    // liste des points visibles, dans des tableaux réutilisés : position, rayon, couleur (indice dans cols), entier
+    const PX = new Float32Array(NMAX + 1), PY = new Float32Array(NMAX + 1), PR = new Float32Array(NMAX + 1), PC = new Uint16Array(NMAX + 1), PN = new Int32Array(NMAX + 1);
+    function visiblePoints(w, h, V, cap) {
+      const K = classes(), lg = p.logo, mk = lg ? logoMask(w, h) : null, all = p.filtre === 'tous', m = K.m;
+      // rayon : celui de la case quand on est près ; de loin, une fraction de l'écart moyen entre premiers, pour garder la trame lisible
+      const cnt = all ? V.nv : V.nv / Math.max(1, Math.log(V.nv)), d = Math.sqrt(w * h / Math.max(1, cnt)), rp = p.taille * Math.max(0.9, Math.min(60, Math.max(V.s * spacing(), 0.17 * d)));
+      const cols = K.prime.concat(K.comp, [K.accent]), ca = V.c * V.s, sa = V.sn * V.s, cx = V.cx, cy = V.cy, mx = mw / w, my = mh / h, rc = rp * 0.7;
+      let k = 0;
+      for (let n = 1; n <= V.nv; n++) {
+        const pr = isP[n]; if (!pr && !all) continue;
+        const xu = X[n], yu = Y[n], x = cx + xu * ca - yu * sa, y = cy + xu * sa + yu * ca;
+        if (x < -rp || y < -rp || x > w + rp || y > h + rp) continue;
+        const r = n % m; let c = pr ? r : m + r, rad = pr ? rp : rc;
+        if (lg && pr) { const ix = (x * mx) | 0, iy = (y * my) | 0; if (ix >= 0 && iy >= 0 && ix < mw && iy < mh && mk[iy * mw + ix]) { c = 2 * m; rad = rp * 1.5; } }
+        PX[k] = x; PY[k] = y; PR[k] = rad; PC[k] = c; PN[k] = n; k++;
+        if (cap && k >= cap) break;
+      }
+      return { k, cols, rp };
+    }
+    function pick(x, y) {
+      const { w, h } = app.size, V = view(), P = visiblePoints(w, h, V, 0); let best = -1, bd = 1e9;
+      for (let i = 0; i < P.k; i++) { const d = Math.hypot(PX[i] - x, PY[i] - y); if (d < bd) { bd = d; best = PN[i]; } }
+      const m = Math.max(1, Math.round(p.modulo));
+      hl = best >= 0 && bd < Math.max(12, P.rp * 3) ? (hl === best % m ? -1 : best % m) : -1;
+    }
+
+    app.loop((t, dt) => {
+      dt = Math.min(0.05, dt || 0);
+      const { w, h, dpr } = app.size;
+      positions();
+      if (!app.thumbnail) { tZoom += dt; if (!held) rot += p.rotation * Math.PI / 180 * dt; }
+      const V = view(), P = visiblePoints(w, h, V, 0), F = hex(p.fond);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      if (P.k < 14000 && P.rp > 1.1) {
+        // peu de points : de vrais disques, regroupés par couleur
+        ctx.fillStyle = p.fond; ctx.fillRect(0, 0, w, h);
+        const bins = new Map();
+        for (let i = 0; i < P.k; i++) { const c = PC[i]; let b = bins.get(c); if (!b) bins.set(c, b = new Path2D()); const r = PR[i]; b.moveTo(PX[i] + r, PY[i]); b.arc(PX[i], PY[i], r, 0, TAU); }
+        for (const [c, b] of bins) { ctx.fillStyle = `rgb(${P.cols[c].map(Math.round).join()})`; ctx.fill(b); }
+      } else {
+        // beaucoup de points : écrits directement dans une image
+        const W2 = Math.round(w * Math.min(dpr, 1.5)), H2 = Math.round(h * Math.min(dpr, 1.5)), k = W2 / w;
+        if (!buf || buf.width !== W2 || buf.height !== H2) { buf = document.createElement('canvas'); buf.width = W2; buf.height = H2; img = buf.getContext('2d').createImageData(W2, H2); u32 = new Uint32Array(img.data.buffer); }
+        const pack = (c) => (255 << 24) | (Math.round(c[2]) << 16) | (Math.round(c[1]) << 8) | Math.round(c[0]);
+        u32.fill(pack(F)); const pc = P.cols.map(pack);
+        for (let i = 0; i < P.k; i++) {
+          const v = pc[PC[i]], r = PR[i] * k, x = PX[i] * k, y = PY[i] * k, R = Math.ceil(r);
+          if (r < 0.9) { const xi = x | 0, yi = y | 0; if (xi >= 0 && yi >= 0 && xi < W2 && yi < H2) u32[yi * W2 + xi] = v; continue; }
+          for (let yy = Math.max(0, Math.floor(y - R)); yy <= Math.min(H2 - 1, y + R); yy++) for (let xx = Math.max(0, Math.floor(x - R)); xx <= Math.min(W2 - 1, x + R); xx++) if ((xx + 0.5 - x) ** 2 + (yy + 0.5 - y) ** 2 <= r * r) u32[yy * W2 + xx] = v;
+        }
+        buf.getContext('2d').putImageData(img, 0, 0);
+        ctx.imageSmoothingEnabled = true; ctx.drawImage(buf, 0, 0, w, h);
+      }
+      app.finish(ctx);
+    });
+
+    // ——— Export SVG : les points visibles (jusqu'à 40 000) ———
+    function toSVG() {
+      const { w, h } = app.size, V = view(), P = visiblePoints(w, h, V, 40000), f = (v) => +v.toFixed(2), bins = new Map();
+      for (let i = 0; i < P.k; i++) { const c = toHex(P.cols[PC[i]]); let b = bins.get(c); if (!b) bins.set(c, b = []); b.push(`<circle cx="${f(PX[i])}" cy="${f(PY[i])}" r="${f(Math.max(0.5, PR[i]))}"/>`); }
+      const out = [`<rect width="100%" height="100%" fill="${p.fond}"/>`]; for (const [c, L] of bins) out.push(`<g fill="${c}">${L.join('')}</g>`);
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">${out.join('')}</svg>`;
+    }
+  </script>
+</body>
+</html>
