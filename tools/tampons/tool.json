@@ -1,0 +1,15 @@
+{
+  "slug": "tampons",
+  "title": "Tampons",
+  "type": "motion",
+  "description": "Un tampon encreur imprime le logo et des formes sur une feuille, en grille, en spirale ou au hasard : encre qui s'épuise, grain du papier, surimpressions.",
+  "tags": ["impression", "texture", "repetition", "encre", "logo", "svg"],
+  "inspiration": [
+    "Les tampons en caoutchouc des bureaux de poste",
+    "Les tampons encreurs des ateliers d'enfants",
+    "Les surimpressions de la risographie"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}

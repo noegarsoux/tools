@@ -1,0 +1,266 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tampons</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Tampons : la feuille est un calque qui garde chaque impression. Une impression = la forme du tampon,
+    // tournée, dont la couverture d'encre suit un bruit (grain du caoutchouc et du papier) seuillé par
+    // le niveau d'encre : plus le tampon s'épuise, plus le seuil laisse de trous. Il se ré-encre de temps en temps.
+    // L'encre se pose en « produit » sur un papier clair (les surimpressions foncent), en « écran » sur un papier sombre.
+    // Quand la feuille est pleine, elle glisse hors champ et une feuille vierge arrive.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const BIEN = PAL('biennale'), MEN = PAL('menthe'), KB = PAL('kegelbahn');
+    const SHAPES = ['logo', 'cercle', 'etoile', 'fleur', 'carre', 'triangle', 'croix'];
+
+    let simT = 0, vKey = '', logoM = null, logoKey = '', ptr = null, G = null, gKey = '', NZ = null;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.06, vignette: 0.1 },
+      hint: 'Clic : tamponner · glissez pour une traînée de tampons · molette : taille du tampon',
+      notes: 'Un tampon en caoutchouc ne donne jamais deux fois la même image : la première impression est grasse, la suivante plus claire, puis le grain du papier perce l\'encre jusqu\'à ce qu\'on repasse sur le tampon encreur. Les surimpressions foncent, et un geste un peu appuyé laisse un double. Ici, le tampon du logo ou d\'une forme simple couvre la feuille en grille, en quinconce, en spirale, en vagues, au hasard ou en pile au centre, puis la feuille pleine s\'en va. Cliquez pour tamponner vous-même, glissez pour une traînée.',
+      params: {
+        'Tampon': {
+          forme: { type: 'select', label: 'Forme', options: { logo: 'Logo', cercle: 'Cercle', etoile: 'Étoile', fleur: 'Fleur', carre: 'Carré', triangle: 'Triangle', croix: 'Croix', mixte: 'Toutes, en alternance' }, value: 'logo' },
+          gravure: { type: 'select', label: 'Gravure', options: { plein: 'Pleine', contour: 'Contour', hachures: 'Hachures' }, value: 'plein' },
+          taille: { type: 'range', label: 'Taille', min: 0.05, max: 0.5, step: 0.005, value: 0.16 },
+          variation: { type: 'range', label: 'Écart de taille', min: 0, max: 0.6, step: 0.01, value: 0.1 },
+          rotation: { type: 'range', label: 'Rotation au hasard (°)', min: 0, max: 180, step: 1, value: 8 },
+        },
+        'Encre': {
+          encre: { type: 'range', label: 'Encre', min: 0.3, max: 1, step: 0.01, value: 0.85 },
+          usure: { type: 'range', label: 'Épuisement par coup', min: 0, max: 0.3, step: 0.005, value: 0.08 },
+          grain: { type: 'range', label: 'Grain', min: 0.2, max: 3, step: 0.05, value: 1 },
+          double: { type: 'range', label: 'Coup doublé', min: 0, max: 1, step: 0.01, value: 0.2 },
+        },
+        'Feuille': {
+          disposition: { type: 'select', label: 'Disposition', options: { grille: 'Grille', quinconce: 'Quinconce', spirale: 'Spirale', vagues: 'Vagues', hasard: 'Au hasard', pile: 'En pile au centre' }, value: 'grille' },
+          cadence: { type: 'range', label: 'Coups par seconde', min: 0.5, max: 20, step: 0.1, value: 4 },
+          serre: { type: 'range', label: 'Espacement', min: 0.6, max: 2, step: 0.01, value: 1.15 },
+          impressions: { type: 'range', label: 'Coups par feuille (0 = auto)', min: 0, max: 400, step: 1, value: 0 },
+          image: { type: 'file', label: 'Logo', accept: 'image/*' },
+        },
+        'Couleurs': {
+          fond: { type: 'color', label: 'Papier', value: '#f1ece2' },
+          couleurs: { type: 'palette', label: 'Encres', value: ['#e5452a', '#2f5fd0', '#16161a'] },
+        },
+      },
+      presets: {
+        'Bureau de poste': {},
+        'Quinconce': { disposition: 'quinconce', taille: 0.12, couleurs: ['#2f5fd0', '#e5452a'], rotation: 4 },
+        'Spirale': { disposition: 'spirale', forme: 'mixte', taille: 0.09, variation: 0.3, rotation: 180, cadence: 8 },
+        'Au hasard': { disposition: 'hasard', forme: 'mixte', taille: 0.13, variation: 0.5, rotation: 180, couleurs: ['#e5452a', '#f2c230', '#2f5fd0', '#3f9a6b'] },
+        'Pile': { disposition: 'pile', taille: 0.42, rotation: 25, cadence: 2, impressions: 40, double: 0.5, couleurs: ['#e5452a', '#2f5fd0', '#f2c230'] },
+        'Vagues': { disposition: 'vagues', forme: 'cercle', gravure: 'contour', taille: 0.08, cadence: 12, couleurs: ['#16161a'] },
+        'Hachures': { gravure: 'hachures', forme: 'etoile', taille: 0.15, couleurs: ['#3f9a6b', '#e5452a'] },
+        'Biennale': { fond: BIEN[0], couleurs: [BIEN[2], BIEN[1], BIEN[3], BIEN[4]], disposition: 'quinconce' },
+        'Menthe': { fond: MEN[0], couleurs: [MEN[3], MEN[1]], forme: 'fleur', disposition: 'hasard', rotation: 90 },
+        'Kegelbahn': { fond: KB[0], couleurs: KB.slice(1), forme: 'mixte', disposition: 'grille', taille: 0.11 },
+      },
+      brand(colors) {
+        const s = colors.slice().sort((a, b) => lum(a) - lum(b)), L = s[s.length - 1];
+        return { fond: L, couleurs: s.length > 1 ? s.slice(0, -1) : ['#16161a'] };
+      },
+      pointer: {
+        down: (q) => { ptr = { x: q.x, y: q.y, lx: q.x, ly: q.y, moved: 0 }; },
+        drag: (q) => { if (!ptr || !G) return; ptr.moved += Math.hypot(q.x - ptr.x, q.y - ptr.y); ptr.x = q.x; ptr.y = q.y; if (Math.hypot(q.x - ptr.lx, q.y - ptr.ly) > G.s * 0.8) { manual(q.x, q.y); ptr.lx = q.x; ptr.ly = q.y; } },
+        up: (q) => { if (ptr && ptr.moved < 6) manual(ptr.x, ptr.y); ptr = null; },
+        wheel: (q, dy) => app.set('taille', Math.max(0.05, Math.min(0.5, +(p.taille + (dy > 0 ? -0.01 : 0.01)).toFixed(3)))),
+      },
+      onChange(k) { if (['*', 'image'].includes(k)) logoKey = ''; },
+      export: { name: 'tampons', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    function hex(x) { const n = parseInt(x.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
+    function lum(x) { const c = hex(x); return (c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114) / 255; }
+    function mix(a, b, t) { const A = hex(a), C = hex(b); return '#' + A.map((v, i) => Math.round(v + (C[i] - v) * t).toString(16).padStart(2, '0')).join(''); }
+    function rng(s) { let a = s >>> 0; return () => { a = (a + 0x6d2b79f5) >>> 0; let t = a; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+
+    function buildLogo() {
+      const img0 = p.image || app.logoImg, key = img0 ? (img0.src || 'c') : 'demo'; if (key === logoKey) return; logoKey = key; vKey = '';
+      const M = 200, c = document.createElement('canvas'); c.width = c.height = M; const x = c.getContext('2d', { willReadFrequently: true }), L = M * 0.94, cx = M / 2;
+      if (img0) { const iw = img0.naturalWidth || img0.width, ih = img0.naturalHeight || img0.height, s = L / Math.max(iw, ih); x.drawImage(img0, cx - iw * s / 2, cx - ih * s / 2, iw * s, ih * s); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(cx, cx, L * 0.48, 0, TAU); x.arc(cx, cx, L * 0.27, 0, TAU, true); x.fill('evenodd'); x.fillRect(cx - L * 0.07, cx - L * 0.5, L * 0.14, L); }
+      const d = x.getImageData(0, 0, M, M).data; let transp = 0; for (let i = 3; i < d.length; i += 4) if (d[i] < 128) transp++; const useA = transp > M * M * 0.05;
+      const F = new Float64Array(M * M); for (let i = 0; i < M * M; i++) { const o = i * 4, l = (d[o] * 0.2126 + d[o + 1] * 0.7152 + d[o + 2] * 0.0722) / 255; F[i] = useA ? d[o + 3] / 255 : (d[o + 3] / 255) * Math.min(1, Math.max(0, (0.75 - l) * 2)); }
+      { const G2 = new Float64Array(M * M); for (let j = 1; j < M - 1; j++) for (let i = 1; i < M - 1; i++) { let a = 0; for (let b = -1; b <= 1; b++) for (let c = -1; c <= 1; c++) a += F[(j + b) * M + i + c] * (b || c ? (b && c ? 1 : 2) : 4); G2[j * M + i] = a / 16; } F.set(G2); }
+      for (let k = 0; k < M; k++) F[k] = F[(M - 1) * M + k] = F[k * M] = F[k * M + M - 1] = 0;
+      logoM = contours(F, M, M, 0.5, 0, 0, 1).filter((c) => c.closed && c.pts.length > 6).map((c) => chaikin(chaikin(c.pts, true), true).map((q) => [q[0] / M - 0.5, q[1] / M - 0.5]));
+    }
+    // carrés marchants + chaînage
+    function contours(F, nx, ny, lev, ox, oy, cs) {
+      const pt = new Map(), adj = new Map();
+      const P = (id) => { let q = pt.get(id); if (q) return q; const cell = id >> 1, i = cell % nx, j = (cell - i) / nx; let a, b, ax, ay, bx, by; if (id & 1) { a = F[j * nx + i]; b = F[(j + 1) * nx + i]; ax = bx = i; ay = j; by = j + 1; } else { a = F[j * nx + i]; b = F[j * nx + i + 1]; ay = by = j; ax = i; bx = i + 1; } const t = (lev - a) / (b - a || 1e-9); q = [ox + (ax + (bx - ax) * t) * cs, oy + (ay + (by - ay) * t) * cs]; pt.set(id, q); return q; };
+      const link = (a, b) => { (adj.get(a) || adj.set(a, []).get(a)).push(b); (adj.get(b) || adj.set(b, []).get(b)).push(a); };
+      for (let j = 0; j < ny - 1; j++) for (let i = 0; i < nx - 1; i++) {
+        const A = F[j * nx + i] > lev, B = F[j * nx + i + 1] > lev, C = F[(j + 1) * nx + i + 1] > lev, D = F[(j + 1) * nx + i] > lev, idx = A | (B << 1) | (C << 2) | (D << 3);
+        if (idx === 0 || idx === 15) continue;
+        const T = (j * nx + i) * 2, R = (j * nx + i + 1) * 2 + 1, Bo = ((j + 1) * nx + i) * 2, Le = (j * nx + i) * 2 + 1;
+        const ctr = (F[j * nx + i] + F[j * nx + i + 1] + F[(j + 1) * nx + i + 1] + F[(j + 1) * nx + i]) / 4 > lev;
+        switch (idx) {
+          case 1: case 14: link(Le, T); break; case 2: case 13: link(T, R); break; case 3: case 12: link(Le, R); break;
+          case 4: case 11: link(R, Bo); break; case 6: case 9: link(T, Bo); break; case 7: case 8: link(Le, Bo); break;
+          case 5: if (ctr) { link(Le, Bo); link(T, R); } else { link(Le, T); link(R, Bo); } break;
+          case 10: if (ctr) { link(Le, T); link(R, Bo); } else { link(Le, Bo); link(T, R); } break;
+        }
+      }
+      const seen = new Set(), out = [];
+      const walk = (s) => { const L = [s]; seen.add(s); let cur = s; for (;;) { const nb = (adj.get(cur) || []).find((x) => !seen.has(x)); if (nb === undefined) break; seen.add(nb); L.push(nb); cur = nb; } return L; };
+      for (const [id, nb] of adj) if (nb.length === 1 && !seen.has(id)) out.push({ pts: walk(id).map(P), closed: false });
+      for (const [id] of adj) if (!seen.has(id)) out.push({ pts: walk(id).map(P), closed: true });
+      return out;
+    }
+    function chaikin(pts, closed) {
+      const o = []; const n = pts.length; for (let k = 0; k < (closed ? n : n - 1); k++) { const a = pts[k], b = pts[(k + 1) % n]; o.push([a[0] * 0.75 + b[0] * 0.25, a[1] * 0.75 + b[1] * 0.25], [a[0] * 0.25 + b[0] * 0.75, a[1] * 0.25 + b[1] * 0.75]); }
+      if (!closed) { o.unshift(pts[0]); o.push(pts[n - 1]); } return o;
+    }
+
+
+    // ——— Formes du tampon, dans un carré unité centré (rayon 0,5) ———
+    function shapeLoops(kind) {
+      const poly = (n, f) => Array.from({ length: n }, (_, k) => { const a = k / n * TAU - Math.PI / 2, r = f(a, k); return [Math.cos(a) * r, Math.sin(a) * r]; });
+      if (kind === 'logo') return logoM;
+      if (kind === 'cercle') return [poly(72, () => 0.48)];
+      if (kind === 'etoile') return [poly(10, (a, k) => (k % 2 ? 0.21 : 0.5))];
+      if (kind === 'fleur') return [poly(96, (a) => 0.33 + 0.15 * Math.cos(6 * (a + Math.PI / 2))), poly(48, () => 0.1)];
+      if (kind === 'carre') { const o = [], r = 0.08, e = 0.44; for (const [cx, cy, a0] of [[e - r, -e + r, -Math.PI / 2], [e - r, e - r, 0], [-e + r, e - r, Math.PI / 2], [-e + r, -e + r, Math.PI]]) for (let k = 0; k <= 6; k++) { const a = a0 + k / 6 * Math.PI / 2; o.push([cx + Math.cos(a) * r, cy + Math.sin(a) * r]); } return [o]; }
+      if (kind === 'triangle') return [[[0, -0.47], [0.46, 0.36], [-0.46, 0.36]]];
+      const a = 0.16, b = 0.48; return [[[-a, -b], [a, -b], [a, -a], [b, -a], [b, a], [a, a], [a, b], [-a, b], [-a, a], [-b, a], [-b, -a], [-a, -a]]];
+    }
+    function pathOn(g, loops) { g.beginPath(); for (const L of loops) { L.forEach((q, i) => (i ? g.lineTo(q[0], q[1]) : g.moveTo(q[0], q[1]))); g.closePath(); } }
+
+    // ——— Bruit du grain (une fois) ———
+    function noiseField() {
+      // bruit isotrope : bruit blanc flouté à plusieurs échelles (pas de quadrillage visible une fois seuillé)
+      if (NZ) return NZ; const N = 256, M = N - 1, F = new Float32Array(N * N), R = rng(77), tmp = new Float32Array(N * N);
+      const blur = (A, r) => { for (let pass = 0; pass < 3; pass++) { for (let y = 0; y < N; y++) { let s = 0; for (let k = -r; k <= r; k++) s += A[y * N + (k & M)]; for (let x = 0; x < N; x++) { tmp[y * N + x] = s; s += A[y * N + ((x + r + 1) & M)] - A[y * N + ((x - r) & M)]; } } for (let x = 0; x < N; x++) { let s = 0; for (let k = -r; k <= r; k++) s += tmp[(k & M) * N + x]; for (let y = 0; y < N; y++) { A[y * N + x] = s / (2 * r + 1) / (2 * r + 1); s += tmp[((y + r + 1) & M) * N + x] - tmp[((y - r) & M) * N + x]; } } } };
+      [[10, 0.28], [4, 0.3], [2, 0.24], [1, 0.18]].forEach(([r, wt]) => { const A = new Float32Array(N * N); for (let i = 0; i < A.length; i++) A[i] = R() - 0.5; blur(A, r); let v = 0; for (let i = 0; i < A.length; i++) v += A[i] * A[i]; const sd = Math.sqrt(v / A.length) || 1; for (let i = 0; i < A.length; i++) F[i] += wt * A[i] / sd; });
+      const so = Array.from(F).sort((x, y) => x - y), lo = so[Math.floor(so.length * 0.01)], hi = so[Math.floor(so.length * 0.99)];
+      for (let i = 0; i < F.length; i++) F[i] = Math.max(0, Math.min(1, (F[i] - lo) / (hi - lo)));
+      NZ = { F, N }; return NZ;
+    }
+    function nz(x, y) { // échantillonnage bilinéaire, torique
+      const Z = NZ, N = Z.N, M = N - 1, i = Math.floor(x), j = Math.floor(y), u = x - i, v = y - j, a = Z.F[(j & M) * N + (i & M)], b = Z.F[(j & M) * N + ((i + 1) & M)], c = Z.F[((j + 1) & M) * N + (i & M)], d = Z.F[((j + 1) & M) * N + ((i + 1) & M)];
+      return (a * (1 - u) + b * u) * (1 - v) + (c * (1 - u) + d * u) * v;
+    }
+
+    // ——— Feuille ———
+    function sheetCount(w, h) { const s = Math.min(w, h) * p.taille * p.serre; return p.impressions > 0 ? p.impressions : p.disposition === 'pile' ? 30 : p.disposition === 'hasard' ? Math.round(w * h / (s * s) * 1.1) : Math.round(w * h / (s * s) * 1.3) + 4; }
+    function positions(w, h, sheet) {
+      const m = Math.min(w, h), s = m * p.taille * p.serre, R = rng(app.seed * 9001 + sheet * 31 + 7), out = [], d = p.disposition;
+      if (d === 'grille' || d === 'quinconce' || d === 'vagues') {
+        const rh = d === 'quinconce' ? s * 0.87 : s, nx = Math.ceil(w / s) + 1, ny = Math.ceil(h / rh) + 1, ox = (w - (nx - 1) * s) / 2, oy = (h - (ny - 1) * rh) / 2;
+        for (let j = 0; j < ny; j++) for (let i0 = 0; i0 < nx; i0++) { const i = j % 2 ? nx - 1 - i0 : i0; let x = ox + i * s + (d === 'quinconce' && j % 2 ? s / 2 : 0), y = oy + j * rh; if (d === 'vagues') y += Math.sin(i * 0.7 + j * 0.9) * s * 0.3; out.push([x, y]); }
+      } else if (d === 'spirale') { const n = sheetCount(w, h), ga = Math.PI * (3 - Math.sqrt(5)), c = s * 0.62; for (let k = 0; k < n; k++) { const r = c * Math.sqrt(k + 0.5), a = k * ga; out.push([w / 2 + Math.cos(a) * r, h / 2 + Math.sin(a) * r]); } }
+      else if (d === 'pile') { for (let k = 0; k < sheetCount(w, h); k++) out.push([w / 2 + (R() - 0.5) * s * 0.5, h / 2 + (R() - 0.5) * s * 0.5]); }
+      else { for (let k = 0; k < sheetCount(w, h); k++) out.push([R() * w, R() * h]); }
+      return out;
+    }
+    function garden(w, h) {
+      buildLogo();
+      const key = [p.forme, p.gravure, p.taille, p.variation, p.rotation, p.encre, p.usure, p.grain, p.double, p.disposition, p.serre, p.impressions, p.cadence, p.fond, p.couleurs.join(), logoKey, app.seed, w, h, app.size.dpr].join();
+      if (key === gKey && G) return G; gKey = key;
+      const dpr = app.size.dpr, mk = () => { const c = document.createElement('canvas'); c.width = Math.ceil(w * dpr); c.height = Math.ceil(h * dpr); return c; };
+      G = { w, h, s: Math.min(w, h) * p.taille, page: mk(), old: null, slide: -1, sheet: 0, idx: 0, list: [], ink: p.encre, next: simT, press: null, pos: positions(w, h, 0), R: rng(app.seed * 4441 + 5), n: 0 };
+      paper(G.page);
+      if (!app.thumbnail && p.disposition !== 'pile') { const n = Math.floor(G.pos.length * 0.45); for (let k = 0; k < n; k++) { const q = G.pos[k], imp = nextImpression(q[0], q[1]); bake(imp); G.list.push(imp); } G.idx = n; }
+      return G;
+    }
+    function paper(c) {
+      const g = c.getContext('2d'), R = rng(app.seed * 3 + 1); g.setTransform(1, 0, 0, 1, 0, 0); g.globalCompositeOperation = 'source-over'; g.fillStyle = p.fond; g.fillRect(0, 0, c.width, c.height);
+      const dk = lum(p.fond) > 0.5; g.strokeStyle = dk ? 'rgba(0,0,0,0.035)' : 'rgba(255,255,255,0.04)'; g.lineWidth = 1;
+      for (let k = 0; k < c.width * c.height / 1800; k++) { const x = R() * c.width, y = R() * c.height, a = R() * TAU, l = 3 + R() * 9; g.beginPath(); g.moveTo(x, y); g.lineTo(x + Math.cos(a) * l, y + Math.sin(a) * l); g.stroke(); }
+    }
+    function nextImpression(x, y) {
+      const R = G.R, Cs = p.couleurs.length ? p.couleurs : ['#16161a'], k = G.n++;
+      const shape = p.forme === 'mixte' ? SHAPES[k % SHAPES.length] : p.forme, col = Cs[Math.floor(R() * Cs.length)], s = G.s * (1 + p.variation * (R() * 2 - 1)), rot = (R() * 2 - 1) * p.rotation * Math.PI / 180;
+      const imp = { x, y, s, rot, shape, col, ink: G.ink, ox: Math.floor(R() * 256), oy: Math.floor(R() * 256), dbl: R() < p.double ? [(R() - 0.5) * s * 0.06, (R() - 0.5) * s * 0.06] : null, seed: k };
+      G.ink *= 1 - p.usure; if (G.ink < Math.max(0.3, p.encre * 0.55)) G.ink = p.encre; // on repasse sur le tampon encreur
+      return imp;
+    }
+    function manual(x, y) { if (!G) return; const imp = nextImpression(x, y); bake(imp); G.list.push(imp); G.flash = { x, y, s: imp.s, t: simT }; }
+
+    // ——— Impression : forme × grain seuillé, posée en produit (ou en écran sur papier sombre) ———
+    function bake(imp) {
+      const dpr = app.size.dpr, S = Math.ceil(imp.s * 1.5 * dpr) + 2, c = document.createElement('canvas'); c.width = c.height = S; const g = c.getContext('2d');
+      g.translate(S / 2, S / 2); g.rotate(imp.rot); g.scale(imp.s * dpr, imp.s * dpr); engrave(g, imp.shape, imp.col);
+      const D = g.getImageData(0, 0, S, S), d = D.data, Z = noiseField(), N = Z.N, gr = p.grain / Math.max(1, imp.s * dpr / 160), L = imp.ink;
+      for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) { const o = (y * S + x) * 4; if (!d[o + 3]) continue; const h = ((x * 73856093) ^ (y * 19349663) ^ (imp.seed * 83492791)) >>> 0, n = nz(x * gr + imp.ox, y * gr + imp.oy) * 0.88 + ((h % 1000) / 1000) * 0.12; const cov = Math.max(0, Math.min(1, (L * 1.1 - n) * 9)); d[o + 3] = d[o + 3] * (0.06 + 0.94 * cov); }
+      g.setTransform(1, 0, 0, 1, 0, 0); g.putImageData(D, 0, 0);
+      const pg = G.page.getContext('2d'); pg.setTransform(1, 0, 0, 1, 0, 0); pg.globalCompositeOperation = lum(p.fond) > 0.45 ? 'multiply' : 'screen';
+      pg.drawImage(c, imp.x * dpr - S / 2, imp.y * dpr - S / 2);
+      if (imp.dbl) { pg.globalAlpha = 0.35; pg.drawImage(c, (imp.x + imp.dbl[0]) * dpr - S / 2, (imp.y + imp.dbl[1]) * dpr - S / 2); pg.globalAlpha = 1; }
+      pg.globalCompositeOperation = 'source-over';
+    }
+    function engrave(g, shape, col) {
+      const loops = shapeLoops(shape); g.fillStyle = col; g.strokeStyle = col;
+      if (p.gravure === 'contour') { pathOn(g, loops); g.lineWidth = 0.075; g.lineJoin = 'round'; g.stroke(); g.save(); g.scale(0.8, 0.8); pathOn(g, loops); g.lineWidth = 0.05; g.stroke(); g.restore(); }
+      else if (p.gravure === 'hachures') { g.save(); pathOn(g, loops); g.clip('evenodd'); g.lineWidth = 0.035; g.beginPath(); for (let k = -12; k <= 12; k++) { g.moveTo(k * 0.07 - 0.7, -0.7); g.lineTo(k * 0.07 + 0.7, 0.7); } g.stroke(); g.restore(); pathOn(g, loops); g.lineWidth = 0.05; g.stroke(); }
+      else { pathOn(g, loops); g.fill('evenodd'); }
+    }
+
+    function step(dt) {
+      const { w, h } = G;
+      if (G.slide >= 0) { G.slide += dt / 0.9; if (G.slide >= 1) { G.slide = -1; G.old = null; } return; }
+      if (G.press) { const ph = (simT - G.press.t0) / 0.32; if (ph >= 0.55 && !G.press.done) { bake(G.press.imp); G.list.push(G.press.imp); G.press.done = true; } if (ph >= 1) G.press = null; }
+      if (!G.press && simT >= G.next) {
+        if (G.idx >= G.pos.length) { // feuille pleine : on la retire
+          G.old = G.page; const c = document.createElement('canvas'); c.width = G.old.width; c.height = G.old.height; paper(c); G.page = c; G.slide = 0; G.sheet++; G.idx = 0; G.list = []; G.pos = positions(w, h, G.sheet); G.next = simT + 1.2; return;
+        }
+        const q = G.pos[G.idx++]; G.press = { imp: nextImpression(q[0], q[1]), t0: simT }; G.next = simT + 1 / p.cadence;
+      }
+    }
+
+    app.loop((t, dt) => {
+      dt = Math.min(1 / 20, dt || 0);
+      const { w, h, dpr } = app.size; garden(w, h);
+      if (app.thumbnail) { if (!G.thumb) { G.thumb = true; const n = Math.round(G.pos.length * 0.8); for (let k = 0; k < n; k++) { const q = G.pos[k]; const imp = nextImpression(q[0], q[1]); bake(imp); G.list.push(imp); } G.idx = n; } }
+      else { simT += dt; step(dt); }
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      if (G.slide >= 0 && G.old) { const e = G.slide * G.slide * (3 - 2 * G.slide), W = canvas.width; ctx.fillStyle = mix(p.fond, '#000000', 0.5); ctx.fillRect(0, 0, W, canvas.height); ctx.drawImage(G.old, -e * W * 1.05, 0); ctx.drawImage(G.page, W * 1.05 * (1 - e), 0); }
+      else ctx.drawImage(G.page, 0, 0);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      // le tampon qui descend puis remonte : son ombre se resserre au contact
+      if (G.press) {
+        const ph = (simT - G.press.t0) / 0.32, im = G.press.imp, k = ph < 0.55 ? 1 - ph / 0.55 : (ph - 0.55) / 0.45, sc = 1 + 0.22 * k, off = im.s * 0.12 * k;
+        ctx.save(); ctx.translate(im.x + off, im.y + off * 1.3); ctx.rotate(im.rot); ctx.scale(im.s * sc, im.s * sc); ctx.globalAlpha = 0.16 * (1 - k * 0.5); pathOn(ctx, shapeLoops(im.shape)); ctx.fillStyle = '#000000'; ctx.fill('evenodd'); ctx.restore();
+        ctx.save(); ctx.translate(im.x - off * 0.4, im.y - off); ctx.rotate(im.rot); ctx.scale(im.s * sc * 1.08, im.s * sc * 1.08); ctx.globalAlpha = 0.55 * k; ctx.fillStyle = mix('#8a6a48', p.fond, 0.2); ctx.beginPath(); ctx.roundRect(-0.55, -0.55, 1.1, 1.1, 0.08); ctx.fill(); ctx.globalAlpha = 0.5 * k; ctx.fillStyle = '#b08a60'; ctx.beginPath(); ctx.arc(0, 0, 0.18, 0, TAU); ctx.fill(); ctx.restore();
+      }
+      app.finish(ctx);
+    });
+
+    function toSVG() {
+      const { w, h } = app.size, f = (v) => +v.toFixed(3); garden(w, h);
+      const blend = lum(p.fond) > 0.45 ? 'multiply' : 'screen', shapes = new Map();
+      let defs = '', s = `<rect width="100%" height="100%" fill="${p.fond}"/>`;
+      const sid = (shape, col) => { const k = shape + col; let id = shapes.get(k); if (id) return id; id = 's' + shapes.size; shapes.set(k, id);
+        const loops = shapeLoops(shape), d = loops.map((L) => 'M' + L.map((q) => f(q[0]) + ' ' + f(q[1])).join('L') + 'Z').join('');
+        if (p.gravure === 'contour') defs += `<g id="${id}" fill="none" stroke="${col}" stroke-linejoin="round"><path d="${d}" stroke-width="0.075"/><path d="${d}" stroke-width="0.0625" transform="scale(0.8)"/></g>`;
+        else if (p.gravure === 'hachures') { let l = ''; for (let k = -12; k <= 12; k++) l += `M${f(k * 0.07 - 0.7)} -0.7L${f(k * 0.07 + 0.7)} 0.7`; defs += `<clipPath id="c${id}"><path d="${d}" clip-rule="evenodd"/></clipPath><g id="${id}" fill="none" stroke="${col}"><path d="${l}" stroke-width="0.035" clip-path="url(#c${id})"/><path d="${d}" stroke-width="0.05"/></g>`; }
+        else defs += `<path id="${id}" d="${d}" fill="${col}" fill-rule="evenodd"/>`;
+        return id; };
+      const lv = [0.4, 0.55, 0.7, 0.85, 1];
+      lv.forEach((L, i) => { defs += `<filter id="k${i}" x="-0.2" y="-0.2" width="1.4" height="1.4" color-interpolation-filters="sRGB"><feTurbulence type="fractalNoise" baseFrequency="${f(0.06 * p.grain * Math.min(1, 160 / G.s))}" numOctaves="4" seed="${i + 3}" result="n"/><feColorMatrix in="n" type="matrix" values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  -27 0 0 0 ${f(9 * (1.1 * L + 1))}" result="a"/><feComposite in="SourceGraphic" in2="a" operator="in" result="m"/><feColorMatrix in="SourceGraphic" type="matrix" values="1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 0 0.06 0" result="p"/><feMerge><feMergeNode in="p"/><feMergeNode in="m"/></feMerge></filter>`; });
+      for (const imp of G.list) {
+        const li = lv.reduce((b, L, i) => (Math.abs(L - imp.ink) < Math.abs(lv[b] - imp.ink) ? i : b), 0), id = sid(imp.shape, imp.col);
+        const one = (dx, dy, a) => `<g transform="translate(${f(imp.x + dx)} ${f(imp.y + dy)})" filter="url(#k${li})"${a < 1 ? ` opacity="${a}"` : ''} style="mix-blend-mode:${blend}"><use href="#${id}" transform="rotate(${f(imp.rot * 180 / Math.PI)}) scale(${f(imp.s)})"/></g>`;
+        s += one(0, 0, 1); if (imp.dbl) s += one(imp.dbl[0], imp.dbl[1], 0.35);
+      }
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><defs>${defs}</defs>${s}</svg>`;
+    }
+  </script>
+</body>
+</html>
