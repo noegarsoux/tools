@@ -1,0 +1,15 @@
+{
+  "slug": "toile-araignee",
+  "title": "Toile d'araignée",
+  "type": "motion",
+  "description": "Une araignée tisse cadre, rayons et spirale, puis la toile vit : elle ondule au vent, se tend sous le doigt, se casse et retient la rosée en forme de logo.",
+  "tags": ["fils", "physique", "radial", "nature", "logo", "svg"],
+  "inspiration": [
+    "Les toiles orbiculaires des épeires",
+    "Les sculptures de toiles de Tomás Saraceno",
+    "Les photographies de toiles couvertes de rosée"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}

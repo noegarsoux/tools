@@ -1,0 +1,275 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Toile d'araignée</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Toile d'araignée : un réseau de nœuds reliés par des fils (ressorts), animé par intégration de Verlet et
+    // relaxation des longueurs. La construction suit l'ordre d'une épeire : amarres et cadre, rayons pris deux à deux
+    // de part et d'autre, moyeu, puis la spirale de capture de l'extérieur vers le centre. Un fil n'agit qu'une fois
+    // tissé ; les nœuds encore « dans le vide » restent en place. La rosée se pose sur la spirale ; dans le logo elle
+    // est dense et colorée. Le vent est une somme de sinus qui balaie la toile ; le doigt attrape un nœud.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const BIEN = PAL('biennale'), MEN = PAL('menthe'), KB = PAL('kegelbahn');
+
+    let simT = 0, W = null, wKey = '', gen = 0, bornT = 0, grab = null, logoM = null, logoKey = '';
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.03, vignette: 0.18 },
+      hint: 'Glissez un fil pour tendre la toile · clic : pincer · molette : nombre de rayons',
+      notes: 'L\'épeire construit sa toile toujours dans le même ordre : quelques amarres, un cadre, puis des rayons posés de part et d\'autre du centre pour garder l\'équilibre, un petit moyeu, et enfin la longue spirale collante qu\'elle tisse de l\'extérieur vers l\'intérieur. On la suit ici fil à fil. Une fois finie, la toile est un réseau de ressorts : le vent la fait onduler, le doigt peut attraper un nœud et la tendre (jusqu\'à la rompre si l\'on active la casse), un clic la pince comme une corde. Au matin la rosée se pose sur la spirale ; à l\'endroit du logo, les gouttes sont plus serrées et prennent la couleur d\'accent. Puis l\'araignée recommence ailleurs.',
+      params: {
+        'Toile': {
+          rayons: { type: 'range', label: 'Rayons', min: 8, max: 48, step: 1, value: 28 },
+          espacement: { type: 'range', label: 'Espacement de la spirale', min: 0.007, max: 0.05, step: 0.001, value: 0.017 },
+          irregularite: { type: 'range', label: 'Irrégularité', min: 0, max: 1, step: 0.01, value: 0.45 },
+          cotes: { type: 'range', label: 'Côtés du cadre', min: 3, max: 9, step: 1, value: 6 },
+          moyeu: { type: 'range', label: 'Moyeu', min: 0.02, max: 0.2, step: 0.005, value: 0.07 },
+          epaisseur: { type: 'range', label: 'Épaisseur du fil', min: 0.3, max: 3, step: 0.05, value: 0.9 },
+        },
+        'Physique': {
+          vent: { type: 'range', label: 'Vent', min: 0, max: 1, step: 0.01, value: 0.35 },
+          tension: { type: 'range', label: 'Tension', min: 0, max: 0.15, step: 0.005, value: 0.03 },
+          gravite: { type: 'range', label: 'Poids de la rosée', min: 0, max: 1, step: 0.01, value: 0.2 },
+          casse: { type: 'toggle', label: 'Les fils cassent', value: false },
+        },
+        'Construction': {
+          construction: { type: 'range', label: 'Durée du tissage (s)', min: 2, max: 40, step: 0.5, value: 12 },
+          tenue: { type: 'range', label: 'Avant la toile suivante (s)', min: 3, max: 60, step: 1, value: 16 },
+        },
+        'Rosée': {
+          rosee: { type: 'range', label: 'Rosée', min: 0, max: 1, step: 0.01, value: 0.3 },
+          tailleGouttes: { type: 'range', label: 'Taille des gouttes', min: 0.002, max: 0.02, step: 0.0005, value: 0.0055 },
+        },
+        'Logo en rosée': {
+          logo: { type: 'toggle', label: 'Inclure le logo', value: false },
+          tailleLogo: { type: 'range', label: 'Taille du logo', min: 0.2, max: 0.9, step: 0.01, value: 0.55, show: (q) => q.logo },
+          image: { type: 'file', label: 'Logo', accept: 'image/*', show: (q) => q.logo },
+        },
+        'Couleurs': {
+          fond: { type: 'color', label: 'Fond', value: '#11161a' },
+          fil: { type: 'color', label: 'Fil', value: '#d8dde0' },
+          gouttes: { type: 'color', label: 'Gouttes', value: '#bfe2f0' },
+          accent: { type: 'color', label: 'Logo', value: '#f2c14e', show: (q) => q.logo },
+        },
+      },
+      presets: {
+        'Aube': {},
+        'Rosée': { rosee: 0.85, tailleGouttes: 0.0065, gravite: 0.45, fond: '#1b2430', gouttes: '#e4f3fb' },
+        'Orbe parfaite': { irregularite: 0, rayons: 32, cotes: 8, espacement: 0.015, vent: 0.15, rosee: 0.1 },
+        'Grand vent': { vent: 0.95, casse: true, tension: 0.01, rosee: 0.2 },
+        'Fine': { rayons: 44, espacement: 0.009, epaisseur: 0.6, rosee: 0.15 },
+        'Lâche': { tension: 0, gravite: 0.9, espacement: 0.028, rayons: 18, irregularite: 0.8, rosee: 0.5, tailleGouttes: 0.008 },
+        'Logo': { logo: true, rayons: 40, espacement: 0.011, moyeu: 0.03, rosee: 0.06, tailleGouttes: 0.006, vent: 0.2 },
+        'Biennale': { fond: BIEN[0], fil: BIEN[1], gouttes: BIEN[2], accent: BIEN[2], rosee: 0.4, epaisseur: 1.1 },
+        'Menthe': { fond: MEN[1], fil: MEN[0], gouttes: MEN[2], accent: MEN[2], rosee: 0.45 },
+        'Kegelbahn': { fond: KB[0], fil: KB[3], gouttes: KB[1], accent: KB[1], rosee: 0.35, rayons: 36 },
+      },
+      brand(colors) {
+        const s = colors.slice().sort((a, b) => lum(a) - lum(b)), L = s[s.length - 1], D = s[0];
+        return { fond: D, fil: L, gouttes: s.length > 2 ? s[s.length - 2] : mix(L, D, 0.3), accent: s[Math.floor(s.length / 2)] };
+      },
+      pointer: {
+        down: (q) => { grab = { x: q.x, y: q.y, x0: q.x, y0: q.y, moved: 0, n: nearest(q.x, q.y) }; },
+        drag: (q) => { if (!grab) return; grab.moved += Math.hypot(q.x - grab.x, q.y - grab.y); grab.x = q.x; grab.y = q.y; },
+        up: () => { if (grab && grab.moved < 6) pluck(grab.x, grab.y); grab = null; },
+        wheel: (q, dy) => app.set('rayons', Math.max(8, Math.min(48, p.rayons + (dy > 0 ? 2 : -2)))),
+      },
+      onChange(k) { if (['*', 'logo', 'image'].includes(k)) logoKey = ''; if (k === '*') gen = 0; },
+      export: { name: 'toile-araignee', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    function hex(x) { const n = parseInt(x.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
+    function lum(x) { const c = hex(x); return (c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114) / 255; }
+    function mix(a, b, t) { const A = hex(a), C = hex(b); return '#' + A.map((v, i) => Math.round(v + (C[i] - v) * t).toString(16).padStart(2, '0')).join(''); }
+    function rng(s) { let a = s >>> 0; return () => { a = (a + 0x6d2b79f5) >>> 0; let t = a; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+
+    // ——— Logo ———
+    function buildLogo() {
+      const img0 = p.image || app.logoImg, key = [p.logo, img0 ? (img0.src || 'c') : 'demo'].join(); if (key === logoKey) return; logoKey = key; wKey = '';
+      const M = 200, c = document.createElement('canvas'); c.width = c.height = M; const x = c.getContext('2d', { willReadFrequently: true }), L = M * 0.94, cx = M / 2;
+      if (img0) { const iw = img0.naturalWidth || img0.width, ih = img0.naturalHeight || img0.height, s = L / Math.max(iw, ih); x.drawImage(img0, cx - iw * s / 2, cx - ih * s / 2, iw * s, ih * s); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(cx, cx, L * 0.48, 0, TAU); x.arc(cx, cx, L * 0.27, 0, TAU, true); x.fill('evenodd'); x.fillRect(cx - L * 0.07, cx - L * 0.5, L * 0.14, L); }
+      const d = x.getImageData(0, 0, M, M).data; let transp = 0; for (let i = 3; i < d.length; i += 4) if (d[i] < 128) transp++; const useA = transp > M * M * 0.05;
+      const m = new Uint8Array(M * M); for (let i = 0; i < M * M; i++) { const o = i * 4, l = (d[o] * 0.2126 + d[o + 1] * 0.7152 + d[o + 2] * 0.0722) / 255; m[i] = (useA ? d[o + 3] > 128 : d[o + 3] > 128 && l < 0.5) ? 1 : 0; }
+      logoM = { m, M };
+    }
+
+    // ——— Construction du réseau ———
+    function web(w, h) {
+      buildLogo();
+      const key = [p.rayons, p.espacement, p.irregularite, p.cotes, p.moyeu, p.tension, p.logo, p.tailleLogo, p.rosee, p.tailleGouttes, logoKey, app.seed, gen, w, h].join();
+      if (key === wKey && W) return W; const regen = !W || W.gen !== gen; wKey = key; if (regen) bornT = simT; else bornT = simT - p.construction;
+      const R = rng(app.seed * 9973 + gen * 7919 + 3), J = p.irregularite, m = Math.min(w, h), jit = (a) => (R() - 0.5) * 2 * a * J;
+      const N = [], S = [], node = (x, y, fixed) => { N.push({ x, y, px: x, py: y, x0: x, y0: y, fixed: !!fixed, bt: fixed ? 0 : 9 }); return N.length - 1; };
+      const spring = (a, b, bt, kind, span = 0.01) => { S.push({ a, b, bt, kind, span, rest: Math.hypot(N[a].x - N[b].x, N[a].y - N[b].y) * (1 - p.tension), dead: false }); };
+      const hx = w / 2 + jit(w * 0.08), hy = h / 2 + jit(h * 0.06) - h * 0.02, hub = node(hx, hy);
+      // cadre : polygone irrégulier, chaque sommet amarré au bord de l'image
+      const K = p.cotes, fv = [], a0 = R() * TAU;
+      for (let j = 0; j < K; j++) {
+        const a = a0 + (j / K) * TAU + jit(0.35 / K * TAU), ca = Math.cos(a), sa = Math.sin(a);
+        const lim = Math.min(ca > 0 ? (w - hx) / ca : ca < 0 ? -hx / ca : 1e9, sa > 0 ? (h - hy) / sa : sa < 0 ? -hy / sa : 1e9);
+        const d = Math.min(lim * 0.8, m * (0.44 + jit(0.08))), x = hx + ca * d, y = hy + sa * d;
+        fv.push({ x, y, a, n: node(x, y), anchor: node(hx + ca * lim, hy + sa * lim, true) });
+      }
+      // rayons : intersection du rayon issu du moyeu avec le cadre
+      const NR = p.rayons, rays = [];
+      for (let i = 0; i < NR; i++) {
+        const th = a0 + (i / NR) * TAU + jit(0.3 / NR * TAU), dx = Math.cos(th), dy = Math.sin(th);
+        let best = null;
+        for (let j = 0; j < K; j++) {
+          const A = fv[j], B = fv[(j + 1) % K], ex = B.x - A.x, ey = B.y - A.y, den = dx * ey - dy * ex; if (Math.abs(den) < 1e-9) continue;
+          const t = ((A.x - hx) * ey - (A.y - hy) * ex) / den, u = ((A.x - hx) * dy - (A.y - hy) * dx) / den;
+          if (t > 0 && u >= 0 && u <= 1 && (!best || t < best.t)) best = { t, u, j };
+        }
+        if (!best) continue;
+        rays.push({ th, dx, dy, len: best.t, edge: best.j, u: best.u, end: node(hx + dx * best.t, hy + dy * best.t), nodes: [] });
+      }
+      const nr = rays.length;
+      // spirale de capture : distance au moyeu qui décroît d'un pas à chaque tour
+      const sp = m * p.espacement, hubR = m * p.moyeu, Rm = rays.reduce((s, r) => s + r.len, 0) / Math.max(1, nr), spiral = [];
+      for (let k = 0; ; k++) {
+        let any = false;
+        for (let i = 0; i < nr; i++) {
+          const r = rays[i], f = 0.93 - (k + i / nr) * sp / Rm, d = f * r.len + jit(sp * 0.25); if (d < hubR) continue; any = true;
+          const n = node(hx + r.dx * d, hy + r.dy * d); r.nodes.push({ d, n }); spiral.push(n);
+        }
+        if (!any) break; if (k > 400) break;
+      }
+      // petit moyeu : un anneau serré autour du centre
+      const ring = rays.map((r) => { const d = hubR * 0.45 + jit(hubR * 0.08), n = node(hx + r.dx * d, hy + r.dy * d); r.nodes.push({ d, n }); return n; });
+      // ordre de tissage et instants (0 → 1)
+      let t = 0;
+      fv.forEach((v, j) => spring(v.anchor, v.n, (t = 0.01 + j * 0.06 / K), 'cadre'));
+      fv.forEach((v, j) => { const ed = []; rays.forEach((r) => { if (r.edge === j) ed.push(r); }); ed.sort((A, B) => A.u - B.u); const pts = [v.n, ...ed.map((r) => r.end), fv[(j + 1) % K].n], du = 0.06 / K / (pts.length - 1); for (let k = 1; k < pts.length; k++) spring(pts[k - 1], pts[k], 0.07 + j * 0.06 / K + (k - 1) * du, 'cadre', du); });
+      const order = []; for (let i = 0; i < Math.ceil(nr / 2); i++) { order.push(i); if (i + Math.floor(nr / 2) < nr && i + Math.floor(nr / 2) !== i) order.push(i + Math.floor(nr / 2)); }
+      [...new Set(order)].forEach((i, k) => { const r = rays[i], bt = 0.14 + (k / nr) * 0.28; r.nodes.sort((A, B) => A.d - B.d); const pts = [hub, ...r.nodes.map((q) => q.n), r.end], du = 0.26 / nr / (pts.length - 1); for (let k = 1; k < pts.length; k++) spring(pts[k - 1], pts[k], bt + (k - 1) * du, 'rayon', du); });
+      ring.forEach((n, i) => spring(n, ring[(i + 1) % nr], 0.43 + (i / nr) * 0.03, 'moyeu'));
+      const ns = spiral.length; for (let k = 1; k < ns; k++) spring(spiral[k - 1], spiral[k], 0.47 + (k / ns) * 0.53, 'spirale', 0.53 / ns);
+      // un nœud libre ne bouge qu'une fois relié par un fil tissé
+      for (const s of S) { for (const n of [s.a, s.b]) if (!N[n].fixed) N[n].bt = Math.min(N[n].bt, s.bt); }
+      N[hub].bt = 0.14;
+      // rosée : gouttes sur la spirale, serrées et colorées dans le logo
+      const drops = [], dr = m * p.tailleGouttes, S0 = m * p.tailleLogo;
+      const inLogo = (x, y) => { if (!p.logo || !logoM) return false; const u = Math.floor(((x - hx) / S0 + 0.5) * logoM.M), v = Math.floor(((y - hy) / S0 + 0.5) * logoM.M); return u >= 0 && v >= 0 && u < logoM.M && v < logoM.M && logoM.m[v * logoM.M + u] === 1; };
+      S.forEach((s, si) => {
+        if (s.kind !== 'spirale') return; const L = s.rest, cnt = Math.max(1, Math.round(L / (dr * 2.6)));
+        for (let k = 0; k < cnt; k++) {
+          const u = (k + 0.5 + (R() - 0.5) * 0.6) / cnt, x = N[s.a].x + (N[s.b].x - N[s.a].x) * u, y = N[s.a].y + (N[s.b].y - N[s.a].y) * u, lg = inLogo(x, y);
+          if (lg || R() < p.rosee * 0.5) drops.push({ s: si, u, r: dr * (lg ? 0.9 + R() * 0.3 : 0.45 + R() * 0.8), logo: lg, ph: R() * TAU });
+        }
+      });
+      W = { N, S, drops, gen, hub, m };
+      return W;
+    }
+
+    function nearest(x, y) {
+      if (!W) return -1; let b = -1, bd = (W.m * 0.06) ** 2;
+      W.N.forEach((n, i) => { if (n.fixed) return; const d = (n.x - x) ** 2 + (n.y - y) ** 2; if (d < bd) { bd = d; b = i; } });
+      return b;
+    }
+    function pluck(x, y) {
+      if (!W) return; const r = W.m * 0.14;
+      for (const n of W.N) { if (n.fixed) continue; const dx = n.x - x, dy = n.y - y, d = Math.hypot(dx, dy); if (d < r) { const k = (1 - d / r) * W.m * 0.012; n.px -= (dx / (d || 1)) * k; n.py -= (dy / (d || 1)) * k; } }
+    }
+
+    // ——— Physique : Verlet + relaxation des fils ———
+    function physics(prog, t, dt, still) {
+      const { N, S, m } = W, damp = 0.985, g = p.gravite * m * 0.6 * (prog < 1 ? 0.1 : 1), wv = still ? 0 : p.vent * m * 1.4 * (prog < 1 ? 0.15 : Math.min(1, 0.15 + (t - bornT - p.construction) * 0.4)), h2 = dt * dt;
+      for (const n of N) {
+        if (n.fixed || n.bt > prog) continue;
+        const vx = (n.x - n.px) * damp, vy = (n.y - n.py) * damp; n.px = n.x; n.py = n.y;
+        const gust = Math.sin(t * 0.7 + n.y0 / m * 2.2) * 0.6 + Math.sin(t * 1.9 + n.x0 / m * 3.1) * 0.4, fx = wv * gust, fy = wv * 0.35 * Math.sin(t * 1.3 + n.x0 / m * 2) + g;
+        n.x += vx + fx * h2; n.y += vy + fy * h2;
+      }
+      if (grab && grab.n >= 0 && N[grab.n]) { const n = N[grab.n]; n.x = grab.x; n.y = grab.y; }
+      for (let it = 0; it < 12; it++) {
+        for (const s of S) {
+          if (s.dead || s.bt > prog) continue; const A = N[s.a], B = N[s.b], dx = B.x - A.x, dy = B.y - A.y, d = Math.hypot(dx, dy) || 1e-6;
+          if (p.casse && d > s.rest * 1.6 + m * 0.12 && s.kind !== 'cadre') { s.dead = true; continue; }
+          const diff = (d - s.rest) / d * 0.5, fa = A.fixed || A.bt > prog ? 0 : 1, fb = B.fixed || B.bt > prog ? 0 : 1, tot = fa + fb; if (!tot) continue;
+          const kx = dx * diff * 2 / tot, ky = dy * diff * 2 / tot;
+          // un fil ne pousse pas : il ne retient que quand il est tendu
+          if (d < s.rest) continue;
+          A.x += kx * fa; A.y += ky * fa; B.x -= kx * fb; B.y -= ky * fb;
+        }
+        if (grab && grab.n >= 0 && N[grab.n]) { const n = N[grab.n]; n.x = grab.x; n.y = grab.y; }
+      }
+    }
+
+    // ——— Dessin ———
+    function render(pen, prog, t) {
+      const { N, S, drops, m } = W, lw = p.epaisseur * Math.max(0.6, m / 900);
+      pen.bg(p.fond);
+      const L = { cadre: [], fil: [] };
+      let last = null;
+      for (const s of S) {
+        if (s.dead || s.bt > prog) continue; const A = N[s.a], B = N[s.b];
+        // le fil en cours de tissage n'est tiré que jusqu'à l'araignée
+        const f = Math.min(1, (prog - s.bt) / s.span), x2 = A.x + (B.x - A.x) * f, y2 = A.y + (B.y - A.y) * f;
+        (s.kind === 'cadre' ? L.cadre : L.fil).push([A.x, A.y, x2, y2]);
+        if (prog < 1 && (!last || s.bt >= last.bt)) last = { bt: s.bt, x: x2, y: y2 };
+      }
+      pen.lines(L.cadre, lw * 1.6, p.fil, 0.75);
+      pen.lines(L.fil, lw, p.fil, 0.85);
+      const D = [], DL = [];
+      for (const q of drops) {
+        const s = S[q.s]; if (s.dead || s.bt > prog) continue; const A = N[s.a], B = N[s.b], age = Math.min(1, (prog - s.bt) * 40), x = A.x + (B.x - A.x) * q.u, y = A.y + (B.y - A.y) * q.u;
+        (q.logo ? DL : D).push([x, y, q.r * age]);
+      }
+      pen.drops(D, p.gouttes);
+      pen.drops(DL, p.accent);
+      if (last) pen.spider(last.x, last.y, m * 0.012, p.fil);
+    }
+
+    app.loop((t, dt) => {
+      dt = Math.min(1 / 30, dt || 0);
+      const { w, h, dpr } = app.size;
+      if (app.thumbnail) { web(w, h); bornT = simT - p.construction; for (let k = 0; k < 120; k++) physics(1, simT, 1 / 60, true); }
+      else {
+        simT += dt; web(w, h);
+        if (simT - bornT > p.construction + p.tenue) { gen++; web(w, h); }
+        physics(Math.min(1, (simT - bornT) / p.construction), simT, dt, false);
+      }
+      const prog = app.thumbnail ? 1 : Math.min(1, (simT - bornT) / p.construction);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      render({
+        bg(c) { ctx.fillStyle = c; ctx.fillRect(0, 0, w, h); },
+        lines(Ls, lw, col, a) { const P = new Path2D(); for (const l of Ls) { P.moveTo(l[0], l[1]); P.lineTo(l[2], l[3]); } ctx.globalAlpha = a; ctx.strokeStyle = col; ctx.lineWidth = lw; ctx.lineCap = 'round'; ctx.stroke(P); ctx.globalAlpha = 1; },
+        drops(Ds, col) {
+          if (!Ds.length) return; const P = new Path2D(), Hh = new Path2D();
+          for (const d of Ds) { if (d[2] <= 0) continue; P.moveTo(d[0] + d[2], d[1]); P.arc(d[0], d[1], d[2], 0, TAU); const r2 = d[2] * 0.32; Hh.moveTo(d[0] - d[2] * 0.3 + r2, d[1] - d[2] * 0.35); Hh.arc(d[0] - d[2] * 0.3, d[1] - d[2] * 0.35, r2, 0, TAU); }
+          ctx.globalAlpha = 0.9; ctx.fillStyle = col; ctx.fill(P); ctx.globalAlpha = 0.85; ctx.fillStyle = '#ffffff'; ctx.fill(Hh); ctx.globalAlpha = 1;
+        },
+        spider(x, y, r, col) { ctx.fillStyle = col; ctx.beginPath(); ctx.arc(x, y, r, 0, TAU); ctx.arc(x + r * 1.3, y, r * 0.6, 0, TAU); ctx.fill(); },
+      }, prog, simT);
+      app.finish(ctx);
+    });
+
+    function toSVG() {
+      const { w, h } = app.size, f = (v) => +v.toFixed(2); web(w, h); const prog = Math.min(1, (simT - bornT) / p.construction);
+      let s = `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">`;
+      render({
+        bg(c) { s += `<rect width="100%" height="100%" fill="${c}"/>`; },
+        lines(Ls, lw, col, a) { if (Ls.length) s += `<path d="${Ls.map((l) => `M${f(l[0])} ${f(l[1])}L${f(l[2])} ${f(l[3])}`).join('')}" stroke="${col}" stroke-opacity="${a}" stroke-width="${f(lw)}" stroke-linecap="round" fill="none"/>`; },
+        drops(Ds, col) { if (!Ds.length) return; s += `<g fill="${col}" fill-opacity="0.9">` + Ds.filter((d) => d[2] > 0).map((d) => `<circle cx="${f(d[0])}" cy="${f(d[1])}" r="${f(d[2])}"/>`).join('') + `</g><g fill="#ffffff" fill-opacity="0.85">` + Ds.filter((d) => d[2] > 0).map((d) => `<circle cx="${f(d[0] - d[2] * 0.3)}" cy="${f(d[1] - d[2] * 0.35)}" r="${f(d[2] * 0.32)}"/>`).join('') + '</g>'; },
+        spider(x, y, r, col) { s += `<g fill="${col}"><circle cx="${f(x)}" cy="${f(y)}" r="${f(r)}"/><circle cx="${f(x + r * 1.3)}" cy="${f(y)}" r="${f(r * 0.6)}"/></g>`; },
+      }, prog, simT);
+      return s + '</svg>';
+    }
+  </script>
+</body>
+</html>
