@@ -1,0 +1,15 @@
+{
+  "slug": "ombres-de-feuillage",
+  "title": "Ombres de feuillage",
+  "type": "motion",
+  "description": "Le soleil à travers les feuilles : chaque trou du feuillage fait sténopé et projette sur le mur une image de la source, disque, croissant d’éclipse ou logo.",
+  "tags": ["animation", "lumiere", "ombre", "interaction", "logo", "svg"],
+  "inspiration": [
+    "Le komorebi, la lumière qui filtre entre les feuilles",
+    "Les croissants projetés sous les arbres pendant les éclipses",
+    "La camera obscura et le sténopé"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}

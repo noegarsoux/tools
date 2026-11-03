@@ -1,0 +1,270 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ombres de feuillage</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Ombres de feuillage : la lumière du soleil qui traverse un feuillage dessine sur le mur des taches qui sont
+    // autant d'images du soleil (chaque trou entre les feuilles fait sténopé). On le calcule comme une convolution :
+    // le feuillage est rendu en masque à la résolution d'une cellule (la couverture antialiasée donne la part de
+    // lumière qui passe), puis chaque cellule éclairée tamponne la forme de la source, en addition. La source peut
+    // être un disque (soleil), un croissant (éclipse) ou le logo : toutes les taches prennent alors sa forme.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const BIE = PAL('biennale'), LUZ = PAL('luzern'), MEN = PAL('menthe');
+    const SOURCES = ['soleil', 'eclipse', 'logo'];
+
+    let vKey = '', logoM = null, logoKey = '', ptr = null, S = null, gKey = '', logoP = null, logoPK = '', spr = null, sprKey = '';
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.07, vignette: 0.3 },
+      hint: 'Glisser : souffler dans les branches · clic : soleil, éclipse ou logo · molette : distance du feuillage',
+      notes: 'Le soleil à travers les feuilles : chaque trou du feuillage agit comme un sténopé et projette sur le mur une image de la source. Avec le soleil, des taches rondes ; pendant une éclipse, des croissants ; avec le logo pour source, des centaines de petits logos qui tremblent au vent. Plus le feuillage est loin du mur, plus les taches sont grandes et douces.',
+      params: {
+        'Lumière': {
+          source: { type: 'select', label: 'Source', options: { soleil: 'Soleil', eclipse: 'Éclipse', logo: 'Logo' }, value: 'soleil' },
+          distance: { type: 'range', label: 'Distance du feuillage', min: 0.3, max: 2.5, step: 0.01, value: 1 },
+          hauteur: { type: 'range', label: 'Hauteur du soleil', min: 0.25, max: 1, step: 0.01, value: 0.7 },
+          azimut: { type: 'range', label: 'Direction du soleil', min: -1, max: 1, step: 0.01, value: 0.3 },
+          eclat: { type: 'range', label: 'Éclat', min: 0.3, max: 1.5, step: 0.01, value: 1 },
+          image: { type: 'file', label: 'Image du logo', accept: 'image/*' },
+        },
+        'Feuillage': {
+          densite: { type: 'range', label: 'Densité', min: 0.2, max: 1, step: 0.01, value: 0.5 },
+          branches: { type: 'range', label: 'Branches', min: 2, max: 12, step: 1, value: 7 },
+          feuille: { type: 'range', label: 'Taille des feuilles', min: 0.5, max: 2, step: 0.01, value: 1 },
+          vent: { type: 'range', label: 'Vent', min: 0, max: 2, step: 0.01, value: 0.7 },
+          fenetre: { type: 'toggle', label: 'Croisée de fenêtre', value: false },
+        },
+        'Couleurs': {
+          lumiere: { type: 'color', label: 'Lumière', value: '#ffe2a8' },
+          ombre: { type: 'color', label: 'Mur à l’ombre', value: '#8f8a86' },
+          fond: { type: 'color', label: 'Mur', value: '#e9e1d4' },
+        },
+      },
+      presets: {
+        'Après-midi': {},
+        'Éclipse': { source: 'eclipse', distance: 1.6, densite: 0.75, vent: 0.4 },
+        'Logos': { source: 'logo', distance: 1.4, densite: 0.72, lumiere: '#fff1c9' },
+        'Matin': { hauteur: 0.35, azimut: -0.8, lumiere: '#ffc98a', ombre: '#7f8496', vent: 0.4 },
+        'Midi': { hauteur: 1, lumiere: '#fffaf0', ombre: '#9a958f', distance: 0.6 },
+        'Fenêtre': { fenetre: true, densite: 0.45, distance: 1.3, branches: 3 },
+        'Tempête': { vent: 2, densite: 0.55, branches: 7 },
+        'Sous-bois': { densite: 0.92, distance: 2.2, eclat: 1.4, ombre: '#5b6658', lumiere: '#f4f0b0', fond: '#d9dccb' },
+        'Biennale': { lumiere: BIE[2], ombre: BIE[0], fond: BIE[1], source: 'logo' },
+        'Luzern': { lumiere: LUZ[2], ombre: LUZ[4], fond: LUZ[3] },
+        'Menthe': { lumiere: MEN[3], ombre: MEN[0], fond: MEN[1], source: 'eclipse' },
+      },
+      brand(colors) {
+        const s = colors.slice().sort((a, b) => lum(a) - lum(b)), D = s[0], L = s[s.length - 1];
+        return { ombre: mix(D, L, 0.25), lumiere: L, fond: s.length > 2 ? s[s.length - 2] : mix(L, D, 0.15) };
+      },
+      pointer: {
+        down: (q) => { ptr = { x: q.x, y: q.y, moved: 0, lx: q.x, ly: q.y }; },
+        drag: (q) => {
+          if (!ptr || !S) return; ptr.moved = Math.max(ptr.moved, Math.hypot(q.x - ptr.x, q.y - ptr.y));
+          if (ptr.moved > 6) { S.gust += Math.max(-3, Math.min(3, (q.x - ptr.lx) / 40)); S.gx = q.x; S.gy = q.y; }
+          ptr.lx = q.x; ptr.ly = q.y;
+        },
+        up: () => { if (ptr && ptr.moved <= 6) app.set('source', SOURCES[(SOURCES.indexOf(p.source) + 1) % SOURCES.length]); ptr = null; },
+        wheel: (q, dy) => app.set('distance', Math.max(0.3, Math.min(2.5, +(p.distance + (dy > 0 ? -0.1 : 0.1)).toFixed(2)))),
+      },
+      onChange(k) { if (['*', 'image'].includes(k)) { logoKey = ''; sprKey = ''; } if (k === '*' || ['branches', 'densite', 'feuille'].includes(k)) gKey = ''; },
+      export: { name: 'ombres-de-feuillage', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    function hex(x) { const n = parseInt(x.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
+    function lum(x) { const c = hex(x); return (c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114) / 255; }
+    function mix(a, b, t) { const A = hex(a), C = hex(b); return '#' + A.map((v, i) => Math.round(v + (C[i] - v) * t).toString(16).padStart(2, '0')).join(''); }
+    function rgba(c, a) { const h = hex(c); return `rgba(${h[0]},${h[1]},${h[2]},${a})`; }
+    function rng(s) { return () => { s |= 0; s = (s + 0x6d2b79f5) | 0; let t = Math.imul(s ^ (s >>> 15), 1 | s); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+
+    function buildLogo() {
+      const img0 = p.image || app.logoImg, key = img0 ? (img0.src || 'c') : 'demo'; if (key === logoKey) return; logoKey = key; vKey = '';
+      const M = 200, c = document.createElement('canvas'); c.width = c.height = M; const x = c.getContext('2d', { willReadFrequently: true }), L = M * 0.94, cx = M / 2;
+      if (img0) { const iw = img0.naturalWidth || img0.width, ih = img0.naturalHeight || img0.height, s = L / Math.max(iw, ih); x.drawImage(img0, cx - iw * s / 2, cx - ih * s / 2, iw * s, ih * s); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(cx, cx, L * 0.48, 0, TAU); x.arc(cx, cx, L * 0.27, 0, TAU, true); x.fill('evenodd'); x.fillRect(cx - L * 0.07, cx - L * 0.5, L * 0.14, L); }
+      const d = x.getImageData(0, 0, M, M).data; let transp = 0; for (let i = 3; i < d.length; i += 4) if (d[i] < 128) transp++; const useA = transp > M * M * 0.05;
+      const F = new Float64Array(M * M); for (let i = 0; i < M * M; i++) { const o = i * 4, l = (d[o] * 0.2126 + d[o + 1] * 0.7152 + d[o + 2] * 0.0722) / 255; F[i] = useA ? d[o + 3] / 255 : (d[o + 3] / 255) * Math.min(1, Math.max(0, (0.75 - l) * 2)); }
+      { const G2 = new Float64Array(M * M); for (let j = 1; j < M - 1; j++) for (let i = 1; i < M - 1; i++) { let a = 0; for (let b = -1; b <= 1; b++) for (let c = -1; c <= 1; c++) a += F[(j + b) * M + i + c] * (b || c ? (b && c ? 1 : 2) : 4); G2[j * M + i] = a / 16; } F.set(G2); }
+      for (let k = 0; k < M; k++) F[k] = F[(M - 1) * M + k] = F[k * M] = F[k * M + M - 1] = 0;
+      logoM = contours(F, M, M, 0.5, 0, 0, 1).filter((c) => c.closed && c.pts.length > 6).map((c) => chaikin(chaikin(c.pts, true), true).map((q) => [q[0] / M - 0.5, q[1] / M - 0.5]));
+    }
+    // carrés marchants + chaînage
+    function contours(F, nx, ny, lev, ox, oy, cs) {
+      const pt = new Map(), adj = new Map();
+      const P = (id) => { let q = pt.get(id); if (q) return q; const cell = id >> 1, i = cell % nx, j = (cell - i) / nx; let a, b, ax, ay, bx, by; if (id & 1) { a = F[j * nx + i]; b = F[(j + 1) * nx + i]; ax = bx = i; ay = j; by = j + 1; } else { a = F[j * nx + i]; b = F[j * nx + i + 1]; ay = by = j; ax = i; bx = i + 1; } const t = (lev - a) / (b - a || 1e-9); q = [ox + (ax + (bx - ax) * t) * cs, oy + (ay + (by - ay) * t) * cs]; pt.set(id, q); return q; };
+      const link = (a, b) => { (adj.get(a) || adj.set(a, []).get(a)).push(b); (adj.get(b) || adj.set(b, []).get(b)).push(a); };
+      for (let j = 0; j < ny - 1; j++) for (let i = 0; i < nx - 1; i++) {
+        const A = F[j * nx + i] > lev, B = F[j * nx + i + 1] > lev, C = F[(j + 1) * nx + i + 1] > lev, D = F[(j + 1) * nx + i] > lev, idx = A | (B << 1) | (C << 2) | (D << 3);
+        if (idx === 0 || idx === 15) continue;
+        const T = (j * nx + i) * 2, R = (j * nx + i + 1) * 2 + 1, Bo = ((j + 1) * nx + i) * 2, Le = (j * nx + i) * 2 + 1;
+        const ctr = (F[j * nx + i] + F[j * nx + i + 1] + F[(j + 1) * nx + i + 1] + F[(j + 1) * nx + i]) / 4 > lev;
+        switch (idx) {
+          case 1: case 14: link(Le, T); break; case 2: case 13: link(T, R); break; case 3: case 12: link(Le, R); break;
+          case 4: case 11: link(R, Bo); break; case 6: case 9: link(T, Bo); break; case 7: case 8: link(Le, Bo); break;
+          case 5: if (ctr) { link(Le, Bo); link(T, R); } else { link(Le, T); link(R, Bo); } break;
+          case 10: if (ctr) { link(Le, T); link(R, Bo); } else { link(Le, Bo); link(T, R); } break;
+        }
+      }
+      const seen = new Set(), out = [];
+      const walk = (s) => { const L = [s]; seen.add(s); let cur = s; for (;;) { const nb = (adj.get(cur) || []).find((x) => !seen.has(x)); if (nb === undefined) break; seen.add(nb); L.push(nb); cur = nb; } return L; };
+      for (const [id, nb] of adj) if (nb.length === 1 && !seen.has(id)) out.push({ pts: walk(id).map(P), closed: false });
+      for (const [id] of adj) if (!seen.has(id)) out.push({ pts: walk(id).map(P), closed: true });
+      return out;
+    }
+    function chaikin(pts, closed) {
+      const o = []; const n = pts.length; for (let k = 0; k < (closed ? n : n - 1); k++) { const a = pts[k], b = pts[(k + 1) % n]; o.push([a[0] * 0.75 + b[0] * 0.25, a[1] * 0.75 + b[1] * 0.25], [a[0] * 0.25 + b[0] * 0.75, a[1] * 0.25 + b[1] * 0.75]); }
+      if (!closed) { o.unshift(pts[0]); o.push(pts[n - 1]); } return o;
+    }
+
+    function logoPath() {
+      if (!logoM) return null; if (logoP && logoPK === logoKey) return logoP; logoPK = logoKey; logoP = new Path2D();
+      for (const L of logoM) { logoP.moveTo(L[0][0], L[0][1]); for (let k = 1; k < L.length; k++) logoP.lineTo(L[k][0], L[k][1]); logoP.closePath(); }
+      return logoP;
+    }
+
+    // ——— feuillage ———
+    function build(w, h) {
+      const R = rng((app.seed || 1) * 6151), u = Math.min(w, h), nb = Math.round(p.branches), br = [];
+      for (let b = 0; b < nb; b++) {
+        // ancrage hors cadre, sur le haut ou les côtés, branche qui entre vers l'intérieur
+        const side = R(), ax = side < 0.5 ? w * (b + R() * 0.8) / nb : side < 0.75 ? -u * 0.1 : w + u * 0.1, ay = side < 0.5 ? -u * 0.12 : h * (0.05 + R() * 0.6);
+        let dir = Math.atan2(h * (0.35 + R() * 0.4) - ay, w * (0.2 + R() * 0.6) - ax), x = ax, y = ay;
+        const len = u * (0.8 + R() * 0.7), seg = 24, pts = [[x, y]], bend = (R() - 0.5) * 1.6;
+        for (let i = 1; i <= seg; i++) { dir += bend / seg + (R() - 0.5) * 0.12; x += Math.cos(dir) * len / seg; y += Math.sin(dir) * len / seg; pts.push([x, y]); }
+        const leaves = [], nl = Math.round(170 * p.densite * (len / u)), L0 = u * 0.05 * p.feuille;
+        for (let k = 0; k < nl; k++) {
+          const f = 0.12 + 0.88 * k / nl, i = Math.min(seg - 1, Math.floor(f * seg)), a = pts[i], c = pts[i + 1], d = Math.atan2(c[1] - a[1], c[0] - a[0]), s = k % 2 ? 1 : -1;
+          // brindille : petits bouquets de part et d'autre
+          const tw = u * (0.03 + R() * 0.17) * p.feuille, ta = d + s * (0.5 + R() * 0.8);
+          const n2 = 3 + Math.floor(R() * 3);
+          for (let j = 0; j < n2; j++) leaves.push({ f, ox: Math.cos(ta) * tw * (0.35 + j * 0.3) + (R() - 0.5) * L0, oy: Math.sin(ta) * tw * (0.35 + j * 0.3) + (R() - 0.5) * L0, a: ta + (R() - 0.5) * 1.4, L: L0 * (0.7 + R() * 0.6), ph: R() * TAU, i });
+        }
+        br.push({ pts, leaves, ph: R() * TAU, ph2: R() * TAU, lw: u * (0.006 + R() * 0.006) });
+      }
+      S = { w, h, br, t: 0, gust: 0, gx: w / 2, gy: h / 2, mask: null, cell: 0 };
+    }
+    // pose les branches : rotation d'ensemble autour de l'ancrage, plus forte au bout
+    function pose(b) {
+      const t = S.t, v = p.vent, base = v * (0.05 * Math.sin(0.7 * t + b.ph) + 0.025 * Math.sin(1.9 * t + b.ph2)) + S.gust * 0.05;
+      const out = [b.pts[0]]; let ang = 0;
+      for (let i = 1; i < b.pts.length; i++) { ang = base * (i / b.pts.length); const o = b.pts[0], q = b.pts[i], c = Math.cos(ang), s = Math.sin(ang); out.push([o[0] + (q[0] - o[0]) * c - (q[1] - o[1]) * s, o[1] + (q[0] - o[0]) * s + (q[1] - o[1]) * c]); }
+      return out;
+    }
+    function leafPath(x, cx, cy, a, L) {
+      // feuille lancéolée : deux arcs de Bézier
+      const c = Math.cos(a), s = Math.sin(a), W = L * 0.36, P = (u, v) => [cx + u * c - v * s, cy + u * s + v * c];
+      const A = P(0, 0), B = P(L, 0), C1 = P(L * 0.35, W), C2 = P(L * 0.75, W * 0.8), D1 = P(L * 0.75, -W * 0.8), D2 = P(L * 0.35, -W);
+      x.moveTo(A[0], A[1]); x.bezierCurveTo(C1[0], C1[1], C2[0], C2[1], B[0], B[1]); x.bezierCurveTo(D1[0], D1[1], D2[0], D2[1], A[0], A[1]);
+    }
+    // masque : blanc opaque = lumière, transparent = feuillage
+    function renderMask() {
+      const { w, h } = S, R = radius(), cell = Math.max(4, R * 0.4), mw = Math.ceil(w / cell) + 1, mh = Math.ceil(h / cell) + 1;
+      if (!S.mask || S.mask.width !== mw || S.mask.height !== mh) { S.mask = document.createElement('canvas'); S.mask.width = mw; S.mask.height = mh; S.mx = S.mask.getContext('2d', { willReadFrequently: true }); }
+      S.cell = cell; const x = S.mx; x.setTransform(1, 0, 0, 1, 0, 0); x.globalCompositeOperation = 'source-over'; x.fillStyle = '#fff'; x.fillRect(0, 0, mw, mh);
+      x.setTransform(1 / cell, 0, 0, 1 / cell, 0, 0); x.globalCompositeOperation = 'destination-out'; x.fillStyle = '#000'; x.strokeStyle = '#000';
+      const t = S.t, v = p.vent;
+      for (const b of S.br) {
+        const P = pose(b); x.lineWidth = b.lw; x.lineCap = 'round'; x.beginPath(); P.forEach((q, j) => j ? x.lineTo(q[0], q[1]) : x.moveTo(q[0], q[1])); x.stroke();
+        x.beginPath();
+        for (const l of b.leaves) { const q = P[l.i], fl = v * 0.35 * Math.sin(3.1 * t + l.ph) + S.gust * 0.08; leafPath(x, q[0] + l.ox, q[1] + l.oy, l.a + fl, l.L); }
+        x.fill();
+      }
+      if (p.fenetre) { const { w: W, h: H } = S, k = W * 0.012; x.fillRect(W * 0.5 - k, -10, k * 2, H + 20); x.fillRect(-10, H * 0.45 - k, W + 20, k * 2); x.fillRect(-10, -10, W * 0.06, H + 20); x.fillRect(W * 0.94, -10, W * 0.1, H + 20); }
+      return x.getImageData(0, 0, mw, mh).data;
+    }
+    const radius = () => Math.min(S.w, S.h) * 0.03 * p.distance;
+    // tampon de la source : disque doux, croissant ou logo
+    function sprite(Ls) {
+      const R = radius() * Ls, st = stretch(), key = [p.source, Math.round(R), logoKey, st.a.toFixed(2), st.sx.toFixed(2)].join('|'); if (spr && key === sprKey) return spr; sprKey = key;
+      // la forme est déjà tournée et allongée : un simple drawImage par tampon
+      const n = Math.max(8, Math.ceil(R * 2.3 * st.sx)), c = document.createElement('canvas'); c.width = c.height = n; const x = c.getContext('2d', { willReadFrequently: true }), m = n / 2;
+      x.fillStyle = '#fff'; x.filter = `blur(${Math.max(0.6, R * 0.08)}px)`; x.translate(m, m); x.rotate(st.a); x.scale(st.sx, st.sy);
+      if (p.source === 'logo' && logoPath()) { x.scale(R * 1.9, R * 1.9); x.fill(logoPath(), 'evenodd'); }
+      else { x.beginPath(); x.arc(0, 0, R, 0, TAU); x.fill(); if (p.source === 'eclipse') { x.globalCompositeOperation = 'destination-out'; x.beginPath(); x.arc(R * 0.55, -R * 0.25, R * 0.92, 0, TAU); x.fill(); } }
+      x.filter = 'none'; x.globalCompositeOperation = 'source-over'; x.setTransform(1, 0, 0, 1, 0, 0);
+      // aire du tampon, pour que l'addition donne 1 sous un ciel dégagé
+      const d = x.getImageData(0, 0, n, n).data; let A = 0; for (let i = 3; i < d.length; i += 4) A += d[i] / 255;
+      spr = { c, n, A: Math.max(1, A) }; return spr;
+    }
+
+    function light() {
+      // calque de lumière : les grandes trouées sont floutées d'un coup, seules les petites trouées (les sténopés)
+      // tamponnent la forme de la source ; addition puis teinte
+      const { w, h } = app.size, data = renderMask(), mw = S.mask.width, mh = S.mask.height, cell = S.cell, Ls = p.source === 'logo' ? 1 : 0.5, sp = sprite(Ls);
+      const W = Math.round(w * Ls), H = Math.round(h * Ls);
+      if (!S.L || S.L.width !== W || S.L.height !== H) { S.L = document.createElement('canvas'); S.L.width = W; S.L.height = H; S.lx = S.L.getContext('2d'); }
+      if (!S.B || S.B.width !== mw || S.B.height !== mh) { S.B = document.createElement('canvas'); S.B.width = mw; S.B.height = mh; S.bx = S.B.getContext('2d'); S.bimg = S.bx.createImageData(mw, mh); }
+      // moyenne locale de lumière (image intégrale) sur le rayon du tampon
+      const F = new Float32Array(mw * mh), I = new Float32Array((mw + 1) * (mh + 1)), rc = Math.max(1, Math.round(radius() / cell));
+      for (let j = 0; j < mh; j++) { let row = 0; for (let i = 0; i < mw; i++) { const v = data[(j * mw + i) * 4 + 3] / 255; F[j * mw + i] = v; row += v; I[(j + 1) * (mw + 1) + i + 1] = I[j * (mw + 1) + i + 1] + row; } }
+      const box = (i, j) => { const a = Math.max(0, i - rc), b = Math.max(0, j - rc), c = Math.min(mw, i + rc + 1), d = Math.min(mh, j + rc + 1); return (I[d * (mw + 1) + c] - I[b * (mw + 1) + c] - I[d * (mw + 1) + a] + I[b * (mw + 1) + a]) / ((c - a) * (d - b)); };
+      const bd = S.bimg.data, pts = [], bulk = [];
+      for (let j = 0; j < mh; j++) for (let i = 0; i < mw; i++) { const k = j * mw + i, v = F[k]; bd[k * 4] = bd[k * 4 + 1] = bd[k * 4 + 2] = 255; bd[k * 4 + 3] = 0; if (v < 0.06) continue; if (box(i, j) > 0.35) { bd[k * 4 + 3] = Math.round(v * 255); bulk.push(i, j, v); continue; }
+        // petite trouée : un seul tampon, au maximum local, qui porte toute la lumière du voisinage (image nette)
+        let mx = true; for (let b = -1; b <= 1 && mx; b++) for (let a = -1; a <= 1; a++) { if (!a && !b) continue; const ii = i + a, jj = j + b; if (ii < 0 || jj < 0 || ii >= mw || jj >= mh) continue; const u2 = F[jj * mw + ii]; if (u2 > v || (u2 === v && (b < 0 || (b === 0 && a < 0)))) { mx = false; break; } }
+        if (mx) { let E = 0, cx = 0, cy = 0; for (let b = -2; b <= 2; b++) for (let a = -2; a <= 2; a++) { const ii = i + a, jj = j + b; if (ii >= 0 && jj >= 0 && ii < mw && jj < mh) { const e = F[jj * mw + ii] * (Math.abs(a) < 2 && Math.abs(b) < 2 ? 1 : 0.5); E += e; cx += e * a; cy += e * b; } } pts.push((i + cx / E) * cell, (j + cy / E) * cell, E); } }
+      S.bx.putImageData(S.bimg, 0, 0);
+      const x = S.lx; x.setTransform(1, 0, 0, 1, 0, 0); x.globalCompositeOperation = 'source-over'; x.clearRect(0, 0, W, H);
+      x.filter = `blur(${Math.max(1, radius() * 0.55 * Ls)}px)`; x.imageSmoothingEnabled = true; x.drawImage(S.B, -cell * Ls / 2, -cell * Ls / 2, mw * cell * Ls, mh * cell * Ls); x.filter = 'none';
+      x.globalCompositeOperation = 'lighter';
+      const a0 = Math.min(1, (cell * Ls) ** 2 / sp.A * p.eclat * 3.5), o = sp.n / 2;
+      for (let k = 0; k < pts.length; k += 3) { x.globalAlpha = Math.min(1, pts[k + 2] * a0); x.drawImage(sp.c, pts[k] * Ls - o, pts[k + 1] * Ls - o); }
+      x.globalAlpha = 1; x.globalCompositeOperation = 'source-in'; x.fillStyle = p.lumiere; x.fillRect(0, 0, W, H); x.globalCompositeOperation = 'source-over';
+      S.pts = pts; S.a0 = a0; S.bulk = bulk;
+    }
+    // soleil bas : les images s'allongent dans la direction de la lumière
+    function stretch() { const e = Math.max(0.25, p.hauteur); return { a: p.azimut * 0.9 + Math.PI / 2, sx: 1 / e, sy: 1 }; }
+
+    app.loop((t, dt) => {
+      dt = Math.min(1 / 20, dt || 0);
+      const { w, h, dpr } = app.size; buildLogo();
+      const key = [w, h, app.seed].join('|'); if (!S || key !== gKey) { gKey = key; build(w, h); }
+      if (app.thumbnail) S.t = 2.1; else { S.t += dt; S.gust *= Math.pow(0.12, dt); }
+      light();
+      ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.fillStyle = mix(p.fond, p.ombre, 0.68); ctx.fillRect(0, 0, canvas.width, canvas.height);
+      // le mur garde un peu de lumière diffuse, plus claire vers le haut
+      const g = ctx.createLinearGradient(0, 0, 0, canvas.height); g.addColorStop(0, rgba(p.fond, 0.35)); g.addColorStop(1, rgba(p.fond, 0)); ctx.fillStyle = g; ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(S.L, 0, 0, canvas.width, canvas.height);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      app.finish(ctx);
+    });
+
+    // ——— SVG ———
+    function toSVG() {
+      const { w, h } = app.size, f = (v) => +v.toFixed(2), R = radius(), st = stretch();
+      let sym = '';
+      if (p.source === 'logo' && logoM) { let lp = ''; for (const L of logoM) { const k = Math.max(1, Math.floor(L.length / 80)); lp += 'M' + f(L[0][0] * 100) + ' ' + f(L[0][1] * 100); for (let q = k; q < L.length; q += k) lp += 'L' + f(L[q][0] * 100) + ' ' + f(L[q][1] * 100); lp += 'Z'; } sym = `<path d="${lp}" transform="scale(${f(R * 1.9 / 100)})" fill-rule="evenodd"/>`; }
+      else if (p.source === 'eclipse') {
+        // croissant : arc extérieur côté opposé à la lune, puis arc de la lune
+        const cx = R * 0.55, cy = -R * 0.25, r2 = R * 0.92, d = Math.hypot(cx, cy), aa = (R * R - r2 * r2 + d * d) / (2 * d), hh = Math.sqrt(R * R - aa * aa), ux = cx / d, uy = cy / d;
+        const P1 = [aa * ux - hh * uy, aa * uy + hh * ux], P2 = [aa * ux + hh * uy, aa * uy - hh * ux];
+        sym = `<path d="M${f(P1[0])} ${f(P1[1])}A${f(R)} ${f(R)} 0 1 1 ${f(P2[0])} ${f(P2[1])}A${f(r2)} ${f(r2)} 0 0 0 ${f(P1[0])} ${f(P1[1])}Z"/>`;
+      }
+      else sym = `<circle r="${f(R)}"/>`;
+      let o = `<rect width="100%" height="100%" fill="${mix(p.fond, p.ombre, 0.68)}"/><defs><g id="k">${sym}</g><filter id="flou" x="-10%" y="-10%" width="120%" height="120%"><feGaussianBlur stdDeviation="${f(radius() * 0.55)}"/></filter></defs><g fill="${p.lumiere}">`;
+      // grandes trouées : cellules floutées
+      const B = S.bulk || [], c = S.cell; o += '<g filter="url(#flou)">';
+      for (let k = 0; k < B.length; k += 3) o += `<rect x="${f((B[k] - 0.5) * c)}" y="${f((B[k + 1] - 0.5) * c)}" width="${f(c + 0.5)}" height="${f(c + 0.5)}" opacity="${f(B[k + 2])}"/>`;
+      o += '</g>';
+      const pts = S.pts || [];
+      for (let k = 0; k < pts.length; k += 3) { const a = Math.min(1, pts[k + 2] * S.a0 * 1.6); if (a < 0.04) continue; o += `<use href="#k" transform="translate(${f(pts[k])} ${f(pts[k + 1])}) rotate(${f(st.a * 180 / Math.PI)}) scale(${f(st.sx)} ${f(st.sy)})" opacity="${f(a)}"/>`; }
+      o += '</g>';
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">${o}</svg>`;
+    }
+  </script>
+</body>
+</html>
