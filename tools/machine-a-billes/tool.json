@@ -1,0 +1,15 @@
+{
+  "slug": "machine-a-billes",
+  "title": "Machine à billes",
+  "type": "motion",
+  "description": "Une sculpture à billes : une roue à godets au moyeu logo monte les billes, qui dévalent des rampes de lames de xylophone qui s’allument à leur passage.",
+  "tags": ["physique", "billes", "objet", "interaction", "logo", "svg"],
+  "inspiration": [
+    "Les sculptures à billes roulantes des musées des sciences",
+    "Les grandes roues à godets qui remontent les billes",
+    "Les xylophones dont chaque lame sonne au passage d’une bille"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}

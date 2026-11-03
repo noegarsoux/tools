@@ -1,0 +1,316 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Machine à billes</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Machine à billes : une grande roue à godets (moyeu au logo) monte les billes et les lâche en haut ; elles
+    // roulent sur des rampes en zigzag faites de lames de xylophone, qui s'allument et vibrent au passage, puis
+    // reviennent faire la queue au pied de la roue. Billes : cercles sous gravité, contacts avec les segments
+    // (lames, butées) et entre elles, en sous-pas ; les godets portent les billes de façon cinématique.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const BIE = PAL('biennale'), LUZ = PAL('luzern'), MEN = PAL('menthe');
+
+    let vKey = '', logoM = null, logoKey = '', ptr = null, hov = null, S = null, gKey = '', simT = 0, stC = null, stKey = '';
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.03, vignette: 0.18 },
+      hint: 'Survolez les lames pour les faire sonner · glissez une bille pour la déplacer · clic : lâcher une bille · molette : vitesse de la roue',
+      notes: 'Une sculpture à billes : la grande roue, au moyeu frappé du logo, monte les billes une à une et les lâche en haut. Elles dévalent des rampes en zigzag faites de lames de xylophone aux couleurs de la marque, qui s’allument et vibrent à leur passage, puis attendent leur tour au pied de la roue. Survolez les lames pour en jouer, déplacez une bille, ou cliquez pour en lâcher une nouvelle.',
+      params: {
+        'Circuit': {
+          niveaux: { type: 'select', label: 'Rampes', options: { 2: '2', 4: '4', 6: '6' }, value: '4' },
+          billes: { type: 'range', label: 'Billes', min: 3, max: 40, step: 1, value: 14 },
+          taille: { type: 'range', label: 'Taille des billes', min: 0.6, max: 1.6, step: 0.01, value: 1 },
+          roue: { type: 'range', label: 'Vitesse de la roue', min: 0.1, max: 2, step: 0.01, value: 0.6 },
+          godets: { type: 'range', label: 'Godets', min: 4, max: 16, step: 1, value: 8 },
+          rebond: { type: 'range', label: 'Rebond', min: 0, max: 0.6, step: 0.01, value: 0.15 },
+          lames: { type: 'range', label: 'Longueur des lames', min: 0.5, max: 2, step: 0.01, value: 1 },
+        },
+        'Couleurs': {
+          couleurs: { type: 'palette', label: 'Lames', value: ['#e5452a', '#f2c230', '#5bb08a', '#2f5fd0', '#7d38e7'] },
+          style: { type: 'select', label: 'Billes', options: { acier: 'Acier', verre: 'Verre', couleur: 'Couleurs des lames' }, value: 'acier' },
+          lueur: { type: 'range', label: 'Lueur', min: 0, max: 1, step: 0.01, value: 0.7 },
+          bois: { type: 'color', label: 'Structure', value: '#c8935a' },
+          metal: { type: 'color', label: 'Métal', value: '#b9bec7' },
+          encre: { type: 'color', label: 'Logo', value: '#16161a' },
+          fond: { type: 'color', label: 'Fond', value: '#efe8dc' },
+          image: { type: 'file', label: 'Image du logo', accept: 'image/*' },
+        },
+      },
+      presets: {
+        'Atelier': {},
+        'Grand circuit': { niveaux: '6', billes: 26, taille: 0.8, roue: 0.9, godets: 12 },
+        'Simple': { niveaux: '2', billes: 7, taille: 1.3, roue: 0.45, godets: 6 },
+        'Verre': { style: 'verre', couleurs: ['#9dd3f0', '#a4e0bc', '#f2b0c8', '#f7e08c'], bois: '#f4f1ea', metal: '#d6d4cf', fond: '#dfe9f2', encre: '#2f5fd0' },
+        'Nuit': { fond: '#0f1118', bois: '#2a2d36', metal: '#7d838f', lueur: 1, encre: '#f2c230', couleurs: ['#f2c230', '#e5452a', '#9db0ef', '#ffffff'] },
+        'Bonbons': { style: 'couleur', couleurs: ['#e5452a', '#f2b0c8', '#f2c230', '#ffffff'], bois: '#e5452a', metal: '#f4f1ea', fond: '#fbe3ea', encre: '#e5452a' },
+        'Monochrome': { couleurs: ['#16161a', '#3a3a40', '#5a5a62'], bois: '#16161a', metal: '#e9e4da', fond: '#e9e4da', encre: '#e9e4da', lueur: 0.4 },
+        'Rapide': { roue: 1.8, billes: 30, rebond: 0.35, godets: 14 },
+        'Biennale': { couleurs: [BIE[2], BIE[3], BIE[4], BIE[0]], bois: BIE[1], metal: BIE[0], fond: BIE[3], encre: BIE[1] },
+        'Luzern': { couleurs: [LUZ[0], LUZ[1], LUZ[2], LUZ[4]], bois: LUZ[3], metal: LUZ[2], fond: LUZ[2], encre: LUZ[0], style: 'couleur' },
+        'Menthe': { couleurs: [MEN[2], MEN[3], MEN[0]], bois: MEN[3], metal: MEN[0], fond: MEN[0], encre: MEN[1], style: 'verre' },
+      },
+      brand(colors) {
+        const s = colors.slice().sort((a, b) => lum(a) - lum(b)), D = s[0], L = s[s.length - 1], mid = s.length > 2 ? s.slice(1, -1) : [D];
+        return { couleurs: colors.slice(), bois: D, metal: mix(L, D, 0.25), encre: mid[0], fond: L };
+      },
+      pointer: {
+        down: (q) => { ptr = { x: q.x, y: q.y, moved: 0, b: S ? pick(q) : null }; },
+        drag: (q) => { if (!ptr) return; const dx = q.x - ptr.x, dy = q.y - ptr.y; ptr.moved += Math.hypot(dx, dy); ptr.x = q.x; ptr.y = q.y; hov = { x: q.x, y: q.y, px: q.x - dx, py: q.y - dy }; },
+        move: (q) => { hov = { x: q.x, y: q.y, px: hov ? hov.x : q.x, py: hov ? hov.y : q.y }; },
+        up: () => { if (ptr && S) { if (ptr.b) { ptr.b.held = false; ptr.b.px = ptr.b.x - (ptr.vx || 0); ptr.b.py = ptr.b.y - (ptr.vy || 0); } else if (ptr.moved < 6) addBall(ptr.x, ptr.y); } ptr = null; },
+        wheel: (q, dy) => app.set('roue', Math.max(0.1, Math.min(2, +(p.roue + (dy > 0 ? -0.1 : 0.1)).toFixed(2)))),
+      },
+      onChange(k) { if (['*', 'image'].includes(k)) logoKey = ''; },
+      export: { name: 'machine-a-billes', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    function hex(x) { const n = parseInt(x.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
+    function lum(x) { const c = hex(x); return (c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114) / 255; }
+    function mix(a, b, t) { const A = hex(a), C = hex(b); return '#' + A.map((v, i) => Math.round(v + (C[i] - v) * t).toString(16).padStart(2, '0')).join(''); }
+    function rgba(c, a) { const h = hex(c); return `rgba(${h[0]},${h[1]},${h[2]},${a})`; }
+    function rng(s) { let a = s >>> 0; return () => { a = (a + 0x6d2b79f5) >>> 0; let t = a; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+
+    function buildLogo() {
+      const img0 = p.image || app.logoImg, key = img0 ? (img0.src || 'c') : 'demo'; if (key === logoKey) return; logoKey = key; vKey = '';
+      const M = 200, c = document.createElement('canvas'); c.width = c.height = M; const x = c.getContext('2d', { willReadFrequently: true }), L = M * 0.94, cx = M / 2;
+      if (img0) { const iw = img0.naturalWidth || img0.width, ih = img0.naturalHeight || img0.height, s = L / Math.max(iw, ih); x.drawImage(img0, cx - iw * s / 2, cx - ih * s / 2, iw * s, ih * s); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(cx, cx, L * 0.48, 0, TAU); x.arc(cx, cx, L * 0.27, 0, TAU, true); x.fill('evenodd'); x.fillRect(cx - L * 0.07, cx - L * 0.5, L * 0.14, L); }
+      const d = x.getImageData(0, 0, M, M).data; let transp = 0; for (let i = 3; i < d.length; i += 4) if (d[i] < 128) transp++; const useA = transp > M * M * 0.05;
+      const F = new Float64Array(M * M); for (let i = 0; i < M * M; i++) { const o = i * 4, l = (d[o] * 0.2126 + d[o + 1] * 0.7152 + d[o + 2] * 0.0722) / 255; F[i] = useA ? d[o + 3] / 255 : (d[o + 3] / 255) * Math.min(1, Math.max(0, (0.75 - l) * 2)); }
+      { const G2 = new Float64Array(M * M); for (let j = 1; j < M - 1; j++) for (let i = 1; i < M - 1; i++) { let a = 0; for (let b = -1; b <= 1; b++) for (let c = -1; c <= 1; c++) a += F[(j + b) * M + i + c] * (b || c ? (b && c ? 1 : 2) : 4); G2[j * M + i] = a / 16; } F.set(G2); }
+      for (let k = 0; k < M; k++) F[k] = F[(M - 1) * M + k] = F[k * M] = F[k * M + M - 1] = 0;
+      logoM = contours(F, M, M, 0.5, 0, 0, 1).filter((c) => c.closed && c.pts.length > 6).map((c) => chaikin(chaikin(c.pts, true), true).map((q) => [q[0] / M - 0.5, q[1] / M - 0.5]));
+    }
+    // carrés marchants + chaînage
+    function contours(F, nx, ny, lev, ox, oy, cs) {
+      const pt = new Map(), adj = new Map();
+      const P = (id) => { let q = pt.get(id); if (q) return q; const cell = id >> 1, i = cell % nx, j = (cell - i) / nx; let a, b, ax, ay, bx, by; if (id & 1) { a = F[j * nx + i]; b = F[(j + 1) * nx + i]; ax = bx = i; ay = j; by = j + 1; } else { a = F[j * nx + i]; b = F[j * nx + i + 1]; ay = by = j; ax = i; bx = i + 1; } const t = (lev - a) / (b - a || 1e-9); q = [ox + (ax + (bx - ax) * t) * cs, oy + (ay + (by - ay) * t) * cs]; pt.set(id, q); return q; };
+      const link = (a, b) => { (adj.get(a) || adj.set(a, []).get(a)).push(b); (adj.get(b) || adj.set(b, []).get(b)).push(a); };
+      for (let j = 0; j < ny - 1; j++) for (let i = 0; i < nx - 1; i++) {
+        const A = F[j * nx + i] > lev, B = F[j * nx + i + 1] > lev, C = F[(j + 1) * nx + i + 1] > lev, D = F[(j + 1) * nx + i] > lev, idx = A | (B << 1) | (C << 2) | (D << 3);
+        if (idx === 0 || idx === 15) continue;
+        const T = (j * nx + i) * 2, R = (j * nx + i + 1) * 2 + 1, Bo = ((j + 1) * nx + i) * 2, Le = (j * nx + i) * 2 + 1;
+        const ctr = (F[j * nx + i] + F[j * nx + i + 1] + F[(j + 1) * nx + i + 1] + F[(j + 1) * nx + i]) / 4 > lev;
+        switch (idx) {
+          case 1: case 14: link(Le, T); break; case 2: case 13: link(T, R); break; case 3: case 12: link(Le, R); break;
+          case 4: case 11: link(R, Bo); break; case 6: case 9: link(T, Bo); break; case 7: case 8: link(Le, Bo); break;
+          case 5: if (ctr) { link(Le, Bo); link(T, R); } else { link(Le, T); link(R, Bo); } break;
+          case 10: if (ctr) { link(Le, T); link(R, Bo); } else { link(Le, Bo); link(T, R); } break;
+        }
+      }
+      const seen = new Set(), out = [];
+      const walk = (s) => { const L = [s]; seen.add(s); let cur = s; for (;;) { const nb = (adj.get(cur) || []).find((x) => !seen.has(x)); if (nb === undefined) break; seen.add(nb); L.push(nb); cur = nb; } return L; };
+      for (const [id, nb] of adj) if (nb.length === 1 && !seen.has(id)) out.push({ pts: walk(id).map(P), closed: false });
+      for (const [id] of adj) if (!seen.has(id)) out.push({ pts: walk(id).map(P), closed: true });
+      return out;
+    }
+    function chaikin(pts, closed) {
+      const o = []; const n = pts.length; for (let k = 0; k < (closed ? n : n - 1); k++) { const a = pts[k], b = pts[(k + 1) % n]; o.push([a[0] * 0.75 + b[0] * 0.25, a[1] * 0.75 + b[1] * 0.25], [a[0] * 0.25 + b[0] * 0.75, a[1] * 0.25 + b[1] * 0.75]); }
+      if (!closed) { o.unshift(pts[0]); o.push(pts[n - 1]); } return o;
+    }
+
+    // ——— géométrie ———
+    function build(w, h) {
+      const U = Math.min(w / 1.62, h / 1.08) * 0.92, ox = w / 2 - U * 0.8, oy = h / 2 - U * 0.5;
+      const r = U * 0.021 * p.taille, R = U * 0.36, cx = ox + U * 0.32, cy = oy + U * 0.5, Rw = R - r * 1.3;
+      const N = +p.niveaux, xb = ox + U * 1.58, xa = cx + R + U * 0.07, gap = U * 0.075, open = U * 0.07;
+      S = { w, h, U, r, R, Rw, cx, cy, N, keys: [], walls: [], balls: [], phi: 0, rings: [], posts: [] };
+      // bouts de chaque rampe (départ en haut, arrivée en bas), puis pente commune
+      const ends = (k) => { const right = k % 2 === 0; if (k === 0) return [cx - R * 0.06, xb - open]; if (k === N - 1) return [xb, cx - r * 1.05]; return right ? [xa - open, xb - open] : [xb, xa]; };
+      const Y0 = cy - Rw + r * 1.1, Yend = cy + Rw + r;
+      let tot = 0; for (let k = 0; k < N; k++) { const e = ends(k); tot += Math.abs(e[1] - e[0]); }
+      const s = Math.max(0.03, ((Yend - Y0) - (N - 1) * gap) / tot);
+      let y = Y0; const C = p.couleurs.length ? p.couleurs : ['#e5452a']; let ci = 0;
+      for (let k = 0; k < N; k++) {
+        const right = k % 2 === 0, [x0, x1] = ends(k);
+        const y0 = y, y1 = y + s * Math.abs(x1 - x0);
+        // butée au bout fermé (côté départ) et au pied de la roue
+        S.walls.push({ a: [x0 + (right ? -r * 0.2 : r * 0.2), y0 - (k ? gap + r * 4 : r * 2.6)], b: [x0 + (right ? -r * 0.2 : r * 0.2), y0 + 2] });
+        if (k === N - 1) S.walls.push({ a: [x1 - r * 0.05, y1 - r * 1.6], b: [x1 - r * 0.05, y1 + 2], stop: true });
+        // lames
+        const kl = U * 0.062 * p.lames, n = Math.max(2, Math.round(Math.abs(x1 - x0) / kl)), dx = (x1 - x0) / n, g = Math.abs(dx) * 0.06;
+        for (let i = 0; i < n; i++) {
+          const ax = x0 + dx * i + Math.sign(dx) * g / 2, bx = x0 + dx * (i + 1) - Math.sign(dx) * g / 2, ay = y0 + (ax - x0) * (y1 - y0) / (x1 - x0), by = y0 + (bx - x0) * (y1 - y0) / (x1 - x0);
+          S.keys.push({ a: [ax, ay], b: [bx, by], c: ci++ % C.length, glow: 0, wob: 0, ph: 0, lvl: k, i, n });
+        }
+        // montants
+        const lo = Math.min(x0, x1), hi = Math.max(x0, x1);
+        for (const px of [lo + U * 0.02, hi - U * 0.02]) { if (px < cx + R + U * 0.03) continue; const py = y0 + (px - x0) * (y1 - y0) / (x1 - x0); S.posts.push([px, py]); }
+        y = y1 + gap;
+      }
+      S.base = oy + U * 1.02; S.sl = s; S.xb = xb;
+      S.pock = Array.from({ length: Math.round(p.godets) }, (_, k) => ({ k, ball: null }));
+      const R0 = rng(app.seed * 9 + 2);
+      for (let i = 0; i < Math.round(p.billes); i++) {
+        const kk = S.keys[Math.floor(R0() * S.keys.length)], x = (kk.a[0] + kk.b[0]) / 2, yb = (kk.a[1] + kk.b[1]) / 2 - r * 1.05 - R0() * r * 4;
+        addBall(x, yb, R0);
+      }
+      for (let k = 0; k < 180; k++) physics(1 / 240);
+    }
+    function addBall(x, y, R0 = Math.random) {
+      const C = p.couleurs.length ? p.couleurs : ['#e5452a'];
+      if (S.balls.length >= 60) { const o = S.balls.shift(); if (o.pk) o.pk.ball = null; }
+      S.balls.push({ x, y, px: x, py: y, rot: R0() * TAU, c: Math.floor(R0() * C.length), pk: null, held: false, id: Math.random() });
+    }
+    function pick(q) { for (const b of S.balls) if (Math.hypot(b.x - q.x, b.y - q.y) < S.r * 2.2) { b.held = true; if (b.pk) { b.pk.ball = null; b.pk = null; } return b; } return null; }
+
+    // ——— physique ———
+    function pockPos(k) { const a = S.phi + k * TAU / S.pock.length; return [S.cx + Math.cos(a) * S.Rw, S.cy + Math.sin(a) * S.Rw, a]; }
+    function segHit(b, a, c, isKey, k) {
+      const r = S.r, ex = c[0] - a[0], ey = c[1] - a[1], L2 = ex * ex + ey * ey; let t = ((b.x - a[0]) * ex + (b.y - a[1]) * ey) / L2; t = Math.max(0, Math.min(1, t));
+      const qx = a[0] + ex * t, qy = a[1] + ey * t, dx = b.x - qx, dy = b.y - qy, d2 = dx * dx + dy * dy; if (d2 >= r * r || d2 < 1e-9) return;
+      const d = Math.sqrt(d2), nx = dx / d, ny = dy / d; b.x = qx + nx * r; b.y = qy + ny * r;
+      const vx = b.x - b.px, vy = b.y - b.py, vn = vx * nx + vy * ny;
+      if (vn < 0) { b.px += nx * vn * (1 + p.rebond); b.py += ny * vn * (1 + p.rebond); if (isKey && -vn > S.r * 0.004) { const imp = Math.min(1, -vn / (S.r * 0.08)); k.glow = Math.max(k.glow, 0.35 + imp * 0.65); k.wob = Math.max(k.wob, imp); if (imp > 0.35 && S.rings.length < 40) S.rings.push({ x: qx, y: qy, t: 0, c: k.c }); } }
+      if (isKey) k.glow = Math.max(k.glow, 0.45);
+    }
+    function physics(dt) {
+      const g = S.U * 2.4, B = S.balls, r = S.r;
+      S.phi += p.roue * 0.9 * dt;
+      // godets : prise au pied, lâcher en haut
+      const NP = S.pock.length;
+      for (const pk of S.pock) {
+        const [x, y, a] = pockPos(pk.k), an = ((a % TAU) + TAU) % TAU;
+        if (pk.ball) { const b = pk.ball; b.px = b.x; b.py = b.y; b.x = x; b.y = y; if (an > Math.PI * 1.5 + 0.03 && an < Math.PI * 1.5 + 1.2) { const vx = -Math.sin(a) * S.Rw * p.roue * 0.9 * dt, vy = Math.cos(a) * S.Rw * p.roue * 0.9 * dt; b.px = b.x - vx - S.r * 0.02; b.py = b.y - vy; b.pk = null; pk.ball = null; } }
+        else if (an > Math.PI * 0.42 && an < Math.PI * 0.62) { for (const b of B) if (!b.pk && !b.held && Math.hypot(b.x - x, b.y - y) < r * 1.3) { pk.ball = b; b.pk = pk; break; } }
+      }
+      for (const b of B) {
+        if (b.pk || b.held) continue;
+        const vx = (b.x - b.px) * 0.999, vy = (b.y - b.py) * 0.999; b.px = b.x; b.py = b.y; b.x += vx; b.y += vy + g * dt * dt;
+        b.rot += vx / r;
+      }
+      if (ptr && ptr.b) { const b = ptr.b; ptr.vx = ptr.x - b.x; ptr.vy = ptr.y - b.y; b.px = b.x; b.py = b.y; b.x = ptr.x; b.y = ptr.y; }
+      for (let it = 0; it < 2; it++) {
+        for (let i = 0; i < B.length; i++) { const a = B[i]; for (let j = i + 1; j < B.length; j++) { const c = B[j]; const dx = c.x - a.x, dy = c.y - a.y, d2 = dx * dx + dy * dy, m = 2 * r; if (d2 >= m * m || d2 < 1e-9) continue; const d = Math.sqrt(d2), k = (m - d) / d * 0.5, fa = a.pk || a.held ? 0 : 1, fc = c.pk || c.held ? 0 : 1, s = fa + fc; if (!s) continue; a.x -= dx * k * 2 * fa / s; a.y -= dy * k * 2 * fa / s; c.x += dx * k * 2 * fc / s; c.y += dy * k * 2 * fc / s; } }
+        for (const b of B) {
+          if (b.pk || b.held) continue;
+          for (const k of S.keys) { if (b.x < Math.min(k.a[0], k.b[0]) - r * 2 || b.x > Math.max(k.a[0], k.b[0]) + r * 2) continue; segHit(b, k.a, k.b, true, k); }
+          for (const wl of S.walls) segHit(b, wl.a, wl.b, false);
+          if (b.y > S.base - r) { b.y = S.base - r; b.py = b.y; }
+          if (b.x < r) { b.x = r; } if (b.x > S.w - r) b.x = S.w - r;
+        }
+      }
+    }
+    function step(dt) {
+      const n = 4; for (let k = 0; k < n; k++) physics(dt / n);
+      for (const k of S.keys) { k.glow = Math.max(0, k.glow - dt * 1.6); k.wob *= Math.exp(-dt * 5); k.ph += dt * 40; }
+      for (let i = S.rings.length - 1; i >= 0; i--) { S.rings[i].t += dt; if (S.rings[i].t > 0.7) S.rings.splice(i, 1); }
+      // jouer des lames au survol
+      if (hov) { for (const k of S.keys) { const mx = (k.a[0] + k.b[0]) / 2, my = (k.a[1] + k.b[1]) / 2; if (Math.abs(hov.x - mx) < Math.abs(k.b[0] - k.a[0]) / 2 && Math.min(hov.py, hov.y) < my + S.r * 2 && Math.max(hov.py, hov.y) > my - S.r * 2 && (hov.x !== hov.px || hov.y !== hov.py)) { k.glow = 1; k.wob = 0.8; } } hov.px = hov.x; hov.py = hov.y; }
+      // sécurité : une bille perdue revient en file
+      for (const b of S.balls) if (!b.pk && !b.held && (b.y > S.base - S.r * 1.1 || !isFinite(b.x) || b.x < S.cx - S.R * 1.3 || b.x > S.xb + S.r * 3 || b.y < -S.U)) { const last = S.keys[S.keys.length - 1]; b.x = last.a[0] - S.r; b.y = last.a[1] - S.r * 3; b.px = b.x; b.py = b.y; }
+    }
+
+    // ——— rendu ———
+    function staticLayer(dpr) {
+      const { w, h } = S, key = [w, h, dpr, S.U, p.fond, p.bois, p.metal, p.niveaux, p.lames, p.taille].join('|'); if (key === stKey) return stC; stKey = key;
+      const c = stC || document.createElement('canvas'); c.width = Math.ceil(w * dpr); c.height = Math.ceil(h * dpr); stC = c;
+      const g = c.getContext('2d'); g.setTransform(dpr, 0, 0, dpr, 0, 0);
+      g.fillStyle = p.fond; g.fillRect(0, 0, w, h);
+      const lg = g.createLinearGradient(0, 0, 0, h); lg.addColorStop(0, 'rgba(255,255,255,0.08)'); lg.addColorStop(1, 'rgba(0,0,0,0.08)'); g.fillStyle = lg; g.fillRect(0, 0, w, h);
+      const U = S.U, Wd = U * 0.016;
+      // socle
+      g.fillStyle = 'rgba(0,0,0,0.18)'; g.fillRect(S.cx - S.R - U * 0.08, S.base + U * 0.012, (S.w / 2 + U * 0.8) - (S.cx - S.R - U * 0.08) + U * 0.02, U * 0.03);
+      g.fillStyle = p.bois; g.fillRect(S.cx - S.R - U * 0.1, S.base, (S.w / 2 + U * 0.8) - (S.cx - S.R - U * 0.1), U * 0.035);
+      g.fillStyle = 'rgba(255,255,255,0.2)'; g.fillRect(S.cx - S.R - U * 0.1, S.base, (S.w / 2 + U * 0.8) - (S.cx - S.R - U * 0.1), U * 0.006);
+      // montants
+      g.fillStyle = mix(p.bois, '#000000', 0.12);
+      for (const [x, y] of S.posts) g.fillRect(x - Wd / 2, y + S.r * 0.4, Wd, S.base - y);
+      // pied de la roue
+      g.strokeStyle = mix(p.bois, '#000000', 0.12); g.lineWidth = U * 0.03; g.lineCap = 'round'; g.beginPath(); g.moveTo(S.cx - S.R * 0.55, S.base); g.lineTo(S.cx, S.cy); g.lineTo(S.cx + S.R * 0.55, S.base); g.stroke();
+      return c;
+    }
+    function drawWheel(g) {
+      const { cx, cy, R, Rw, U } = S, M = p.metal, a0 = S.phi;
+      // jante et rayons
+      g.strokeStyle = mix(M, '#000000', 0.25); g.lineWidth = U * 0.012; g.beginPath(); g.arc(cx, cy, R, 0, TAU); g.stroke();
+      g.strokeStyle = M; g.lineWidth = U * 0.006; g.beginPath(); g.arc(cx, cy, R - U * 0.004, 0, TAU); g.stroke();
+      g.strokeStyle = mix(M, '#000000', 0.15); g.lineWidth = U * 0.008; g.beginPath(); g.arc(cx, cy, Rw - S.r * 1.3, 0, TAU); g.stroke();
+      const ns = S.pock.length; g.lineWidth = U * 0.007; g.strokeStyle = mix(M, '#000000', 0.2);
+      for (let k = 0; k < ns; k++) { const a = a0 + (k + 0.5) * TAU / ns; g.beginPath(); g.moveTo(cx + Math.cos(a) * R * 0.3, cy + Math.sin(a) * R * 0.3); g.lineTo(cx + Math.cos(a) * R, cy + Math.sin(a) * R); g.stroke(); }
+      // godets
+      for (const pk of S.pock) { const [x, y, a] = pockPos(pk.k); g.strokeStyle = mix(M, '#000000', 0.3); g.lineWidth = S.r * 0.35; g.lineCap = 'round'; g.beginPath(); g.arc(x, y, S.r * 1.25, a + Math.PI * 0.15, a + Math.PI * 1.15); g.stroke(); }
+      // moyeu au logo
+      const hr = R * 0.32; g.fillStyle = 'rgba(0,0,0,0.2)'; g.beginPath(); g.arc(cx + U * 0.004, cy + U * 0.007, hr, 0, TAU); g.fill();
+      const hg = g.createRadialGradient(cx - hr * 0.3, cy - hr * 0.4, 0, cx, cy, hr); hg.addColorStop(0, mix(M, '#ffffff', 0.45)); hg.addColorStop(1, mix(M, '#000000', 0.15)); g.fillStyle = hg; g.beginPath(); g.arc(cx, cy, hr, 0, TAU); g.fill();
+      if (logoM) { g.save(); g.translate(cx, cy); g.rotate(a0); const ls = hr * 1.35; g.fillStyle = p.encre; g.beginPath(); for (const lp of logoM) { lp.forEach((q, i) => (i ? g.lineTo(q[0] * ls, q[1] * ls) : g.moveTo(q[0] * ls, q[1] * ls))); g.closePath(); } g.fill('evenodd'); g.restore(); }
+    }
+    function drawKeys(g) {
+      const C = p.couleurs.length ? p.couleurs : ['#e5452a'], th = S.U * 0.019;
+      for (const k of S.keys) {
+        const col = C[k.c % C.length], o = Math.sin(k.ph) * k.wob * S.U * 0.004, ax = k.a[0], ay = k.a[1] + o, bx = k.b[0], by = k.b[1] + o;
+        if (k.glow > 0.02 && p.lueur > 0) { g.strokeStyle = rgba(col, k.glow * 0.35 * p.lueur); g.lineWidth = th * 3.2; g.lineCap = 'round'; g.beginPath(); g.moveTo(ax, ay + th / 2); g.lineTo(bx, by + th / 2); g.stroke(); }
+        g.lineCap = 'butt'; g.strokeStyle = mix(col, '#000000', 0.3); g.lineWidth = th; g.beginPath(); g.moveTo(ax, ay + th * 0.6); g.lineTo(bx, by + th * 0.6); g.stroke();
+        g.strokeStyle = k.glow > 0 ? mix(col, '#ffffff', k.glow * 0.55 * p.lueur) : col; g.lineWidth = th * 0.75; g.beginPath(); g.moveTo(ax, ay + th * 0.42); g.lineTo(bx, by + th * 0.42); g.stroke();
+        // clous
+        g.fillStyle = mix(p.metal, '#000000', 0.3); const q = 0.18; g.fillRect(ax + (bx - ax) * q - 1, ay + (by - ay) * q + th * 0.3, 2, 2); g.fillRect(ax + (bx - ax) * (1 - q) - 1, ay + (by - ay) * (1 - q) + th * 0.3, 2, 2);
+      }
+      g.strokeStyle = mix(p.bois, '#000000', 0.25); g.lineWidth = S.U * 0.008; g.lineCap = 'round'; for (const wl of S.walls) { g.beginPath(); g.moveTo(wl.a[0], wl.a[1]); g.lineTo(wl.b[0], wl.b[1]); g.stroke(); }
+    }
+    function drawBall(g, b) {
+      const r = S.r, C = p.couleurs.length ? p.couleurs : ['#e5452a'];
+      g.fillStyle = 'rgba(0,0,0,0.18)'; g.beginPath(); g.ellipse(b.x + r * 0.15, b.y + r * 0.95, r * 0.8, r * 0.22, 0, 0, TAU); g.fill();
+      let base = p.metal; if (p.style === 'couleur') base = C[b.c % C.length]; if (p.style === 'verre') base = C[b.c % C.length];
+      const gr = g.createRadialGradient(b.x - r * 0.35, b.y - r * 0.4, r * 0.05, b.x, b.y, r);
+      if (p.style === 'acier') { gr.addColorStop(0, '#ffffff'); gr.addColorStop(0.35, mix(base, '#ffffff', 0.3)); gr.addColorStop(0.75, mix(base, '#000000', 0.35)); gr.addColorStop(1, mix(base, '#ffffff', 0.2)); }
+      else if (p.style === 'verre') { gr.addColorStop(0, 'rgba(255,255,255,0.95)'); gr.addColorStop(0.3, rgba(mix(base, '#ffffff', 0.4), 0.6)); gr.addColorStop(1, rgba(mix(base, '#000000', 0.2), 0.85)); }
+      else { gr.addColorStop(0, mix(base, '#ffffff', 0.5)); gr.addColorStop(0.5, base); gr.addColorStop(1, mix(base, '#000000', 0.35)); }
+      g.fillStyle = gr; g.beginPath(); g.arc(b.x, b.y, r, 0, TAU); g.fill();
+      if (p.style === 'verre') { g.save(); g.beginPath(); g.arc(b.x, b.y, r * 0.95, 0, TAU); g.clip(); g.strokeStyle = rgba(mix(base, '#000000', 0.2), 0.9); g.lineWidth = r * 0.28; g.beginPath(); g.ellipse(b.x, b.y, r * 0.75, r * 0.32, b.rot, 0, TAU); g.stroke(); g.restore(); }
+      if (p.style === 'couleur') { g.strokeStyle = 'rgba(255,255,255,0.7)'; g.lineWidth = r * 0.14; g.beginPath(); g.arc(b.x, b.y, r * 0.6, b.rot, b.rot + 1.2); g.stroke(); }
+    }
+
+    app.loop((t, dt) => {
+      dt = Math.min(1 / 20, dt || 0);
+      const { w, h, dpr } = app.size; buildLogo();
+      const key = [w, h, p.niveaux, p.billes, p.taille, p.godets, p.lames, app.seed, (p.couleurs || []).length].join('|'); if (!S || key !== gKey) { gKey = key; build(w, h); }
+      if (app.thumbnail) { if (!S.th) { S.th = true; for (let k = 0; k < 360; k++) { simT += 1 / 60; step(1 / 60); } } }
+      else { simT += dt; step(dt); }
+      ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.drawImage(staticLayer(dpr), 0, 0);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      drawWheel(ctx); drawKeys(ctx);
+      for (const rg of S.rings) { const C = p.couleurs.length ? p.couleurs : ['#e5452a'], a = (1 - rg.t / 0.7) * 0.5 * p.lueur; if (a <= 0) continue; ctx.strokeStyle = rgba(C[rg.c % C.length], a); ctx.lineWidth = 1.5; ctx.beginPath(); ctx.arc(rg.x, rg.y, S.r * (1.2 + rg.t * 6), Math.PI, TAU); ctx.stroke(); }
+      for (const b of S.balls) drawBall(ctx, b);
+      // axe de la roue par-dessus
+      ctx.fillStyle = mix(p.metal, '#000000', 0.4); ctx.beginPath(); ctx.arc(S.cx, S.cy, S.U * 0.012, 0, TAU); ctx.fill();
+      app.finish(ctx);
+    });
+
+    // ——— SVG ———
+    function toSVG() {
+      const { w, h } = app.size, f = (v) => +v.toFixed(2); buildLogo(); const C = p.couleurs.length ? p.couleurs : ['#e5452a'], U = S.U, M = p.metal, r = S.r;
+      let o = `<rect width="100%" height="100%" fill="${p.fond}"/>`;
+      o += `<rect x="${f(S.cx - S.R - U * 0.1)}" y="${f(S.base)}" width="${f((w / 2 + U * 0.8) - (S.cx - S.R - U * 0.1))}" height="${f(U * 0.035)}" fill="${p.bois}"/>`;
+      for (const [x, y] of S.posts) o += `<rect x="${f(x - U * 0.008)}" y="${f(y + r * 0.4)}" width="${f(U * 0.016)}" height="${f(S.base - y)}" fill="${mix(p.bois, '#000000', 0.12)}"/>`;
+      o += `<path d="M${f(S.cx - S.R * 0.55)} ${f(S.base)}L${f(S.cx)} ${f(S.cy)}L${f(S.cx + S.R * 0.55)} ${f(S.base)}" fill="none" stroke="${mix(p.bois, '#000000', 0.12)}" stroke-width="${f(U * 0.03)}" stroke-linecap="round"/>`;
+      o += `<circle cx="${f(S.cx)}" cy="${f(S.cy)}" r="${f(S.R)}" fill="none" stroke="${mix(M, '#000000', 0.25)}" stroke-width="${f(U * 0.012)}"/>`;
+      const ns = S.pock.length; for (let k = 0; k < ns; k++) { const a = S.phi + (k + 0.5) * TAU / ns; o += `<line x1="${f(S.cx + Math.cos(a) * S.R * 0.3)}" y1="${f(S.cy + Math.sin(a) * S.R * 0.3)}" x2="${f(S.cx + Math.cos(a) * S.R)}" y2="${f(S.cy + Math.sin(a) * S.R)}" stroke="${mix(M, '#000000', 0.2)}" stroke-width="${f(U * 0.007)}"/>`; }
+      for (const pk of S.pock) { const [x, y, a] = pockPos(pk.k), a1 = a + Math.PI * 0.15, a2 = a + Math.PI * 1.15, rr = r * 1.25; o += `<path d="M${f(x + Math.cos(a1) * rr)} ${f(y + Math.sin(a1) * rr)}A${f(rr)} ${f(rr)} 0 0 1 ${f(x + Math.cos(a2) * rr)} ${f(y + Math.sin(a2) * rr)}" fill="none" stroke="${mix(M, '#000000', 0.3)}" stroke-width="${f(r * 0.35)}" stroke-linecap="round"/>`; }
+      const hr = S.R * 0.32; o += `<circle cx="${f(S.cx)}" cy="${f(S.cy)}" r="${f(hr)}" fill="${mix(M, '#ffffff', 0.15)}"/>`;
+      if (logoM) { const ls = hr * 1.35, c = Math.cos(S.phi), s = Math.sin(S.phi); o += `<path fill-rule="evenodd" fill="${p.encre}" d="${logoM.map((l) => 'M' + l.map((q) => f(S.cx + (q[0] * c - q[1] * s) * ls) + ' ' + f(S.cy + (q[0] * s + q[1] * c) * ls)).join('L') + 'Z').join('')}"/>`; }
+      const th = U * 0.014;
+      for (const k of S.keys) { const col = C[k.c % C.length]; o += `<line x1="${f(k.a[0])}" y1="${f(k.a[1] + th * 0.5)}" x2="${f(k.b[0])}" y2="${f(k.b[1] + th * 0.5)}" stroke="${k.glow > 0 ? mix(col, '#ffffff', k.glow * 0.55 * p.lueur) : col}" stroke-width="${f(th)}"/>`; }
+      for (const wl of S.walls) o += `<line x1="${f(wl.a[0])}" y1="${f(wl.a[1])}" x2="${f(wl.b[0])}" y2="${f(wl.b[1])}" stroke="${mix(p.bois, '#000000', 0.25)}" stroke-width="${f(U * 0.008)}" stroke-linecap="round"/>`;
+      let defs = `<radialGradient id="acier" cx="0.32" cy="0.3" r="0.75"><stop offset="0" stop-color="#ffffff"/><stop offset="0.35" stop-color="${mix(M, '#ffffff', 0.3)}"/><stop offset="0.75" stop-color="${mix(M, '#000000', 0.35)}"/><stop offset="1" stop-color="${mix(M, '#ffffff', 0.2)}"/></radialGradient>`;
+      C.forEach((c, i) => { defs += `<radialGradient id="b${i}" cx="0.32" cy="0.3" r="0.75"><stop offset="0" stop-color="${mix(c, '#ffffff', 0.5)}"/><stop offset="0.5" stop-color="${c}"/><stop offset="1" stop-color="${mix(c, '#000000', 0.35)}"/></radialGradient>`; });
+      for (const b of S.balls) o += `<circle cx="${f(b.x)}" cy="${f(b.y)}" r="${f(r)}" fill="url(#${p.style === 'acier' ? 'acier' : 'b' + (b.c % C.length)})"/>`;
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><defs>${defs}</defs>${o}</svg>`;
+    }
+  </script>
+</body>
+</html>
