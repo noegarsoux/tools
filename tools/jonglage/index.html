@@ -1,0 +1,307 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Jonglage</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Jonglage : un moteur de siteswap. À chaque temps, la main du temps (gauche, droite, gauche…) relance la
+    // balle qui vient d'arriver avec la hauteur lue dans la figure ; un lancer de valeur h retombe h temps plus
+    // tard, dans l'autre main si h est impair. Les balles volent en paraboles (même gravité pour toutes), restent
+    // un instant dans la main qui les ramène en creusant, puis repartent. Le diagramme en échelle montre les lancers.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const BIE = PAL('biennale'), LUZ = PAL('luzern'), MEN = PAL('menthe');
+    const FIG = { '3': '3 balles', '441': '441', '531': '531', '423': '423', '51': '51', '52512': '52512', '4': '4 balles', '534': '534', '633': '633', '7531': '7531', '55550': '55550', '5': '5 balles', '744': '744', '97531': '97531' };
+    const CYCLE = ['3', '441', '531', '423', '4', '534', '51', '633', '52512', '5', '744', '7531', '97531'];
+
+    let vKey = '', logoM = null, logoKey = '', ptr = null, S = null, gKey = '', simT = 0, logoP = null, logoPK = '';
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.035, vignette: 0.25 },
+      hint: 'Clic : figure suivante · glisser : écart des mains (↔) et hauteur (↕) · molette : tempo',
+      notes: 'Un jongleur invisible qui lit des siteswaps : chaque chiffre est la hauteur d’un lancer, compté en temps. Les balles, anneaux ou massues suivent leurs paraboles, passent d’une main à l’autre quand le chiffre est impair, et le diagramme en échelle déroule les lancers en dessous. Les figures s’enchaînent sans faire tomber les balles en trop : elles sont posées, les nouvelles entrent en jeu.',
+      params: {
+        'Jonglage': {
+          figure: { type: 'select', label: 'Figure', options: Object.assign({ cycle: 'Enchaînement' }, FIG), value: 'cycle' },
+          duree: { type: 'range', label: 'Durée d’une figure (s)', min: 3, max: 20, step: 0.5, value: 8 },
+          tempo: { type: 'range', label: 'Tempo (temps/s)', min: 1.5, max: 6, step: 0.1, value: 3.4 },
+          hauteur: { type: 'range', label: 'Hauteur', min: 0.3, max: 1, step: 0.01, value: 0.8 },
+          ecart: { type: 'range', label: 'Écart des mains', min: 0.08, max: 0.4, step: 0.01, value: 0.2 },
+          tenue: { type: 'range', label: 'Temps dans la main', min: 0.2, max: 0.8, step: 0.01, value: 0.5 },
+          objets: { type: 'select', label: 'Objets', options: { balles: 'Balles', anneaux: 'Anneaux', massues: 'Massues' }, value: 'balles' },
+          taille: { type: 'range', label: 'Taille', min: 0.5, max: 1.8, step: 0.01, value: 1 },
+        },
+        'Rendu': {
+          couleurs: { type: 'palette', label: 'Objets', value: ['#e5452a', '#f2b0c8', '#f2e640', '#2f5fd0', '#f4f3f0'] },
+          trainees: { type: 'range', label: 'Traînées', min: 0, max: 1, step: 0.01, value: 0.45 },
+          diagramme: { type: 'toggle', label: 'Diagramme en échelle', value: true },
+          mains: { type: 'toggle', label: 'Mains', value: true },
+          ombres: { type: 'toggle', label: 'Ombres', value: true },
+          encre: { type: 'color', label: 'Mains et diagramme', value: '#f4f3f0' },
+          fond: { type: 'color', label: 'Fond', value: '#111111' },
+          image: { type: 'file', label: 'Image du logo', accept: 'image/*' },
+        },
+      },
+      presets: {
+        'Cascade': {},
+        '3 balles': { figure: '3', tempo: 3, trainees: 0.7 },
+        'Massues': { objets: 'massues', figure: '3', tempo: 2.6, couleurs: ['#f4f3f0', '#e5452a'], trainees: 0.2, hauteur: 0.7 },
+        'Anneaux': { objets: 'anneaux', figure: '5', tempo: 3.6, couleurs: ['#f2e640', '#e5452a', '#2f5fd0'], trainees: 0.3 },
+        '97531': { figure: '97531', tempo: 4, hauteur: 0.95, trainees: 0.8, ecart: 0.24 },
+        'Lent': { tempo: 1.8, tenue: 0.65, trainees: 0.9, figure: '441' },
+        'Papier': { fond: '#efe9dd', encre: '#16161a', couleurs: ['#16161a', '#e5452a', '#2f5fd0'], ombres: true, trainees: 0.55 },
+        'Sans diagramme': { diagramme: false, hauteur: 0.92, taille: 1.3, figure: '534' },
+        'Biennale': { couleurs: [BIE[2], BIE[3], BIE[4], BIE[0]], fond: BIE[1], encre: BIE[0] },
+        'Luzern': { couleurs: [LUZ[0], LUZ[1], LUZ[2], LUZ[4]], fond: LUZ[3], encre: LUZ[2], objets: 'massues', figure: '423' },
+        'Menthe': { couleurs: [MEN[2], MEN[3], MEN[0]], fond: MEN[1], encre: MEN[0], objets: 'anneaux', figure: '531' },
+      },
+      brand(colors) {
+        const s = colors.slice().sort((a, b) => lum(a) - lum(b)), D = s[0], L = s[s.length - 1], mid = s.length > 2 ? s.slice(1, -1) : [L];
+        return { couleurs: mid.concat([L]), fond: mix(D, '#000000', 0.3), encre: L };
+      },
+      pointer: {
+        down: (q) => { ptr = { x: q.x, y: q.y, moved: 0, e0: p.ecart, h0: p.hauteur }; },
+        drag: (q) => {
+          if (!ptr || !S) return; ptr.moved = Math.max(ptr.moved, Math.hypot(q.x - ptr.x, q.y - ptr.y)); if (ptr.moved <= 6) return;
+          app.set('ecart', +Math.max(0.08, Math.min(0.4, ptr.e0 + (q.x - ptr.x) / S.w * 0.6)).toFixed(2));
+          app.set('hauteur', +Math.max(0.3, Math.min(1, ptr.h0 - (q.y - ptr.y) / S.h * 1.2)).toFixed(2));
+        },
+        up: () => { if (ptr && ptr.moved <= 6 && S) nextFigure(); ptr = null; },
+        wheel: (q, dy) => app.set('tempo', Math.max(1.5, Math.min(6, +(p.tempo + (dy > 0 ? -0.2 : 0.2)).toFixed(1)))),
+      },
+      onChange(k) { if (['*', 'image'].includes(k)) logoKey = ''; if ((k === 'figure' || k === '*') && S) setFigure(p.figure === 'cycle' ? CYCLE[S.ci % CYCLE.length] : p.figure); },
+      export: { name: 'jonglage', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    function hex(x) { const n = parseInt(x.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
+    function lum(x) { const c = hex(x); return (c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114) / 255; }
+    function mix(a, b, t) { const A = hex(a), C = hex(b); return '#' + A.map((v, i) => Math.round(v + (C[i] - v) * t).toString(16).padStart(2, '0')).join(''); }
+    function rgba(c, a) { const h = hex(c); return `rgba(${h[0]},${h[1]},${h[2]},${a})`; }
+    function rng(s) { let a = s >>> 0; return () => { a = (a + 0x6d2b79f5) >>> 0; let t = a; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+    const col = (i) => { const c = p.couleurs; return c.length ? c[i % c.length] : '#e5452a'; };
+
+    function buildLogo() {
+      const img0 = p.image || app.logoImg, key = img0 ? (img0.src || 'c') : 'demo'; if (key === logoKey) return; logoKey = key; vKey = '';
+      const M = 200, c = document.createElement('canvas'); c.width = c.height = M; const x = c.getContext('2d', { willReadFrequently: true }), L = M * 0.94, cx = M / 2;
+      if (img0) { const iw = img0.naturalWidth || img0.width, ih = img0.naturalHeight || img0.height, s = L / Math.max(iw, ih); x.drawImage(img0, cx - iw * s / 2, cx - ih * s / 2, iw * s, ih * s); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(cx, cx, L * 0.48, 0, TAU); x.arc(cx, cx, L * 0.27, 0, TAU, true); x.fill('evenodd'); x.fillRect(cx - L * 0.07, cx - L * 0.5, L * 0.14, L); }
+      const d = x.getImageData(0, 0, M, M).data; let transp = 0; for (let i = 3; i < d.length; i += 4) if (d[i] < 128) transp++; const useA = transp > M * M * 0.05;
+      const F = new Float64Array(M * M); for (let i = 0; i < M * M; i++) { const o = i * 4, l = (d[o] * 0.2126 + d[o + 1] * 0.7152 + d[o + 2] * 0.0722) / 255; F[i] = useA ? d[o + 3] / 255 : (d[o + 3] / 255) * Math.min(1, Math.max(0, (0.75 - l) * 2)); }
+      { const G2 = new Float64Array(M * M); for (let j = 1; j < M - 1; j++) for (let i = 1; i < M - 1; i++) { let a = 0; for (let b = -1; b <= 1; b++) for (let c = -1; c <= 1; c++) a += F[(j + b) * M + i + c] * (b || c ? (b && c ? 1 : 2) : 4); G2[j * M + i] = a / 16; } F.set(G2); }
+      for (let k = 0; k < M; k++) F[k] = F[(M - 1) * M + k] = F[k * M] = F[k * M + M - 1] = 0;
+      logoM = contours(F, M, M, 0.5, 0, 0, 1).filter((c) => c.closed && c.pts.length > 6).map((c) => chaikin(chaikin(c.pts, true), true).map((q) => [q[0] / M - 0.5, q[1] / M - 0.5]));
+    }
+    // carrés marchants + chaînage
+    function contours(F, nx, ny, lev, ox, oy, cs) {
+      const pt = new Map(), adj = new Map();
+      const P = (id) => { let q = pt.get(id); if (q) return q; const cell = id >> 1, i = cell % nx, j = (cell - i) / nx; let a, b, ax, ay, bx, by; if (id & 1) { a = F[j * nx + i]; b = F[(j + 1) * nx + i]; ax = bx = i; ay = j; by = j + 1; } else { a = F[j * nx + i]; b = F[j * nx + i + 1]; ay = by = j; ax = i; bx = i + 1; } const t = (lev - a) / (b - a || 1e-9); q = [ox + (ax + (bx - ax) * t) * cs, oy + (ay + (by - ay) * t) * cs]; pt.set(id, q); return q; };
+      const link = (a, b) => { (adj.get(a) || adj.set(a, []).get(a)).push(b); (adj.get(b) || adj.set(b, []).get(b)).push(a); };
+      for (let j = 0; j < ny - 1; j++) for (let i = 0; i < nx - 1; i++) {
+        const A = F[j * nx + i] > lev, B = F[j * nx + i + 1] > lev, C = F[(j + 1) * nx + i + 1] > lev, D = F[(j + 1) * nx + i] > lev, idx = A | (B << 1) | (C << 2) | (D << 3);
+        if (idx === 0 || idx === 15) continue;
+        const T = (j * nx + i) * 2, R = (j * nx + i + 1) * 2 + 1, Bo = ((j + 1) * nx + i) * 2, Le = (j * nx + i) * 2 + 1;
+        const ctr = (F[j * nx + i] + F[j * nx + i + 1] + F[(j + 1) * nx + i + 1] + F[(j + 1) * nx + i]) / 4 > lev;
+        switch (idx) {
+          case 1: case 14: link(Le, T); break; case 2: case 13: link(T, R); break; case 3: case 12: link(Le, R); break;
+          case 4: case 11: link(R, Bo); break; case 6: case 9: link(T, Bo); break; case 7: case 8: link(Le, Bo); break;
+          case 5: if (ctr) { link(Le, Bo); link(T, R); } else { link(Le, T); link(R, Bo); } break;
+          case 10: if (ctr) { link(Le, T); link(R, Bo); } else { link(Le, Bo); link(T, R); } break;
+        }
+      }
+      const seen = new Set(), out = [];
+      const walk = (s) => { const L = [s]; seen.add(s); let cur = s; for (;;) { const nb = (adj.get(cur) || []).find((x) => !seen.has(x)); if (nb === undefined) break; seen.add(nb); L.push(nb); cur = nb; } return L; };
+      for (const [id, nb] of adj) if (nb.length === 1 && !seen.has(id)) out.push({ pts: walk(id).map(P), closed: false });
+      for (const [id] of adj) if (!seen.has(id)) out.push({ pts: walk(id).map(P), closed: true });
+      return out;
+    }
+    function chaikin(pts, closed) {
+      const o = []; const n = pts.length; for (let k = 0; k < (closed ? n : n - 1); k++) { const a = pts[k], b = pts[(k + 1) % n]; o.push([a[0] * 0.75 + b[0] * 0.25, a[1] * 0.75 + b[1] * 0.25], [a[0] * 0.25 + b[0] * 0.75, a[1] * 0.25 + b[1] * 0.75]); }
+      if (!closed) { o.unshift(pts[0]); o.push(pts[n - 1]); } return o;
+    }
+
+    // ——— moteur de siteswap ———
+    // S.beat : prochain temps à traiter ; S.arr[k] : balle qui arrive au temps k ; S.throws : lancers {k, h, b}
+    function build(w, h) {
+      const old = S;
+      S = { w, h, tb: 0, mx: 3, mxT: 3, beat: 0, arr: new Map(), balls: [], throws: [], nid: 0, pat: '3', k0: 0, ci: old ? old.ci : 0, figT: 0, R: rng(app.seed * 17 + 3) };
+      simT = 0;
+      setFigure(p.figure === 'cycle' ? CYCLE[S.ci % CYCLE.length] : p.figure, true);
+    }
+    function setFigure(f, now) { S.next = { pat: f, now: !!now }; S.figT = simT; }
+    function nextFigure() {
+      if (p.figure === 'cycle') { S.ci++; setFigure(CYCLE[S.ci % CYCLE.length]); }
+      else { const keys = Object.keys(FIG), i = (keys.indexOf(p.figure) + 1) % keys.length; app.set('figure', keys[i]); }
+    }
+    const B = () => 1; // tout est compté en temps (S.tb avance de tempo·dt)
+    function process(k) {
+      if (S.next) { S.pat = S.next.pat; S.k0 = k; S.next = null; S.mxT = Math.max(3, ...[...S.pat].map(Number)); if (k === 0) S.mx = S.mxT; }
+      const P = S.pat, hgt = +P[((k - S.k0) % P.length + P.length) % P.length];
+      let b = S.arr.get(k); S.arr.delete(k);
+      if (hgt === 0) { if (b) b.drop = k; return; }
+      if (!b) { b = { id: S.nid++, born: k, throws: [], trail: [] }; S.balls.push(b); }
+      if (S.arr.has(k + hgt)) { b.drop = k; return; }                 // place prise : la balle est posée
+      const th = { k, h: hgt, b, spin: (S.R() - 0.5) * 0.6 }; b.throws.push(th); if (b.throws.length > 3) b.throws.shift();
+      S.throws.push(th); if (S.throws.length > 80) S.throws.shift();
+      S.arr.set(k + hgt, b);
+    }
+    // ——— géométrie des mains ———
+    function geo() {
+      const { w, h } = S, diag = p.diagramme ? h * 0.16 : 0, base = h * 0.8 - diag * 0.75, e = w * p.ecart, Hm = (base - h * 0.08) * p.hauteur;
+      const F = (S.mx - p.tenue) * B(), g = 8 * Hm / (F * F);
+      return { base, e, g, Hm, diag, r: Math.min(w, h) * 0.027 * p.taille, scoop: h * 0.035 };
+    }
+    function handPos(G, H, t) {
+      const b = B(), d = p.tenue, sgn = H ? 1 : -1, xin = sgn * G.e * 0.42, xout = sgn * G.e;
+      let u = ((t / b - H) % 2 + 2) % 2;
+      if (u < 2 - d) { const s = u / (2 - d), e = s * s * (3 - 2 * s); return [xin + (xout - xin) * e, -Math.sin(Math.PI * s) * G.scoop * 0.5]; }
+      const s = (u - (2 - d)) / d; return [xout + (xin - xout) * s, Math.sin(Math.PI * s) * G.scoop];
+    }
+    // position d'une balle au temps t : vol, puis tenue dans la main qui la relance
+    function ballPos(G, ball, t) {
+      const b = B(), d = p.tenue; let th = null;
+      for (const x of ball.throws) if (x.k * b <= t) th = x;
+      if (!th) { // pas encore lancée : elle attend dans la main de son premier temps
+        const k = ball.born; return { x: handPos(G, k % 2, t)[0], y: handPos(G, k % 2, t)[1], a: 0, fly: 0, h: 0 };
+      }
+      const t0 = th.k * b, H0 = th.k % 2, H1 = (th.k + th.h) % 2;
+      if (th.h === 2) { const q = handPos(G, H0, t); return { x: q[0], y: q[1], a: th.spin * 0.3, fly: 0, h: 2 }; }
+      const F = (th.h - d) * b, tt = t - t0;
+      if (tt < F) {
+        const x0 = (H0 ? 1 : -1) * G.e * 0.42, x1 = (H1 ? 1 : -1) * G.e, s = tt / F, vy = G.g * F / 2;
+        const spins = p.objets === 'massues' ? Math.max(1, Math.floor(th.h / 2)) : p.objets === 'anneaux' ? 0.5 : th.h * 0.35;
+        return { x: x0 + (x1 - x0) * s, y: -(vy * tt - G.g * tt * tt / 2), a: (H0 ? -1 : 1) * s * TAU * spins + th.spin, fly: 1, h: th.h, s };
+      }
+      const q = handPos(G, H1, t); return { x: q[0], y: q[1], a: th.spin, fly: 0, h: th.h };
+    }
+
+    // ——— dessin des objets ———
+    function logoPath() {
+      if (!logoM) return null; if (logoP && logoPK === logoKey) return logoP; logoPK = logoKey; logoP = new Path2D();
+      for (const L of logoM) { logoP.moveTo(L[0][0], L[0][1]); for (let k = 1; k < L.length; k++) logoP.lineTo(L[k][0], L[k][1]); logoP.closePath(); }
+      return logoP;
+    }
+    function drawObj(x, cx, cy, r, a, c, alpha) {
+      x.save(); x.globalAlpha = alpha; x.translate(cx, cy); x.rotate(a);
+      const L = lum(c), hi = mix(c, '#ffffff', 0.45), lo = mix(c, '#000000', 0.35);
+      if (p.objets === 'massues') {
+        const len = r * 3.4; x.fillStyle = c; x.beginPath();
+        x.moveTo(0, -len * 0.5); x.bezierCurveTo(r * 0.3, -len * 0.5, r * 0.32, -len * 0.18, r * 0.62, len * 0.05); x.bezierCurveTo(r * 0.85, len * 0.32, r * 0.5, len * 0.5, 0, len * 0.5);
+        x.bezierCurveTo(-r * 0.5, len * 0.5, -r * 0.85, len * 0.32, -r * 0.62, len * 0.05); x.bezierCurveTo(-r * 0.32, -len * 0.18, -r * 0.3, -len * 0.5, 0, -len * 0.5); x.fill();
+        x.fillStyle = lo; x.fillRect(-r * 0.22, -len * 0.5, r * 0.44, len * 0.14); x.fillStyle = rgba('#ffffff', 0.35); x.fillRect(-r * 0.55, len * 0.12, r * 1.1, len * 0.06);
+        x.beginPath(); x.ellipse(-r * 0.22, len * 0.22, r * 0.12, len * 0.12, 0, 0, TAU); x.fill();
+      } else if (p.objets === 'anneaux') {
+        const sq = 0.35 + 0.65 * Math.abs(Math.cos(a * 0.5)); x.rotate(-a); x.scale(sq, 1);
+        x.strokeStyle = c; x.lineWidth = r * 0.42; x.beginPath(); x.arc(0, 0, r * 1.25, 0, TAU); x.stroke();
+        x.strokeStyle = rgba('#ffffff', 0.3); x.lineWidth = r * 0.1; x.beginPath(); x.arc(0, 0, r * 1.35, Math.PI * 1.1, Math.PI * 1.6); x.stroke();
+      } else {
+        x.fillStyle = c; x.beginPath(); x.arc(0, 0, r, 0, TAU); x.fill();
+        const lp = logoPath(); if (lp) { x.save(); x.scale(r * 1.25, r * 1.25); x.fillStyle = L > 0.6 ? lo : hi; x.fill(lp, 'evenodd'); x.restore(); }
+        x.rotate(-a); const g = x.createRadialGradient(-r * 0.35, -r * 0.4, r * 0.1, 0, 0, r); g.addColorStop(0, rgba('#ffffff', 0.4)); g.addColorStop(0.5, rgba('#ffffff', 0)); g.addColorStop(1, rgba('#000000', 0.3));
+        x.fillStyle = g; x.beginPath(); x.arc(0, 0, r, 0, TAU); x.fill();
+      }
+      x.restore();
+    }
+    function alphaOf(ball, t) {
+      const b = B(); let a = Math.min(1, (t - (ball.born * b - b * 1.2)) / (b * 1.2));
+      if (ball.drop !== undefined) a = Math.min(a, 1 - (t - ball.drop * b) / (b * 1.5));
+      return Math.max(0, Math.min(1, a));
+    }
+
+    app.loop((t, dt) => {
+      dt = Math.min(1 / 20, dt || 0);
+      const { w, h, dpr } = app.size; buildLogo();
+      const key = [w, h, app.seed].join('|'); if (!S || key !== gKey) { gKey = key; build(w, h); }
+      if (app.thumbnail) { S.tb = 14.6; }
+      else { simT += dt; S.tb += dt * p.tempo; }
+      // figure suivante en mode enchaînement
+      if (p.figure === 'cycle' && !app.thumbnail && simT - S.figT > p.duree) { S.ci++; setFigure(CYCLE[S.ci % CYCLE.length]); }
+      while (S.beat <= S.tb + 0.5) process(S.beat++);
+      S.mx += (S.mxT - S.mx) * Math.min(1, dt * 1.5);
+      S.balls = S.balls.filter((b) => b.drop === undefined || S.tb < b.drop + 2);
+      const G = geo(), cx = w / 2, by = G.base;
+      ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.fillStyle = p.fond; ctx.fillRect(0, 0, canvas.width, canvas.height); ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      const gl = ctx.createRadialGradient(cx, by - G.Hm * 0.5, 0, cx, by - G.Hm * 0.5, Math.max(w, h) * 0.7); gl.addColorStop(0, rgba(mix(p.fond, p.encre, 0.15), 0.6)); gl.addColorStop(1, rgba(p.fond, 0)); ctx.fillStyle = gl; ctx.fillRect(0, 0, w, h);
+      const pos = S.balls.map((b) => [b, ballPos(G, b, S.tb), alphaOf(b, S.tb)]);
+      // ombres au sol
+      const floor = by + h * 0.07;
+      if (p.ombres) for (const [b, q, a] of pos) { const k = Math.max(0.15, 1 - (-q.y) / (G.Hm * 1.2)); ctx.fillStyle = rgba('#000000', 0.25 * k * a * (lum(p.fond) > 0.5 ? 0.7 : 1)); ctx.beginPath(); ctx.ellipse(cx + q.x, floor, G.r * 1.6 * (0.5 + k * 0.6), G.r * 0.35, 0, 0, TAU); ctx.fill(); }
+      // traînées
+      if (p.trainees > 0) {
+        const n = 24, span = p.trainees * B() * 2.2;
+        for (const [b, , a] of pos) {
+          if (a <= 0) continue;
+          // traînée en ruban effilé, fondue de la queue vers la balle
+          const P = []; for (let k = n; k >= 0; k--) { const q = ballPos(G, b, S.tb - span * k / n); P.push([cx + q.x, by + q.y, G.r * 0.95 * (1 - k / n)]); }
+          const Lft = [], Rgt = []; for (let k = 0; k < P.length; k++) { const A = P[Math.max(0, k - 1)], C2 = P[Math.min(P.length - 1, k + 1)]; let nx = -(C2[1] - A[1]), ny = C2[0] - A[0]; const l = Math.hypot(nx, ny) || 1; nx /= l; ny /= l; Lft.push([P[k][0] + nx * P[k][2], P[k][1] + ny * P[k][2]]); Rgt.push([P[k][0] - nx * P[k][2], P[k][1] - ny * P[k][2]]); }
+          const gr = ctx.createLinearGradient(P[0][0], P[0][1], P[n][0], P[n][1]); gr.addColorStop(0, rgba(col(b.id), 0)); gr.addColorStop(1, rgba(col(b.id), 0.6 * a));
+          ctx.fillStyle = gr; ctx.beginPath(); Lft.forEach((q, k) => (k ? ctx.lineTo(q[0], q[1]) : ctx.moveTo(q[0], q[1]))); for (let k = Rgt.length - 1; k >= 0; k--) ctx.lineTo(Rgt[k][0], Rgt[k][1]); ctx.closePath(); ctx.fill();
+        }
+        ctx.globalAlpha = 1;
+      }
+      // mains et avant-bras
+      if (p.mains) for (const H of [0, 1]) {
+        const q = handPos(G, H, S.tb), sg = H ? 1 : -1, ex = cx + sg * G.e * 1.15, ey = by + h * 0.13;
+        ctx.strokeStyle = rgba(p.encre, 0.55); ctx.lineWidth = G.r * 0.9; ctx.lineCap = 'round'; ctx.beginPath(); ctx.moveTo(ex, ey); ctx.lineTo(cx + q[0], by + q[1] + G.r * 0.9); ctx.stroke();
+        ctx.fillStyle = p.encre; ctx.beginPath(); ctx.ellipse(cx + q[0], by + q[1] + G.r * 1.05, G.r * 1.25, G.r * 0.55, 0, 0, TAU); ctx.fill();
+      }
+      for (const [b, q, a] of pos) if (a > 0) drawObj(ctx, cx + q.x, by + q.y, G.r, q.a, col(b.id), a);
+      if (p.diagramme) ladder(ctx, G);
+      app.finish(ctx);
+    });
+
+    // ——— diagramme en échelle ———
+    function ladder(x, G) {
+      const { w, h } = S, y0 = h - G.diag * 0.92, y1 = h - G.diag * 0.22, span = 16, px = w / span, now = S.tb, off = w * 0.62;
+      const X = (k) => off + (k - now) * px, Y = (k) => (k % 2 ? y1 : y0);
+      x.lineWidth = Math.max(1, G.r * 0.18);
+      for (const th of S.throws) {
+        const xa = X(th.k), xb = X(th.k + th.h); if (xb < -px || xa > w + px) continue;
+        const fade = Math.min(1, Math.max(0, (xa + px) / (w * 0.25)));
+        x.strokeStyle = rgba(col(th.b.id), 0.85 * fade); x.beginPath();
+        if (th.k % 2 === (th.k + th.h) % 2) { const yy = Y(th.k), dir = th.k % 2 ? 1 : -1; x.moveTo(xa, yy); x.quadraticCurveTo((xa + xb) / 2, yy + dir * (G.diag * 0.12 + th.h * G.diag * 0.04), xb, yy); }
+        else { x.moveTo(xa, Y(th.k)); x.lineTo(xb, Y(th.k + th.h)); }
+        x.stroke();
+      }
+      for (let k = Math.floor(now - span * 0.65); k < now + span * 0.4; k++) { const xx = X(k); if (xx < 0 || xx > w) continue; const past = k <= now; x.fillStyle = rgba(p.encre, past ? 0.7 : 0.25); x.beginPath(); x.arc(xx, Y(k), G.r * (past ? 0.32 : 0.22), 0, TAU); x.fill(); }
+      x.strokeStyle = rgba(p.encre, 0.35); x.beginPath(); x.moveTo(off, y0 - G.diag * 0.1); x.lineTo(off, y1 + G.diag * 0.1); x.stroke();
+    }
+
+    // ——— SVG ———
+    function toSVG() {
+      const { w, h } = app.size, f = (v) => +v.toFixed(2), G = geo(), cx = w / 2, by = G.base;
+      let o = `<rect width="100%" height="100%" fill="${p.fond}"/>`;
+      const pos = S.balls.map((b) => [b, ballPos(G, b, S.tb), alphaOf(b, S.tb)]).filter((e) => e[2] > 0.02);
+      if (p.ombres) { const floor = by + h * 0.07; for (const [, q, a] of pos) { const k = Math.max(0.15, 1 - (-q.y) / (G.Hm * 1.2)); o += `<ellipse cx="${f(cx + q.x)}" cy="${f(floor)}" rx="${f(G.r * 1.6 * (0.5 + k * 0.6))}" ry="${f(G.r * 0.35)}" fill="#000000" fill-opacity="${f(0.25 * k * a)}"/>`; } }
+      if (p.trainees > 0) { const n = 24, span = p.trainees * B() * 2.2; for (const [b, , a] of pos) { let d = ''; for (let k = n; k >= 0; k--) { const q = ballPos(G, b, S.tb - span * k / n); d += (k === n ? 'M' : 'L') + f(cx + q.x) + ' ' + f(by + q.y); } o += `<path d="${d}" fill="none" stroke="${col(b.id)}" stroke-opacity="${f(0.4 * a)}" stroke-width="${f(G.r * 0.5)}" stroke-linecap="round"/>`; } }
+      if (p.mains) for (const H of [0, 1]) { const q = handPos(G, H, S.tb), sg = H ? 1 : -1; o += `<line x1="${f(cx + sg * G.e * 1.15)}" y1="${f(by + h * 0.13)}" x2="${f(cx + q[0])}" y2="${f(by + q[1] + G.r * 0.9)}" stroke="${p.encre}" stroke-opacity="0.55" stroke-width="${f(G.r * 0.9)}" stroke-linecap="round"/><ellipse cx="${f(cx + q[0])}" cy="${f(by + q[1] + G.r * 1.05)}" rx="${f(G.r * 1.25)}" ry="${f(G.r * 0.55)}" fill="${p.encre}"/>`; }
+      let lp = ''; if (logoM) for (const L of logoM) { const st = Math.max(1, Math.floor(L.length / 120)); lp += 'M' + f(L[0][0] * 100) + ' ' + f(L[0][1] * 100); for (let k = st; k < L.length; k += st) lp += 'L' + f(L[k][0] * 100) + ' ' + f(L[k][1] * 100); lp += 'Z'; }
+      for (const [b, q, a] of pos) {
+        const c = col(b.id), r = G.r, tr = `translate(${f(cx + q.x)} ${f(by + q.y)}) rotate(${f(q.a * 180 / Math.PI)})`;
+        if (p.objets === 'massues') { const len = r * 3.4; o += `<g transform="${tr}" opacity="${f(a)}"><path d="M0 ${f(-len * 0.5)}C${f(r * 0.3)} ${f(-len * 0.5)} ${f(r * 0.32)} ${f(-len * 0.18)} ${f(r * 0.62)} ${f(len * 0.05)}C${f(r * 0.85)} ${f(len * 0.32)} ${f(r * 0.5)} ${f(len * 0.5)} 0 ${f(len * 0.5)}C${f(-r * 0.5)} ${f(len * 0.5)} ${f(-r * 0.85)} ${f(len * 0.32)} ${f(-r * 0.62)} ${f(len * 0.05)}C${f(-r * 0.32)} ${f(-len * 0.18)} ${f(-r * 0.3)} ${f(-len * 0.5)} 0 ${f(-len * 0.5)}Z" fill="${c}"/><rect x="${f(-r * 0.22)}" y="${f(-len * 0.5)}" width="${f(r * 0.44)}" height="${f(len * 0.14)}" fill="${mix(c, '#000000', 0.35)}"/></g>`; }
+        else if (p.objets === 'anneaux') { const sq = 0.35 + 0.65 * Math.abs(Math.cos(q.a * 0.5)); o += `<ellipse cx="${f(cx + q.x)}" cy="${f(by + q.y)}" rx="${f(r * 1.25 * sq)}" ry="${f(r * 1.25)}" fill="none" stroke="${c}" stroke-width="${f(r * 0.42)}" opacity="${f(a)}"/>`; }
+        else { o += `<g transform="${tr}" opacity="${f(a)}"><circle r="${f(r)}" fill="${c}"/>${lp ? `<path d="${lp}" transform="scale(${f(r * 1.25 / 100)})" fill="${lum(c) > 0.6 ? mix(c, '#000000', 0.35) : mix(c, '#ffffff', 0.45)}" fill-rule="evenodd"/>` : ''}</g>`; }
+      }
+      if (p.diagramme) {
+        const y0 = h - G.diag * 0.92, y1 = h - G.diag * 0.22, span = 16, px = w / span, now = S.tb, off = w * 0.62, X = (k) => off + (k - now) * px, Y = (k) => (k % 2 ? y1 : y0);
+        for (const th of S.throws) { const xa = X(th.k), xb = X(th.k + th.h); if (xb < -px || xa > w + px) continue; const c = col(th.b.id);
+          if (th.k % 2 === (th.k + th.h) % 2) { const yy = Y(th.k), dir = th.k % 2 ? 1 : -1; o += `<path d="M${f(xa)} ${f(yy)}Q${f((xa + xb) / 2)} ${f(yy + dir * (G.diag * 0.12 + th.h * G.diag * 0.04))} ${f(xb)} ${f(yy)}" fill="none" stroke="${c}" stroke-width="${f(Math.max(1, G.r * 0.18))}"/>`; }
+          else o += `<line x1="${f(xa)}" y1="${f(Y(th.k))}" x2="${f(xb)}" y2="${f(Y(th.k + th.h))}" stroke="${c}" stroke-width="${f(Math.max(1, G.r * 0.18))}"/>`; }
+        for (let k = Math.floor(now - span * 0.65); k < now + span * 0.4; k++) { const xx = X(k); if (xx < 0 || xx > w) continue; o += `<circle cx="${f(xx)}" cy="${f(Y(k))}" r="${f(G.r * (k <= now ? 0.32 : 0.22))}" fill="${p.encre}" fill-opacity="${k <= now ? 0.7 : 0.25}"/>`; }
+      }
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">${o}</svg>`;
+    }
+  </script>
+</body>
+</html>
