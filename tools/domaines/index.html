@@ -1,0 +1,370 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Domaines</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Domaines : modèle de Potts à q états sur une grille, un état par couleur. Chaque case veut ressembler à ses
+    // huit voisines (énergie de liaison), l'agitation thermique s'y oppose. Sous la température critique, de grands
+    // domaines se forment et grossissent ; au-dessus, tout se dissout en grésil. Deux dynamiques : « aimantation »
+    // (Metropolis, chaque case change d'état) et « démixtion » (Kawasaki, les cases échangent leur place : les
+    // proportions de chaque couleur sont conservées, on obtient des labyrinthes qui s'épaississent).
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const KB = PAL('kegelbahn'), PYR = PAL('pyramides'), MEN = PAL('menthe'), SAL = PAL('salon'), LUZ = PAL('luzern'), BIEN = PAL('biennale');
+
+    let W = 0, H = 0, N = 0, S = null, HF = null, XM = null, XP = null, YM = null, YP = null, q = 2;
+    let simKey = '', fieldKey = '', maskKey = null, mask = null, held = null, tSim = 0, buf = null, img = null, hi = null, hiImg = null;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.04, vignette: 0.12 },
+      hint: 'Glissez pour peindre un domaine · touchez pour chauffer un point · molette : température',
+      notes: 'Chaque case prend l’une des couleurs et cherche à ressembler à ses voisines ; la température les en empêche. Froid, les couleurs se regroupent en domaines qui grossissent en avalant les plus petits. Chaud, tout se dissout. Près de la température critique, les domaines ont toutes les tailles à la fois. En démixtion, les cases ne changent pas de couleur, elles échangent leur place, comme deux liquides qui se séparent.',
+      params: {
+        'Modèle': {
+          dynamique: { type: 'segmented', label: 'Dynamique', options: { aimantation: 'Aimantation', demixtion: 'Démixtion' }, value: 'aimantation' },
+          finesse: { type: 'range', label: 'Finesse', min: 32, max: 360, step: 4, value: 160 },
+          temperature: { type: 'range', label: 'Température', min: 0.2, max: 1.6, step: 0.01, value: 0.72 },
+          respiration: { type: 'range', label: 'Respiration', min: 0, max: 0.8, step: 0.01, value: 0.32 },
+          periode: { type: 'range', label: 'Période (s)', min: 6, max: 90, step: 1, value: 26, show: (q) => q.respiration > 0 },
+          vitesse: { type: 'range', label: 'Vitesse', min: 0, max: 1, step: 0.01, value: 0.5 },
+          dosage: { type: 'range', label: 'Part de la 1ʳᵉ couleur', min: 0.1, max: 0.9, step: 0.01, value: 0.5, show: (q) => q.dynamique === 'demixtion' },
+          champ: { type: 'range', label: 'Attraction du logo', min: 0, max: 2, step: 0.01, value: 0 },
+          image: { type: 'file', label: 'Logo', accept: 'image/*', show: (q) => q.champ > 0 },
+        },
+        'Rendu': {
+          style: { type: 'segmented', label: 'Style', options: { lisse: 'Aplats', pixels: 'Pixels', points: 'Points' }, value: 'lisse' },
+          contour: { type: 'range', label: 'Contour', min: 0, max: 1, step: 0.01, value: 0 },
+          trait: { type: 'color', label: 'Trait', value: '#111111', show: (q) => q.contour > 0 },
+          fond: { type: 'color', label: 'Fond', value: '#111111', show: (q) => q.style === 'points' },
+        },
+        'Couleurs': {
+          couleurs: { type: 'palette', label: 'Une couleur par état', value: ['#111111', '#e5452a', '#f2b0c8', '#f4f3f0'] },
+        },
+      },
+      presets: {
+        'Aimantation': {},
+        'Démixtion': { dynamique: 'demixtion', temperature: 0.5, respiration: 0, finesse: 200, dosage: 0.45, couleurs: ['#111111', '#f4f3f0'] },
+        'Point critique': { temperature: 0.99, respiration: 0.04, finesse: 300, style: 'pixels', couleurs: ['#0a0a0a', '#f4f1ea'] },
+        'Logo': { champ: 1.8, finesse: 200, temperature: 0.78, respiration: 0.22, couleurs: ['#e5452a', '#111111', '#f4f3f0'] },
+        'Contours': { contour: 0.45, trait: '#111111', temperature: 0.6, couleurs: ['#f4f3f0', '#f2e640', '#f2b0c8', '#9db0ef'] },
+        'Points': { style: 'points', fond: '#0c0c0c', finesse: 120, temperature: 0.8, couleurs: ['#ef5a2f', '#486cfc', '#edd14b', '#f272ba'] },
+        'Gros pixels': { style: 'pixels', finesse: 44, temperature: 0.86, respiration: 0.3, periode: 14, couleurs: SAL.slice(1) },
+        'Émulsion': { dynamique: 'demixtion', temperature: 0.5, respiration: 0, finesse: 150, dosage: 0.3, couleurs: MEN.slice(1).concat(MEN[0]) },
+        'Kegelbahn': { couleurs: KB.slice() },
+        'Pyramides': { couleurs: PYR.slice(1, 6), contour: 0.25, trait: PYR[6] },
+        'Luzern': { couleurs: LUZ.slice(), finesse: 120 },
+      },
+      brand(colors) {
+        const lum = (x) => { const c = hex(x); return c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114; };
+        const all = colors.slice(0, 6), dark = colors.slice().sort((a, b) => lum(a) - lum(b))[0];
+        return { couleurs: all.length > 1 ? all : [all[0], '#f4f3f0'], fond: dark, trait: dark };
+      },
+      pointer: {
+        down: (qq) => { const i = cellAt(qq.x, qq.y); held = { x0: qq.x, y0: qq.y, moved: false, s: i < 0 ? 0 : S[i] }; },
+        drag: (qq) => { if (!held) return; if (Math.hypot(qq.x - held.x0, qq.y - held.y0) > 5) held.moved = true; if (held.moved) paint(qq.x, qq.y, held.s); },
+        up: () => { if (held && !held.moved) heat(held.x0, held.y0); held = null; },
+        wheel: (qq, dy) => app.set('temperature', Math.max(0.2, Math.min(1.6, +(p.temperature + (dy > 0 ? -0.03 : 0.03)).toFixed(2)))),
+      },
+      onChange(k) {
+        if (k === 'image') maskKey = null;
+        if (k === '*' || ['dynamique', 'finesse', 'dosage'].includes(k)) simKey = '';
+        if (k === 'couleurs' && p.couleurs.length !== q) simKey = '';
+        fieldKey = '';
+      },
+      onSeed() { simKey = ''; },
+      export: { name: 'domaines', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    const hex = (x) => { const n = parseInt(x.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; };
+    function mulberry(a) { return () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+
+    // ——— Grille (bords périodiques : le plan se referme sur lui-même) ———
+    function reset() {
+      const { w, h } = app.size; q = Math.max(2, Math.min(8, p.couleurs.length));
+      W = Math.round(p.finesse); H = Math.max(8, Math.round(W * h / w)); N = W * H;
+      S = new Uint8Array(N); HF = new Float32Array(N);
+      XM = new Int32Array(W); XP = new Int32Array(W); YM = new Int32Array(H); YP = new Int32Array(H);
+      for (let x = 0; x < W; x++) { XM[x] = (x - 1 + W) % W; XP[x] = (x + 1) % W; }
+      for (let y = 0; y < H; y++) { YM[y] = ((y - 1 + H) % H) * W; YP[y] = ((y + 1) % H) * W; }
+      const r = mulberry(app.seed * 9173 + 3);
+      if (p.dynamique === 'demixtion') {
+        // proportions fixées : la première couleur prend « dosage », les autres se partagent le reste
+        for (let i = 0; i < N; i++) { const u = r(); S[i] = u < p.dosage ? 0 : 1 + Math.min(q - 2, Math.floor((u - p.dosage) / (1 - p.dosage) * (q - 1))); }
+      } else for (let i = 0; i < N; i++) S[i] = Math.floor(r() * q);
+      fieldKey = ''; tSim = 0;
+    }
+
+    // ——— Logo : le champ favorise la première couleur dedans, la défavorise un peu dehors ———
+    function logoMask() {
+      const img0 = p.image || app.logoImg, key = (img0 ? (img0.src || 'c') : 'demo') + W + 'x' + H;
+      if (key === maskKey && mask) return mask; maskKey = key;
+      const c = document.createElement('canvas'); c.width = W; c.height = H; const x = c.getContext('2d', { willReadFrequently: true });
+      const L = Math.min(W, H) * 0.7, cx = W / 2, cy = H / 2;
+      if (img0) { const iw = img0.naturalWidth || img0.width, ih = img0.naturalHeight || img0.height, k = L / Math.max(iw, ih); x.drawImage(img0, cx - iw * k / 2, cy - ih * k / 2, iw * k, ih * k); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(cx, cy, L * 0.48, 0, TAU); x.arc(cx, cy, L * 0.26, 0, TAU, true); x.fill('evenodd'); x.fillRect(cx - L * 0.06, cy - L * 0.5, L * 0.12, L); }
+      const d = x.getImageData(0, 0, W, H).data, a = new Float32Array(N); let transp = 0; for (let i = 3; i < d.length; i += 4) if (d[i] < 128) transp++;
+      const useA = transp > N * 0.05;
+      for (let i = 0; i < N; i++) { const l = (d[i * 4] * 0.2126 + d[i * 4 + 1] * 0.7152 + d[i * 4 + 2] * 0.0722) / 255; a[i] = useA ? d[i * 4 + 3] / 255 : (d[i * 4 + 3] / 255) * (l < 0.5 ? 1 : 0); }
+      mask = a; return a;
+    }
+    function buildField() {
+      HF.fill(0); if (p.champ <= 0) return;
+      const m = logoMask(), h = p.champ;
+      for (let i = 0; i < N; i++) HF[i] = m[i] > 0.5 ? h : -h * 0.35;
+    }
+
+    // ——— Dynamique ———
+    // énergie locale : liaisons de poids 1 avec les 4 voisines directes, 0,5 avec les diagonales
+    function same(i, x, y, s) {
+      const xm = XM[x], xp = XP[x], ym = YM[y], yp = YP[y], r = y * W;
+      return (S[r + xm] === s) + (S[r + xp] === s) + (S[ym + x] === s) + (S[yp + x] === s)
+        + 0.5 * ((S[ym + xm] === s) + (S[ym + xp] === s) + (S[yp + xm] === s) + (S[yp + xp] === s));
+    }
+    function neighbour(x, y, k) {
+      switch (k) { case 0: return y * W + XM[x]; case 1: return y * W + XP[x]; case 2: return YM[y] + x; case 3: return YP[y] + x; case 4: return YM[y] + XM[x]; case 5: return YM[y] + XP[x]; case 6: return YP[y] + XM[x]; default: return YP[y] + XP[x]; }
+    }
+    function glauber(n, T) {
+      const inv = 1 / T, R = Math.random;
+      for (let u = 0; u < n; u++) {
+        const x = (R() * W) | 0, y = (R() * H) | 0, i = y * W + x, cur = S[i];
+        const nw = R() < 0.8 ? S[neighbour(x, y, (R() * 8) | 0)] : (R() * q) | 0; if (nw === cur) continue;
+        const h = HF[i], dE = same(i, x, y, cur) - same(i, x, y, nw) - h * ((nw === 0) - (cur === 0));
+        if (dE <= 0 || R() < Math.exp(-dE * inv)) S[i] = nw;
+      }
+    }
+    function kawasaki(n, T) {
+      const inv = 1 / T, R = Math.random;
+      for (let u = 0; u < n; u++) {
+        const x = (R() * W) | 0, y = (R() * H) | 0, i = y * W + x, k = (R() * 4) | 0, j = neighbour(x, y, k), a = S[i], b = S[j]; if (a === b) continue;
+        const xj = j % W, yj = (j / W) | 0;
+        // la liaison i–j compte pareil avant et après l'échange : on la retire des deux côtés
+        const dE = (same(i, x, y, a) - 1 * (b === a)) + (same(j, xj, yj, b) - (a === b)) - (same(i, x, y, b) - 1) - (same(j, xj, yj, a) - 1)
+          - HF[i] * ((b === 0) - (a === 0)) - HF[j] * ((a === 0) - (b === 0));
+        if (dE <= 0 || R() < Math.exp(-dE * inv)) { S[i] = b; S[j] = a; }
+      }
+    }
+    const tc = () => 1.68 / Math.log(1 + Math.sqrt(q));
+    const tempNow = () => Math.max(0.05, p.temperature + p.respiration * Math.sin(tSim / p.periode * TAU));
+    function step(sweeps, budget) {
+      const T = tempNow() * tc(), t0 = performance.now(), chunk = Math.max(2000, N >> 2);
+      let left = sweeps * N * (p.dynamique === 'demixtion' ? 2 : 1);
+      while (left > 0) { const n = Math.min(chunk, left); if (p.dynamique === 'demixtion') kawasaki(n, T); else glauber(n, T); left -= n; if (budget && performance.now() - t0 > budget) break; }
+    }
+
+    // ——— Gestes ———
+    function cellAt(x, y) { if (!S) return -1; const gx = Math.floor(x / app.size.w * W), gy = Math.floor(y / app.size.h * H); return gx < 0 || gy < 0 || gx >= W || gy >= H ? -1 : gy * W + gx; }
+    function disc(x, y, rad, f) {
+      const gx = x / app.size.w * W, gy = y / app.size.h * H, r = Math.max(1.5, rad);
+      for (let yy = Math.floor(gy - r); yy <= gy + r; yy++) for (let xx = Math.floor(gx - r); xx <= gx + r; xx++) {
+        if ((xx + 0.5 - gx) ** 2 + (yy + 0.5 - gy) ** 2 > r * r) continue; f(((yy % H) + H) % H * W + ((xx % W) + W) % W);
+      }
+    }
+    function paint(x, y, s) {
+      if (p.dynamique === 'demixtion') {
+        // en démixtion la matière se conserve : on rassemble la couleur sous le doigt en échangeant avec le bord du pinceau
+        const pool = []; disc(x, y, W * 0.07, (i) => { if (S[i] !== s) pool.push(i); });
+        const out = []; disc(x, y, W * 0.12, (i) => { if (S[i] === s) out.push(i); });
+        const gx = x / app.size.w * W, gy = y / app.size.h * H, d = (i) => ((i % W) - gx) ** 2 + (((i / W) | 0) - gy) ** 2;
+        out.sort((a, b) => d(b) - d(a));
+        for (let k = 0; k < Math.min(pool.length, out.length); k++) { const a = pool[k], b = out[k]; if (d(b) <= d(a)) break; S[b] = S[a]; S[a] = s; }
+      } else disc(x, y, W * 0.045, (i) => { S[i] = s; });
+    }
+    function heat(x, y) { if (p.dynamique === 'demixtion') { const L = []; disc(x, y, W * 0.09, (i) => L.push(i)); for (let k = L.length - 1; k > 0; k--) { const j = (Math.random() * (k + 1)) | 0, a = S[L[k]]; S[L[k]] = S[L[j]]; S[L[j]] = a; } } else disc(x, y, W * 0.09, (i) => { S[i] = (Math.random() * q) | 0; }); }
+
+    // ——— Rendu ———
+    const colRGB = () => p.couleurs.slice(0, q).map(hex);
+    function renderPixels(w, h) {
+      if (!buf || buf.width !== W || buf.height !== H) { buf = document.createElement('canvas'); buf.width = W; buf.height = H; img = buf.getContext('2d').createImageData(W, H); }
+      const C = colRGB(), d = img.data, TR = hex(p.trait), cw = p.contour;
+      for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+        const i = y * W + x, s = S[i], o = i * 4; let c = C[s];
+        if (cw > 0 && (S[y * W + XP[x]] !== s || S[YP[y] + x] !== s) && cw > 0.2) c = TR;
+        d[o] = c[0]; d[o + 1] = c[1]; d[o + 2] = c[2]; d[o + 3] = 255;
+      }
+      buf.getContext('2d').putImageData(img, 0, 0);
+      ctx.imageSmoothingEnabled = false; ctx.drawImage(buf, 0, 0, w, h); ctx.imageSmoothingEnabled = true;
+    }
+    // vote à la majorité sur 3×3 (centre 4, côtés 2, coins 1) : efface le grésil isolé et adoucit les bords
+    let D = null, SC = new Float32Array(8);
+    function majority() {
+      if (!D || D.length !== N) D = new Uint8Array(N);
+      const Sg = S, wts = [4, 2, 2, 2, 2, 1, 1, 1, 1];
+      for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+        const i = y * W + x, c = Sg[i], xm = XM[x], xp = XP[x], ym = YM[y], yp = YP[y], r = y * W;
+        const a1 = Sg[r + xm], a2 = Sg[r + xp], a3 = Sg[ym + x], a4 = Sg[yp + x];
+        if (a1 === c && a2 === c && a3 === c && a4 === c) { D[i] = c; continue; }
+        SC.fill(0); const nb = [c, a1, a2, a3, a4, Sg[ym + xm], Sg[ym + xp], Sg[yp + xm], Sg[yp + xp]];
+        let best = c, bv = 0; for (let k = 0; k < 9; k++) { const v = (SC[nb[k]] += wts[k]); if (v > bv || (v === bv && nb[k] === c)) { bv = v; best = nb[k]; } }
+        D[i] = best;
+      }
+      return D;
+    }
+    // appartenance lissée à chaque état (noyau 1-2-1 sur 3×3), en une passe sur la grille
+    let BL = null;
+    function blurred(Sg) {
+      if (!BL || BL.length !== q * N) BL = new Float32Array(q * N); else BL.fill(0);
+      for (let y = 0; y < H; y++) {
+        const ym = YM[y], yp = YP[y], r = y * W;
+        for (let x = 0; x < W; x++) {
+          const i = r + x, xm = XM[x], xp = XP[x];
+          BL[Sg[i] * N + i] += 0.25;
+          BL[Sg[r + xm] * N + i] += 0.125; BL[Sg[r + xp] * N + i] += 0.125; BL[Sg[ym + x] * N + i] += 0.125; BL[Sg[yp + x] * N + i] += 0.125;
+          BL[Sg[ym + xm] * N + i] += 0.0625; BL[Sg[ym + xp] * N + i] += 0.0625; BL[Sg[yp + xm] * N + i] += 0.0625; BL[Sg[yp + xp] * N + i] += 0.0625;
+        }
+      }
+      return BL;
+    }
+    // aplats : interpolation bilinéaire de l'appartenance à chaque état, on garde l'état majoritaire (bords lisses)
+    let tabKey = '', X0 = null, X1 = null, FX = null, Y0 = null, Y1 = null, FY = null;
+    function renderSmooth(w, h, dpr) {
+      const k = Math.max(1, Math.min(6, Math.floor(Math.min(680, w * dpr) / W))), OW = W * k, OH = H * k;
+      if (!hi || hi.width !== OW || hi.height !== OH) { hi = document.createElement('canvas'); hi.width = OW; hi.height = OH; hiImg = hi.getContext('2d').createImageData(OW, OH); }
+      const tk = OW + 'x' + OH;
+      if (tk !== tabKey) {
+        tabKey = tk; X0 = new Int32Array(OW); X1 = new Int32Array(OW); FX = new Float32Array(OW); Y0 = new Int32Array(OH); Y1 = new Int32Array(OH); FY = new Float32Array(OH);
+        for (let o = 0; o < OW; o++) { const g = (o + 0.5) / k - 0.5, f = Math.floor(g); X0[o] = (f + W) % W; X1[o] = (f + 1) % W; FX[o] = g - f; }
+        for (let o = 0; o < OH; o++) { const g = (o + 0.5) / k - 0.5, f = Math.floor(g); Y0[o] = ((f + H) % H) * W; Y1[o] = ((f + 1) % H) * W; FY[o] = g - f; }
+      }
+      const C = colRGB(), TR = hex(p.trait), d = hiImg.data, cw = p.contour * 0.5, aa = 0.9 / k, S = majority(), B = blurred(S);
+      let o = 0;
+      for (let oy = 0; oy < OH; oy++) {
+        const y0 = Y0[oy], y1 = Y1[oy], fy = FY[oy], gy = 1 - fy;
+        for (let ox = 0; ox < OW; ox++, o += 4) {
+          const x0 = X0[ox], x1 = X1[ox], fx = FX[ox], gx = 1 - fx;
+          const a = S[y0 + x0], b = S[y0 + x1], c = S[y1 + x0], e = S[y1 + x1];
+          let s = a, m = 1;
+          if (a !== b || a !== c || a !== e) {
+            // parmi les états présents autour, celui dont l'appartenance lissée est la plus forte
+            const i0 = y0 + x0, i1 = y0 + x1, i2 = y1 + x0, i3 = y1 + x1, w0 = gx * gy, w1 = fx * gy, w2 = gx * fy, w3 = fx * fy;
+            let z = a * N, best = B[z + i0] * w0 + B[z + i1] * w1 + B[z + i2] * w2 + B[z + i3] * w3, sec = -1, u;
+            if (b !== a) { z = b * N; u = B[z + i0] * w0 + B[z + i1] * w1 + B[z + i2] * w2 + B[z + i3] * w3; if (u > best) { sec = best; best = u; s = b; } else if (u > sec) sec = u; }
+            if (c !== a && c !== b) { z = c * N; u = B[z + i0] * w0 + B[z + i1] * w1 + B[z + i2] * w2 + B[z + i3] * w3; if (u > best) { sec = best; best = u; s = c; } else if (u > sec) sec = u; }
+            if (e !== a && e !== b && e !== c) { z = e * N; u = B[z + i0] * w0 + B[z + i1] * w1 + B[z + i2] * w2 + B[z + i3] * w3; if (u > best) { sec = best; best = u; s = e; } else if (u > sec) sec = u; }
+            m = sec < 0 ? 1 : best - sec;
+          }
+          const col = C[s];
+          if (cw > 0 && m < cw + aa) {
+            const t = Math.max(0, Math.min(1, (cw + aa - m) / (2 * aa)));
+            d[o] = col[0] + (TR[0] - col[0]) * t; d[o + 1] = col[1] + (TR[1] - col[1]) * t; d[o + 2] = col[2] + (TR[2] - col[2]) * t;
+          } else { d[o] = col[0]; d[o + 1] = col[1]; d[o + 2] = col[2]; }
+          d[o + 3] = 255;
+        }
+      }
+      hi.getContext('2d').putImageData(hiImg, 0, 0);
+      ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high'; ctx.drawImage(hi, 0, 0, w, h);
+    }
+    // points : une pastille par case (sous-échantillonnée), d'autant plus grosse que ses voisines lui ressemblent
+    function dots(w, h) {
+      const st = Math.max(1, Math.round(W / 64)), cw = w / W, chh = h / H, out = [];
+      for (let y = 0; y < H; y += st) for (let x = 0; x < W; x += st) {
+        const i = y * W + x, s = S[i], n = same(i, x, y, s) / 6;
+        out.push([(x + st / 2) * cw, (y + st / 2) * chh, Math.min(cw, chh) * st * 0.5 * (0.28 + 0.72 * n), s]);
+      }
+      return out;
+    }
+    function renderDots(w, h) {
+      ctx.fillStyle = p.fond; ctx.fillRect(0, 0, w, h);
+      const C = p.couleurs, bins = C.map(() => [new Path2D()]), cnt = C.map(() => 0);
+      for (const [x, y, r, s] of dots(w, h)) { if (++cnt[s] % 700 === 0) bins[s].push(new Path2D()); const P = bins[s][bins[s].length - 1]; P.moveTo(x + r, y); P.arc(x, y, r, 0, TAU); }
+      bins.forEach((L, s) => { ctx.fillStyle = C[s]; for (const P of L) ctx.fill(P); });
+    }
+
+    app.loop((t, dt) => {
+      dt = Math.min(0.05, dt || 0);
+      const { w, h, dpr } = app.size;
+      const key = [p.dynamique, p.finesse, p.dosage, w, h, app.seed, p.couleurs.length].join();
+      if (key !== simKey || !S) { reset(); simKey = key; step(app.thumbnail ? 60 : p.dynamique === 'demixtion' ? 16 : 6, 0); }
+      const fk = [p.champ, maskKey, W, H].join(); if (fk !== fieldKey) { buildField(); fieldKey = [p.champ, maskKey, W, H].join(); }
+      if (!app.thumbnail && dt > 0) { tSim += dt; step(0.15 + p.vitesse * p.vitesse * 3.5, 11); }
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      if (p.style === 'pixels') renderPixels(w, h);
+      else if (p.style === 'points') renderDots(w, h);
+      else renderSmooth(w, h, dpr);
+      app.finish(ctx);
+    });
+
+    // ——— Export SVG ———
+    function toSVG() {
+      const { w, h } = app.size, C = p.couleurs, cw = w / W, ch = h / H, out = [];
+      const f = (v) => +v.toFixed(2);
+      if (p.style === 'points') {
+        out.push(`<rect width="100%" height="100%" fill="${p.fond}"/>`);
+        const bins = C.map(() => []);
+        for (const [x, y, r, s] of dots(w, h)) bins[s].push(`<circle cx="${f(x)}" cy="${f(y)}" r="${f(r)}"/>`);
+        bins.forEach((L, s) => { if (L.length) out.push(`<g fill="${C[s]}">${L.join('')}</g>`); });
+      } else if (p.style === 'pixels') {
+        const bins = C.map(() => []);
+        for (let y = 0; y < H; y++) { let x = 0; while (x < W) { const s = S[y * W + x]; let e = x + 1; while (e < W && S[y * W + e] === s) e++; bins[s].push(`M${f(x * cw)} ${f(y * ch)}h${f((e - x) * cw)}v${f(ch)}h${f(-(e - x) * cw)}z`); x = e; } }
+        bins.forEach((L, s) => { if (L.length) out.push(`<path fill="${C[s]}" shape-rendering="crispEdges" d="${L.join('')}"/>`); });
+        if (p.contour > 0.2) {
+          const seg = [];
+          for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { const s = S[y * W + x]; if (x < W - 1 && S[y * W + x + 1] !== s) seg.push(`M${f((x + 1) * cw)} ${f(y * ch)}v${f(ch)}`); if (y < H - 1 && S[(y + 1) * W + x] !== s) seg.push(`M${f(x * cw)} ${f((y + 1) * ch)}h${f(cw)}`); }
+          out.push(`<path fill="none" stroke="${p.trait}" stroke-width="${f(Math.min(cw, ch) * 0.25)}" d="${seg.join('')}"/>`);
+        }
+      } else {
+        // aplats : contours (marching squares) de l'appartenance lissée à chaque état
+        const cnt = new Array(q).fill(0); for (let i = 0; i < N; i++) cnt[S[i]]++;
+        const bg = cnt.indexOf(Math.max(...cnt));
+        out.push(`<rect width="100%" height="100%" fill="${C[bg]}"/>`);
+        const paths = [];
+        for (let s = 0; s < q; s++) { if (s === bg || !cnt[s]) continue; const d = contours(s, cw, ch); if (d) paths.push(`<path fill="${C[s]}" fill-rule="evenodd" d="${d}"/>`); }
+        out.push(...paths);
+        if (p.contour > 0) {
+          const sw = f(Math.min(cw, ch) * p.contour * 0.9);
+          for (let s = 0; s < q; s++) { if (!cnt[s]) continue; const d = contours(s, cw, ch); if (d) out.push(`<path fill="none" stroke="${p.trait}" stroke-width="${sw}" stroke-linejoin="round" d="${d}"/>`); }
+        }
+      }
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">${out.join('')}</svg>`;
+    }
+    function contours(s, cw, ch) {
+      // appartenance lissée (noyau 1-2-1), grille bordée de zéros pour fermer les formes hors cadre
+      const PW = W + 2, PH = H + 2, F = new Float32Array(PW * PH), G = new Float32Array(PW * PH);
+      for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) F[(y + 1) * PW + x + 1] = S[y * W + x] === s ? 1 : 0;
+      for (let y = 1; y < PH - 1; y++) for (let x = 1; x < PW - 1; x++) { const i = y * PW + x; G[i] = (F[i - 1] + 2 * F[i] + F[i + 1]) / 4; }
+      for (let y = 1; y < PH - 1; y++) for (let x = 1; x < PW - 1; x++) { const i = y * PW + x; F[i] = (G[i - PW] + 2 * G[i] + G[i + PW]) / 4; }
+      const th = 0.45, link = new Map(), pos = new Map();
+      const px = (gx) => (gx - 0.5) * cw, py = (gy) => (gy - 0.5) * ch;
+      const pt = (id) => {
+        if (pos.has(id)) return pos.get(id);
+        const c = id >> 1, x = c % PW, y = (c / PW) | 0; let r;
+        if ((id & 1) === 0) { const a = F[y * PW + x], b = F[y * PW + x + 1], t = (th - a) / (b - a); r = [px(x + t), py(y)]; }
+        else { const a = F[y * PW + x], b = F[(y + 1) * PW + x], t = (th - a) / (b - a); r = [px(x), py(y + t)]; }
+        pos.set(id, r); return r;
+      };
+      const add = (a, b) => { (link.get(a) || link.set(a, []).get(a)).push(b); (link.get(b) || link.set(b, []).get(b)).push(a); };
+      for (let y = 0; y < PH - 1; y++) for (let x = 0; x < PW - 1; x++) {
+        const tl = F[y * PW + x] > th, tr = F[y * PW + x + 1] > th, br = F[(y + 1) * PW + x + 1] > th, bl = F[(y + 1) * PW + x] > th;
+        const c = tl * 8 + tr * 4 + br * 2 + bl; if (c === 0 || c === 15) continue;
+        const e = [(y * PW + x) * 2, (y * PW + x + 1) * 2 + 1, ((y + 1) * PW + x) * 2, (y * PW + x) * 2 + 1];
+        const mid = (F[y * PW + x] + F[y * PW + x + 1] + F[(y + 1) * PW + x] + F[(y + 1) * PW + x + 1]) / 4 > th;
+        switch (c) {
+          case 1: case 14: add(e[3], e[2]); break; case 2: case 13: add(e[2], e[1]); break; case 3: case 12: add(e[3], e[1]); break;
+          case 4: case 11: add(e[0], e[1]); break; case 6: case 9: add(e[0], e[2]); break; case 7: case 8: add(e[3], e[0]); break;
+          case 5: if (mid) { add(e[3], e[0]); add(e[2], e[1]); } else { add(e[3], e[2]); add(e[0], e[1]); } break;
+          case 10: if (mid) { add(e[0], e[1]); add(e[3], e[2]); } else { add(e[3], e[0]); add(e[2], e[1]); } break;
+        }
+      }
+      const seen = new Set(), parts = [], f = (v) => +v.toFixed(1);
+      for (const start of link.keys()) {
+        if (seen.has(start)) continue; let prev = -1, cur = start; const pts = [];
+        while (cur !== undefined && !seen.has(cur)) { seen.add(cur); pts.push(pt(cur)); const L = link.get(cur); const nx = L[0] !== prev ? L[0] : L[1]; prev = cur; cur = nx; }
+        if (pts.length > 2) parts.push('M' + pts.map(([a, b]) => f(a) + ' ' + f(b)).join('L') + 'Z');
+      }
+      return parts.join('');
+    }
+  </script>
+</body>
+</html>

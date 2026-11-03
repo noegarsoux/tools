@@ -1,0 +1,15 @@
+{
+  "slug": "domaines",
+  "title": "Domaines",
+  "type": "motion",
+  "description": "Des domaines de couleur naissent, se disputent le plan et s'effacent quand la température monte : le modèle de Potts, une couleur de marque par état.",
+  "tags": ["physique", "aplats", "pixels", "couleur", "logo", "svg"],
+  "inspiration": [
+    "Modèle d'Ising (1925) et modèle de Potts (1952)",
+    "Domaines magnétiques et décomposition spinodale des alliages",
+    "Algorithme de Metropolis (1953), dynamique de Kawasaki (1966)"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}
