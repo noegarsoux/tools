@@ -1,0 +1,294 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Berceau de Newton</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Berceau de Newton : N pendules (angle θᵢ, longueur L) alignés. Deux billes voisines qui s'interpénètrent
+    // de δ subissent une force de contact raide K·δ (plus un léger amortissement pendant la compression) ;
+    // projetée sur la tangente de chaque pendule, elle donne une accélération angulaire. Avec un petit jeu entre
+    // les billes, les chocs se font deux à deux et l'élan traverse la rangée. Pas de temps de 1/4000 s.
+    // Vue de trois quarts : chaque bille pend à deux fils en V, accrochés à un rail avant et à un rail arrière.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2, DT = 1 / 4000;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const BIT = PAL('bitmap'), GLY = PAL('glyphes'), LUZ = PAL('luzern'), MEN = PAL('menthe'), PYR = PAL('pyramides');
+
+    let simT = 0, vKey = '', logoM = null, logoKey = '', ptr = null, S = null, gKey = '', SP = null, spKey = '', BG = null, bgKey = '';
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.04, vignette: 0.2 },
+      hint: 'Saisissez une bille, écartez-la et lâchez-la · clic dans le vide : relancer · molette : élan',
+      notes: 'Dans un berceau de Newton, on lâche une bille au bout de la rangée : elle frappe la suivante et c\'est la dernière qui repart, seule, avec presque tout l\'élan. Le choc traverse les billes immobiles comme une onde, parce que chaque contact est très bref et très raide. Ici, les billes sont chromées, laquées aux couleurs de la marque ou mates, le logo est gravé sur le socle, et la machine se relance d\'elle-même, avec une, deux ou trois billes. Saisissez une bille pour la lancer vous-même.',
+      params: {
+        'Berceau': {
+          billes: { type: 'range', label: 'Billes', min: 3, max: 9, step: 1, value: 5 },
+          taille: { type: 'range', label: 'Taille des billes', min: 0.02, max: 0.08, step: 0.001, value: 0.045 },
+          longueur: { type: 'range', label: 'Longueur des fils', min: 0.18, max: 0.5, step: 0.005, value: 0.32 },
+          ecart: { type: 'range', label: 'Jeu entre billes', min: 0, max: 0.2, step: 0.005, value: 0.03 },
+          perspective: { type: 'range', label: 'Vue plongeante', min: 0, max: 0.7, step: 0.01, value: 0.32 },
+        },
+        'Mouvement': {
+          lancer: { type: 'select', label: 'Lancer', options: { un: 'Une bille', deux: 'Deux billes', trois: 'Trois billes', deuxcotes: 'Des deux côtés', hasard: 'Au hasard' }, value: 'un' },
+          elan: { type: 'range', label: 'Élan', min: 0.2, max: 1.2, step: 0.01, value: 0.6 },
+          vitesse: { type: 'range', label: 'Vitesse', min: 0.2, max: 2.5, step: 0.01, value: 1 },
+          amorti: { type: 'range', label: 'Amortissement', min: 0, max: 1, step: 0.01, value: 0.25 },
+        },
+        'Matières': {
+          matiere: { type: 'segmented', label: 'Billes', options: { chrome: 'Chrome', laque: 'Laquées', mat: 'Mates' }, value: 'chrome' },
+          couleurs: { type: 'palette', label: 'Couleurs', value: ['#e5452a', '#f2c230', '#2f5fd0', '#16161a'] },
+          socle: { type: 'color', label: 'Socle', value: '#16161a' },
+          fond: { type: 'color', label: 'Fond', value: '#e9e5dc' },
+          image: { type: 'file', label: 'Logo', accept: 'image/*' },
+        },
+      },
+      presets: {
+        'Bureau': {},
+        'Deux billes': { lancer: 'deux', billes: 6, matiere: 'chrome', fond: '#1b1d22', socle: '#3a3d44' },
+        'Des deux côtés': { lancer: 'deuxcotes', billes: 7, taille: 0.038, elan: 0.75 },
+        'Laquées': { matiere: 'laque', couleurs: ['#e5452a', '#f2c230', '#2f5fd0', '#2f8a4a', '#e57d9e'], billes: 5, fond: '#f4f1ea', socle: '#f4f1ea' },
+        'Géantes': { billes: 3, taille: 0.075, longueur: 0.42, lancer: 'un', elan: 0.9, matiere: 'chrome', fond: '#2a2a2e', socle: '#111113', perspective: 0.2 },
+        'Longue rangée': { billes: 9, taille: 0.03, longueur: 0.4, lancer: 'trois', ecart: 0.02, perspective: 0.45 },
+        'Mates': { matiere: 'mat', couleurs: ['#16161a', '#f4f1ea'], fond: '#e5452a', socle: '#16161a', lancer: 'hasard', billes: 6 },
+        'Face': { perspective: 0, billes: 5, lancer: 'deux', matiere: 'laque', couleurs: [LUZ[0], LUZ[1], LUZ[2]], fond: LUZ[4], socle: LUZ[3] },
+        'Pyramides': { matiere: 'laque', couleurs: [PYR[2], PYR[3], PYR[4], PYR[5]], fond: PYR[0], socle: PYR[6], billes: 6, lancer: 'hasard', amorti: 0.4 },
+        'Menthe': { matiere: 'mat', couleurs: [MEN[3], MEN[2], MEN[1]], fond: MEN[0], socle: MEN[1], billes: 7, lancer: 'deuxcotes', perspective: 0.5 },
+      },
+      brand(colors) {
+        const s = colors.slice().sort((a, b) => lum(a) - lum(b)), D = s[0], L = s[s.length - 1];
+        return { fond: L, socle: D, couleurs: s.length > 2 ? s.slice(1, -1) : [D], matiere: s.length > 2 ? 'laque' : 'chrome' };
+      },
+      pointer: {
+        down: (q) => {
+          ptr = { x: q.x, y: q.y, moved: 0, b: null }; if (!S) return;
+          let best = -1, bd = 1e9; S.balls.forEach((b, i) => { const P = ballPos(i), d = Math.hypot(q.x - P[0], q.y - P[1]); if (d < bd) { bd = d; best = i; } });
+          if (bd < S.r * 1.6) { ptr.b = best; S.hand = null; S.grab = best; S.hold = simT + 6; }
+        },
+        drag: (q) => {
+          if (!ptr) return; ptr.moved += Math.hypot(q.x - ptr.x, q.y - ptr.y); ptr.x = q.x; ptr.y = q.y;
+          if (ptr.b !== null && S) { const b = S.balls[ptr.b], X = S.X[ptr.b], th = Math.max(-1.3, Math.min(1.3, Math.atan2(q.x - X, Math.max(1, q.y - S.y0)))); b.tgt = th; }
+        },
+        up: () => {
+          if (!ptr) return;
+          if (ptr.b !== null && S) { S.grab = -1; S.balls[ptr.b].tgt = null; S.hold = simT + 3; }
+          else if (ptr.moved < 6 && S) launch();
+          ptr = null;
+        },
+        wheel: (q, dy) => app.set('elan', Math.max(0.2, Math.min(1.2, +(p.elan + (dy > 0 ? -0.05 : 0.05)).toFixed(2)))),
+      },
+      onChange(k) { if (['*', 'image'].includes(k)) logoKey = ''; },
+      export: { name: 'berceau-de-newton', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    function hex(x) { const n = parseInt(x.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
+    function lum(x) { const c = hex(x); return (c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114) / 255; }
+    function mix(a, b, t) { const A = hex(a), C = hex(b); return '#' + A.map((v, i) => Math.round(v + (C[i] - v) * t).toString(16).padStart(2, '0')).join(''); }
+    function rng(s) { let a = s >>> 0; return () => { a = (a + 0x6d2b79f5) >>> 0; let t = a; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+    const pal = () => (p.couleurs.length ? p.couleurs : ['#e5452a']);
+
+    function buildLogo() {
+      const img0 = p.image || app.logoImg, key = img0 ? (img0.src || 'c') : 'demo'; if (key === logoKey) return; logoKey = key; vKey = '';
+      const M = 200, c = document.createElement('canvas'); c.width = c.height = M; const x = c.getContext('2d', { willReadFrequently: true }), L = M * 0.94, cx = M / 2;
+      if (img0) { const iw = img0.naturalWidth || img0.width, ih = img0.naturalHeight || img0.height, s = L / Math.max(iw, ih); x.drawImage(img0, cx - iw * s / 2, cx - ih * s / 2, iw * s, ih * s); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(cx, cx, L * 0.48, 0, TAU); x.arc(cx, cx, L * 0.27, 0, TAU, true); x.fill('evenodd'); x.fillRect(cx - L * 0.07, cx - L * 0.5, L * 0.14, L); }
+      const d = x.getImageData(0, 0, M, M).data; let transp = 0; for (let i = 3; i < d.length; i += 4) if (d[i] < 128) transp++; const useA = transp > M * M * 0.05;
+      const F = new Float64Array(M * M); for (let i = 0; i < M * M; i++) { const o = i * 4, l = (d[o] * 0.2126 + d[o + 1] * 0.7152 + d[o + 2] * 0.0722) / 255; F[i] = useA ? d[o + 3] / 255 : (d[o + 3] / 255) * Math.min(1, Math.max(0, (0.75 - l) * 2)); }
+      { const G2 = new Float64Array(M * M); for (let j = 1; j < M - 1; j++) for (let i = 1; i < M - 1; i++) { let a = 0; for (let b = -1; b <= 1; b++) for (let c = -1; c <= 1; c++) a += F[(j + b) * M + i + c] * (b || c ? (b && c ? 1 : 2) : 4); G2[j * M + i] = a / 16; } F.set(G2); }
+      for (let k = 0; k < M; k++) F[k] = F[(M - 1) * M + k] = F[k * M] = F[k * M + M - 1] = 0;
+      logoM = contours(F, M, M, 0.5, 0, 0, 1).filter((c) => c.closed && c.pts.length > 6).map((c) => chaikin(chaikin(c.pts, true), true).map((q) => [q[0] / M - 0.5, q[1] / M - 0.5]));
+    }
+    // carrés marchants + chaînage
+    function contours(F, nx, ny, lev, ox, oy, cs) {
+      const pt = new Map(), adj = new Map();
+      const P = (id) => { let q = pt.get(id); if (q) return q; const cell = id >> 1, i = cell % nx, j = (cell - i) / nx; let a, b, ax, ay, bx, by; if (id & 1) { a = F[j * nx + i]; b = F[(j + 1) * nx + i]; ax = bx = i; ay = j; by = j + 1; } else { a = F[j * nx + i]; b = F[j * nx + i + 1]; ay = by = j; ax = i; bx = i + 1; } const t = (lev - a) / (b - a || 1e-9); q = [ox + (ax + (bx - ax) * t) * cs, oy + (ay + (by - ay) * t) * cs]; pt.set(id, q); return q; };
+      const link = (a, b) => { (adj.get(a) || adj.set(a, []).get(a)).push(b); (adj.get(b) || adj.set(b, []).get(b)).push(a); };
+      for (let j = 0; j < ny - 1; j++) for (let i = 0; i < nx - 1; i++) {
+        const A = F[j * nx + i] > lev, B = F[j * nx + i + 1] > lev, C = F[(j + 1) * nx + i + 1] > lev, D = F[(j + 1) * nx + i] > lev, idx = A | (B << 1) | (C << 2) | (D << 3);
+        if (idx === 0 || idx === 15) continue;
+        const T = (j * nx + i) * 2, R = (j * nx + i + 1) * 2 + 1, Bo = ((j + 1) * nx + i) * 2, Le = (j * nx + i) * 2 + 1;
+        const ctr = (F[j * nx + i] + F[j * nx + i + 1] + F[(j + 1) * nx + i + 1] + F[(j + 1) * nx + i]) / 4 > lev;
+        switch (idx) {
+          case 1: case 14: link(Le, T); break; case 2: case 13: link(T, R); break; case 3: case 12: link(Le, R); break;
+          case 4: case 11: link(R, Bo); break; case 6: case 9: link(T, Bo); break; case 7: case 8: link(Le, Bo); break;
+          case 5: if (ctr) { link(Le, Bo); link(T, R); } else { link(Le, T); link(R, Bo); } break;
+          case 10: if (ctr) { link(Le, T); link(R, Bo); } else { link(Le, Bo); link(T, R); } break;
+        }
+      }
+      const seen = new Set(), out = [];
+      const walk = (s) => { const L = [s]; seen.add(s); let cur = s; for (;;) { const nb = (adj.get(cur) || []).find((x) => !seen.has(x)); if (nb === undefined) break; seen.add(nb); L.push(nb); cur = nb; } return L; };
+      for (const [id, nb] of adj) if (nb.length === 1 && !seen.has(id)) out.push({ pts: walk(id).map(P), closed: false });
+      for (const [id] of adj) if (!seen.has(id)) out.push({ pts: walk(id).map(P), closed: true });
+      return out;
+    }
+    function chaikin(pts, closed) {
+      const o = []; const n = pts.length; for (let k = 0; k < (closed ? n : n - 1); k++) { const a = pts[k], b = pts[(k + 1) % n]; o.push([a[0] * 0.75 + b[0] * 0.25, a[1] * 0.75 + b[1] * 0.25], [a[0] * 0.25 + b[0] * 0.75, a[1] * 0.25 + b[1] * 0.75]); }
+      if (!closed) { o.unshift(pts[0]); o.push(pts[n - 1]); } return o;
+    }
+
+    // ——— Scène ———
+    function build(w, h) {
+      const m = Math.min(w, h), N = p.billes | 0, r = m * p.taille, L = m * p.longueur, gap = r * p.ecart, tilt = p.perspective;
+      const D = r * 2.2 + m * 0.03, rowW = N * 2 * r + (N - 1) * gap, yRest = h * 0.5 + L * 0.18, y0 = yRest - L, yb = yRest + r + m * 0.07;
+      const X = []; for (let i = 0; i < N; i++) X.push(w / 2 + (i - (N - 1) / 2) * (2 * r + gap));
+      const old = S && S.balls.length === N ? S.balls : null;
+      S = { w, h, m, N, r, L, gap, tilt, D, rowW, y0, yRest, yb, X, balls: old || X.map(() => ({ th: 0, om: 0, tgt: null })), hand: null, grab: -1, hold: -1, next: simT + 0.4, R: rng(app.seed), shot: 0 };
+    }
+    const ballPos = (i) => [S.X[i] + S.L * Math.sin(S.balls[i].th), S.y0 + S.L * Math.cos(S.balls[i].th)];
+    function launch() {
+      const N = S.N, R = S.R, A = p.elan; let L = [], Rr = [];
+      const k = { un: 1, deux: 2, trois: 3 }[p.lancer];
+      if (k) { const side = S.shot % 2 ? 1 : -1; for (let i = 0; i < Math.min(k, N - 1); i++) (side < 0 ? L : Rr).push(side < 0 ? i : N - 1 - i); }
+      else if (p.lancer === 'deuxcotes') { L = [0]; Rr = [N - 1]; }
+      else { const kk = 1 + Math.floor(R() * Math.min(3, N - 1)); if (R() < 0.5) for (let i = 0; i < kk; i++) L.push(i); else for (let i = 0; i < kk; i++) Rr.push(N - 1 - i); if (R() < 0.25) { if (L.length) Rr.push(N - 1); else L.push(0); } }
+      S.hand = { L, Rr, A: A * (0.9 + R() * 0.2), t0: simT, d: 0.7 / Math.sqrt(p.vitesse) }; S.shot++;
+      for (const b of S.balls) b.tgt = null;
+    }
+    function step(dt) {
+      const N = S.N, r = S.r, L = S.L, sp = Math.max(0.1, p.vitesse), g = L * Math.pow(TAU / 1.35, 2) * sp * sp, K = 2.5e6 * sp * sp, C = 40 * sp, air = p.amorti * 0.35;
+      // main invisible : soulève les billes de bout et les maintient, puis lâche
+      let kin = new Map();
+      if (S.hand) { const H = S.hand, u = Math.min(1, (simT - H.t0) / H.d), e = u * u * (3 - 2 * u); for (const i of H.L) kin.set(i, -H.A * e - (H.L.length - 1 - H.L.indexOf(i)) * 0); for (const i of H.Rr) kin.set(i, H.A * e); if (u >= 1 && simT - H.t0 > H.d + 0.15) { S.hand = null; kin = new Map(); } }
+      S.balls.forEach((b, i) => { if (b.tgt !== null && b.tgt !== undefined) kin.set(i, b.tgt); });
+      // billes tenues ensemble : on les espace pour qu'elles se touchent juste
+      const n = Math.max(1, Math.ceil(dt / DT)), h = dt / n;
+      for (let s = 0; s < n; s++) {
+        const acc = new Float64Array(N), P = S.balls.map((b, i) => ballPos(i));
+        for (let i = 0; i < N - 1; i++) {
+          const a = P[i], c = P[i + 1], dx = c[0] - a[0], dy = c[1] - a[1], d = Math.hypot(dx, dy), del = Math.min(2 * r - d, r * 0.2); if (del <= 0) continue;
+          const nx = dx / d, ny = dy / d, b1 = S.balls[i], b2 = S.balls[i + 1];
+          const v1x = L * Math.cos(b1.th) * b1.om, v1y = -L * Math.sin(b1.th) * b1.om, v2x = L * Math.cos(b2.th) * b2.om, v2y = -L * Math.sin(b2.th) * b2.om;
+          const vn = (v2x - v1x) * nx + (v2y - v1y) * ny; let F = K * del - C * Math.min(0, vn); if (F < 0) F = 0;
+          acc[i] += (-F * nx * Math.cos(b1.th) + F * ny * Math.sin(b1.th)) / L;
+          acc[i + 1] += (F * nx * Math.cos(b2.th) - F * ny * Math.sin(b2.th)) / L;
+        }
+        for (let i = 0; i < N; i++) {
+          const b = S.balls[i];
+          if (kin.has(i)) { const tg = kin.get(i), nt = b.th + (tg - b.th) * Math.min(1, h * 40); b.om = Math.max(-14 * sp, Math.min(14 * sp, (nt - b.th) / h)); b.th = nt; continue; }
+          b.om += (acc[i] - g / L * Math.sin(b.th) - air * b.om) * h; b.om = Math.max(-14 * sp, Math.min(14 * sp, b.om)); b.th += b.om * h; if (Math.abs(b.th) > 1.45) { b.th = Math.sign(b.th) * 1.45; b.om *= -0.3; }
+        }
+      }
+      // relance quand tout se calme
+      const E = S.balls.reduce((a, b) => a + Math.abs(b.th) + Math.abs(b.om) * 0.15, 0);
+      if (!S.hand && S.grab < 0 && simT >= S.hold && (E < 0.03 * S.N || simT >= S.next)) { launch(); S.next = simT + 9 / sp; }
+    }
+
+    // ——— Sprites des billes ———
+    function ballSprite(g, r, mat, col) {
+      if (mat === 'chrome') {
+        g.save(); g.beginPath(); g.arc(0, 0, r, 0, TAU); g.clip();
+        const env = g.createLinearGradient(0, -r, 0, r); env.addColorStop(0, mix(p.fond, '#ffffff', 0.55)); env.addColorStop(0.42, mix(p.fond, '#ffffff', 0.15)); env.addColorStop(0.5, '#2a2a2e'); env.addColorStop(0.56, mix(p.socle, '#000000', 0.3)); env.addColorStop(0.8, mix(p.socle, '#ffffff', 0.12)); env.addColorStop(1, mix(p.socle, '#000000', 0.5));
+        g.fillStyle = env; g.fillRect(-r, -r, r * 2, r * 2);
+        const rim = g.createRadialGradient(0, 0, r * 0.55, 0, 0, r); rim.addColorStop(0, 'rgba(0,0,0,0)'); rim.addColorStop(0.8, 'rgba(0,0,0,0.12)'); rim.addColorStop(1, 'rgba(0,0,0,0.55)'); g.fillStyle = rim; g.fillRect(-r, -r, r * 2, r * 2);
+        g.fillStyle = 'rgba(255,255,255,0.9)'; g.beginPath(); g.ellipse(-r * 0.35, -r * 0.45, r * 0.22, r * 0.12, -0.6, 0, TAU); g.fill();
+        g.fillStyle = 'rgba(255,255,255,0.35)'; g.beginPath(); g.ellipse(r * 0.38, r * 0.5, r * 0.18, r * 0.07, -0.6, 0, TAU); g.fill();
+        g.restore();
+      } else {
+        const gr = g.createRadialGradient(-r * 0.35, -r * 0.4, r * 0.1, 0, 0, r * 1.05);
+        if (mat === 'laque') { gr.addColorStop(0, mix(col, '#ffffff', 0.45)); gr.addColorStop(0.35, col); gr.addColorStop(1, mix(col, '#000000', 0.55)); }
+        else { gr.addColorStop(0, mix(col, '#ffffff', 0.12)); gr.addColorStop(0.6, col); gr.addColorStop(1, mix(col, '#000000', 0.3)); }
+        g.fillStyle = gr; g.beginPath(); g.arc(0, 0, r, 0, TAU); g.fill();
+        g.fillStyle = mix(col, lum(col) > 0.5 ? '#000000' : '#ffffff', 0.55); g.globalAlpha = mat === 'laque' ? 0.8 : 0.9; g.beginPath(); for (const lp of logoM) { lp.forEach((q, k) => k ? g.lineTo(q[0] * r * 1.05, q[1] * r * 1.05) : g.moveTo(q[0] * r * 1.05, q[1] * r * 1.05)); g.closePath(); } g.fill('evenodd'); g.globalAlpha = 1;
+        if (mat === 'laque') { g.fillStyle = 'rgba(255,255,255,0.75)'; g.beginPath(); g.ellipse(-r * 0.38, -r * 0.48, r * 0.2, r * 0.1, -0.6, 0, TAU); g.fill(); }
+      }
+      // œillet
+      g.fillStyle = '#8a8d93'; g.beginPath(); g.arc(0, -r * 0.98, r * 0.09, 0, TAU); g.fill();
+    }
+    function sprites(dpr) {
+      buildLogo(); const r = S.r, C = pal(), key = [r, dpr, p.matiere, C.join(), p.fond, p.socle, logoKey].join('|'); if (key === spKey) return SP; spKey = key;
+      const pad = Math.ceil(r * 0.2), W = r * 2 + pad * 2, list = [];
+      for (let i = 0; i < S.N; i++) { const c = document.createElement('canvas'); c.width = c.height = Math.ceil(W * dpr); const g = c.getContext('2d'); g.scale(dpr, dpr); g.translate(W / 2, W / 2); ballSprite(g, r, p.matiere, C[i % C.length]); list.push(c); }
+      SP = { list, W }; return SP;
+    }
+
+    // ——— Décor fixe : fond, socle, montants, rails ———
+    function frameGeom() {
+      const r = S.r, t = S.tilt, ext = r + Math.max(S.m * 0.06, S.L * 0.62), x0 = S.X[0] - ext, x1 = S.X[S.N - 1] + ext, D = S.D;
+      const ry = (z) => S.y0 + z * t, by = (z) => S.yb + z * t, Bd = D * 1.5;
+      return { x0, x1, D, Bd, ry, by, bx0: x0 - S.m * 0.04, bx1: x1 + S.m * 0.04, th: S.m * 0.012, bh: S.m * 0.05 };
+    }
+    function backdrop(w, h, dpr) {
+      const key = [w, h, dpr, p.fond, p.socle, S.N, S.r, S.L, S.tilt, S.gap, logoKey].join('|'); if (key === bgKey) return BG; bgKey = key;
+      BG = BG || document.createElement('canvas'); BG.width = Math.round(w * dpr); BG.height = Math.round(h * dpr);
+      const g = BG.getContext('2d'), m = S.m, F = frameGeom(); g.setTransform(dpr, 0, 0, dpr, 0, 0);
+      const gr = g.createLinearGradient(0, 0, 0, h); gr.addColorStop(0, mix(p.fond, '#ffffff', 0.12)); gr.addColorStop(0.7, p.fond); gr.addColorStop(1, mix(p.fond, '#000000', 0.12)); g.fillStyle = gr; g.fillRect(0, 0, w, h);
+      // ombre du socle
+      g.save(); g.filter = `blur(${m * 0.025}px)`; g.fillStyle = 'rgba(0,0,0,0.35)'; g.beginPath(); g.ellipse(w / 2, F.by(-F.Bd) + F.Bd * S.tilt * 2 + F.bh + m * 0.01, (F.bx1 - F.bx0) * 0.55, m * 0.03 + F.Bd * S.tilt * 0.6, 0, 0, TAU); g.fill(); g.restore();
+      // socle : face avant + dessus
+      const top = [[F.bx0, F.by(F.Bd)], [F.bx1, F.by(F.Bd)], [F.bx1, F.by(-F.Bd)], [F.bx0, F.by(-F.Bd)]];
+      g.fillStyle = mix(p.socle, '#000000', 0.25); g.beginPath(); g.rect(F.bx0, F.by(F.Bd), F.bx1 - F.bx0, F.bh); g.fill();
+      const tg = g.createLinearGradient(0, F.by(-F.Bd), 0, F.by(F.Bd)); tg.addColorStop(0, mix(p.socle, '#ffffff', 0.08)); tg.addColorStop(1, mix(p.socle, '#ffffff', 0.18)); g.fillStyle = tg; g.beginPath(); top.forEach((q, k) => k ? g.lineTo(q[0], q[1]) : g.moveTo(q[0], q[1])); g.closePath(); g.fill();
+      g.fillStyle = 'rgba(255,255,255,0.25)'; g.fillRect(F.bx0, F.by(F.Bd) - 0.5, F.bx1 - F.bx0, 1);
+      // logo gravé sur la face avant du socle
+      if (logoM) { const s = F.bh * 0.8; g.save(); g.translate(w / 2, F.by(F.Bd) + F.bh / 2); g.fillStyle = mix(p.socle, lum(p.socle) > 0.5 ? '#000000' : '#ffffff', 0.35); g.beginPath(); for (const lp of logoM) { lp.forEach((q, k) => k ? g.lineTo(q[0] * s, q[1] * s) : g.moveTo(q[0] * s, q[1] * s)); g.closePath(); } g.fill('evenodd'); g.restore(); }
+      return BG;
+    }
+    function metalGrad(g, x0, y0, x1, y1) { const gr = g.createLinearGradient(x0, y0, x1, y1); gr.addColorStop(0, '#5d6067'); gr.addColorStop(0.35, '#f1f2f4'); gr.addColorStop(0.6, '#a9adb3'); gr.addColorStop(1, '#3d4046'); return gr; }
+    function drawRail(g, F, z) { const y = F.ry(z); g.strokeStyle = metalGrad(g, 0, y - F.th / 2, 0, y + F.th / 2); g.lineWidth = F.th; g.lineCap = 'round'; g.beginPath(); g.moveTo(F.x0, y); g.lineTo(F.x1, y); g.stroke(); }
+    function drawPosts(g, F, z) { for (const x of [F.x0, F.x1]) { g.strokeStyle = metalGrad(g, x - F.th / 2, 0, x + F.th / 2, 0); g.lineWidth = F.th; g.lineCap = 'round'; g.beginPath(); g.moveTo(x, F.ry(z)); g.lineTo(x, F.by(z)); g.stroke(); } }
+
+    app.loop((t, dt) => {
+      dt = Math.min(1 / 20, dt || 0);
+      const { w, h, dpr } = app.size; buildLogo();
+      const key = [w, h, p.billes, p.taille, p.longueur, p.ecart, p.perspective].join('|'); if (!S || key !== gKey) { gKey = key; build(w, h); }
+      if (app.thumbnail) { if (!S.th) { S.th = true; for (let k = 0; k < 600; k++) { simT += 1 / 60; step(1 / 60); if (simT > 1.75 / Math.sqrt(p.vitesse) && !S.hand && Math.abs(S.balls[S.N - 1].th) > p.elan * 0.6) break; } } }
+      else { simT += dt; step(dt); }
+      const SPR = sprites(dpr), F = frameGeom(), r = S.r;
+      ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.drawImage(backdrop(w, h, dpr), 0, 0); ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      // ombres des billes sur le socle
+      for (let i = 0; i < S.N; i++) { const P = ballPos(i), hgt = (F.by(0) - P[1]) / S.L, a = Math.max(0, 0.45 - hgt * 0.25); ctx.fillStyle = `rgba(0,0,0,${a})`; ctx.beginPath(); ctx.ellipse(P[0], F.by(0), r * (1 + hgt * 0.4), r * (0.25 + S.tilt * 0.6), 0, 0, TAU); ctx.fill(); }
+      drawPosts(ctx, F, -F.D); drawRail(ctx, F, -F.D);
+      const fil = mix(p.socle, '#888888', 0.4);
+      ctx.strokeStyle = fil; ctx.lineWidth = Math.max(0.6, S.m * 0.0018);
+      for (let i = 0; i < S.N; i++) { const P = ballPos(i), th = S.balls[i].th, ax = P[0] - r * Math.sin(th), ay = P[1] - r * Math.cos(th); ctx.beginPath(); ctx.moveTo(S.X[i], F.ry(-F.D)); ctx.lineTo(ax, ay); ctx.stroke(); }
+      for (let i = 0; i < S.N; i++) {
+        const P = ballPos(i);
+        ctx.save(); ctx.translate(P[0], P[1]); ctx.rotate(-S.balls[i].th * 0.0); ctx.drawImage(SPR.list[i], -SPR.W / 2, -SPR.W / 2, SPR.W, SPR.W);
+        if (p.matiere === 'chrome') for (const j of [i - 1, i + 1]) { if (j < 0 || j >= S.N) continue; const Q = ballPos(j), d = Math.hypot(Q[0] - P[0], Q[1] - P[1]), a = Math.max(0, 1 - (d - 2 * r) / (r * 1.5)); if (a <= 0) continue; const ux = (Q[0] - P[0]) / d, uy = (Q[1] - P[1]) / d; ctx.save(); ctx.beginPath(); ctx.arc(0, 0, r, 0, TAU); ctx.clip(); ctx.fillStyle = `rgba(20,20,24,${0.45 * a})`; ctx.beginPath(); ctx.ellipse(ux * r * 0.92, uy * r * 0.92, r * 0.28, r * 0.5, Math.atan2(uy, ux), 0, TAU); ctx.fill(); ctx.restore(); }
+        ctx.restore();
+      }
+      ctx.strokeStyle = fil; ctx.lineWidth = Math.max(0.6, S.m * 0.0018);
+      for (let i = 0; i < S.N; i++) { const P = ballPos(i), th = S.balls[i].th, ax = P[0] - r * Math.sin(th), ay = P[1] - r * Math.cos(th); ctx.beginPath(); ctx.moveTo(S.X[i], F.ry(F.D)); ctx.lineTo(ax, ay); ctx.stroke(); }
+      drawPosts(ctx, F, F.D); drawRail(ctx, F, F.D);
+      app.finish(ctx);
+    });
+
+    function toSVG() {
+      const { w, h } = app.size, f = (v) => +v.toFixed(2); buildLogo(); const F = frameGeom(), r = S.r, C = pal(), m = S.m;
+      let s = `<rect width="100%" height="100%" fill="${p.fond}"/>`;
+      s += `<ellipse cx="${f(w / 2)}" cy="${f(F.by(-F.Bd) + F.Bd * S.tilt * 2 + F.bh + m * 0.01)}" rx="${f((F.bx1 - F.bx0) * 0.55)}" ry="${f(m * 0.03 + F.Bd * S.tilt * 0.6)}" fill="#000" opacity="0.35" filter="url(#flou)"/>`;
+      s += `<rect x="${f(F.bx0)}" y="${f(F.by(F.Bd))}" width="${f(F.bx1 - F.bx0)}" height="${f(F.bh)}" fill="${mix(p.socle, '#000000', 0.25)}"/><path fill="${mix(p.socle, '#ffffff', 0.12)}" d="M${f(F.bx0)} ${f(F.by(F.Bd))}H${f(F.bx1)}L${f(F.bx1)} ${f(F.by(-F.Bd))}H${f(F.bx0)}Z"/>`;
+      const sL = F.bh * 0.8; s += `<path transform="translate(${f(w / 2)} ${f(F.by(F.Bd) + F.bh / 2)}) scale(${f(sL)})" fill="${mix(p.socle, lum(p.socle) > 0.5 ? '#000000' : '#ffffff', 0.35)}" fill-rule="evenodd" d="${logoM.map((lp) => 'M' + lp.map((q) => q[0].toFixed(4) + ' ' + q[1].toFixed(4)).join('L') + 'Z').join('')}"/>`;
+      for (let i = 0; i < S.N; i++) { const P = ballPos(i), hgt = (F.by(0) - P[1]) / S.L; s += `<ellipse cx="${f(P[0])}" cy="${f(F.by(0))}" rx="${f(r * (1 + hgt * 0.4))}" ry="${f(r * (0.25 + S.tilt * 0.6))}" fill="#000" opacity="${f(Math.max(0, 0.45 - hgt * 0.25))}"/>`; }
+      const bar = (x0, y0, x1, y1) => `<path d="M${f(x0)} ${f(y0)}L${f(x1)} ${f(y1)}" stroke="url(#acier)" stroke-width="${f(F.th)}" stroke-linecap="round"/>`;
+      const posts = (z) => bar(F.x0, F.ry(z), F.x0, F.by(z)) + bar(F.x1, F.ry(z), F.x1, F.by(z)) + bar(F.x0, F.ry(z), F.x1, F.ry(z));
+      const fil = mix(p.socle, '#888888', 0.4), fw = f(Math.max(0.6, m * 0.0018));
+      const strings = (z) => S.balls.map((b, i) => { const P = ballPos(i); return `<path d="M${f(S.X[i])} ${f(F.ry(z))}L${f(P[0] - r * Math.sin(b.th))} ${f(P[1] - r * Math.cos(b.th))}" stroke="${fil}" stroke-width="${fw}"/>`; }).join('');
+      s += posts(-F.D) + strings(-F.D);
+      const ld = logoM.map((lp) => 'M' + lp.map((q) => (q[0] * r * 1.05).toFixed(2) + ' ' + (q[1] * r * 1.05).toFixed(2)).join('L') + 'Z').join('');
+      let defs = `<filter id="flou" x="-0.3" y="-0.3" width="1.6" height="1.6"><feGaussianBlur stdDeviation="${f(m * 0.02)}"/></filter><linearGradient id="acier" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#5d6067"/><stop offset="0.4" stop-color="#e8e9ec"/><stop offset="1" stop-color="#3d4046"/></linearGradient>`;
+      defs += `<linearGradient id="chrome" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="${mix(p.fond, '#ffffff', 0.55)}"/><stop offset="0.42" stop-color="${mix(p.fond, '#ffffff', 0.15)}"/><stop offset="0.5" stop-color="#2a2a2e"/><stop offset="0.56" stop-color="${mix(p.socle, '#000000', 0.3)}"/><stop offset="0.8" stop-color="${mix(p.socle, '#ffffff', 0.12)}"/><stop offset="1" stop-color="${mix(p.socle, '#000000', 0.5)}"/></linearGradient><radialGradient id="bord"><stop offset="0.55" stop-color="#000" stop-opacity="0"/><stop offset="1" stop-color="#000" stop-opacity="0.55"/></radialGradient>`;
+      C.forEach((c, k) => { defs += `<radialGradient id="b${k}" cx="0.32" cy="0.3" r="0.75"><stop offset="0" stop-color="${mix(c, '#ffffff', p.matiere === 'laque' ? 0.45 : 0.12)}"/><stop offset="0.45" stop-color="${c}"/><stop offset="1" stop-color="${mix(c, '#000000', p.matiere === 'laque' ? 0.55 : 0.3)}"/></radialGradient>`; });
+      for (let i = 0; i < S.N; i++) {
+        const P = ballPos(i), c = C[i % C.length];
+        s += `<g transform="translate(${f(P[0])} ${f(P[1])})">`;
+        if (p.matiere === 'chrome') s += `<circle r="${f(r)}" fill="url(#chrome)"/><circle r="${f(r)}" fill="url(#bord)"/><ellipse cx="${f(-r * 0.35)}" cy="${f(-r * 0.45)}" rx="${f(r * 0.22)}" ry="${f(r * 0.12)}" transform="rotate(-34 ${f(-r * 0.35)} ${f(-r * 0.45)})" fill="#fff" opacity="0.9"/>`;
+        else s += `<circle r="${f(r)}" fill="url(#b${i % C.length})"/><path fill-rule="evenodd" fill="${mix(c, lum(c) > 0.5 ? '#000000' : '#ffffff', 0.55)}" d="${ld}"/>${p.matiere === 'laque' ? `<ellipse cx="${f(-r * 0.38)}" cy="${f(-r * 0.48)}" rx="${f(r * 0.2)}" ry="${f(r * 0.1)}" fill="#fff" opacity="0.75"/>` : ''}`;
+        s += '</g>';
+      }
+      s += strings(F.D) + posts(F.D);
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><defs>${defs}</defs>${s}</svg>`;
+    }
+  </script>
+</body>
+</html>
