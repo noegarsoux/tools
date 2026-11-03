@@ -1,0 +1,15 @@
+{
+  "slug": "ressort-escalier",
+  "title": "Ressort d’escalier",
+  "type": "motion",
+  "description": "Le ressort à spires qui descend l’escalier tout seul : la spire du haut bascule, les autres passent d’une pile à l’autre, sur des marches sans fin marquées du logo.",
+  "tags": ["animation", "jouet", "boucle", "interaction", "logo", "svg"],
+  "inspiration": [
+    "Le jouet à ressort qui descend les marches d’un escalier",
+    "Les spires qui passent d’une pile à l’autre à travers l’arche",
+    "Les boucles d’animation sans fin des génériques"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}
