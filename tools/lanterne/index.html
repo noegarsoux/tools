@@ -1,0 +1,272 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Lanterne</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Lanterne : une lanterne tournante percée de trous (étoiles, logo, cercles…) dans une chambre noire.
+    // Chaque trou est un polygone sur le cylindre ; ses sommets sont prolongés depuis l'ampoule jusqu'au mur,
+    // au sol ou au plafond (intersection rayon/boîte), puis vus en perspective. Les taches sont additionnées dans
+    // un calque flouté, plus faibles avec la distance et l'incidence ; elles s'étirent en approchant des coins.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const BIE = PAL('biennale'), LUZ = PAL('luzern'), MEN = PAL('menthe');
+    const MOTIFS = ['etoiles', 'logo', 'cercles', 'losanges', 'lunes'];
+    // pièce (unités monde) : ampoule à l'origine, caméra en z = -CAM
+    const RW = 2.3, FL = 1.25, CE = 1.35, BK = 2.5, CAM = 3.3, EYE = 0.18, RL = 0.3, HL = 0.36;
+
+    let vKey = '', logoM = null, logoKey = '', ptr = null, S = null, gKey = '', simT = 0;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.05, vignette: 0.35 },
+      hint: 'Glisser : faire tourner la lanterne · clic : autre motif · molette : vitesse',
+      notes: 'Une lanterne tournante dans une chambre noire : la lumière passe par des trous découpés en étoiles, en cercles ou en logo et les projette sur les murs, le sol et le plafond. Les formes grandissent et s’étirent en glissant vers les coins, se colorent des gélatines de la lanterne et tournent lentement autour de la pièce.',
+      params: {
+        'Lanterne': {
+          motif: { type: 'select', label: 'Motif', options: { etoiles: 'Étoiles', logo: 'Logo', cercles: 'Cercles', losanges: 'Losanges', lunes: 'Lunes et étoiles' }, value: 'etoiles' },
+          trous: { type: 'range', label: 'Trous', min: 6, max: 60, step: 1, value: 26 },
+          taille: { type: 'range', label: 'Taille des trous', min: 0.4, max: 2, step: 0.01, value: 1 },
+          vitesse: { type: 'range', label: 'Vitesse', min: -1, max: 1, step: 0.01, value: 0.18 },
+          abatjour: { type: 'color', label: 'Abat-jour', value: '#2a2420' },
+          image: { type: 'file', label: 'Image du logo', accept: 'image/*' },
+        },
+        'Lumière': {
+          couleurs: { type: 'palette', label: 'Gélatines', value: ['#f2e640', '#f2b0c8', '#9dd3f0', '#ffffff'] },
+          intensite: { type: 'range', label: 'Intensité', min: 0.2, max: 2, step: 0.01, value: 1 },
+          flou: { type: 'range', label: 'Flou', min: 0, max: 1, step: 0.01, value: 0.35 },
+          ambiance: { type: 'range', label: 'Lumière ambiante', min: 0, max: 1, step: 0.01, value: 0.25 },
+          murs: { type: 'color', label: 'Murs', value: '#1d2233' },
+          sol: { type: 'color', label: 'Sol', value: '#2a2026' },
+        },
+      },
+      presets: {
+        'Veilleuse': {},
+        'Logo': { motif: 'logo', trous: 12, taille: 1.3, couleurs: ['#ffffff', '#f2e640'], murs: '#141414', sol: '#1e1a18' },
+        'Cercles': { motif: 'cercles', trous: 40, taille: 0.8, couleurs: ['#e5452a', '#f2e640', '#2f5fd0', '#f4f3f0'] },
+        'Losanges': { motif: 'losanges', trous: 30, couleurs: ['#7d38e7', '#b9a0e6', '#f25f03'], murs: '#161226' },
+        'Lunes': { motif: 'lunes', trous: 34, couleurs: ['#f2e6c8', '#9db0ef'], murs: '#0f1830', sol: '#121a28', vitesse: 0.1 },
+        'Fête': { motif: 'etoiles', trous: 56, taille: 0.7, vitesse: 0.7, couleurs: ['#e5452a', '#f2e640', '#5bb08a', '#2f5fd0', '#f2b0c8'], intensite: 1.3, flou: 0.15 },
+        'Blanc chaud': { couleurs: ['#ffd9a0'], ambiance: 0.35, murs: '#3a2e28', sol: '#2c211c', abatjour: '#8a5a32', flou: 0.5 },
+        'Net': { flou: 0, taille: 1.2, trous: 18, motif: 'losanges', couleurs: ['#ffffff'] },
+        'Biennale': { couleurs: [BIE[2], BIE[3], BIE[4], BIE[0]], murs: BIE[1], sol: '#1c1210', abatjour: BIE[0], motif: 'logo', trous: 14 },
+        'Luzern': { couleurs: [LUZ[0], LUZ[2], LUZ[4]], murs: '#1e1430', sol: LUZ[3], abatjour: LUZ[1], motif: 'losanges' },
+        'Menthe': { couleurs: [MEN[2], MEN[0]], murs: MEN[1], sol: '#121614', abatjour: MEN[3], motif: 'cercles', trous: 36 },
+      },
+      brand(colors) {
+        const s = colors.slice().sort((a, b) => lum(a) - lum(b)), D = s[0], L = s[s.length - 1], mid = s.length > 2 ? s.slice(1) : [L];
+        return { couleurs: mid, murs: mix(D, '#000000', 0.35), sol: mix(D, '#000000', 0.55), abatjour: mix(D, L, 0.25), motif: 'logo' };
+      },
+      pointer: {
+        down: (q) => { ptr = { x: q.x, y: q.y, moved: 0, lx: q.x, lt: performance.now() }; if (S) S.grab = true; },
+        drag: (q) => { if (!ptr || !S) return; ptr.moved = Math.max(ptr.moved, Math.hypot(q.x - ptr.x, q.y - ptr.y)); const now = performance.now(), d = (q.x - ptr.lx) / (S.w * 0.18); S.rot -= d; S.om = -d / Math.max(0.008, (now - ptr.lt) / 1000); ptr.lx = q.x; ptr.lt = now; },
+        up: () => { if (!S) return; S.grab = false; if (ptr && ptr.moved <= 6) { const i = MOTIFS.indexOf(p.motif); app.set('motif', MOTIFS[(i + 1) % MOTIFS.length]); } ptr = null; },
+        wheel: (q, dy) => app.set('vitesse', Math.max(-1, Math.min(1, +(p.vitesse + (dy > 0 ? -0.05 : 0.05)).toFixed(2)))),
+      },
+      onChange(k) { if (['*', 'image'].includes(k)) logoKey = ''; },
+      export: { name: 'lanterne', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    function hex(x) { const n = parseInt(x.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
+    function lum(x) { const c = hex(x); return (c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114) / 255; }
+    function mix(a, b, t) { const A = hex(a), C = hex(b); return '#' + A.map((v, i) => Math.round(v + (C[i] - v) * t).toString(16).padStart(2, '0')).join(''); }
+    function rgba(c, a) { const h = hex(c); return `rgba(${h[0]},${h[1]},${h[2]},${a})`; }
+    function rng(s) { let a = s >>> 0; return () => { a = (a + 0x6d2b79f5) >>> 0; let t = a; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+    const gel = (i) => { const c = p.couleurs; return c.length ? c[i % c.length] : '#ffffff'; };
+
+    function buildLogo() {
+      const img0 = p.image || app.logoImg, key = img0 ? (img0.src || 'c') : 'demo'; if (key === logoKey) return; logoKey = key; vKey = '';
+      const M = 200, c = document.createElement('canvas'); c.width = c.height = M; const x = c.getContext('2d', { willReadFrequently: true }), L = M * 0.94, cx = M / 2;
+      if (img0) { const iw = img0.naturalWidth || img0.width, ih = img0.naturalHeight || img0.height, s = L / Math.max(iw, ih); x.drawImage(img0, cx - iw * s / 2, cx - ih * s / 2, iw * s, ih * s); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(cx, cx, L * 0.48, 0, TAU); x.arc(cx, cx, L * 0.27, 0, TAU, true); x.fill('evenodd'); x.fillRect(cx - L * 0.07, cx - L * 0.5, L * 0.14, L); }
+      const d = x.getImageData(0, 0, M, M).data; let transp = 0; for (let i = 3; i < d.length; i += 4) if (d[i] < 128) transp++; const useA = transp > M * M * 0.05;
+      const F = new Float64Array(M * M); for (let i = 0; i < M * M; i++) { const o = i * 4, l = (d[o] * 0.2126 + d[o + 1] * 0.7152 + d[o + 2] * 0.0722) / 255; F[i] = useA ? d[o + 3] / 255 : (d[o + 3] / 255) * Math.min(1, Math.max(0, (0.75 - l) * 2)); }
+      { const G2 = new Float64Array(M * M); for (let j = 1; j < M - 1; j++) for (let i = 1; i < M - 1; i++) { let a = 0; for (let b = -1; b <= 1; b++) for (let c = -1; c <= 1; c++) a += F[(j + b) * M + i + c] * (b || c ? (b && c ? 1 : 2) : 4); G2[j * M + i] = a / 16; } F.set(G2); }
+      for (let k = 0; k < M; k++) F[k] = F[(M - 1) * M + k] = F[k * M] = F[k * M + M - 1] = 0;
+      logoM = contours(F, M, M, 0.5, 0, 0, 1).filter((c) => c.closed && c.pts.length > 6).map((c) => chaikin(chaikin(c.pts, true), true).map((q) => [q[0] / M - 0.5, q[1] / M - 0.5]));
+    }
+    // carrés marchants + chaînage
+    function contours(F, nx, ny, lev, ox, oy, cs) {
+      const pt = new Map(), adj = new Map();
+      const P = (id) => { let q = pt.get(id); if (q) return q; const cell = id >> 1, i = cell % nx, j = (cell - i) / nx; let a, b, ax, ay, bx, by; if (id & 1) { a = F[j * nx + i]; b = F[(j + 1) * nx + i]; ax = bx = i; ay = j; by = j + 1; } else { a = F[j * nx + i]; b = F[j * nx + i + 1]; ay = by = j; ax = i; bx = i + 1; } const t = (lev - a) / (b - a || 1e-9); q = [ox + (ax + (bx - ax) * t) * cs, oy + (ay + (by - ay) * t) * cs]; pt.set(id, q); return q; };
+      const link = (a, b) => { (adj.get(a) || adj.set(a, []).get(a)).push(b); (adj.get(b) || adj.set(b, []).get(b)).push(a); };
+      for (let j = 0; j < ny - 1; j++) for (let i = 0; i < nx - 1; i++) {
+        const A = F[j * nx + i] > lev, B = F[j * nx + i + 1] > lev, C = F[(j + 1) * nx + i + 1] > lev, D = F[(j + 1) * nx + i] > lev, idx = A | (B << 1) | (C << 2) | (D << 3);
+        if (idx === 0 || idx === 15) continue;
+        const T = (j * nx + i) * 2, R = (j * nx + i + 1) * 2 + 1, Bo = ((j + 1) * nx + i) * 2, Le = (j * nx + i) * 2 + 1;
+        const ctr = (F[j * nx + i] + F[j * nx + i + 1] + F[(j + 1) * nx + i + 1] + F[(j + 1) * nx + i]) / 4 > lev;
+        switch (idx) {
+          case 1: case 14: link(Le, T); break; case 2: case 13: link(T, R); break; case 3: case 12: link(Le, R); break;
+          case 4: case 11: link(R, Bo); break; case 6: case 9: link(T, Bo); break; case 7: case 8: link(Le, Bo); break;
+          case 5: if (ctr) { link(Le, Bo); link(T, R); } else { link(Le, T); link(R, Bo); } break;
+          case 10: if (ctr) { link(Le, T); link(R, Bo); } else { link(Le, Bo); link(T, R); } break;
+        }
+      }
+      const seen = new Set(), out = [];
+      const walk = (s) => { const L = [s]; seen.add(s); let cur = s; for (;;) { const nb = (adj.get(cur) || []).find((x) => !seen.has(x)); if (nb === undefined) break; seen.add(nb); L.push(nb); cur = nb; } return L; };
+      for (const [id, nb] of adj) if (nb.length === 1 && !seen.has(id)) out.push({ pts: walk(id).map(P), closed: false });
+      for (const [id] of adj) if (!seen.has(id)) out.push({ pts: walk(id).map(P), closed: true });
+      return out;
+    }
+    function chaikin(pts, closed) {
+      const o = []; const n = pts.length; for (let k = 0; k < (closed ? n : n - 1); k++) { const a = pts[k], b = pts[(k + 1) % n]; o.push([a[0] * 0.75 + b[0] * 0.25, a[1] * 0.75 + b[1] * 0.25], [a[0] * 0.25 + b[0] * 0.75, a[1] * 0.25 + b[1] * 0.75]); }
+      if (!closed) { o.unshift(pts[0]); o.push(pts[n - 1]); } return o;
+    }
+
+    // ——— formes des trous (unités : rayon 1) ———
+    function shape(kind, R) {
+      const poly = (n, f) => Array.from({ length: n }, (_, k) => f(k / n * TAU));
+      if (kind === 'cercles') return [poly(20, (a) => [Math.cos(a), Math.sin(a)])];
+      if (kind === 'losanges') return [[[0, -1.25], [0.72, 0], [0, 1.25], [-0.72, 0]]];
+      if (kind === 'logo' && logoM) return logoM.map((L) => { const st = Math.max(1, Math.floor(L.length / 90)); const o = []; for (let k = 0; k < L.length; k += st) o.push([L[k][0] * 2.1, L[k][1] * 2.1]); return o; });
+      if (kind === 'lune') { const o = []; for (let k = 0; k <= 16; k++) { const a = -Math.PI / 2 + k / 16 * Math.PI; o.push([Math.cos(a), Math.sin(a)]); } for (let k = 16; k >= 0; k--) { const a = -Math.PI / 2 + k / 16 * Math.PI; o.push([Math.cos(a) * 0.45, Math.sin(a) * 0.86]); } const r = R() * TAU; return [o.map((q) => [q[0] * Math.cos(r) - q[1] * Math.sin(r), q[0] * Math.sin(r) + q[1] * Math.cos(r)])]; }
+      const n = 5, r0 = 0.45, rot = R() * TAU; return [Array.from({ length: n * 2 }, (_, k) => { const a = rot + k / (n * 2) * TAU, r = k % 2 ? r0 : 1; return [Math.cos(a) * r, Math.sin(a) * r]; })];
+    }
+    function build(w, h) {
+      const R = rng(app.seed * 41 + 9), n = Math.round(p.trous), holes = [];
+      const rows = p.motif === 'logo' ? 3 : Math.max(2, Math.min(5, Math.round(Math.sqrt(n / 2.5))));
+      for (let i = 0; i < n; i++) {
+        const row = i % rows, per = Math.ceil(n / rows), col = Math.floor(i / rows), jit = p.motif === 'etoiles' || p.motif === 'lunes' ? 1 : 0;
+        const phi = (col + (row % 2) * 0.5) / per * TAU + jit * (R() - 0.5) * (TAU / per) * 0.7;
+        const zs = p.motif === 'logo' ? 0.62 : 0.78, z = -HL * zs + (rows > 1 ? row / (rows - 1) : 0.5) * HL * zs * 2 + jit * (R() - 0.5) * HL * 0.25;
+        const kind = p.motif === 'lunes' ? (R() < 0.3 ? 'lune' : 'etoile') : p.motif === 'etoiles' ? 'etoile' : p.motif;
+        const sz = (p.motif === 'logo' ? 0.075 : 0.045) * p.taille * (jit ? 0.6 + R() * 0.7 : 1) * (kind === 'lune' ? 1.4 : 1);
+        holes.push({ phi, z, sz: Math.min(sz, HL * 0.5), loops: shape(kind, R), c: i % Math.max(1, p.couleurs.length) });
+      }
+      S = { w, h, holes, rot: S ? S.rot : 0, om: S ? S.om : 0, grab: false, lay: null, f: Math.min(h * 0.95, w * 0.62) };
+    }
+
+    // ——— projection ———
+    function scr(x, y, z) { const d = z + CAM; return [S.w / 2 + S.f * x / d, S.h * 0.52 - S.f * (y - EYE) / d]; }
+    const PLANES = [ // nom, axe, valeur, normale
+      { id: 'fond', ax: 2, v: BK }, { id: 'gauche', ax: 0, v: -RW }, { id: 'droite', ax: 0, v: RW }, { id: 'sol', ax: 1, v: -FL }, { id: 'plafond', ax: 1, v: CE },
+    ];
+    function hit(d) { // premier plan touché par le rayon d depuis l'ampoule
+      let best = null, tb = Infinity;
+      for (const P of PLANES) { const c = d[P.ax]; if (c === 0 || Math.sign(c) !== Math.sign(P.v)) continue; const t = P.v / c; if (t > 0 && t < tb) { tb = t; best = P; } }
+      return best ? { P: best, t: tb } : null;
+    }
+    function planePoly(P) {
+      const c = { fond: [[-RW, -FL, BK], [RW, -FL, BK], [RW, CE, BK], [-RW, CE, BK]], gauche: [[-RW, -FL, -CAM + 0.2], [-RW, -FL, BK], [-RW, CE, BK], [-RW, CE, -CAM + 0.2]], droite: [[RW, -FL, -CAM + 0.2], [RW, -FL, BK], [RW, CE, BK], [RW, CE, -CAM + 0.2]], sol: [[-RW, -FL, -CAM + 0.2], [RW, -FL, -CAM + 0.2], [RW, -FL, BK], [-RW, -FL, BK]], plafond: [[-RW, CE, -CAM + 0.2], [RW, CE, -CAM + 0.2], [RW, CE, BK], [-RW, CE, BK]] }[P.id];
+      return c.map((q) => scr(q[0], q[1], q[2]));
+    }
+    // taches de lumière : [{P, pts (écran, par boucle), col, a}]
+    function patches() {
+      const out = [];
+      for (const H of S.holes) {
+        const ph = H.phi + S.rot, dc = [Math.sin(ph) * RL, H.z, Math.cos(ph) * RL], hc = hit(dc); if (!hc) continue;
+        const P = hc.P, X = dc.map((v) => v * hc.t); if (P.ax === 2 ? false : X[2] < -CAM + 0.35) continue;
+        const loops = [];
+        for (const L of H.loops) {
+          const pts = []; let ok = true;
+          for (const q of L) { const a = ph + q[0] * H.sz / RL, z = H.z - q[1] * H.sz, d = [Math.sin(a) * RL, z, Math.cos(a) * RL], c = d[P.ax]; if (c === 0 || Math.sign(c) !== Math.sign(P.v)) { ok = false; break; } const t = P.v / c; if (t <= 0 || t > 40) { ok = false; break; } const Q = d.map((v) => v * t); if (Q[2] < -CAM + 0.25) { ok = false; break; } pts.push(scr(Q[0], Q[1], Q[2])); }
+          if (ok && pts.length > 2) loops.push(pts);
+        }
+        if (!loops.length) continue;
+        const dist = Math.hypot(X[0], X[1], X[2]), inc = Math.abs(dc[P.ax]) / Math.hypot(dc[0], dc[1], dc[2]);
+        out.push({ P, loops, col: gel(H.c), a: Math.min(1, p.intensite * (0.35 + 0.65 * inc) * Math.min(1.6, 5.5 / (dist * dist + 1.5))) });
+      }
+      return out;
+    }
+
+    // ——— dessin ———
+    function room(x) {
+      const amb = 0.12 + p.ambiance * 0.6;
+      for (const P of PLANES) {
+        const poly = planePoly(P); let c = P.id === 'sol' ? p.sol : p.murs;
+        c = mix(c, '#000000', P.id === 'fond' ? 0.15 * (1 - amb) : P.id === 'plafond' ? 0.45 * (1 - amb) : 0.3 * (1 - amb));
+        x.fillStyle = c; x.beginPath(); poly.forEach((q, k) => (k ? x.lineTo(q[0], q[1]) : x.moveTo(q[0], q[1]))); x.closePath(); x.fill();
+      }
+      // halo de l'ampoule sur la pièce
+      const o = scr(0, 0, 0), g = x.createRadialGradient(o[0], o[1], 0, o[0], o[1], S.f * 0.9);
+      g.addColorStop(0, rgba(mix(gel(0), '#ffffff', 0.5), 0.1 + 0.18 * p.ambiance)); g.addColorStop(1, rgba(gel(0), 0)); x.fillStyle = g; x.fillRect(0, 0, S.w, S.h);
+    }
+    function lightLayer(dpr, P) {
+      const sc = 0.5, W = Math.max(1, Math.round(S.w * dpr * sc)), H = Math.max(1, Math.round(S.h * dpr * sc));
+      if (!S.lay || S.lay.width !== W || S.lay.height !== H) { S.lay = document.createElement('canvas'); S.lay.width = W; S.lay.height = H; S.lx = S.lay.getContext('2d'); }
+      const x = S.lx; x.setTransform(1, 0, 0, 1, 0, 0); x.clearRect(0, 0, W, H); x.setTransform(dpr * sc, 0, 0, dpr * sc, 0, 0);
+      x.globalCompositeOperation = 'lighter';
+      for (const pl of PLANES) {
+        const L = P.filter((q) => q.P === pl); if (!L.length) continue;
+        const poly = planePoly(pl); x.save(); x.beginPath(); poly.forEach((q, k) => (k ? x.lineTo(q[0], q[1]) : x.moveTo(q[0], q[1]))); x.closePath(); x.clip();
+        for (const q of L) { x.fillStyle = rgba(q.col, q.a.toFixed(3)); x.beginPath(); for (const pts of q.loops) { pts.forEach((v, k) => (k ? x.lineTo(v[0], v[1]) : x.moveTo(v[0], v[1]))); x.closePath(); } x.fill('evenodd'); }
+        x.restore();
+      }
+      x.globalCompositeOperation = 'source-over';
+      // flou appliqué à demi-résolution (bien moins coûteux que sur le canevas entier)
+      const bl = p.flou * Math.min(S.w, S.h) * 0.012 * dpr * sc;
+      if (bl <= 0.3) return S.lay;
+      if (!S.lay2 || S.lay2.width !== W || S.lay2.height !== H) { S.lay2 = document.createElement('canvas'); S.lay2.width = W; S.lay2.height = H; S.lx2 = S.lay2.getContext('2d'); }
+      const y = S.lx2; y.clearRect(0, 0, W, H); y.globalCompositeOperation = 'source-over'; y.filter = `blur(${bl.toFixed(1)}px)`; y.drawImage(S.lay, 0, 0); y.filter = 'none';
+      y.globalCompositeOperation = 'lighter'; y.globalAlpha = 0.55; y.drawImage(S.lay, 0, 0); y.globalAlpha = 1; y.globalCompositeOperation = 'source-over';
+      return S.lay2;
+    }
+    function lantern(x) {
+      const o = scr(0, 0, 0), top = scr(0, HL, 0), bot = scr(0, -HL, 0), rx = S.f * RL / CAM, ry = rx * 0.22, ceil = scr(0, CE, 0);
+      // cordon
+      x.strokeStyle = rgba(mix(p.abatjour, '#ffffff', 0.3), 0.7); x.lineWidth = Math.max(1, rx * 0.025); x.beginPath(); x.moveTo(ceil[0], ceil[1]); x.lineTo(top[0], top[1] - ry * 1.5); x.stroke();
+      // halo
+      const g = x.createRadialGradient(o[0], o[1], rx * 0.6, o[0], o[1], rx * 3.2); g.addColorStop(0, rgba(mix(gel(0), '#ffffff', 0.6), 0.22 * p.intensite)); g.addColorStop(1, rgba(gel(0), 0)); x.fillStyle = g; x.beginPath(); x.arc(o[0], o[1], rx * 3.2, 0, TAU); x.fill();
+      // corps
+      const body = x.createLinearGradient(o[0] - rx, 0, o[0] + rx, 0); body.addColorStop(0, mix(p.abatjour, '#000000', 0.45)); body.addColorStop(0.35, mix(p.abatjour, '#ffffff', 0.12)); body.addColorStop(1, mix(p.abatjour, '#000000', 0.55));
+      x.fillStyle = body; x.beginPath(); x.ellipse(o[0], bot[1], rx, ry, 0, 0, Math.PI); x.lineTo(o[0] - rx, top[1]); x.ellipse(o[0], top[1], rx, ry, 0, Math.PI, 0, true); x.closePath(); x.fill();
+      // trous éclairés (face visible : cos φ < 0)
+      x.save(); x.beginPath(); x.ellipse(o[0], bot[1], rx, ry, 0, 0, Math.PI); x.lineTo(o[0] - rx, top[1]); x.ellipse(o[0], top[1], rx, ry, 0, Math.PI, 0, true); x.closePath(); x.clip();
+      for (const H of S.holes) {
+        const ph = H.phi + S.rot; if (Math.cos(ph) > 0.05) continue;
+        x.fillStyle = mix(gel(H.c), '#ffffff', 0.55); x.beginPath();
+        for (const L of H.loops) { L.forEach((q, k) => { const a = ph + q[0] * H.sz / RL, sx = o[0] + Math.sin(a) * rx, sy = o[1] - (H.z - q[1] * H.sz) / HL * (o[1] - top[1]) - Math.cos(a) * ry * -0.0; if (k) x.lineTo(sx, sy); else x.moveTo(sx, sy); }); x.closePath(); }
+        x.globalAlpha = Math.min(1, -Math.cos(ph) * 1.4); x.fill('evenodd'); x.globalAlpha = 1;
+      }
+      x.restore();
+      // couvercle et socle
+      x.fillStyle = mix(p.abatjour, '#000000', 0.25); x.beginPath(); x.ellipse(o[0], top[1], rx, ry, 0, 0, TAU); x.fill();
+      x.fillStyle = mix(p.abatjour, '#ffffff', 0.08); x.beginPath(); x.ellipse(o[0], top[1] - ry * 0.4, rx * 0.35, ry * 0.4, 0, 0, TAU); x.fill();
+      x.strokeStyle = mix(p.abatjour, '#000000', 0.5); x.lineWidth = Math.max(1, rx * 0.05); x.beginPath(); x.ellipse(o[0], bot[1], rx, ry, 0, 0, Math.PI); x.stroke();
+    }
+
+    app.loop((t, dt) => {
+      dt = Math.min(1 / 20, dt || 0);
+      const { w, h, dpr } = app.size; buildLogo();
+      const key = [w, h, p.motif, p.trous, p.taille, p.couleurs.length, app.seed, logoKey].join('|'); if (!S || key !== gKey) { gKey = key; build(w, h); }
+      if (app.thumbnail) S.rot = 0.6;
+      else if (!S.grab) { const base = p.vitesse * 0.9; S.om += (base - S.om) * Math.min(1, dt * 0.8); S.rot += S.om * dt; }
+      simT += dt;
+      ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.fillStyle = '#000'; ctx.fillRect(0, 0, canvas.width, canvas.height); ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      room(ctx);
+      const P = patches(), lay = lightLayer(dpr, P);
+      ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.drawImage(lay, 0, 0, canvas.width, canvas.height); ctx.restore();
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      lantern(ctx);
+      app.finish(ctx);
+    });
+
+    // ——— SVG ———
+    function toSVG() {
+      const { w, h } = app.size, f = (v) => +v.toFixed(1), amb = 0.12 + p.ambiance * 0.6, pd = (poly) => poly.map((q, k) => (k ? 'L' : 'M') + f(q[0]) + ' ' + f(q[1])).join('') + 'Z';
+      let o = `<rect width="100%" height="100%" fill="#000000"/>`;
+      for (const P of PLANES) { let c = P.id === 'sol' ? p.sol : p.murs; c = mix(c, '#000000', P.id === 'fond' ? 0.15 * (1 - amb) : P.id === 'plafond' ? 0.45 * (1 - amb) : 0.3 * (1 - amb)); o += `<path d="${pd(planePoly(P))}" fill="${c}"/>`; }
+      let defs = ''; PLANES.forEach((P, i) => { defs += `<clipPath id="p${i}"><path d="${pd(planePoly(P))}"/></clipPath>`; });
+      const Pt = patches();
+      PLANES.forEach((P, i) => { const L = Pt.filter((q) => q.P === P); if (!L.length) return; o += `<g clip-path="url(#p${i})" style="mix-blend-mode:screen">`; for (const q of L) o += `<path d="${q.loops.map(pd).join('')}" fill="${q.col}" fill-opacity="${f(q.a * 0.95)}" fill-rule="evenodd"/>`; o += '</g>'; });
+      const c0 = scr(0, 0, 0), top = scr(0, HL, 0), bot = scr(0, -HL, 0), rx = S.f * RL / CAM, ry = rx * 0.22, ceil = scr(0, CE, 0);
+      o += `<line x1="${f(ceil[0])}" y1="${f(ceil[1])}" x2="${f(top[0])}" y2="${f(top[1] - ry * 1.5)}" stroke="${mix(p.abatjour, '#ffffff', 0.3)}" stroke-width="1"/>`;
+      o += `<path d="M${f(c0[0] - rx)} ${f(top[1])}L${f(c0[0] - rx)} ${f(bot[1])}A${f(rx)} ${f(ry)} 0 0 0 ${f(c0[0] + rx)} ${f(bot[1])}L${f(c0[0] + rx)} ${f(top[1])}Z" fill="${p.abatjour}"/>`;
+      for (const H of S.holes) { const ph = H.phi + S.rot; if (Math.cos(ph) > 0.05) continue; let d = ''; for (const L of H.loops) d += L.map((q, k) => { const a = ph + q[0] * H.sz / RL; return (k ? 'L' : 'M') + f(c0[0] + Math.sin(a) * rx) + ' ' + f(c0[1] - (H.z - q[1] * H.sz) / HL * (c0[1] - top[1])); }).join('') + 'Z'; o += `<path d="${d}" fill="${mix(gel(H.c), '#ffffff', 0.55)}" fill-opacity="${f(Math.min(1, -Math.cos(ph) * 1.4))}" fill-rule="evenodd"/>`; }
+      o += `<ellipse cx="${f(c0[0])}" cy="${f(top[1])}" rx="${f(rx)}" ry="${f(ry)}" fill="${mix(p.abatjour, '#000000', 0.25)}"/>`;
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><defs>${defs}</defs>${o}</svg>`;
+    }
+  </script>
+</body>
+</html>
