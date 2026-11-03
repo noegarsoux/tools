@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Métronomes</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Métronomes : chaque métronome a une phase θ qui avance à sa propre vitesse ω (un peu différente des autres).
+    // Ils sont posés sur une planche commune qui recule quand les bras penchent : c'est ce qui les couple
+    // (modèle de Kuramoto, dθᵢ/dt = ωᵢ + K·r·sin(ψ − θᵢ − φᵢ)). Au fil du temps ils s'accordent. φᵢ vaut π pour les
+    // métronomes du logo : une fois synchronisés, ils battent à contretemps et le logo se lit dans les bras.
+    // L'angle du bras est A·sin θ ; à chaque extrémité, un « tic » s'allume. Le couplage monte doucement après chaque désordre.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const BIEN = PAL('biennale'), MEN = PAL('menthe'), KB = PAL('kegelbahn');
+
+    let simT = 0, G = null, gKey = '', shake = 0, calmT = 0, ptr = null, logoM = null, logoKey = '', R = null;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.03, vignette: 0.12 },
+      hint: 'Cliquez pour désaccorder les métronomes · glissez pour en bousculer · molette : nombre de métronomes',
+      notes: 'Posez une dizaine de métronomes sur une planche qui peut rouler, lancez-les n\'importe comment : en quelques minutes ils battent tous ensemble. Chaque coup de balancier pousse un peu la planche, et la planche, en bougeant, pousse à son tour tous les autres. Le physicien Yoshiki Kuramoto a mis ce phénomène en équation ; on le retrouve dans les lucioles qui clignotent en chœur ou les applaudissements qui se calent. Ici la planche oscille sous vos yeux, les tics s\'allument au bout de chaque battement, et l\'accord gagne peu à peu. Les métronomes du logo, eux, s\'accordent à contretemps : une fois l\'ordre installé, le logo apparaît dans le mouvement des bras. Un clic remet le désordre.',
+      params: {
+        'Métronomes': {
+          colonnes: { type: 'range', label: 'Par rangée', min: 3, max: 30, step: 1, value: 12 },
+          tempo: { type: 'range', label: 'Tempo (battements/min)', min: 30, max: 200, step: 1, value: 92 },
+          dispersion: { type: 'range', label: 'Écart de tempo', min: 0, max: 0.3, step: 0.005, value: 0.06 },
+          amplitude: { type: 'range', label: 'Amplitude', min: 0.15, max: 0.9, step: 0.01, value: 0.55 },
+          forme: { type: 'select', label: 'Boîtier', options: { pyramide: 'Pyramide', borne: 'Borne', aucun: 'Aucun' }, value: 'pyramide' },
+        },
+        'Accord': {
+          couplage: { type: 'range', label: 'Couplage', min: 0, max: 3, step: 0.01, value: 0.7 },
+          montee: { type: 'range', label: 'Montée du couplage (s)', min: 0, max: 40, step: 0.5, value: 10 },
+          planche: { type: 'range', label: 'Mouvement de la planche', min: 0, max: 1, step: 0.01, value: 0.5 },
+          desordre: { type: 'range', label: 'Désordre auto (s, 0 = jamais)', min: 0, max: 90, step: 1, value: 40 },
+        },
+        'Logo à contretemps': {
+          logo: { type: 'toggle', label: 'Inclure le logo', value: false },
+          tailleLogo: { type: 'range', label: 'Taille du logo', min: 0.3, max: 1, step: 0.01, value: 0.85, show: (q) => q.logo },
+          image: { type: 'file', label: 'Logo', accept: 'image/*', show: (q) => q.logo },
+        },
+        'Couleurs': {
+          fond: { type: 'color', label: 'Fond', value: '#efe9df' },
+          corps: { type: 'color', label: 'Boîtiers', value: '#3b2a22' },
+          bras: { type: 'color', label: 'Bras', value: '#d8c7a6' },
+          couleurs: { type: 'palette', label: 'Poids', value: ['#e5452a', '#f2b0c8', '#f2e640'] },
+          accent: { type: 'color', label: 'Logo et tics', value: '#2f5fd0' },
+        },
+      },
+      presets: {
+        'Atelier': {},
+        'Cent métronomes': { colonnes: 16, dispersion: 0.1, couplage: 0.5, montee: 20 },
+        'Lent': { tempo: 48, colonnes: 7, amplitude: 0.7, couplage: 0.4 },
+        'Rapide': { tempo: 176, colonnes: 14, amplitude: 0.35, couplage: 1.2 },
+        'Chaos': { couplage: 0, dispersion: 0.25, colonnes: 18, desordre: 0 },
+        'Bras nus': { forme: 'aucun', colonnes: 26, amplitude: 0.6, fond: '#121318', bras: '#f4f1ea', couleurs: ['#f4f1ea'], accent: '#ef5a2f' },
+        'Logo': { logo: true, colonnes: 24, forme: 'aucun', amplitude: 0.45, couplage: 1.4, montee: 6, dispersion: 0.03, fond: '#121318', bras: '#6b6f7a', couleurs: ['#c9ccd4'], accent: '#ef5a2f' },
+        'Biennale': { fond: BIEN[0], corps: BIEN[1], bras: '#bbbbbb', couleurs: [BIEN[2], BIEN[3], BIEN[4]], accent: BIEN[2] },
+        'Menthe': { fond: MEN[0], corps: MEN[3], bras: MEN[1], couleurs: [MEN[2], MEN[1]], accent: MEN[1], forme: 'borne' },
+        'Kegelbahn': { fond: KB[0], corps: '#1d1a22', bras: KB[3], couleurs: KB.slice(1), accent: KB[1], forme: 'borne', colonnes: 14 },
+      },
+      brand(colors) {
+        const s = colors.slice().sort((a, b) => lum(a) - lum(b)), L = s[s.length - 1], D = s[0];
+        return { fond: L, corps: D, bras: mix(L, D, 0.3), couleurs: s.length > 2 ? s.slice(1, -1) : [mix(L, D, 0.5)], accent: s[Math.floor(s.length / 2)] };
+      },
+      pointer: {
+        down: (q) => { ptr = { x: q.x, y: q.y, moved: 0 }; },
+        drag: (q) => { if (!ptr) return; ptr.moved += Math.hypot(q.x - ptr.x, q.y - ptr.y); ptr.x = q.x; ptr.y = q.y; bump(q.x, q.y, G ? G.s * 1.2 : 40); },
+        up: () => { if (ptr && ptr.moved < 6) scatter(); ptr = null; },
+        wheel: (q, dy) => app.set('colonnes', Math.max(3, Math.min(30, p.colonnes + (dy > 0 ? 1 : -1)))),
+      },
+      onChange(k) { if (['*', 'logo', 'image'].includes(k)) logoKey = ''; },
+      export: { name: 'metronomes', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    function hex(x) { const n = parseInt(x.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
+    function lum(x) { const c = hex(x); return (c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114) / 255; }
+    function mix(a, b, t) { const A = hex(a), C = hex(b); return '#' + A.map((v, i) => Math.round(v + (C[i] - v) * t).toString(16).padStart(2, '0')).join(''); }
+    function rng(s) { let a = s >>> 0; return () => { a = (a + 0x6d2b79f5) >>> 0; let t = a; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+
+    // ——— Logo ———
+    function buildLogo() {
+      const img0 = p.image || app.logoImg, key = [p.logo, img0 ? (img0.src || 'c') : 'demo'].join(); if (key === logoKey) return; logoKey = key; gKey = '';
+      const M = 200, c = document.createElement('canvas'); c.width = c.height = M; const x = c.getContext('2d', { willReadFrequently: true }), L = M * 0.94, cx = M / 2;
+      if (img0) { const iw = img0.naturalWidth || img0.width, ih = img0.naturalHeight || img0.height, s = L / Math.max(iw, ih); x.drawImage(img0, cx - iw * s / 2, cx - ih * s / 2, iw * s, ih * s); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(cx, cx, L * 0.48, 0, TAU); x.arc(cx, cx, L * 0.27, 0, TAU, true); x.fill('evenodd'); x.fillRect(cx - L * 0.07, cx - L * 0.5, L * 0.14, L); }
+      const d = x.getImageData(0, 0, M, M).data; let transp = 0; for (let i = 3; i < d.length; i += 4) if (d[i] < 128) transp++; const useA = transp > M * M * 0.05;
+      const m = new Uint8Array(M * M); for (let i = 0; i < M * M; i++) { const o = i * 4, l = (d[o] * 0.2126 + d[o + 1] * 0.7152 + d[o + 2] * 0.0722) / 255; m[i] = (useA ? d[o + 3] > 128 : d[o + 3] > 128 && l < 0.5) ? 1 : 0; }
+      logoM = { m, M };
+    }
+
+    // ——— Grille ———
+    function grid(w, h) {
+      buildLogo();
+      const key = [p.colonnes, p.forme, p.logo, p.tailleLogo, logoKey, app.seed, w, h].join(); if (key === gKey && G) return G; gKey = key;
+      R = rng(app.seed * 6007 + 1);
+      const nx = p.colonnes, s = w / (nx + 0.6), rowH = s * (p.forme === 'aucun' ? 1.15 : 1.5), ny = Math.max(1, Math.floor((h - s * 0.4) / rowH)), oy = (h - ny * rowH) / 2, S = Math.min(w, h) * p.tailleLogo;
+      const list = [];
+      for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+        const x = (i + 0.8) * s, base = oy + (j + 1) * rowH - s * 0.12, cy = base - rowH * 0.45;
+        let lg = 0; if (p.logo && logoM) { const u = Math.floor(((x - w / 2) / S + 0.5) * logoM.M), v = Math.floor(((cy - h / 2) / S + 0.5) * logoM.M); lg = u >= 0 && v >= 0 && u < logoM.M && v < logoM.M && logoM.m[v * logoM.M + u] ? 1 : 0; }
+        list.push({ i, j, x, base, th: R() * TAU, dw: (R() - 0.5) * 2, lg, tick: -9, side: 0, col: (p.couleurs.length ? p.couleurs : ['#888'])[Math.floor(R() * Math.max(1, p.couleurs.length))], ci: R() });
+      }
+      G = { nx, ny, s, rowH, list, shelf: new Float32Array(ny), shelfV: new Float32Array(ny) };
+      calmT = simT;
+      return G;
+    }
+    function scatter() { if (!G) return; for (const M of G.list) M.th = R() * TAU; calmT = simT; shake = 1; }
+    function bump(x, y, r) { if (!G) return; for (const M of G.list) { const d = Math.hypot(M.x - x, M.base - G.rowH * 0.4 - y); if (d < r) M.th += (R() - 0.5) * 2.5 * (1 - d / r); } calmT = Math.max(calmT, simT - p.montee * 0.5); }
+
+    function step(t, dt) {
+      const L = G.list, N = L.length, w0 = (p.tempo / 60) * Math.PI, K = p.couplage * Math.min(1, p.montee > 0 ? (t - calmT) / p.montee : 1);
+      if (p.desordre > 0 && t - calmT > p.desordre + p.montee) scatter();
+      // paramètre d'ordre par rangée (chaque rangée a sa planche) et global ; la phase du logo est décalée de π
+      const C = new Float32Array(G.ny), S = new Float32Array(G.ny), cnt = new Float32Array(G.ny); let Cg = 0, Sg = 0;
+      for (const M of L) { const a = M.th - (M.lg ? Math.PI : 0); C[M.j] += Math.cos(a); S[M.j] += Math.sin(a); cnt[M.j]++; Cg += Math.cos(a); Sg += Math.sin(a); }
+      for (const M of L) {
+        const c = (C[M.j] / cnt[M.j]) * 0.7 + (Cg / N) * 0.3, s = (S[M.j] / cnt[M.j]) * 0.7 + (Sg / N) * 0.3, a = M.th - (M.lg ? Math.PI : 0);
+        const prev = Math.sin(M.th);
+        M.th += (w0 * (1 + p.dispersion * M.dw) + K * (s * Math.cos(a) - c * Math.sin(a)) * w0 * 0.6) * dt;
+        const now = Math.sin(M.th);
+        // tic : au passage par le milieu de chaque battement
+        if ((prev < 0) !== (now < 0)) { M.tick = t; M.side = now > 0 ? 1 : -1; }
+      }
+      // planches : elles reculent quand la rangée penche (moyenne des sinus), avec un peu d'inertie
+      for (let j = 0; j < G.ny; j++) { let sm = 0; for (let i = 0; i < G.nx; i++) { const M = L[j * G.nx + i]; sm += Math.sin(M.th); } const target = -(sm / G.nx) * p.planche * G.s * 0.25; G.shelfV[j] += ((target - G.shelf[j]) * 60 - G.shelfV[j] * 10) * dt; G.shelf[j] += G.shelfV[j] * dt; }
+      shake = Math.max(0, shake - dt * 2);
+    }
+
+    // ——— Dessin ———
+    function render(pen, w, h, t) {
+      const { s, rowH, list, shelf } = G, A = p.amplitude, armL = rowH * (p.forme === 'aucun' ? 0.78 : 0.72), lw = Math.max(1, s * 0.05);
+      pen.bg(p.fond);
+      const shelves = [], bodies = [], slots = [], arms = [], armsL = [], weights = new Map(), ticks = [];
+      for (let j = 0; j < G.ny; j++) { const y = list[j * G.nx].base; shelves.push([s * 0.2 + shelf[j], y, w - s * 0.4, s * 0.12]); }
+      for (const M of list) {
+        const x = M.x + shelf[M.j], y = M.base, bw = s * 0.62, bh = rowH * 0.78, piv = [x, y - bh * 0.12];
+        if (p.forme === 'pyramide') { bodies.push([[x - bw / 2, y], [x + bw / 2, y], [x + bw * 0.17, y - bh], [x - bw * 0.17, y - bh]]); slots.push([[x - bw * 0.07, y - bh * 0.1], [x + bw * 0.07, y - bh * 0.1], [x + bw * 0.05, y - bh * 0.85], [x - bw * 0.05, y - bh * 0.85]]); }
+        else if (p.forme === 'borne') { const r = bw * 0.36; const pts = [[x - bw * 0.42, y], [x + bw * 0.42, y]]; for (let k = 0; k <= 10; k++) { const a = (k / 10) * Math.PI; pts.push([x + Math.cos(a) * r, y - bh + r - Math.sin(a) * r]); } bodies.push(pts); }
+        const ang = A * Math.sin(M.th), tx = piv[0] + Math.sin(ang) * armL, ty = piv[1] - Math.cos(ang) * armL;
+        (M.lg && p.logo ? armsL : arms).push([piv[0], piv[1], tx, ty]);
+        const wp = 0.62, wx = piv[0] + Math.sin(ang) * armL * wp, wy = piv[1] - Math.cos(ang) * armL * wp, ws = s * 0.16, ca = Math.cos(ang), sa = Math.sin(ang);
+        const quad = [[-ws, -ws * 0.6], [ws, -ws * 0.6], [ws * 0.7, ws * 0.6], [-ws * 0.7, ws * 0.6]].map(([u, v]) => [wx + u * ca - v * sa, wy + u * sa + v * ca]);
+        const wc = M.lg && p.logo ? p.accent : M.col; let L = weights.get(wc); if (!L) weights.set(wc, (L = [])); L.push(quad);
+        const age = t - M.tick; if (age < 0.18) ticks.push([x + M.side * bw * 0.32, y - bh * 1.02, s * 0.06 * (1 - age / 0.18)]);
+      }
+      pen.rects(shelves, mix(p.corps, p.fond, 0.35));
+      if (bodies.length) pen.polys(bodies, p.corps);
+      if (slots.length) pen.polys(slots, mix(p.corps, '#000000', 0.35));
+      pen.lines(arms, p.bras, lw);
+      pen.lines(armsL, p.accent, lw * 1.3);
+      for (const [c, L] of weights) pen.polys(L, c);
+      pen.dots(ticks, p.accent);
+    }
+
+    app.loop((t, dt) => {
+      dt = Math.min(1 / 30, dt || 0);
+      const { w, h, dpr } = app.size; grid(w, h);
+      if (app.thumbnail) { simT = 0; calmT = 0; R = rng(app.seed * 6007 + 1); for (const M of G.list) M.th = R() * TAU; for (let k = 0; k < 900; k++) { simT = k / 60; step(simT, 1 / 60); } }
+      else { simT += dt; const n = 2; for (let k = 0; k < n; k++) step(simT, dt / n); }
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      render({
+        bg(c) { ctx.fillStyle = c; ctx.fillRect(0, 0, w, h); },
+        rects(L, c) { ctx.fillStyle = c; for (const r of L) ctx.fillRect(r[0], r[1], r[2], r[3]); },
+        polys(L, c) { const P = new Path2D(); for (const pts of L) { P.moveTo(pts[0][0], pts[0][1]); for (let k = 1; k < pts.length; k++) P.lineTo(pts[k][0], pts[k][1]); P.closePath(); } ctx.fillStyle = c; ctx.fill(P); },
+        lines(L, c, lw) { if (!L.length) return; const P = new Path2D(); for (const l of L) { P.moveTo(l[0], l[1]); P.lineTo(l[2], l[3]); } ctx.strokeStyle = c; ctx.lineWidth = lw; ctx.lineCap = 'round'; ctx.stroke(P); },
+        dots(L, c) { if (!L.length) return; const P = new Path2D(); for (const d of L) { P.moveTo(d[0] + d[2], d[1]); P.arc(d[0], d[1], d[2], 0, TAU); } ctx.fillStyle = c; ctx.fill(P); },
+      }, w, h, simT);
+      app.finish(ctx);
+    });
+
+    function toSVG() {
+      const { w, h } = app.size, f = (v) => +v.toFixed(2); grid(w, h);
+      let s = `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">`;
+      render({
+        bg(c) { s += `<rect width="100%" height="100%" fill="${c}"/>`; },
+        rects(L, c) { s += `<g fill="${c}">` + L.map((r) => `<rect x="${f(r[0])}" y="${f(r[1])}" width="${f(r[2])}" height="${f(r[3])}"/>`).join('') + '</g>'; },
+        polys(L, c) { s += `<path d="${L.map((pts) => 'M' + pts.map((q) => f(q[0]) + ' ' + f(q[1])).join('L') + 'Z').join('')}" fill="${c}"/>`; },
+        lines(L, c, lw) { if (L.length) s += `<path d="${L.map((l) => `M${f(l[0])} ${f(l[1])}L${f(l[2])} ${f(l[3])}`).join('')}" stroke="${c}" stroke-width="${f(lw)}" stroke-linecap="round" fill="none"/>`; },
+        dots(L, c) { if (L.length) s += `<g fill="${c}">` + L.map((d) => `<circle cx="${f(d[0])}" cy="${f(d[1])}" r="${f(d[2])}"/>`).join('') + '</g>'; },
+      }, w, h, simT);
+      return s + '</svg>';
+    }
+  </script>
+</body>
+</html>
