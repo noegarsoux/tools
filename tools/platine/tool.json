@@ -1,0 +1,15 @@
+{
+  "slug": "platine",
+  "title": "Platine",
+  "type": "motion",
+  "description": "Un vinyle tourne sur sa platine, étiquette au logo : reflets fixes dans les sillons, bras qui avance de plage en plage, scratch au doigt et vinyles marbrés.",
+  "tags": ["objet", "rotation", "musique", "interaction", "logo", "svg"],
+  "inspiration": [
+    "Les platines tourne-disques et leur bras en S",
+    "Les pinceaux de lumière immobiles sur un disque qui tourne",
+    "Les vinyles colorés, marbrés ou éclaboussés, et les picture discs"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}
