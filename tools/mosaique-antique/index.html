@@ -1,0 +1,250 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mosaïque antique</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Mosaïque antique : le mosaïste romain pose d'abord une rangée de tesselles le long des contours de son dessin,
+    // puis des rangées parallèles qui s'en éloignent (l'« andamento »). On reproduit ce geste : les régions (logo,
+    // cercles, vagues, cadre) donnent des bords ; une transformée de distance mesure l'éloignement à ces bords ;
+    // ses courbes de niveau, espacées d'une tesselle, deviennent les rangées. On pose une tesselle carrée tous les
+    // côtés le long de chaque rangée, orientée selon la courbe, en évitant celles qui se chevauchent.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const BIEN = PAL('biennale'), MEN = PAL('menthe'), KB = PAL('kegelbahn');
+
+    let simT = 0, M = null, mKey = '', poseT = 0, userC = [], logoM = null, logoKey = '';
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.04, vignette: 0.12 },
+      hint: 'Cliquez pour ajouter un cercle · molette : taille des tesselles',
+      notes: 'Dans l\'opus vermiculatum, la technique la plus fine des mosaïques romaines, les tesselles ne sont pas posées en grille : elles suivent les contours du dessin, rang après rang, comme les lignes d\'une empreinte digitale. Ce cheminement, que les Italiens appellent « andamento », donne aux figures leur vibration ; on le voit dans les pavements de Pompéi comme dans les voûtes de Ravenne. En 2001, Alejo Hausner a proposé de le simuler à partir d\'une carte des distances aux contours. Cet outil en suit le principe : chaque courbe de niveau de la distance devient une rangée, chaque rangée reçoit ses tesselles taillées un peu de travers, et la pose avance depuis les contours vers le fond. Une lumière rasante passe ensuite sur les pierres.',
+      params: {
+        'Tesselles': {
+          tesselle: { type: 'range', label: 'Taille des tesselles', min: 0.008, max: 0.04, step: 0.001, value: 0.016 },
+          joint: { type: 'range', label: 'Joint', min: 0, max: 0.4, step: 0.01, value: 0.14 },
+          irregularite: { type: 'range', label: 'Taille irrégulière', min: 0, max: 0.5, step: 0.01, value: 0.22 },
+          nuances: { type: 'range', label: 'Nuances des pierres', min: 0, max: 0.4, step: 0.01, value: 0.12 },
+        },
+        'Dessin': {
+          motif: { type: 'segmented', label: 'Motif', options: { aucun: 'Aucun', cercles: 'Cercles', vagues: 'Vagues' }, value: 'cercles' },
+          nombre: { type: 'range', label: 'Nombre de cercles ou de vagues', min: 1, max: 9, step: 1, value: 4 },
+          cadre: { type: 'toggle', label: 'Bordure', value: true },
+        },
+        'Pose et lumière': {
+          pose: { type: 'range', label: 'Durée de la pose (s)', min: 0.5, max: 20, step: 0.5, value: 6 },
+          reflet: { type: 'range', label: 'Lumière rasante', min: 0, max: 1, step: 0.01, value: 0.5 },
+          vitesse: { type: 'range', label: 'Vitesse de la lumière', min: 0, max: 2, step: 0.01, value: 0.5 },
+        },
+        'Logo en mosaïque': {
+          logo: { type: 'toggle', label: 'Dessiner le logo', value: false },
+          tailleLogo: { type: 'range', label: 'Taille du logo', min: 0.3, max: 1.8, step: 0.01, value: 1.2, show: (q) => q.logo },
+          image: { type: 'file', label: 'Logo', accept: 'image/*', show: (q) => q.logo },
+        },
+        'Couleurs': {
+          fond: { type: 'color', label: 'Joint', value: '#d9d0bd' },
+          couleurs: { type: 'palette', label: 'Pierres', value: ['#e9dfc8', '#b5452b', '#2c3566', '#d9a441', '#3b2a20'] },
+          accent: { type: 'color', label: 'Logo', value: '#2c3566', show: (q) => q.logo },
+        },
+      },
+      presets: {
+        'Pompéi': {},
+        'Ravenne': { couleurs: ['#1d3f8f', '#d9a441', '#0f1c40', '#f2e3b0', '#2f6b4f'], fond: '#a68b4f', motif: 'cercles', nombre: 6 },
+        'Vagues': { motif: 'vagues', nombre: 5, couleurs: ['#e8eef7', '#1d3f8f', '#9fbfe6', '#486cfc'], fond: '#c9cdd3' },
+        'Grosses pierres': { tesselle: 0.032, irregularite: 0.35, joint: 0.2, nombre: 3 },
+        'Fines': { tesselle: 0.009, joint: 0.1, nombre: 5, motif: 'cercles' },
+        'Cadre seul': { motif: 'aucun', cadre: true, nuances: 0.6, joint: 0.2, couleurs: ['#e9dfc8', '#b5452b', '#3b2a20'] },
+        'Logo': { logo: true, motif: 'aucun', cadre: true, couleurs: ['#e9dfc8', '#d6cbb2'], accent: '#b5452b', tesselle: 0.013 },
+        'Biennale': { fond: '#cfc9bd', couleurs: [BIEN[0], BIEN[2], BIEN[1], BIEN[3], BIEN[4]], nombre: 5 },
+        'Menthe': { fond: MEN[1], couleurs: [MEN[0], MEN[3], MEN[2]], motif: 'vagues', nombre: 4 },
+        'Kegelbahn': { fond: '#1a1a1a', couleurs: [KB[0], KB[1], KB[2], KB[3]], nombre: 5, joint: 0.18 },
+      },
+      brand(colors) {
+        const s = colors.slice().sort((a, b) => lum(a) - lum(b)), L = s[s.length - 1];
+        return { fond: mix(L, s[0], 0.25), couleurs: [L, ...s.slice(0, -1)], accent: s[Math.floor(s.length / 2)] };
+      },
+      pointer: {
+        down: (q) => { userC.push({ x: q.x, y: q.y, r: Math.min(app.size.w, app.size.h) * (0.1 + Math.random() * 0.15) }); if (userC.length > 6) userC.shift(); mKey = ''; },
+        wheel: (q, dy) => app.set('tesselle', Math.max(0.008, Math.min(0.04, +(p.tesselle * (dy > 0 ? 1 / 1.08 : 1.08)).toFixed(3)))),
+      },
+      onChange(k) { if (['*', 'logo', 'image'].includes(k)) logoKey = ''; if (k === '*') userC = []; },
+      export: { name: 'mosaique-antique', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    function hex(x) { const n = parseInt(x.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
+    function lum(x) { const c = hex(x); return (c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114) / 255; }
+    function mix(a, b, t) { const A = hex(a), B = hex(b); return '#' + A.map((v, i) => Math.round(v + (B[i] - v) * t).toString(16).padStart(2, '0')).join(''); }
+
+    // ——— Logo ———
+    function buildLogo() {
+      const img0 = p.image || app.logoImg, key = [p.logo, img0 ? (img0.src || 'c') : 'demo'].join(); if (key === logoKey) return; logoKey = key; mKey = '';
+      logoM = null; if (!p.logo) return;
+      const N = 200, c = document.createElement('canvas'); c.width = c.height = N; const x = c.getContext('2d', { willReadFrequently: true }), L = N * 0.94, cx = N / 2;
+      if (img0) { const iw = img0.naturalWidth || img0.width, ih = img0.naturalHeight || img0.height, s = L / Math.max(iw, ih); x.drawImage(img0, cx - iw * s / 2, cx - ih * s / 2, iw * s, ih * s); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(cx, cx, L * 0.48, 0, TAU); x.arc(cx, cx, L * 0.27, 0, TAU, true); x.fill('evenodd'); x.fillRect(cx - L * 0.07, cx - L * 0.5, L * 0.14, L); }
+      const d = x.getImageData(0, 0, N, N).data; let transp = 0; for (let i = 3; i < d.length; i += 4) if (d[i] < 128) transp++; const useA = transp > N * N * 0.05;
+      const m = new Uint8Array(N * N); for (let i = 0; i < N * N; i++) { const o = i * 4, l = (d[o] * 0.2126 + d[o + 1] * 0.7152 + d[o + 2] * 0.0722) / 255; m[i] = (useA ? d[o + 3] > 128 : d[o + 3] > 128 && l < 0.5) ? 1 : 0; }
+      logoM = { m, M: N };
+    }
+    function inLogo(X, Y, w, h) {
+      if (!logoM || !p.logo) return false; const S = Math.min(w, h) * 0.5 * p.tailleLogo, u = Math.floor(((X - w / 2) / S * 0.5 + 0.5) * logoM.M), v = Math.floor(((Y - h / 2) / S * 0.5 + 0.5) * logoM.M);
+      return u >= 0 && v >= 0 && u < logoM.M && v < logoM.M && logoM.m[v * logoM.M + u] === 1;
+    }
+
+    // ——— Régions du dessin ———
+    function circles(w, h) {
+      const R = app.rng(), m = Math.min(w, h), out = [];
+      for (let i = 0; i < p.nombre; i++) out.push({ x: w * (0.15 + R() * 0.7), y: h * (0.15 + R() * 0.7), r: m * (0.1 + R() * 0.28) });
+      return out.concat(userC);
+    }
+    function regionFn(w, h) {
+      const C = p.motif === 'cercles' ? circles(w, h) : userC, m = Math.min(w, h), R = app.rng(), ph = R() * TAU, k = 1.5 + R() * 2;
+      return (x, y) => {
+        if (inLogo(x, y, w, h)) return -1;
+        let id = 0;
+        if (p.motif === 'vagues') { const band = h / (p.nombre + 1); id = Math.floor((y + Math.sin(x / m * k * Math.PI + ph) * band * 0.45) / band) + 1; }
+        for (const c of C) if ((x - c.x) ** 2 + (y - c.y) ** 2 < c.r * c.r) id += 1 + (p.motif === 'vagues' ? 3 : 0);
+        return id;
+      };
+    }
+
+    // ——— Rangées : distance aux bords, courbes de niveau, tesselles ———
+    function build(w, h) {
+      buildLogo();
+      const key = [p.tesselle, p.irregularite, p.motif, p.nombre, p.cadre, app.seed, w, h, logoKey, p.tailleLogo, userC.length].join(); if (key === mKey && M) return M; mKey = key; poseT = simT;
+      const m = Math.min(w, h), cs = Math.max(w, h) / 300, GW = Math.ceil(w / cs) + 1, GH = Math.ceil(h / cs) + 1, reg = regionFn(w, h), Rg = new Int16Array(GW * GH);
+      for (let j = 0; j < GH; j++) for (let i = 0; i < GW; i++) Rg[j * GW + i] = reg(i * cs, j * cs);
+      // transformée de distance (chanfrein 3-4) depuis les bords de régions et le cadre
+      const D = new Float32Array(GW * GH).fill(1e9);
+      for (let j = 0; j < GH; j++) for (let i = 0; i < GW; i++) {
+        const o = j * GW + i, r = Rg[o];
+        if ((p.cadre && (i === 0 || j === 0 || i === GW - 1 || j === GH - 1)) || (i > 0 && Rg[o - 1] !== r) || (j > 0 && Rg[o - GW] !== r) || (i < GW - 1 && Rg[o + 1] !== r) || (j < GH - 1 && Rg[o + GW] !== r)) D[o] = 0;
+      }
+      let any = false; for (let i = 0; i < D.length; i++) if (D[i] === 0) { any = true; break; }
+      if (!any) D[Math.floor(GH / 2) * GW + Math.floor(GW / 2)] = 0;
+      for (let j = 0; j < GH; j++) for (let i = 0; i < GW; i++) { const o = j * GW + i; let d = D[o]; if (i > 0) d = Math.min(d, D[o - 1] + 1); if (j > 0) { d = Math.min(d, D[o - GW] + 1); if (i > 0) d = Math.min(d, D[o - GW - 1] + 1.414); if (i < GW - 1) d = Math.min(d, D[o - GW + 1] + 1.414); } D[o] = d; }
+      for (let j = GH - 1; j >= 0; j--) for (let i = GW - 1; i >= 0; i--) { const o = j * GW + i; let d = D[o]; if (i < GW - 1) d = Math.min(d, D[o + 1] + 1); if (j < GH - 1) { d = Math.min(d, D[o + GW] + 1); if (i < GW - 1) d = Math.min(d, D[o + GW + 1] + 1.414); if (i > 0) d = Math.min(d, D[o + GW - 1] + 1.414); } D[o] = d; }
+      const ts = p.tesselle * m, step = ts / cs, tiles = [], R = app.rng(), hash = new Map(), cellK = (x, y) => Math.floor(x / ts) * 7919 + Math.floor(y / ts);
+      const free = (x, y, r) => { const ci = Math.floor(x / ts), cj = Math.floor(y / ts); for (let b = -1; b <= 1; b++) for (let a = -1; a <= 1; a++) { const L = hash.get((ci + a) * 7919 + cj + b); if (L) for (const q of L) if ((q.x - x) ** 2 + (q.y - y) ** 2 < r * r) return false; } return true; };
+      let maxD = 0; for (const d of D) if (d > maxD && d < 1e8) maxD = d;
+      for (let k = 0; (k + 0.5) * step < maxD; k++) {
+        const lv = (k + 0.5) * step;
+        for (const loop of contour(D, GW, GH, lv)) {
+          // pose le long de la rangée, une tesselle par longueur de côté
+          let acc = ts * 0.5 * R();
+          for (let i = 1; i < loop.length; i++) {
+            const a = loop[i - 1], b = loop[i], L = Math.hypot(b[0] - a[0], b[1] - a[1]) * cs; if (!L) continue;
+            let s = acc; const ang = Math.atan2(b[1] - a[1], b[0] - a[0]);
+            while (s < L) {
+              const t = s / L, x = (a[0] + (b[0] - a[0]) * t) * cs, y = (a[1] + (b[1] - a[1]) * t) * cs, sz = ts * (1 - p.irregularite * R() * 0.6);
+              if (x > -ts && y > -ts && x < w + ts && y < h + ts && free(x, y, ts * 0.78)) {
+                const gi = Math.min(GW - 1, Math.max(0, Math.round(x / cs))), gj = Math.min(GH - 1, Math.max(0, Math.round(y / cs))), rid = Rg[gj * GW + gi];
+                const fk = p.cadre ? Math.floor(Math.min(x, y, w - x, h - y) / ts) : 9, sh = (R() - 0.5) * 2;
+                const tile = { x, y, a: ang + (R() - 0.5) * 0.12 * (1 + p.irregularite), sz, rid, fk, sh, col: '', o: k + R() * 0.8, j: [R(), R(), R(), R(), R(), R(), R(), R()] };
+                tiles.push(tile); const ck = cellK(x, y); const Lh = hash.get(ck); if (Lh) Lh.push(tile); else hash.set(ck, [tile]);
+              }
+              s += ts * (0.92 + R() * 0.16);
+            }
+            acc = s - L;
+          }
+        }
+      }
+      const levels = Math.ceil(maxD / step);
+      tiles.sort((A, B) => A.o - B.o);
+      M = { tiles, levels, ts, colKey: '' };
+      return M;
+    }
+    function contour(D, GW, GH, lv) {
+      const segs = [];
+      for (let j = 0; j < GH - 1; j++) for (let i = 0; i < GW - 1; i++) {
+        const o = j * GW + i, a = D[o], b = D[o + 1], c = D[o + GW + 1], d = D[o + GW], idx = (a > lv ? 8 : 0) | (b > lv ? 4 : 0) | (c > lv ? 2 : 0) | (d > lv ? 1 : 0);
+        if (idx === 0 || idx === 15) continue; const T = 2 * o, Bm = 2 * (o + GW), Lf = 2 * o + 1, R = 2 * (o + 1) + 1, e = (x, y) => segs.push(x, y);
+        switch (idx) { case 1: case 14: e(Lf, Bm); break; case 2: case 13: e(Bm, R); break; case 3: case 12: e(Lf, R); break; case 4: case 11: e(T, R); break; case 6: case 9: e(T, Bm); break; case 7: case 8: e(Lf, T); break; case 5: e(Lf, T); e(Bm, R); break; case 10: e(T, R); e(Lf, Bm); break; }
+      }
+      const pos = (id) => { const o = id >> 1, i = o % GW, j = (o / GW) | 0; if ((id & 1) === 0) { const a = D[o], b = D[o + 1]; return [i + (lv - a) / (b - a), j]; } const a = D[o], b = D[o + GW]; return [i, j + (lv - a) / (b - a)]; };
+      const adj = new Map(); for (let s = 0; s < segs.length; s += 2) for (const [x, y] of [[segs[s], segs[s + 1]], [segs[s + 1], segs[s]]]) { const L = adj.get(x); if (L) L.push(y); else adj.set(x, [y]); }
+      const seen = new Set(), loops = [];
+      // on commence par les extrémités ouvertes (rangées qui touchent le bord), puis les boucles fermées
+      const starts = [...adj.keys()].sort((a, b) => adj.get(a).length - adj.get(b).length);
+      for (const st of starts) {
+        if (seen.has(st)) continue; const loop = [st]; seen.add(st); let prev = -1, cur = st;
+        for (;;) { const L = adj.get(cur); let nx = -1; for (const q of L) if (q !== prev && !seen.has(q)) { nx = q; break; } if (nx < 0) break; seen.add(nx); loop.push(nx); prev = cur; cur = nx; }
+        if (loop.length > 1) { const P = loop.map(pos); if (adj.get(cur).includes(st) && loop.length > 2) P.push(P[0]); loops.push(P); }
+      }
+      return loops;
+    }
+
+    // forme d'une tesselle : un carré aux coins légèrement déplacés
+    function quad(T, gap) {
+      const s = T.sz * (1 - gap) / 2, c = Math.cos(T.a), n = Math.sin(T.a), J = T.j, q = p.irregularite * 0.35, pts = [];
+      const corners = [[-1, -1], [1, -1], [1, 1], [-1, 1]];
+      for (let k = 0; k < 4; k++) { const u = (corners[k][0] + (J[k * 2] - 0.5) * q) * s, v = (corners[k][1] + (J[k * 2 + 1] - 0.5) * q) * s; pts.push([T.x + u * c - v * n, T.y + u * n + v * c]); }
+      return pts;
+    }
+
+    // couleurs recalculées sans reconstruire les rangées
+    function paint() {
+      const k = [p.couleurs.join(), p.accent, p.nuances].join(); if (M.colKey === k) return; M.colKey = k;
+      const C = p.couleurs.length ? p.couleurs : ['#888888'];
+      for (const T of M.tiles) {
+        const base = T.rid < 0 ? p.accent : (T.fk === 0 || T.fk === 2) && C.length > 1 ? C[T.fk === 0 ? C.length - 1 : 1] : C[((T.rid % C.length) + C.length) % C.length], sh = T.sh * p.nuances;
+        T.col = mix(base, sh > 0 ? '#ffffff' : '#000000', Math.round(Math.abs(sh) * 4) / 4 * 0.5);
+      }
+    }
+    function count(t) {
+      const B = M, prog = app.thumbnail ? 1e9 : ((t - poseT) / Math.max(0.2, p.pose)) * (B.levels + 1);
+      let lo = 0, hi = B.tiles.length; while (lo < hi) { const mid = (lo + hi) >> 1; if (B.tiles[mid].o < prog) lo = mid + 1; else hi = mid; }
+      return lo;
+    }
+    function shown(t) { paint(); return M.tiles.slice(0, count(t)); }
+    // calque des pierres déjà posées, complété au fil de la pose
+    const layer = document.createElement('canvas'), lctx = layer.getContext('2d'); let lKey = '', lN = 0;
+
+    app.loop((t, dt) => {
+      dt = Math.min(0.1, dt || 0);
+      if (!app.thumbnail) simT += dt; else simT = 3;
+      const { w, h, dpr } = app.size; build(w, h);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      paint();
+      const n = count(simT), m = Math.min(w, h), gap = p.joint, k = [M.colKey, gap, p.fond, w, h, dpr, M.tiles.length, mKey].join();
+      if (k !== lKey || n < lN) { lKey = k; lN = 0; layer.width = Math.round(w * dpr); layer.height = Math.round(h * dpr); lctx.setTransform(dpr, 0, 0, dpr, 0, 0); lctx.fillStyle = p.fond; lctx.fillRect(0, 0, w, h); }
+      if (n > lN) {
+        const G = new Map();
+        for (let i = lN; i < n; i++) { const T = M.tiles[i], q = quad(T, gap); let P = G.get(T.col); if (!P) G.set(T.col, (P = new Path2D())); P.moveTo(q[0][0], q[0][1]); P.lineTo(q[1][0], q[1][1]); P.lineTo(q[2][0], q[2][1]); P.lineTo(q[3][0], q[3][1]); P.closePath(); }
+        for (const [col, P] of G) { lctx.fillStyle = col; lctx.fill(P); }
+        lN = n;
+      }
+      ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.drawImage(layer, 0, 0); ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      // lumière rasante : une bande qui traverse la mosaïque, chaque pierre brille selon son inclinaison
+      const glint = [new Path2D(), new Path2D(), new Path2D()];
+      if (p.reflet > 0) for (let i = 0; i < n; i++) {
+        const T = M.tiles[i], ph = ((T.x * 0.7 + T.y * 0.5) / m) * 2.2 - simT * p.vitesse, c = Math.cos(ph * Math.PI); if (c < 0.6) continue;
+        const g = c ** 6 * (0.55 + 0.45 * Math.cos(T.a * 4 + T.j[0] * 3)), b = g > 0.66 ? 2 : g > 0.33 ? 1 : g > 0.12 ? 0 : -1;
+        if (b >= 0) { const q = quad(T, gap), P2 = glint[b]; P2.moveTo(q[0][0], q[0][1]); P2.lineTo(q[1][0], q[1][1]); P2.lineTo(q[2][0], q[2][1]); P2.lineTo(q[3][0], q[3][1]); P2.closePath(); }
+      }
+      if (p.reflet > 0) glint.forEach((P, b) => { ctx.fillStyle = `rgba(255,255,255,${(0.07 + b * 0.07) * p.reflet})`; ctx.fill(P); });
+      app.finish(ctx);
+    });
+
+    function toSVG() {
+      const { w, h } = app.size, f = (v) => +v.toFixed(1); build(w, h);
+      let s = `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><rect width="100%" height="100%" fill="${p.fond}"/>`;
+      const G = new Map(); for (const T of shown(simT)) { const q = quad(T, p.joint); G.set(T.col, (G.get(T.col) || '') + 'M' + q.map((v) => f(v[0]) + ' ' + f(v[1])).join('L') + 'Z'); }
+      for (const [col, d] of G) s += `<path d="${d}" fill="${col}"/>`;
+      return s + '</svg>';
+    }
+  </script>
+</body>
+</html>
