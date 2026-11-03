@@ -1,0 +1,15 @@
+{
+  "slug": "billard",
+  "title": "Billard de lumière",
+  "type": "motion",
+  "description": "Des rayons lancés dans une table close rebondissent sur ses bords : l'ellipse les ramène au foyer, le stade et le champignon les éparpillent en chaos.",
+  "tags": ["mathematiques", "lumiere", "lignes", "geometrie", "logo", "svg"],
+  "inspiration": [
+    "George D. Birkhoff, les billards dynamiques (1927)",
+    "Iakov Sinaï et Leonid Bunimovich, billards dispersifs et stades chaotiques (1970-1979)",
+    "Les miroirs ardents d'Archimède et les foyers de l'ellipse"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}
