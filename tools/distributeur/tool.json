@@ -1,0 +1,15 @@
+{
+  "slug": "distributeur",
+  "title": "Distributeur de boules",
+  "type": "motion",
+  "description": "Un distributeur de boules de gomme aux couleurs de la marque : les billes s’entassent dans le globe, la manivelle en libère une qui roule dans le plateau.",
+  "tags": ["physique", "particules", "objet", "interaction", "logo", "svg"],
+  "inspiration": [
+    "Les distributeurs de chewing-gums à manivelle et leur globe de verre",
+    "Le tas de billes qui se tasse quand on en retire une",
+    "Le socle émaillé et sa plaque de métal"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}
