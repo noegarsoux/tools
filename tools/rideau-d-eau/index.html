@@ -1,0 +1,278 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Rideau d’eau</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Rideau d'eau : une rampe de buses lâche des gouttes ligne par ligne. Pour que l'image tombe sans s'étirer,
+    // la ligne k sort au moment où une image rigide en chute libre passerait la rampe (t_k = √(2ks/g)) avec la
+    // vitesse de cette image (v_k = g·t_k) ; « compensation » mélange ce calage avec une émission naïve, qui
+    // étire l'image vers le bas. Les gouttes s'écrasent dans un bassin (houle 1D + éclaboussures) ; la main
+    // ouvre un passage dans le rideau.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const BIE = PAL('biennale'), LUZ = PAL('luzern'), MEN = PAL('menthe');
+
+    let vKey = '', logoM = null, logoKey = '', ptr = null, hov = null, S = null, gKey = '', simT = 0, bgC = null, bgKey = '';
+    const ORDER = ['logo', 'vagues', 'damier', 'cercles', 'logo', 'diagonales', 'zigzag', 'pluie', 'logo', 'rideau'];
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.03, vignette: 0.25 },
+      hint: 'Passez la main sous la rampe : le rideau s’ouvre · clic : motif suivant · molette : densité des buses',
+      notes: 'Un rideau d’eau numérique : une rampe de buses lâche des gouttes ligne par ligne, et l’eau dessine le logo, des vagues, un damier ou des cercles qui tombent puis s’écrasent dans le bassin. Avec la compensation, chaque ligne part au bon moment et à la bonne vitesse pour que l’image tombe d’un bloc ; sans elle, l’image s’étire en tombant. Passez la main sous la rampe : l’eau s’écarte pour vous laisser passer.',
+      params: {
+        'Rideau': {
+          buses: { type: 'range', label: 'Buses', min: 32, max: 220, step: 1, value: 110 },
+          motif: { type: 'select', label: 'Motif', options: { cycle: 'Enchaînement', logo: 'Logo', vagues: 'Vagues', damier: 'Damier', cercles: 'Cercles', diagonales: 'Diagonales', zigzag: 'Zigzag', pluie: 'Pluie', rideau: 'Rideau plein' }, value: 'cycle' },
+          compensation: { type: 'range', label: 'Compensation', min: 0, max: 1, step: 0.01, value: 1 },
+          chute: { type: 'range', label: 'Durée de chute (s)', min: 0.5, max: 3.5, step: 0.05, value: 1.9 },
+          pause: { type: 'range', label: 'Pause entre motifs (s)', min: 0, max: 3, step: 0.05, value: 0.5 },
+          gouttes: { type: 'range', label: 'Taille des gouttes', min: 0.3, max: 1.5, step: 0.01, value: 0.7 },
+        },
+        'Lumière': {
+          couleurs: { type: 'palette', label: 'Éclairage', value: ['#2f5fd0', '#9dd3f0', '#f4f1ea'] },
+          defile: { type: 'range', label: 'Défilement des couleurs', min: 0, max: 1, step: 0.01, value: 0.2 },
+          halo: { type: 'range', label: 'Halo', min: 0, max: 1, step: 0.01, value: 0.55 },
+          bassin: { type: 'toggle', label: 'Bassin', value: true },
+          rampe: { type: 'color', label: 'Rampe', value: '#9aa0aa' },
+          eau: { type: 'color', label: 'Bassin', value: '#1f3a6e' },
+          fond: { type: 'color', label: 'Fond', value: '#0b0d14' },
+          image: { type: 'file', label: 'Image du logo', accept: 'image/*' },
+        },
+      },
+      presets: {
+        'Fontaine': {},
+        'Logo seul': { motif: 'logo', pause: 0.8, buses: 140 },
+        'Sans compensation': { compensation: 0, motif: 'logo', chute: 1.8 },
+        'Fine': { buses: 210, gouttes: 0.4, couleurs: ['#f4f1ea', '#9dd3f0'], halo: 0.35 },
+        'Grosses gouttes': { buses: 46, gouttes: 1.4, chute: 1.6, couleurs: ['#f2c230', '#e5452a'], fond: '#140c08', eau: '#4a2410' },
+        'Arc-en-ciel': { couleurs: ['#e5452a', '#f2c230', '#5bb08a', '#2f5fd0', '#7d38e7'], defile: 0.6, halo: 0.7 },
+        'Jour': { fond: '#e9eef2', couleurs: ['#2f5fd0', '#16161a'], halo: 0, eau: '#9dc7e3', rampe: '#5a5f68' },
+        'Pluie lente': { motif: 'pluie', chute: 2.6, buses: 160, couleurs: ['#9db0ef', '#ffffff'] },
+        'Biennale': { couleurs: [BIE[2], BIE[3], BIE[4]], fond: BIE[1], eau: '#2a1418', rampe: BIE[0] },
+        'Luzern': { couleurs: [LUZ[0], LUZ[2], LUZ[4]], fond: LUZ[3], eau: LUZ[1], rampe: LUZ[2] },
+        'Menthe': { couleurs: [MEN[2], MEN[0]], fond: MEN[1], eau: MEN[3], rampe: MEN[0] },
+      },
+      brand(colors) {
+        const s = colors.slice().sort((a, b) => lum(a) - lum(b)), D = s[0], L = s[s.length - 1], mid = s.length > 2 ? s.slice(1, -1) : [L];
+        return { couleurs: mid.concat([L]), fond: mix(D, '#000000', 0.35), eau: mix(D, mid[0], 0.35), rampe: mix(L, D, 0.4) };
+      },
+      pointer: {
+        down: (q) => { ptr = { x: q.x, y: q.y, moved: 0 }; hov = { x: q.x, y: q.y, t: simT }; },
+        drag: (q) => { if (!ptr) return; ptr.moved += Math.hypot(q.x - ptr.x, q.y - ptr.y); ptr.x = q.x; ptr.y = q.y; hov = { x: q.x, y: q.y, t: simT }; },
+        move: (q) => { hov = { x: q.x, y: q.y, t: simT }; },
+        up: () => { if (ptr && ptr.moved < 6 && S) { S.force = true; } ptr = null; },
+        wheel: (q, dy) => app.set('buses', Math.max(32, Math.min(220, p.buses + (dy > 0 ? -8 : 8)))),
+      },
+      onChange(k) { if (['*', 'image'].includes(k)) logoKey = ''; if (k === 'motif' && S) S.force = true; },
+      export: { name: 'rideau-d-eau', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    function hex(x) { const n = parseInt(x.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
+    function lum(x) { const c = hex(x); return (c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114) / 255; }
+    function mix(a, b, t) { const A = hex(a), C = hex(b); return '#' + A.map((v, i) => Math.round(v + (C[i] - v) * t).toString(16).padStart(2, '0')).join(''); }
+    function rgba(c, a) { const h = hex(c); return `rgba(${h[0]},${h[1]},${h[2]},${a})`; }
+    function rng(s) { let a = s >>> 0; return () => { a = (a + 0x6d2b79f5) >>> 0; let t = a; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+
+    function buildLogo() {
+      const img0 = p.image || app.logoImg, key = img0 ? (img0.src || 'c') : 'demo'; if (key === logoKey) return; logoKey = key; vKey = '';
+      const M = 200, c = document.createElement('canvas'); c.width = c.height = M; const x = c.getContext('2d', { willReadFrequently: true }), L = M * 0.94, cx = M / 2;
+      if (img0) { const iw = img0.naturalWidth || img0.width, ih = img0.naturalHeight || img0.height, s = L / Math.max(iw, ih); x.drawImage(img0, cx - iw * s / 2, cx - ih * s / 2, iw * s, ih * s); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(cx, cx, L * 0.48, 0, TAU); x.arc(cx, cx, L * 0.27, 0, TAU, true); x.fill('evenodd'); x.fillRect(cx - L * 0.07, cx - L * 0.5, L * 0.14, L); }
+      const d = x.getImageData(0, 0, M, M).data; let transp = 0; for (let i = 3; i < d.length; i += 4) if (d[i] < 128) transp++; const useA = transp > M * M * 0.05;
+      const F = new Float64Array(M * M); for (let i = 0; i < M * M; i++) { const o = i * 4, l = (d[o] * 0.2126 + d[o + 1] * 0.7152 + d[o + 2] * 0.0722) / 255; F[i] = useA ? d[o + 3] / 255 : (d[o + 3] / 255) * Math.min(1, Math.max(0, (0.75 - l) * 2)); }
+      { const G2 = new Float64Array(M * M); for (let j = 1; j < M - 1; j++) for (let i = 1; i < M - 1; i++) { let a = 0; for (let b = -1; b <= 1; b++) for (let c = -1; c <= 1; c++) a += F[(j + b) * M + i + c] * (b || c ? (b && c ? 1 : 2) : 4); G2[j * M + i] = a / 16; } F.set(G2); }
+      for (let k = 0; k < M; k++) F[k] = F[(M - 1) * M + k] = F[k * M] = F[k * M + M - 1] = 0;
+      logoM = contours(F, M, M, 0.5, 0, 0, 1).filter((c) => c.closed && c.pts.length > 6).map((c) => chaikin(chaikin(c.pts, true), true).map((q) => [q[0] / M - 0.5, q[1] / M - 0.5]));
+    }
+    // carrés marchants + chaînage
+    function contours(F, nx, ny, lev, ox, oy, cs) {
+      const pt = new Map(), adj = new Map();
+      const P = (id) => { let q = pt.get(id); if (q) return q; const cell = id >> 1, i = cell % nx, j = (cell - i) / nx; let a, b, ax, ay, bx, by; if (id & 1) { a = F[j * nx + i]; b = F[(j + 1) * nx + i]; ax = bx = i; ay = j; by = j + 1; } else { a = F[j * nx + i]; b = F[j * nx + i + 1]; ay = by = j; ax = i; bx = i + 1; } const t = (lev - a) / (b - a || 1e-9); q = [ox + (ax + (bx - ax) * t) * cs, oy + (ay + (by - ay) * t) * cs]; pt.set(id, q); return q; };
+      const link = (a, b) => { (adj.get(a) || adj.set(a, []).get(a)).push(b); (adj.get(b) || adj.set(b, []).get(b)).push(a); };
+      for (let j = 0; j < ny - 1; j++) for (let i = 0; i < nx - 1; i++) {
+        const A = F[j * nx + i] > lev, B = F[j * nx + i + 1] > lev, C = F[(j + 1) * nx + i + 1] > lev, D = F[(j + 1) * nx + i] > lev, idx = A | (B << 1) | (C << 2) | (D << 3);
+        if (idx === 0 || idx === 15) continue;
+        const T = (j * nx + i) * 2, R = (j * nx + i + 1) * 2 + 1, Bo = ((j + 1) * nx + i) * 2, Le = (j * nx + i) * 2 + 1;
+        const ctr = (F[j * nx + i] + F[j * nx + i + 1] + F[(j + 1) * nx + i + 1] + F[(j + 1) * nx + i]) / 4 > lev;
+        switch (idx) {
+          case 1: case 14: link(Le, T); break; case 2: case 13: link(T, R); break; case 3: case 12: link(Le, R); break;
+          case 4: case 11: link(R, Bo); break; case 6: case 9: link(T, Bo); break; case 7: case 8: link(Le, Bo); break;
+          case 5: if (ctr) { link(Le, Bo); link(T, R); } else { link(Le, T); link(R, Bo); } break;
+          case 10: if (ctr) { link(Le, T); link(R, Bo); } else { link(Le, Bo); link(T, R); } break;
+        }
+      }
+      const seen = new Set(), out = [];
+      const walk = (s) => { const L = [s]; seen.add(s); let cur = s; for (;;) { const nb = (adj.get(cur) || []).find((x) => !seen.has(x)); if (nb === undefined) break; seen.add(nb); L.push(nb); cur = nb; } return L; };
+      for (const [id, nb] of adj) if (nb.length === 1 && !seen.has(id)) out.push({ pts: walk(id).map(P), closed: false });
+      for (const [id] of adj) if (!seen.has(id)) out.push({ pts: walk(id).map(P), closed: true });
+      return out;
+    }
+    function chaikin(pts, closed) {
+      const o = []; const n = pts.length; for (let k = 0; k < (closed ? n : n - 1); k++) { const a = pts[k], b = pts[(k + 1) % n]; o.push([a[0] * 0.75 + b[0] * 0.25, a[1] * 0.75 + b[1] * 0.25], [a[0] * 0.25 + b[0] * 0.75, a[1] * 0.25 + b[1] * 0.75]); }
+      if (!closed) { o.unshift(pts[0]); o.push(pts[n - 1]); } return o;
+    }
+
+    // ——— géométrie ———
+    function build(w, h) {
+      const n = Math.round(p.buses), x0 = w * 0.06, x1 = w * 0.94, dx = (x1 - x0) / n;
+      const top = h * 0.1, surf = p.bassin ? h * 0.86 : h + dx * 4, H = surf - top;
+      const old = S;
+      S = { w, h, n, x0, dx, top, surf, H, g: 2 * H / (p.chute * p.chute), drops: [], spl: [], wave: new Float32Array(Math.ceil(w / 4) + 2), wv: new Float32Array(Math.ceil(w / 4) + 2),
+        pat: null, row: 0, t0: 0, idx: old ? old.idx : 0, wait: 0, gapT: new Float32Array(n), r: rng(app.seed * 7 + 1) };
+      newPattern(simT);
+    }
+    // motifs : une grille de booléens (lignes du haut vers le bas)
+    function pattern(kind) {
+      const n = S.n, R = S.r; let rows, f;
+      if (kind === 'logo') {
+        const s = Math.min(n * 0.86, 160, Math.floor(S.H * 0.5 / S.dx)), c = document.createElement('canvas'); c.width = n; rows = Math.round(s * 1.0) + 2; c.height = rows; const g = c.getContext('2d');
+        g.fillStyle = '#000'; g.beginPath(); for (const lp of logoM || []) { lp.forEach((q, i) => (i ? g.lineTo(n / 2 + q[0] * s, rows / 2 + q[1] * s) : g.moveTo(n / 2 + q[0] * s, rows / 2 + q[1] * s))); g.closePath(); } g.fill('evenodd');
+        const d = g.getImageData(0, 0, n, rows).data; f = (i, k) => d[(k * n + i) * 4 + 3] > 110;
+      } else if (kind === 'vagues') { rows = Math.round(n * 0.55); const per = Math.max(8, n / 9); f = (i, k) => ((k + per * 0.45 * Math.sin(i / n * TAU * 1.5)) % per + per) % per < per * 0.32; }
+      else if (kind === 'damier') { const c = Math.max(3, Math.round(n / 10)); rows = c * 6; f = (i, k) => (Math.floor(i / c) + Math.floor(k / c)) % 2 === 0; }
+      else if (kind === 'cercles') { rows = Math.round(n * 0.7); const per = Math.max(5, n / 12); f = (i, k) => { const d = Math.hypot(i - n / 2, (k - rows / 2)); return d % per < per * 0.4 && d < rows / 2; }; }
+      else if (kind === 'diagonales') { rows = Math.round(n * 0.5); const per = Math.max(6, n / 8); f = (i, k) => (((i + k) % per) + per) % per < per * 0.35; }
+      else if (kind === 'zigzag') { rows = Math.round(n * 0.5); const per = Math.max(8, n / 7); f = (i, k) => { const z = Math.abs(((i % per) + per) % per - per / 2); return ((k + z) % (per * 0.7)) < per * 0.16; }; }
+      else if (kind === 'pluie') { rows = Math.round(n * 0.8); const m = Array.from({ length: n * rows }, () => R() < 0.05); f = (i, k) => m[k * n + i]; }
+      else { rows = Math.round(n * 0.25); f = () => true; }
+      const grid = new Uint8Array(n * rows); for (let k = 0; k < rows; k++) for (let i = 0; i < n; i++) grid[k * n + i] = f(i, k) ? 1 : 0;
+      return { kind, rows, grid };
+    }
+    function newPattern(t) {
+      const kind = p.motif === 'cycle' ? ORDER[S.idx++ % ORDER.length] : p.motif;
+      S.pat = pattern(kind); S.row = 0; S.t0 = t; S.hue = S.r();
+    }
+
+    // ——— simulation ———
+    function emitRow(k, tNow) {
+      const { n, dx, x0, top, g, pat } = S, s = dx * 1.0;
+      const tc = Math.sqrt(2 * k * s / g), vc = g * tc; // calage « image rigide »
+      const tn = k * (s / Math.sqrt(2 * g * (S.H * 0.35))), vn = 0; // émission régulière, sans vitesse initiale
+      const v = vc * p.compensation + vn * (1 - p.compensation);
+      for (let i = 0; i < n; i++) {
+        if (!pat.grid[k * n + i] || S.gapT[i] > 0.15) continue;
+        S.drops.push({ x: x0 + (i + 0.5) * dx, y: top, vy: v, i, c: i / n });
+      }
+    }
+    function rowTime(k) { const s = S.dx, g = S.g; const tc = Math.sqrt(2 * k * s / g), tn = k * (s / Math.sqrt(2 * g * (S.H * 0.35))); return tc * p.compensation + tn * (1 - p.compensation); }
+    function step(dt) {
+      const { g, surf } = S;
+      // passage de la main : les buses au-dessus s'arrêtent
+      const handOn = hov && simT - hov.t < 1.2 && hov.y > S.top && hov.y < S.surf, hr = Math.max(S.dx * 3, S.w * 0.07);
+      for (let i = 0; i < S.n; i++) { const x = S.x0 + (i + 0.5) * S.dx, inGap = handOn && Math.abs(x - hov.x) < hr; S.gapT[i] = inGap ? S.gapT[i] + dt : Math.max(0, S.gapT[i] - dt * 3); }
+      if (S.force) { S.force = false; newPattern(simT); }
+      // émission des lignes
+      const tl = simT - S.t0;
+      while (S.row < S.pat.rows && rowTime(S.row) <= tl) { emitRow(S.row, simT); S.row++; }
+      if (S.row >= S.pat.rows && tl > rowTime(S.pat.rows - 1) + p.pause + 0.05) newPattern(simT);
+      // chute
+      const D = S.drops, hx = handOn ? hov.x : -1e9, hy = handOn ? hov.y : -1e9;
+      for (let j = D.length - 1; j >= 0; j--) {
+        const d = D[j], y0 = d.y; d.vy += g * dt; d.y += d.vy * dt;
+        if (handOn && Math.abs(d.x - hx) < hr * 0.75 && y0 < hy && d.y >= hy) { splash(d.x, hy, d.vy, 2, d.c); D[j] = D[D.length - 1]; D.pop(); continue; }
+        if (d.y >= surf) {
+          if (p.bassin) { const wi = Math.round(d.x / 4); if (wi > 0 && wi < S.wave.length - 1) S.wv[wi] += 0.35; if (S.r() < 0.35) splash(d.x, surf, d.vy, 1, d.c); }
+          D[j] = D[D.length - 1]; D.pop();
+        }
+      }
+      // éclaboussures
+      const P = S.spl; for (let j = P.length - 1; j >= 0; j--) { const q = P[j]; q.vy += g * 0.6 * dt; q.x += q.vx * dt; q.y += q.vy * dt; q.l -= dt; if (q.l <= 0 || q.y > surf + 2) { P[j] = P[P.length - 1]; P.pop(); } }
+      // houle du bassin
+      if (p.bassin) { const W = S.wave, V = S.wv, n = W.length; const lim = Math.max(2, S.dx * 0.9); for (let i = 1; i < n - 1; i++) V[i] += (W[i - 1] + W[i + 1] - 2 * W[i]) * 0.2 - W[i] * 0.06; for (let i = 0; i < n; i++) { V[i] *= 0.9; W[i] = Math.max(-lim, Math.min(lim, W[i] + V[i])); } }
+    }
+    function splash(x, y, v, n, c) {
+      if (S.spl.length > 900) return;
+      for (let k = 0; k < n; k++) { const a = -Math.PI / 2 + (S.r() - 0.5) * 2.2, sp = v * (0.08 + S.r() * 0.18); S.spl.push({ x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, l: 0.25 + S.r() * 0.35, c }); }
+    }
+
+    // ——— rendu ———
+    function colAt(u) {
+      const C = p.couleurs.length ? p.couleurs : ['#9dd3f0'], v = ((u + simT * p.defile * 0.15) % 1 + 1) % 1, x = v * C.length, i = Math.floor(x) % C.length, j = (i + 1) % C.length;
+      return mix(C[i], C[j], x - Math.floor(x));
+    }
+    function backdrop(dpr) {
+      const { w, h } = S, key = [w, h, dpr, p.fond, p.eau, p.rampe, p.halo, p.bassin, S.n, (p.couleurs || []).join()].join('|'); if (key === bgKey) return bgC; bgKey = key;
+      const c = bgC || document.createElement('canvas'); c.width = Math.ceil(w * dpr); c.height = Math.ceil(h * dpr); bgC = c;
+      const g = c.getContext('2d'); g.setTransform(dpr, 0, 0, dpr, 0, 0);
+      g.fillStyle = p.fond; g.fillRect(0, 0, w, h);
+      if (p.halo > 0) { const C = p.couleurs.length ? p.couleurs : ['#9dd3f0']; const rg = g.createRadialGradient(w / 2, S.surf, 0, w / 2, S.surf, Math.max(w, h) * 0.75); rg.addColorStop(0, rgba(C[0], 0.35 * p.halo)); rg.addColorStop(1, rgba(C[0], 0)); g.fillStyle = rg; g.fillRect(0, 0, w, h); }
+      // rampe de buses
+      const y = S.top, rh = Math.max(6, S.dx * 1.4);
+      const lg = g.createLinearGradient(0, y - rh * 1.6, 0, y); lg.addColorStop(0, mix(p.rampe, '#ffffff', 0.35)); lg.addColorStop(0.5, p.rampe); lg.addColorStop(1, mix(p.rampe, '#000000', 0.45));
+      g.fillStyle = lg; g.fillRect(S.x0 - S.dx * 2, y - rh * 1.6, S.n * S.dx + S.dx * 4, rh * 1.4);
+      g.fillStyle = mix(p.rampe, '#000000', 0.55); for (let i = 0; i < S.n; i++) g.fillRect(S.x0 + (i + 0.5) * S.dx - S.dx * 0.18, y - rh * 0.25, S.dx * 0.36, rh * 0.25);
+      g.fillStyle = 'rgba(0,0,0,0.35)'; g.fillRect(0, y - rh * 2.4, w, rh * 0.8);
+      g.fillStyle = mix(p.rampe, '#000000', 0.3); g.fillRect(S.x0 - S.dx * 2, y - rh * 3.2, S.dx * 1.5, rh * 1.8); g.fillRect(S.x0 + S.n * S.dx + S.dx * 0.5, y - rh * 3.2, S.dx * 1.5, rh * 1.8);
+      if (p.bassin) {
+        const bg = g.createLinearGradient(0, S.surf, 0, h); bg.addColorStop(0, mix(p.eau, '#ffffff', 0.12)); bg.addColorStop(1, mix(p.eau, '#000000', 0.5)); g.fillStyle = bg; g.fillRect(0, S.surf, w, h - S.surf);
+        // margelle
+        g.fillStyle = mix(p.rampe, '#000000', 0.35); g.fillRect(0, h * 0.965, w, h * 0.035);
+      }
+      return c;
+    }
+
+    app.loop((t, dt) => {
+      dt = Math.min(1 / 20, dt || 0);
+      const { w, h, dpr } = app.size; buildLogo();
+      const key = [w, h, p.buses, p.chute, p.bassin, app.seed, logoKey].join('|'); if (!S || key !== gKey) { gKey = key; build(w, h); }
+      if (app.thumbnail) { if (!S.th) { S.th = true; S.idx = 0; newPattern(simT); const T = Math.max(rowTime(S.pat.rows - 1) + 0.02, Math.sqrt((S.H * 0.95 + S.pat.rows * S.dx) / S.g)); for (let k = 0; k < Math.round(T * 120); k++) { simT += 1 / 120; step(1 / 120); } } }
+      else { const n = 2; for (let k = 0; k < n; k++) { simT += dt / n; step(dt / n); } }
+      ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.drawImage(backdrop(dpr), 0, 0);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      const { dx, surf } = S, dw = Math.max(1, dx * 0.42 * p.gouttes), NB = 10;
+      // gouttes, regroupées par teinte
+      const buckets = Array.from({ length: NB }, () => []);
+      for (const d of S.drops) { const u = ((d.c + simT * p.defile * 0.15) % 1 + 1) % 1; buckets[Math.min(NB - 1, Math.floor(u * NB))].push(d); }
+      if (p.halo > 0) ctx.globalCompositeOperation = 'lighter';
+      for (let b = 0; b < NB; b++) {
+        const L = buckets[b]; if (!L.length) continue; const col = colAt((b + 0.5) / NB - simT * p.defile * 0.15);
+        ctx.fillStyle = col;
+        for (const d of L) { const len = Math.max(dw * 1.4, Math.min(dx * 2.2, d.vy * 0.012)) * p.gouttes; ctx.fillRect(d.x - dw / 2, d.y - len, dw, len); }
+        if (p.halo > 0 && S.drops.length < 3500) { ctx.fillStyle = rgba(col, 0.12 * p.halo); for (const d of L) { const len = Math.max(dw * 1.4, Math.min(dx * 2.2, d.vy * 0.012)) * p.gouttes; ctx.fillRect(d.x - dw * 1.6, d.y - len * 1.2, dw * 3.2, len * 1.4); } }
+      }
+      ctx.globalCompositeOperation = 'source-over';
+      // éclaboussures
+      for (const q of S.spl) { ctx.fillStyle = rgba(colAt(q.c), Math.min(1, q.l * 3)); const s = Math.max(1, dw * 0.7); ctx.fillRect(q.x - s / 2, q.y - s / 2, s, s); }
+      // surface du bassin
+      if (p.bassin) {
+        const W = S.wave; ctx.beginPath(); ctx.moveTo(0, surf + W[0]); for (let i = 1; i < W.length; i++) ctx.lineTo(i * 4, surf + W[i]); ctx.lineTo(w, h); ctx.lineTo(0, h); ctx.closePath();
+        ctx.fillStyle = rgba(p.eau, 0.55); ctx.fill();
+        ctx.strokeStyle = rgba(mix(colAt(0.3), '#ffffff', 0.4), 0.7); ctx.lineWidth = Math.max(1, dx * 0.15); ctx.beginPath(); ctx.moveTo(0, surf + W[0]); for (let i = 1; i < W.length; i++) ctx.lineTo(i * 4, surf + W[i]); ctx.stroke();
+        // reflet du rideau
+        ctx.globalAlpha = 0.18; ctx.globalCompositeOperation = 'lighter';
+        for (const d of S.drops) if (d.y > surf - S.H * 0.2) { const ry = surf + (surf - d.y) * 0.6 + S.H * 0.02; if (ry < h * 0.96) { ctx.fillStyle = colAt(d.c); ctx.fillRect(d.x - dw / 2, ry, dw, dw * 2); } }
+        ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over';
+      }
+      // main
+      if (hov && simT - hov.t < 1.2 && hov.y > S.top && hov.y < S.surf) { const a = Math.max(0, 1 - (simT - hov.t) / 1.2) * 0.35; ctx.strokeStyle = `rgba(255,255,255,${a})`; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.arc(hov.x, hov.y, Math.max(S.dx * 3, S.w * 0.07) * 0.75, 0, TAU); ctx.stroke(); }
+      app.finish(ctx);
+    });
+
+    // ——— SVG ———
+    function toSVG() {
+      const { w, h } = app.size, f = (v) => +v.toFixed(1); buildLogo(); const { dx, surf } = S, dw = Math.max(1, dx * 0.42 * p.gouttes);
+      let o = `<rect width="100%" height="100%" fill="${p.fond}"/>`;
+      const y = S.top, rh = Math.max(6, dx * 1.4);
+      o += `<rect x="${f(S.x0 - dx * 2)}" y="${f(y - rh * 1.6)}" width="${f(S.n * dx + dx * 4)}" height="${f(rh * 1.4)}" fill="${p.rampe}"/>`;
+      if (p.bassin) { let d = `M0 ${f(surf + S.wave[0])}`; for (let i = 1; i < S.wave.length; i++) d += `L${i * 4} ${f(surf + S.wave[i])}`; o += `<path d="${d}L${w} ${h}L0 ${h}Z" fill="${p.eau}"/>`; }
+      const groups = {}; for (const dd of S.drops) { const col = colAt(dd.c), len = Math.max(dw * 1.4, Math.min(dx * 2.2, dd.vy * 0.012)) * p.gouttes; (groups[col] = groups[col] || []).push(`M${f(dd.x - dw / 2)} ${f(dd.y - len)}h${f(dw)}v${f(len)}h${f(-dw)}Z`); }
+      for (const col in groups) o += `<path fill="${col}" d="${groups[col].join('')}"/>`;
+      for (const q of S.spl) { const s = Math.max(1, dw * 0.7); o += `<rect x="${f(q.x - s / 2)}" y="${f(q.y - s / 2)}" width="${f(s)}" height="${f(s)}" fill="${colAt(q.c)}"/>`; }
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">${o}</svg>`;
+    }
+  </script>
+</body>
+</html>
