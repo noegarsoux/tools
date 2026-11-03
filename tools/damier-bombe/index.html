@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Damier bombé</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Damier bombé : un damier régulier passé sous des loupes. Chaque bosse pousse les points loin de son centre,
+    // p' = p + (p − c)·k·e^(−r²/R²) : le centre grossit, la périphérie se tasse, et tant que k reste sous ~2,2 la grille
+    // ne se replie jamais sur elle-même. Les bords des cases sont subdivisés pour se courber, les pastilles sont des
+    // polygones déformés point par point, et leur couleur suit le grossissement local, comme les sphères de Vasarely.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const BIEN = PAL('biennale'), GLY = PAL('glyphes'), SAL = PAL('salon'), MEN = PAL('menthe'), KB = PAL('kegelbahn');
+
+    let bulges = [], bKey = '', simT = 0, grab = null, logoM = null, logoKey = '';
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.02, vignette: 0.06 },
+      hint: 'Glissez une bosse pour la déplacer · touchez ailleurs pour en poser une · molette : force',
+      notes: 'Dans les années 1950, Victor Vasarely commence la série Vega : un damier noir et blanc dont le centre se gonfle comme une bulle, les carrés s\'y étirent, les pastilles y grossissent et changent de couleur. L\'œil ne peut s\'empêcher de lire une sphère là où il n\'y a qu\'une surface plane. Ici chaque bosse est une loupe : les points sont repoussés loin de son centre d\'autant plus fort qu\'ils en sont proches, ce qui grossit le cœur et tasse le pourtour. Avec une force négative, la bosse devient un creux. Les pastilles prennent la couleur du grossissement local, et le logo, s\'il est activé, inverse le damier là où il passe.',
+      params: {
+        'Damier': {
+          cases: { type: 'range', label: 'Cases (petit côté)', min: 6, max: 44, step: 1, value: 18 },
+          motif: { type: 'segmented', label: 'Motif', options: { rond: 'Rond', carre: 'Carré', losange: 'Losange', aucun: 'Aucun' }, value: 'rond' },
+          taille: { type: 'range', label: 'Taille du motif', min: 0.15, max: 1, step: 0.01, value: 0.72, show: (q) => q.motif !== 'aucun' },
+          damier: { type: 'toggle', label: 'Cases alternées', value: true },
+          alterne: { type: 'toggle', label: 'Motif en négatif sur les cases sombres', value: false, show: (q) => q.damier && q.motif !== 'aucun' },
+        },
+        'Bosses': {
+          nombre: { type: 'range', label: 'Bosses', min: 1, max: 6, step: 1, value: 2 },
+          force: { type: 'range', label: 'Force (négatif : creux)', min: -1, max: 1, step: 0.01, value: 0.75 },
+          rayon: { type: 'range', label: 'Rayon', min: 0.12, max: 1, step: 0.01, value: 0.42 },
+          derive: { type: 'range', label: 'Dérive', min: 0, max: 2, step: 0.01, value: 0.45 },
+          pulsation: { type: 'range', label: 'Pulsation', min: 0, max: 1, step: 0.01, value: 0.35 },
+        },
+        'Logo inversé': {
+          logo: { type: 'toggle', label: 'Le logo inverse le damier', value: false },
+          tailleLogo: { type: 'range', label: 'Taille du logo', min: 0.3, max: 1.8, step: 0.01, value: 1.1, show: (q) => q.logo },
+          image: { type: 'file', label: 'Logo', accept: 'image/*', show: (q) => q.logo },
+        },
+        'Couleurs': {
+          fond: { type: 'color', label: 'Cases claires', value: '#f1ece1' },
+          sombre: { type: 'color', label: 'Cases sombres', value: '#16161c', show: (q) => q.damier },
+          couleurs: { type: 'palette', label: 'Motif, du plat au bombé', value: ['#16161c', '#486cfc', '#f272ba', '#edd14b'] },
+          accent: { type: 'color', label: 'Logo', value: '#ef5a2f', show: (q) => q.logo },
+        },
+      },
+      presets: {
+        'Vega': {},
+        'Creux': { force: -1, rayon: 0.6, nombre: 1, cases: 22, couleurs: ['#16161c', '#486cfc', '#7fe0c2', '#f4f1ea'], derive: 0.3, alterne: true },
+        'Carrés': { motif: 'carre', taille: 0.6, cases: 14, couleurs: ['#16161c', '#ef5a2f', '#edd14b'], alterne: true },
+        'Losanges': { motif: 'losange', taille: 0.9, cases: 22, nombre: 3, rayon: 0.32, couleurs: ['#16161c', '#2c3566', '#486cfc', '#c9d6f2'] },
+        'Damier nu': { motif: 'aucun', cases: 26, nombre: 3, force: 0.9, rayon: 0.35 },
+        'Pastilles': { damier: false, fond: '#16161c', cases: 30, taille: 0.85, couleurs: ['#2a2a33', '#486cfc', '#f272ba', '#edd14b', '#f4f1ea'], nombre: 4, rayon: 0.3 },
+        'Logo': { logo: true, cases: 26, nombre: 1, force: 0.6, rayon: 0.6, couleurs: ['#16161c', '#5a5a66'], accent: '#ef5a2f', derive: 0.25 },
+        'Biennale': { fond: BIEN[0], sombre: BIEN[1], couleurs: [BIEN[1], BIEN[2], BIEN[3], BIEN[4]], accent: BIEN[2] },
+        'Menthe': { fond: MEN[1], sombre: MEN[0], couleurs: [MEN[0], MEN[2], MEN[3]], motif: 'carre', taille: 0.55 },
+        'Kegelbahn': { fond: KB[0], damier: false, couleurs: [KB[1], KB[2]], cases: 24, nombre: 3 },
+      },
+      brand(colors) {
+        const s = colors.slice().sort((a, b) => lum(a) - lum(b));
+        return { fond: s[s.length - 1], sombre: s[0], couleurs: s.length > 2 ? s.slice(0, -1) : s.slice(), accent: s[Math.floor(s.length / 2)] };
+      },
+      pointer: {
+        down: (q) => pointerDown(q.x, q.y),
+        drag: (q) => { if (grab) { const u = toUnit(q.x, q.y); grab.b.hold = u; } },
+        up: () => { if (grab) { const b = grab.b, d = drift(b, simT); b.bx = b.hold[0] - d[0]; b.by = b.hold[1] - d[1]; b.hold = null; } grab = null; },
+        wheel: (q, dy) => app.set('force', Math.max(-1, Math.min(1, +(p.force + (dy > 0 ? -0.04 : 0.04)).toFixed(2)))),
+      },
+      onChange(k) { if (['*', 'nombre'].includes(k)) bKey = ''; if (['*', 'logo', 'image', 'tailleLogo'].includes(k)) logoKey = ''; },
+      onSeed() { bKey = ''; },
+      export: { name: 'damier-bombe', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    function hex(x) { const n = parseInt(x.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
+    function lum(x) { const c = hex(x); return (c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114) / 255; }
+    function mix(a, b, t) { const A = hex(a), B = hex(b); return '#' + A.map((v, i) => Math.round(v + (B[i] - v) * t).toString(16).padStart(2, '0')).join(''); }
+
+    // ——— Les bosses : une position de base, une dérive en Lissajous, une pulsation ———
+    function buildBulges() {
+      const key = String(p.nombre); if (key === bKey && bulges.length) return; bKey = key;
+      const R = app.rng(); bulges = [];
+      for (let i = 0; i < p.nombre; i++) {
+        const a = i / p.nombre * TAU + R() * 0.8, r = p.nombre === 1 ? 0 : 0.35 + R() * 0.25;
+        bulges.push({ bx: Math.cos(a) * r, by: Math.sin(a) * r * 0.8, fa: 0.5 + R() * 0.6, fb: 0.4 + R() * 0.6, pa: R() * TAU, pb: R() * TAU, pp: R() * TAU, amp: 0.25 + R() * 0.25, sc: 0.8 + R() * 0.4, hold: null });
+      }
+    }
+    function drift(b, t) { const v = p.derive * 0.35; return [Math.sin(t * v * b.fa + b.pa) * b.amp, Math.cos(t * v * b.fb + b.pb) * b.amp * 0.8]; }
+    let B = [];
+    function stateAt(t) {
+      B = bulges.map((b) => {
+        const d = drift(b, t), c = b.hold || [b.bx + d[0], b.by + d[1]];
+        const puls = 1 - p.pulsation * 0.5 * (1 + Math.sin(t * 0.9 + b.pp));
+        const k = (p.force >= 0 ? p.force * 1.7 : p.force * 0.85) * puls, R = p.rayon * b.sc;
+        return { x: c[0], y: c[1], k, iR2: 1 / (R * R) };
+      });
+    }
+    // le champ : déplacement et grossissement relatif s (≈ agrandissement local − 1)
+    function warp(x, y) {
+      let dx = 0, dy = 0, s = 0;
+      for (const b of B) { const ex = x - b.x, ey = y - b.y, g = b.k * Math.exp(-(ex * ex + ey * ey) * b.iR2); dx += ex * g; dy += ey * g; s += g; }
+      return [x + dx, y + dy, s];
+    }
+
+    // ——— Logo : masque échantillonné ———
+    function buildLogo() {
+      const img0 = p.image || app.logoImg, key = [p.logo, img0 ? (img0.src || 'c') : 'demo'].join(); if (key === logoKey) return; logoKey = key;
+      logoM = null; if (!p.logo) return;
+      const M = 200, c = document.createElement('canvas'); c.width = c.height = M; const x = c.getContext('2d', { willReadFrequently: true }), L = M * 0.94, cx = M / 2;
+      if (img0) { const iw = img0.naturalWidth || img0.width, ih = img0.naturalHeight || img0.height, s = L / Math.max(iw, ih); x.drawImage(img0, cx - iw * s / 2, cx - ih * s / 2, iw * s, ih * s); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(cx, cx, L * 0.48, 0, TAU); x.arc(cx, cx, L * 0.27, 0, TAU, true); x.fill('evenodd'); x.fillRect(cx - L * 0.07, cx - L * 0.5, L * 0.14, L); }
+      const d = x.getImageData(0, 0, M, M).data; let transp = 0; for (let i = 3; i < d.length; i += 4) if (d[i] < 128) transp++; const useA = transp > M * M * 0.05;
+      const m = new Uint8Array(M * M); for (let i = 0; i < M * M; i++) { const o = i * 4, l = (d[o] * 0.2126 + d[o + 1] * 0.7152 + d[o + 2] * 0.0722) / 255; m[i] = (useA ? d[o + 3] > 128 : d[o + 3] > 128 && l < 0.5) ? 1 : 0; }
+      logoM = { m, M };
+    }
+    function inLogo(x, y) {
+      if (!logoM || !p.logo) return false; const T = p.tailleLogo, u = Math.floor((x / T * 0.5 + 0.5) * logoM.M), v = Math.floor((y / T * 0.5 + 0.5) * logoM.M);
+      return u >= 0 && v >= 0 && u < logoM.M && v < logoM.M && logoM.m[v * logoM.M + u] === 1;
+    }
+
+    // ——— Construction : polygones de cases et de motifs, groupés par couleur ———
+    function unit(w, h) { return Math.min(w, h) / 2; }
+    function toUnit(X, Y) { const { w, h } = app.size, u = unit(w, h); return [(X - w / 2) / u, (Y - h / 2) / u]; }
+    function pointerDown(X, Y) {
+      const { w, h } = app.size, u = unit(w, h); let best = null, bd = (Math.min(w, h) * 0.12) ** 2;
+      for (const b of bulges) { const d0 = drift(b, simT), c = b.hold || [b.bx + d0[0], b.by + d0[1]], d = (w / 2 + c[0] * u - X) ** 2 + (h / 2 + c[1] * u - Y) ** 2; if (d < bd) { bd = d; best = b; } }
+      const q = toUnit(X, Y);
+      if (!best) {
+        if (bulges.length >= 8) bulges.shift();
+        best = { bx: q[0], by: q[1], fa: 0.5 + Math.random() * 0.6, fb: 0.4 + Math.random() * 0.6, pa: Math.random() * TAU, pb: Math.random() * TAU, pp: Math.random() * TAU, amp: 0.15, sc: 0.8 + Math.random() * 0.3, hold: null };
+        const d0 = drift(best, simT); best.bx -= d0[0]; best.by -= d0[1]; bulges.push(best);
+      }
+      best.hold = q; grab = { b: best };
+    }
+    function colorAt(t) {
+      const C = p.couleurs.length ? p.couleurs : ['#000000']; if (C.length === 1) return C[0];
+      const u = Math.max(0, Math.min(0.999, t)) * (C.length - 1), i = Math.floor(u); return mix(C[i], C[i + 1], Math.round((u - i) * 6) / 6);
+    }
+    function build(w, h, t) {
+      buildBulges(); buildLogo(); stateAt(t);
+      const u = unit(w, h), n = p.cases, cs = 2 / n, ax = w / 2 / u, ay = h / 2 / u;
+      const nx = Math.ceil(ax / cs) + 2, ny = Math.ceil(ay / cs) + 2, Q = 3, W = 2 * nx * Q + 1, H = 2 * ny * Q + 1;
+      const LX = new Float32Array(W * H), LY = new Float32Array(W * H);
+      for (let j = 0; j < H; j++) for (let i = 0; i < W; i++) { const x = (i / Q - nx) * cs, y = (j / Q - ny) * cs, r = warp(x, y); LX[j * W + i] = w / 2 + r[0] * u; LY[j * W + i] = h / 2 + r[1] * u; }
+      const smax = Math.max(0.2, Math.abs(p.force >= 0 ? p.force * 1.7 : p.force * 0.85));
+      const fills = new Map(), add = (col, pts) => { let L = fills.get(col); if (!L) fills.set(col, (L = [])); L.push(pts); };
+      const shapes = new Map(), addS = (col, pts) => { let L = shapes.get(col); if (!L) shapes.set(col, (L = [])); L.push(pts); };
+      const K = p.motif === 'rond' ? 20 : p.motif === 'aucun' ? 0 : 4 * 3;
+      for (let cj = -ny; cj < ny; cj++) for (let ci = -nx; ci < nx; ci++) {
+        const x0 = ci * cs, y0 = cj * cs, xc = x0 + cs / 2, yc = y0 + cs / 2;
+        const dark0 = p.damier && ((ci + cj) & 1) === 1, inv = inLogo(xc, yc), dark = inv ? !dark0 : dark0;
+        // contour de la case sur la grille fine
+        const gi = (ci + nx) * Q, gj = (cj + ny) * Q, poly = [];
+        for (let k = 0; k < Q; k++) poly.push(gj * W + gi + k);
+        for (let k = 0; k < Q; k++) poly.push((gj + k) * W + gi + Q);
+        for (let k = 0; k < Q; k++) poly.push((gj + Q) * W + gi + Q - k);
+        for (let k = 0; k < Q; k++) poly.push((gj + Q - k) * W + gi);
+        const pts = poly.map((o) => [LX[o], LY[o]]);
+        let mnx = Infinity, mxx = -Infinity, mny = Infinity, mxy = -Infinity; for (const q of pts) { mnx = Math.min(mnx, q[0]); mxx = Math.max(mxx, q[0]); mny = Math.min(mny, q[1]); mxy = Math.max(mxy, q[1]); }
+        if (mxx < -2 || mnx > w + 2 || mxy < -2 || mny > h + 2) continue;
+        if (dark) add(p.sombre, pts);
+        if (!K) continue;
+        const s = warp(xc, yc)[2], tcol = Math.min(1, Math.max(0, s / smax) * 0.8 + (p.force < 0 ? 0 : 0.0));
+        let col = inv && p.logo ? p.accent : colorAt(p.force >= 0 ? tcol : -s / smax);
+        if (p.alterne && dark && !inv) col = colorAt(1 - Math.min(1, Math.abs(s) / smax));
+        const r = p.taille * cs / 2, sh = [], span = Math.max(mxx - mnx, mxy - mny) * p.taille, KK = p.motif === 'rond' ? (span < 14 ? 10 : span < 36 ? 14 : 22) : K;
+        for (let k = 0; k < KK; k++) {
+          let lx, ly;
+          if (p.motif === 'rond') { const a = k / KK * TAU; lx = Math.cos(a) * r; ly = Math.sin(a) * r; }
+          else { const side = Math.floor(k / 3), f = (k % 3) / 3, cr = p.motif === 'carre' ? [[-1, -1], [1, -1], [1, 1], [-1, 1]] : [[0, -1], [1, 0], [0, 1], [-1, 0]], a = cr[side], b = cr[(side + 1) % 4]; lx = (a[0] + (b[0] - a[0]) * f) * r; ly = (a[1] + (b[1] - a[1]) * f) * r; }
+          const q = warp(xc + lx, yc + ly); sh.push([w / 2 + q[0] * u, h / 2 + q[1] * u]);
+        }
+        addS(col, sh);
+      }
+      return { fills, shapes };
+    }
+
+    app.loop((t, dt) => {
+      dt = Math.min(0.1, dt || 0);
+      if (!app.thumbnail) simT += dt; else simT = 3.2;
+      const { w, h, dpr } = app.size, { fills, shapes } = build(w, h, simT);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = p.fond; ctx.fillRect(0, 0, w, h);
+      for (const M of [fills, shapes]) for (const [col, L] of M) {
+        const P2 = new Path2D(); for (const pts of L) { P2.moveTo(pts[0][0], pts[0][1]); for (let i = 1; i < pts.length; i++) P2.lineTo(pts[i][0], pts[i][1]); P2.closePath(); }
+        ctx.fillStyle = col; ctx.fill(P2);
+      }
+      app.finish(ctx);
+    });
+
+    function toSVG() {
+      const { w, h } = app.size, f = (v) => +v.toFixed(1), { fills, shapes } = build(w, h, simT);
+      let s = `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><rect width="100%" height="100%" fill="${p.fond}"/>`;
+      for (const M of [fills, shapes]) for (const [col, L] of M) {
+        let d = ''; for (const pts of L) d += 'M' + pts.map((q) => f(q[0]) + ' ' + f(q[1])).join('L') + 'z';
+        s += `<path d="${d}" fill="${col}"/>`;
+      }
+      return s + '</svg>';
+    }
+  </script>
+</body>
+</html>

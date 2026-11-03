@@ -1,0 +1,15 @@
+{
+  "slug": "damier-bombe",
+  "title": "Damier bombé",
+  "type": "motion",
+  "description": "Un damier d'op art que des loupes mobiles gonflent ou creusent, pastilles et losanges dégradés selon le grossissement ; on déplace les bosses et le logo s'inverse.",
+  "tags": ["op-art", "grille", "damier", "optique", "logo", "svg"],
+  "inspiration": [
+    "Victor Vasarely, la série Vega (années 1950 à 1970)",
+    "Bridget Riley et l'Op Art de « The Responsive Eye » (MoMA, 1965)",
+    "Les déformations de grille des lentilles gravitationnelles"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}
