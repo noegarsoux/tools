@@ -1,0 +1,15 @@
+{
+  "slug": "toupies",
+  "title": "Toupies",
+  "type": "motion",
+  "description": "Des toupies vues de dessus tournent dans une arène en cuvette, se heurtent, vacillent puis tombent ; en tournant, leurs motifs se fondent en anneaux de couleur.",
+  "tags": ["physique", "rotation", "couleur", "jeu", "logo", "svg"],
+  "inspiration": [
+    "Les toupies de Benham et leurs couleurs fantômes",
+    "Les disques optiques de Marcel Duchamp (Rotoreliefs)",
+    "Les arènes de toupies des cours de récréation"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}
