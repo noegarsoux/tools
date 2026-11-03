@@ -1,0 +1,272 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Kolam</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Kolam (courbes miroir) : la ligne voyage en diagonale entre les milieux des côtés d'une grille de points.
+    // En chaque milieu, deux brins se croisent… sauf si un miroir y est posé : posé le long du côté, il renvoie la
+    // ligne du même côté ; posé en travers, il la renvoie de l'autre. Le bord est tout en miroirs, donc la ligne se
+    // referme toujours. En mode « une seule ligne », on ajoute les miroirs un à un et on ne garde que ceux qui ne
+    // coupent pas la ligne en morceaux. Coordonnées doublées : les points sont aux (pair, pair), les milieux aux (X+Y impair).
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const BIEN = PAL('biennale'), MEN = PAL('menthe'), KB = PAL('kegelbahn');
+
+    let simT = 0, G = null, gKey = '', gen = 0, phT = 0, edited = false, drag = null, logoM = null, logoKey = '';
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.03, vignette: 0.1 },
+      hint: 'Cliquez près d\'un croisement pour poser, tourner ou ôter un miroir · glissez pour en semer · molette : nombre de points',
+      notes: 'Chaque matin, dans le sud de l\'Inde, on trace devant la porte un kolam : une grille de points à la farine de riz, puis une ligne qui serpente autour d\'eux sans jamais s\'arrêter. En Angola, les conteurs tchokwe dessinent de la même façon leurs sona dans le sable. Le mathématicien Paulus Gerdes a montré qu\'on peut tous les décrire avec des miroirs : la ligne file en diagonale et rebondit sur de petits miroirs posés entre les points. Ici l\'ordinateur pose les miroirs ; en mode « une seule ligne », il ne garde que ceux qui laissent la ligne d\'un seul tenant, comme dans les kolams les plus savants. Cliquez sur un croisement pour y poser un miroir, le tourner ou l\'enlever : la ligne se redessine aussitôt.',
+      params: {
+        'Grille': {
+          points: { type: 'range', label: 'Points (petit côté)', min: 2, max: 18, step: 1, value: 7 },
+          motif: { type: 'select', label: 'Miroirs', options: { unique: 'Une seule ligne', libre: 'Au hasard', croise: 'Aucun (tressage)' }, value: 'unique' },
+          densite: { type: 'range', label: 'Densité de miroirs', min: 0, max: 1, step: 0.01, value: 0.55 },
+          symetrie: { type: 'select', label: 'Symétrie', options: { aucune: 'Aucune', miroir: 'Miroir', rotation: 'Rotation' }, value: 'rotation' },
+        },
+        'Trait': {
+          epaisseur: { type: 'range', label: 'Épaisseur', min: 0.02, max: 0.3, step: 0.005, value: 0.11 },
+          rondeur: { type: 'range', label: 'Rondeur', min: 0, max: 1, step: 0.01, value: 1 },
+          pastilles: { type: 'range', label: 'Taille des points', min: 0, max: 0.3, step: 0.005, value: 0.09 },
+        },
+        'Tracé': {
+          trace: { type: 'range', label: 'Durée du tracé (s)', min: 0.5, max: 15, step: 0.1, value: 5 },
+          tenue: { type: 'range', label: 'Pause avant le suivant (s)', min: 0.5, max: 20, step: 0.5, value: 5 },
+          comete: { type: 'range', label: 'Lueurs sur la ligne', min: 0, max: 1, step: 0.01, value: 0.5 },
+          vitesse: { type: 'range', label: 'Vitesse des lueurs', min: 0, max: 2, step: 0.01, value: 0.5 },
+        },
+        'Logo en kolam': {
+          logo: { type: 'toggle', label: 'Inclure le logo', value: false },
+          tailleLogo: { type: 'range', label: 'Taille du logo', min: 0.3, max: 1.2, step: 0.01, value: 0.8, show: (q) => q.logo },
+          image: { type: 'file', label: 'Logo', accept: 'image/*', show: (q) => q.logo },
+        },
+        'Couleurs': {
+          fond: { type: 'color', label: 'Fond', value: '#7a3424' },
+          couleurs: { type: 'palette', label: 'Lignes', value: ['#f6efe2', '#f2c14e', '#e98a6b'] },
+          coloris: { type: 'select', label: 'Couleur des lignes', options: { une: 'Une seule', boucles: 'Une par boucle' }, value: 'boucles' },
+          pointsCouleur: { type: 'color', label: 'Points', value: '#f6efe2' },
+          accent: { type: 'color', label: 'Logo', value: '#f2c14e', show: (q) => q.logo },
+        },
+      },
+      presets: {
+        'Seuil': {},
+        'Grand kolam': { points: 13, epaisseur: 0.12, pastilles: 0.08, trace: 8 },
+        'Sona': { fond: '#d8c3a0', couleurs: ['#3a2a1e'], pointsCouleur: '#3a2a1e', coloris: 'une', symetrie: 'miroir', points: 6, epaisseur: 0.07, pastilles: 0.12 },
+        'Tressage': { motif: 'croise', points: 9, coloris: 'boucles', couleurs: ['#f6efe2', '#f2c14e', '#e98a6b', '#9fd3c7'] },
+        'Au hasard': { motif: 'libre', symetrie: 'aucune', points: 10, densite: 0.5 },
+        'Angles vifs': { rondeur: 0, epaisseur: 0.08, points: 9, fond: '#121212', couleurs: ['#f4f3f0'], coloris: 'une', pointsCouleur: '#e5452a' },
+        'Logo': { logo: true, points: 15, epaisseur: 0.1, pastilles: 0.06, coloris: 'une', couleurs: ['#f6efe2'], accent: '#f2c14e' },
+        'Biennale': { fond: BIEN[0], couleurs: [BIEN[1], BIEN[2]], pointsCouleur: BIEN[2], accent: BIEN[2], points: 8 },
+        'Menthe': { fond: MEN[1], couleurs: [MEN[2], MEN[0], MEN[3]], pointsCouleur: MEN[0], accent: MEN[2], points: 9 },
+        'Kegelbahn': { fond: KB[0], couleurs: KB.slice(1), pointsCouleur: KB[3], accent: KB[1], points: 11, symetrie: 'miroir' },
+      },
+      brand(colors) {
+        const s = colors.slice().sort((a, b) => lum(a) - lum(b)), L = s[s.length - 1], D = s[0];
+        return { fond: D, couleurs: s.length > 2 ? s.slice(1).reverse() : [L], pointsCouleur: L, accent: s[Math.floor(s.length / 2)] };
+      },
+      pointer: {
+        down: (q) => { drag = { last: -1, moved: 0, x: q.x, y: q.y }; toggleAt(q.x, q.y, drag); },
+        drag: (q) => { if (!drag) return; drag.moved += Math.hypot(q.x - drag.x, q.y - drag.y); drag.x = q.x; drag.y = q.y; toggleAt(q.x, q.y, drag); },
+        up: () => { drag = null; },
+        wheel: (q, dy) => app.set('points', Math.max(2, Math.min(18, p.points + (dy > 0 ? 1 : -1)))),
+      },
+      onChange(k) { if (['*', 'logo', 'image'].includes(k)) logoKey = ''; if (k === '*') gen = 0; },
+      export: { name: 'kolam', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    function hex(x) { const n = parseInt(x.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
+    function lum(x) { const c = hex(x); return (c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114) / 255; }
+    function mix(a, b, t) { const A = hex(a), C = hex(b); return '#' + A.map((v, i) => Math.round(v + (C[i] - v) * t).toString(16).padStart(2, '0')).join(''); }
+    function rng(s) { let a = s >>> 0; return () => { a = (a + 0x6d2b79f5) >>> 0; let t = a; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+
+    // ——— Logo ———
+    function buildLogo() {
+      const img0 = p.image || app.logoImg, key = [p.logo, img0 ? (img0.src || 'c') : 'demo'].join(); if (key === logoKey) return; logoKey = key; gKey = '';
+      const M = 200, c = document.createElement('canvas'); c.width = c.height = M; const x = c.getContext('2d', { willReadFrequently: true }), L = M * 0.94, cx = M / 2;
+      if (img0) { const iw = img0.naturalWidth || img0.width, ih = img0.naturalHeight || img0.height, s = L / Math.max(iw, ih); x.drawImage(img0, cx - iw * s / 2, cx - ih * s / 2, iw * s, ih * s); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(cx, cx, L * 0.48, 0, TAU); x.arc(cx, cx, L * 0.27, 0, TAU, true); x.fill('evenodd'); x.fillRect(cx - L * 0.07, cx - L * 0.5, L * 0.14, L); }
+      const d = x.getImageData(0, 0, M, M).data; let transp = 0; for (let i = 3; i < d.length; i += 4) if (d[i] < 128) transp++; const useA = transp > M * M * 0.05;
+      const m = new Uint8Array(M * M); for (let i = 0; i < M * M; i++) { const o = i * 4, l = (d[o] * 0.2126 + d[o + 1] * 0.7152 + d[o + 2] * 0.0722) / 255; m[i] = (useA ? d[o + 3] > 128 : d[o + 3] > 128 && l < 0.5) ? 1 : 0; }
+      logoM = { m, M };
+    }
+
+    // ——— Grille, miroirs, boucles ———
+    function layout(w, h) {
+      const s = Math.min(w, h) / (p.points + 2), nx = Math.max(2, Math.floor(w / s - 2) + 1), ny = Math.max(2, Math.floor(h / s - 2) + 1);
+      return { s, nx, ny, ox: (w - (nx - 1) * s) / 2, oy: (h - (ny - 1) * s) / 2 };
+    }
+    function grid(w, h) {
+      buildLogo();
+      const key = [p.points, p.motif, p.densite, p.rondeur, p.symetrie, p.logo, p.tailleLogo, logoKey, app.seed, gen, w, h].join(); if (key === gKey && G) return G; if (G && G.gen === gen) phT = simT - p.trace; gKey = key; edited = false;
+      const L = layout(w, h), { nx, ny } = L, W = 2 * nx + 1, H = 2 * ny + 1, idx = (X, Y) => (Y + 1) * W + (X + 1);
+      const T = new Int8Array(W * H).fill(-1), fixed = new Uint8Array(W * H), pts = [];
+      const dotIn = (i, j) => {
+        if (!p.logo || !logoM || i < 0 || j < 0 || i >= nx || j >= ny) return false; const S = Math.min(w, h) * p.tailleLogo, x = L.ox + i * L.s, y = L.oy + j * L.s;
+        const u = Math.floor(((x - w / 2) / S + 0.5) * logoM.M), v = Math.floor(((y - h / 2) / S + 0.5) * logoM.M); return u >= 0 && v >= 0 && u < logoM.M && v < logoM.M && logoM.m[v * logoM.M + u] === 1;
+      };
+      for (let Y = -1; Y <= 2 * ny - 1; Y++) for (let X = -1; X <= 2 * nx - 1; X++) {
+        if (((X + Y) & 1) === 0) continue; const horiz = (X & 1) !== 0; // milieu d'un côté horizontal (points à gauche et à droite)
+        if (horiz ? Y < 0 || Y > 2 * ny - 2 : X < 0 || X > 2 * nx - 2) continue;
+        const o = idx(X, Y), border = horiz ? X === -1 || X === 2 * nx - 1 : Y === -1 || Y === 2 * ny - 1;
+        const a = horiz ? [(X - 1) / 2, Y / 2] : [X / 2, (Y - 1) / 2], b = horiz ? [(X + 1) / 2, Y / 2] : [X / 2, (Y + 1) / 2];
+        if (border) { T[o] = 2; fixed[o] = 1; }
+        else if (dotIn(a[0], a[1]) !== dotIn(b[0], b[1])) { T[o] = 2; fixed[o] = 1; }
+        else { T[o] = 0; pts.push({ X, Y, o }); }
+      }
+      // orbites de symétrie : les milieux équivalents reçoivent le même miroir
+      const cx = nx - 1, cy = ny - 1, orb = new Map();
+      for (const q of pts) {
+        let a = q.X - cx, b = q.Y - cy;
+        if (p.symetrie !== 'aucune') { a = Math.abs(a); b = Math.abs(b); if (p.symetrie === 'rotation' && nx === ny && b > a) [a, b] = [b, a]; }
+        const k = a * 1000 + b; let O = orb.get(k); if (!O) orb.set(k, (O = [])); O.push(q.o);
+      }
+      const R = rng(app.seed * 7919 + gen * 104729 + 17), orbs = [...orb.values()];
+      for (let i = orbs.length - 1; i > 0; i--) { const j = Math.floor(R() * (i + 1)); [orbs[i], orbs[j]] = [orbs[j], orbs[i]]; }
+      G = { L, W, H, T, fixed, idx, nx, ny, dotIn, gen };
+      if (p.motif !== 'croise') {
+        let cur = countLoops(G);
+        for (const O of orbs) {
+          if (R() > p.densite) continue; const t = R() < 0.5 ? 1 : 2;
+          for (const o of O) T[o] = t;
+          if (p.motif === 'unique') {
+            // l'une des deux orientations garde presque toujours la ligne d'un seul tenant
+            let c = countLoops(G); if (c > cur) { for (const o of O) T[o] = 3 - t; c = countLoops(G); }
+            if (c > cur) for (const o of O) T[o] = 0; else cur = c;
+          }
+        }
+      }
+      trace(G);
+      return G;
+    }
+    // suit la ligne d'un milieu à l'autre ; renvoie les boucles (ou seulement leur nombre)
+    function walk(G, collect) {
+      const { W, H, T, idx } = G, used = new Uint8Array(W * H * 4), loops = []; let n = 0;
+      const dirI = (dx, dy) => (dx > 0 ? 1 : 0) + (dy > 0 ? 2 : 0);
+      for (let Y0 = -1; Y0 < H - 1; Y0++) for (let X0 = -1; X0 < W - 1; X0++) {
+        const o0 = idx(X0, Y0); if (T[o0] < 0) continue;
+        for (const [dx0, dy0] of [[1, 1], [1, -1], [-1, 1], [-1, -1]]) {
+          if (used[o0 * 4 + dirI(dx0, dy0)]) continue;
+          const nX = X0 + dx0, nY = Y0 + dy0; if (nX < -1 || nY < -1 || nX >= W - 1 || nY >= H - 1 || T[idx(nX, nY)] < 0) continue;
+          let X = X0, Y = Y0, dx = dx0, dy = dy0; const P = collect ? [] : null; let guard = 0;
+          do {
+            const o = idx(X, Y); used[o * 4 + dirI(dx, dy)] = 1; X += dx; Y += dy; const o2 = idx(X, Y); used[o2 * 4 + dirI(-dx, -dy)] = 1;
+            if (P) P.push([X, Y]);
+            const t = T[o2], horiz = (X & 1) !== 0;
+            if (t === 1) { if (horiz) dy = -dy; else dx = -dx; } else if (t === 2) { if (horiz) dx = -dx; else dy = -dy; }
+          } while (!(X === X0 && Y === Y0 && dx === dx0 && dy === dy0) && ++guard < 1e6);
+          n++; if (P) loops.push(P);
+        }
+      }
+      return collect ? loops : n;
+    }
+    const countLoops = (G) => walk(G, false);
+
+    // boucles → polylignes lissées (coins arrondis en quadratiques), longueur cumulée pour le tracé progressif
+    function trace(G) {
+      const { L } = G, raw = walk(G, true), toXY = (q) => [L.ox + q[0] * L.s / 2, L.oy + q[1] * L.s / 2];
+      G.loops = raw.map((P, li) => {
+        const n = P.length, pts = [], r = 1, rd = p.rondeur;
+        let inl = 0; for (const q of P) { const i = Math.round(q[0] / 2), j = Math.round(q[1] / 2); if (G.dotIn(Math.floor(q[0] / 2), Math.floor(q[1] / 2)) || G.dotIn(i, j)) inl++; }
+        const segs = [];
+        for (let k = 0; k < n; k++) {
+          const A = toXY(P[(k - 1 + n) % n]), V = toXY(P[k]), Nn = toXY(P[(k + 1) % n]);
+          const a = [V[0] + (A[0] - V[0]) * 0.5 * r, V[1] + (A[1] - V[1]) * 0.5 * r], b = [V[0] + (Nn[0] - V[0]) * 0.5 * r, V[1] + (Nn[1] - V[1]) * 0.5 * r];
+          // point de contrôle : du chanfrein (rondeur 0) au coin bien arrondi (rondeur 1)
+          const Vc = [(a[0] + b[0]) / 2 + (V[0] - (a[0] + b[0]) / 2) * rd, (a[1] + b[1]) / 2 + (V[1] - (a[1] + b[1]) / 2) * rd];
+          segs.push({ a, V: Vc, b });
+          // échantillonnage pour mesurer et tracer partiellement
+          if (pts.length) pts.push(a); else pts.push(a);
+          if (rd > 0) for (let s = 1; s <= 6; s++) { const t = s / 6, u = 1 - t; pts.push([u * u * a[0] + 2 * u * t * Vc[0] + t * t * b[0], u * u * a[1] + 2 * u * t * Vc[1] + t * t * b[1]]); }
+          else pts.push(b);
+        }
+        pts.push(pts[0]);
+        const cum = new Float32Array(pts.length); for (let k = 1; k < pts.length; k++) cum[k] = cum[k - 1] + Math.hypot(pts[k][0] - pts[k - 1][0], pts[k][1] - pts[k - 1][1]);
+        return { pts, cum, len: cum[pts.length - 1], segs, logo: inl > n * 0.5, li };
+      }).sort((A, B) => B.len - A.len).map((l, i) => Object.assign(l, { li: i }));
+    }
+
+    function toggleAt(x, y, d) {
+      if (!G) return; const { L, idx, T, fixed, W, H } = G, X = Math.round((x - L.ox) / L.s * 2), Y = Math.round((y - L.oy) / L.s * 2);
+      let best = -1, bd = 1e9; for (let b = -1; b <= 1; b++) for (let a = -1; a <= 1; a++) { const XX = X + a, YY = Y + b; if (XX < -1 || YY < -1 || XX >= W - 1 || YY >= H - 1) continue; const o = idx(XX, YY); if (T[o] < 0 || fixed[o]) continue; const dd = (L.ox + XX * L.s / 2 - x) ** 2 + (L.oy + YY * L.s / 2 - y) ** 2; if (dd < bd) { bd = dd; best = o; } }
+      if (best < 0 || best === d.last || bd > (L.s * 0.45) ** 2) return; d.last = best;
+      T[best] = (T[best] + 1) % 3; trace(G); edited = true; phT = simT - p.trace; // ligne entière, la pause repart
+    }
+
+    // ——— Animation : tracé, pause, effacement, nouveau kolam ———
+    function phase(t) {
+      const a = p.trace, b = p.tenue, c = p.trace * 0.5, u = t - phT;
+      if (edited) return u < a + b * 2 ? { draw: 1, from: 0 } : null;
+      if (u < a) return { draw: (u / a) ** 0.9, from: 0 };
+      if (u < a + b) return { draw: 1, from: 0 };
+      if (u < a + b + c) { const e = (u - a - b) / c; return { draw: 1, from: e * e * (3 - 2 * e) }; }
+      return null;
+    }
+    function partial(lp, f0, f1, out) {
+      const L0 = lp.len * f0, L1 = lp.len * f1, { pts, cum } = lp; let started = false;
+      for (let k = 1; k < pts.length; k++) {
+        if (cum[k] < L0) continue; if (cum[k - 1] > L1) break;
+        const seg = cum[k] - cum[k - 1] || 1, A = pts[k - 1], Bp = pts[k];
+        const t0 = Math.max(0, (L0 - cum[k - 1]) / seg), t1 = Math.min(1, (L1 - cum[k - 1]) / seg);
+        if (!started) { out.moveTo(A[0] + (Bp[0] - A[0]) * t0, A[1] + (Bp[1] - A[1]) * t0); started = true; }
+        out.lineTo(A[0] + (Bp[0] - A[0]) * t1, A[1] + (Bp[1] - A[1]) * t1);
+      }
+    }
+    function loopCol(lp) {
+      if (lp.logo && p.logo) return p.accent;
+      const C = p.couleurs.length ? p.couleurs : ['#ffffff']; return p.coloris === 'une' ? C[0] : C[lp.li % C.length];
+    }
+
+    app.loop((t, dt) => {
+      dt = Math.min(0.1, dt || 0); simT += app.thumbnail ? 0 : dt;
+      const { w, h, dpr } = app.size;
+      let g = grid(w, h), ph = app.thumbnail ? { draw: 1, from: 0 } : phase(simT);
+      if (!ph) { gen++; phT = simT; edited = false; g = grid(w, h); ph = phase(simT); }
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = p.fond; ctx.fillRect(0, 0, w, h);
+      const { L } = g, lw = L.s * p.epaisseur;
+      if (p.pastilles > 0) { const P = new Path2D(), r = L.s * p.pastilles * 0.5; for (let j = 0; j < g.ny; j++) for (let i = 0; i < g.nx; i++) { const x = L.ox + i * L.s, y = L.oy + j * L.s; P.moveTo(x + r, y); P.arc(x, y, r, 0, TAU); } ctx.fillStyle = p.pointsCouleur; ctx.fill(P); }
+      ctx.lineCap = 'round'; ctx.lineJoin = 'round'; ctx.lineWidth = lw;
+      const byCol = new Map();
+      for (const lp of g.loops) { const col = loopCol(lp); let P = byCol.get(col); if (!P) byCol.set(col, (P = new Path2D())); partial(lp, ph.from, ph.draw, P); }
+      for (const [col, P] of byCol) { ctx.strokeStyle = col; ctx.stroke(P); }
+      // lueurs : de petits traits plus clairs qui glissent le long de chaque boucle
+      if (p.comete > 0 && ph.draw >= 1 && ph.from === 0) {
+        const segL = L.s * 0.9;
+        const H = new Path2D();
+        for (const lp of g.loops) { const n = Math.max(1, Math.round(lp.len / (L.s * 10) * p.comete)), per = lp.len / n; for (let k = 0; k < n; k++) { const s0 = ((simT * p.vitesse * L.s * 2 + k * per + lp.li * 37) % lp.len + lp.len) % lp.len; const f0 = s0 / lp.len, f1 = Math.min(1, (s0 + segL) / lp.len); partial(lp, f0, f1, H); } }
+        ctx.strokeStyle = lum(p.fond) < 0.5 ? 'rgba(255,255,255,' + (0.25 + 0.4 * p.comete) + ')' : 'rgba(0,0,0,' + (0.15 + 0.3 * p.comete) + ')'; ctx.lineWidth = lw * 0.45; ctx.stroke(H);
+      }
+      app.finish(ctx);
+    });
+
+    function toSVG() {
+      const { w, h } = app.size, f = (v) => +v.toFixed(2), g = grid(w, h), { L } = g, ph = phase(simT) || { draw: 1, from: 0 };
+      let s = `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><rect width="100%" height="100%" fill="${p.fond}"/>`;
+      if (p.pastilles > 0) { const r = f(L.s * p.pastilles * 0.5); s += `<g fill="${p.pointsCouleur}">`; for (let j = 0; j < g.ny; j++) for (let i = 0; i < g.nx; i++) s += `<circle cx="${f(L.ox + i * L.s)}" cy="${f(L.oy + j * L.s)}" r="${r}"/>`; s += '</g>'; }
+      const byCol = new Map();
+      for (const lp of g.loops) {
+        let d = '';
+        if (ph.draw >= 1 && ph.from === 0) { d = 'M' + f(lp.segs[0].a[0]) + ' ' + f(lp.segs[0].a[1]); for (const q of lp.segs) d += `L${f(q.a[0])} ${f(q.a[1])}` + (p.rondeur > 0 ? `Q${f(q.V[0])} ${f(q.V[1])} ${f(q.b[0])} ${f(q.b[1])}` : `L${f(q.b[0])} ${f(q.b[1])}`); d += 'Z'; }
+        else { const pen = { moveTo: (x, y) => (d += `M${f(x)} ${f(y)}`), lineTo: (x, y) => (d += `L${f(x)} ${f(y)}`) }; partial(lp, ph.from, ph.draw, pen); }
+        const col = loopCol(lp); byCol.set(col, (byCol.get(col) || '') + d);
+      }
+      for (const [col, d] of byCol) if (d) s += `<path d="${d}" fill="none" stroke="${col}" stroke-width="${f(L.s * p.epaisseur)}" stroke-linecap="round" stroke-linejoin="round"/>`;
+      return s + '</svg>';
+    }
+  </script>
+</body>
+</html>
