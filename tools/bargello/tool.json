@@ -1,0 +1,15 @@
+{
+  "slug": "bargello",
+  "title": "Bargello",
+  "type": "motion",
+  "description": "Une broderie au point de Bargello : des points verticaux décalés colonne après colonne dessinent flammes, vagues et écailles qui ondulent ; le logo se brode dedans.",
+  "tags": ["textile", "broderie", "motif", "vague", "logo", "svg"],
+  "inspiration": [
+    "Les sièges brodés du Palazzo del Bargello à Florence",
+    "Le point de Hongrie et le « flame stitch » du XVIIe siècle",
+    "Les tissus Missoni"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}

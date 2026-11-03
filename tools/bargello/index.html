@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Bargello</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Bargello : sur un canevas quadrillé, chaque point est un fil vertical qui couvre L rangs. D'une colonne à l'autre,
+    // on monte ou on descend d'un ou deux rangs : le profil de ce décalage (dents, vague, écailles) se répète sur toutes
+    // les bandes de couleur empilées, et la broderie se couvre de flammes. Ici le profil glisse latéralement, les bandes
+    // défilent, le doigt soulève localement la vague et le logo se brode dans une gamme de sa couleur.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const BIEN = PAL('biennale'), MEN = PAL('menthe'), KB = PAL('kegelbahn');
+
+    let simT = 0, bumps = [], logoM = null, logoKey = '', last = null;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: false,
+      finish: { grain: 0.03, vignette: 0.08 },
+      hint: 'Glissez pour soulever la vague · molette : amplitude',
+      notes: 'Le point de Bargello doit son nom aux chaises brodées du Palazzo del Bargello, à Florence ; on l\'appelle aussi point de Hongrie, ou « flame stitch ». La règle est simple : tous les points sont verticaux et de même longueur, et chaque colonne commence un peu plus haut ou un peu plus bas que la précédente. Le profil choisi pour la première rangée se répète ensuite sur chaque bande de couleur, si bien qu\'un seul tracé en dents de scie suffit à couvrir le tissu de flammes. Dans les années 1960 et 1970, Missoni en a fait la signature de ses tricots. Ici le profil glisse, les bandes montent lentement, le doigt soulève la vague, et le logo se brode dans une gamme tirée de sa couleur.',
+      params: {
+        'Canevas': {
+          colonnes: { type: 'range', label: 'Points (petit côté)', min: 20, max: 140, step: 1, value: 60 },
+          longueur: { type: 'range', label: 'Longueur d\'un point (rangs)', min: 2, max: 8, step: 1, value: 4 },
+          rangs: { type: 'range', label: 'Rangs par point de largeur', min: 0.5, max: 2, step: 0.05, value: 1 },
+        },
+        'Motif': {
+          forme: { type: 'select', label: 'Profil', options: { flamme: 'Flammes', vague: 'Vague', ecailles: 'Écailles', marches: 'Marches', hasard: 'Au hasard' }, value: 'flamme' },
+          amplitude: { type: 'range', label: 'Amplitude (rangs)', min: 0, max: 40, step: 0.5, value: 12 },
+          periode: { type: 'range', label: 'Largeur d\'un motif (points)', min: 4, max: 60, step: 1, value: 18 },
+          miroir: { type: 'toggle', label: 'Bandes en miroir (losanges)', value: false },
+          allerRetour: { type: 'toggle', label: 'Gamme aller-retour', value: true },
+        },
+        'Mouvement': {
+          glisse: { type: 'range', label: 'Glissement du profil', min: -2, max: 2, step: 0.01, value: 0.35 },
+          defile: { type: 'range', label: 'Défilement des bandes', min: -2, max: 2, step: 0.01, value: 0.25 },
+        },
+        'Fil': {
+          relief: { type: 'range', label: 'Relief du fil', min: 0, max: 1, step: 0.01, value: 0.55 },
+          jour: { type: 'range', label: 'Jour entre points', min: 0, max: 0.4, step: 0.01, value: 0.12 },
+        },
+        'Logo brodé': {
+          logo: { type: 'toggle', label: 'Broder le logo', value: false },
+          tailleLogo: { type: 'range', label: 'Taille du logo', min: 0.3, max: 1.8, step: 0.01, value: 1.2, show: (q) => q.logo },
+          image: { type: 'file', label: 'Logo', accept: 'image/*', show: (q) => q.logo },
+        },
+        'Couleurs': {
+          fond: { type: 'color', label: 'Canevas', value: '#e9e2d0' },
+          couleurs: { type: 'palette', label: 'Fils', value: ['#2c1e2f', '#7a2a3a', '#ef5a2f', '#f2a65a', '#f6dca0'] },
+          accent: { type: 'color', label: 'Logo', value: '#486cfc', show: (q) => q.logo },
+        },
+      },
+      presets: {
+        'Flammes': {},
+        'Missoni': { couleurs: ['#1b1b1f', '#f272ba', '#edd14b', '#486cfc', '#ef5a2f', '#f4f1ea'], allerRetour: false, longueur: 3, amplitude: 6, periode: 14, colonnes: 80 },
+        'Vague': { forme: 'vague', couleurs: ['#0b1d3a', '#1d3f8f', '#486cfc', '#9fbfe6', '#e8eef7'], amplitude: 16, periode: 30, defile: -0.3 },
+        'Écailles': { forme: 'ecailles', couleurs: ['#1f3324', '#3f6b45', '#7fae6a', '#cfe0b0'], amplitude: 8, periode: 10, longueur: 3 },
+        'Losanges': { miroir: true, couleurs: ['#3b2a20', '#b5452b', '#d9a441', '#efe2c0'], amplitude: 10, periode: 16, glisse: 0.2 },
+        'Marches': { forme: 'marches', couleurs: ['#16161c', '#5b4bd6', '#f272ba', '#f4f1ea'], amplitude: 14, periode: 24, longueur: 5 },
+        'Logo': { logo: true, couleurs: ['#cfc6b0', '#ddd5c1', '#ebe5d6'], accent: '#ef5a2f', colonnes: 90, amplitude: 8, periode: 14, longueur: 3 },
+        'Biennale': { fond: BIEN[0], couleurs: [BIEN[1], BIEN[2], BIEN[3], BIEN[4], BIEN[0]], allerRetour: true, amplitude: 12 },
+        'Menthe': { fond: MEN[1], couleurs: [MEN[1], MEN[0], MEN[2], MEN[3]], forme: 'vague', amplitude: 14 },
+        'Kegelbahn': { fond: KB[0], couleurs: [KB[0], KB[1], KB[2]], forme: 'marches', miroir: true, amplitude: 10 },
+      },
+      brand(colors) {
+        const s = colors.slice().sort((a, b) => lum(a) - lum(b));
+        return { fond: s[s.length - 1], couleurs: s.length > 1 ? s : [s[0], '#ffffff'], accent: s[Math.floor(s.length / 2)] };
+      },
+      pointer: {
+        down: (q) => { last = [q.x, q.y]; addBump(q.x, q.y); },
+        drag: (q) => { if (last && Math.hypot(q.x - last[0], q.y - last[1]) > 10) { addBump(q.x, q.y); last = [q.x, q.y]; } },
+        up: () => { last = null; },
+        wheel: (q, dy) => app.set('amplitude', Math.max(0, Math.min(40, p.amplitude + (dy > 0 ? -1 : 1)))),
+      },
+      onChange(k) { if (['*', 'logo', 'image'].includes(k)) logoKey = ''; },
+      export: { name: 'bargello', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    function hex(x) { const n = parseInt(x.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
+    function lum(x) { const c = hex(x); return (c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114) / 255; }
+    function mix(a, b, t) { const A = hex(a), B = hex(b); return '#' + A.map((v, i) => Math.round(v + (B[i] - v) * t).toString(16).padStart(2, '0')).join(''); }
+    function addBump(x, y) { bumps.push({ x, y, t: simT }); if (bumps.length > 60) bumps.shift(); }
+
+    // ——— Logo ———
+    function buildLogo() {
+      const img0 = p.image || app.logoImg, key = [p.logo, img0 ? (img0.src || 'c') : 'demo'].join(); if (key === logoKey) return; logoKey = key;
+      logoM = null; if (!p.logo) return;
+      const M = 200, c = document.createElement('canvas'); c.width = c.height = M; const x = c.getContext('2d', { willReadFrequently: true }), L = M * 0.94, cx = M / 2;
+      if (img0) { const iw = img0.naturalWidth || img0.width, ih = img0.naturalHeight || img0.height, s = L / Math.max(iw, ih); x.drawImage(img0, cx - iw * s / 2, cx - ih * s / 2, iw * s, ih * s); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(cx, cx, L * 0.48, 0, TAU); x.arc(cx, cx, L * 0.27, 0, TAU, true); x.fill('evenodd'); x.fillRect(cx - L * 0.07, cx - L * 0.5, L * 0.14, L); }
+      const d = x.getImageData(0, 0, M, M).data; let transp = 0; for (let i = 3; i < d.length; i += 4) if (d[i] < 128) transp++; const useA = transp > M * M * 0.05;
+      const m = new Uint8Array(M * M); for (let i = 0; i < M * M; i++) { const o = i * 4, l = (d[o] * 0.2126 + d[o + 1] * 0.7152 + d[o + 2] * 0.0722) / 255; m[i] = (useA ? d[o + 3] > 128 : d[o + 3] > 128 && l < 0.5) ? 1 : 0; }
+      logoM = { m, M };
+    }
+    function inLogo(X, Y, w, h) {
+      if (!logoM || !p.logo) return false; const S = Math.min(w, h) * 0.5 * p.tailleLogo, u = Math.floor(((X - w / 2) / S * 0.5 + 0.5) * logoM.M), v = Math.floor(((Y - h / 2) / S * 0.5 + 0.5) * logoM.M);
+      return u >= 0 && v >= 0 && u < logoM.M && v < logoM.M && logoM.m[v * logoM.M + u] === 1;
+    }
+
+    // ——— Profil : décalage (en rangs entiers) de chaque colonne ———
+    function hash1(i) { let h = Math.imul(i ^ 0x9e3779b9, 0x85ebca6b); h ^= h >>> 13; h = Math.imul(h, 0xc2b2ae35); h ^= h >>> 16; return (h >>> 0) / 4294967296; }
+    function profile(u) {
+      // u : position en motifs (1 = un motif complet) ; renvoie une valeur dans [-1, 1]
+      const f = u - Math.floor(u);
+      switch (p.forme) {
+        case 'vague': return Math.sin(u * TAU);
+        case 'ecailles': return 1 - 2 * Math.abs(Math.sin(u * Math.PI));
+        case 'marches': return 1 - 4 * Math.abs(f - 0.5);
+        case 'hasard': { const k = Math.floor(u * 3), g = u * 3 - k, a = hash1(k) * 2 - 1, b = hash1(k + 1) * 2 - 1, s = g * g * (3 - 2 * g); return a + (b - a) * s; }
+        default: { // flammes : pics aigus, creux arrondis
+          const tri = 1 - 2 * Math.abs(f - 0.5) * 2; return Math.sign(tri) * Math.abs(tri) ** 0.7;
+        }
+      }
+    }
+
+    function stitches(w, h, t) {
+      buildLogo();
+      const m = Math.min(w, h), cw = m / p.colonnes, rh = cw / p.rangs, L = p.longueur | 0, nx = Math.ceil(w / cw) + 1, ny = Math.ceil(h / rh);
+      const C = p.couleurs.length ? p.couleurs : ['#000000'], seq = p.allerRetour && C.length > 2 ? C.concat(C.slice(1, -1).reverse()) : C, n = seq.length;
+      // gamme du logo : l'accent assombri et éclairci, de la même longueur que la gamme des fils
+      const acc = seq.map((c, k) => { const v = lum(c), tgt = v > lum(p.accent) ? '#ffffff' : '#000000'; return mix(p.accent, tgt, Math.min(0.75, Math.abs(v - lum(p.accent)) * 0.9)); });
+      const scroll = t * p.defile * 3, slide = t * p.glisse * 0.12, out = [], ox = (w - (nx - 1) * cw) / 2;
+      for (let i = 0; i < nx; i++) {
+        const x = ox + i * cw;
+        let off = profile(i / p.periode + slide) * p.amplitude;
+        for (const b of bumps) { const age = t - b.t, dx = (x - b.x) / (m * 0.08); if (age < 6 && Math.abs(dx) < 3) off += -p.amplitude * 0.9 * Math.exp(-dx * dx) * Math.sin(Math.min(1, age * 2) * Math.PI / 2) * Math.max(0, 1 - age / 6) - 0; }
+        off = p.forme === 'marches' ? Math.round(off / (L / 2)) * (L / 2) : Math.round(off);
+        const push = (r0, len, band) => {
+          const y0 = r0 * rh, y1 = y0 + len * rh; if (y1 < -rh || y0 > h + rh || len <= 0) return;
+          const ci = ((band % n) + n) % n; out.push(x, y0, y1, inLogo(x, (y0 + y1) / 2, w, h) ? -1 - ci : ci);
+        };
+        if (!p.miroir) {
+          // une colonne de points empilés ; chaque point couvre L rangs à partir de off + k·L
+          const o = off + scroll, k0 = Math.floor(-o / L) - 1, k1 = Math.ceil((ny - o) / L) + 1;
+          for (let k = k0; k <= k1; k++) push(o + k * L, L, k);
+        } else {
+          // en miroir : le profil monte au-dessus de l'axe et descend en dessous ; les bandes naissent au centre
+          const a = Math.max(0, off + p.amplitude + 0.5 | 0), mid = Math.round(ny / 2), sm = ((scroll % L) + L) % L, sh = Math.floor(scroll / L), K = Math.ceil(ny / L) + 2;
+          for (let k = -1; k < K; k++) { push(mid + a + k * L + sm, L, k + 1 - sh); push(mid - a - (k + 1) * L - sm, L, k + 1 - sh); }
+          // cœur du losange : de l'axe jusqu'aux premières bandes
+          const top = mid - a - sm, bot = mid + a + sm; for (let r = top; r < bot; r += L) push(r, Math.min(L, bot - r), -sh);
+        }
+      }
+      return { out, cw, seq, acc };
+    }
+
+    app.loop((t, dt) => {
+      dt = Math.min(0.1, dt || 0);
+      if (!app.thumbnail) simT += dt; else simT = 2;
+      if (bumps.length && simT - bumps[0].t > 6) bumps = bumps.filter((b) => simT - b.t < 6);
+      const { w, h, dpr } = app.size, { out, cw, seq, acc } = stitches(w, h, simT);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = p.fond; ctx.fillRect(0, 0, w, h);
+      const gx = cw * p.jour / 2, gy = Math.min(cw, (out[2] - out[1])) * p.jour * 0.25, wd = cw - 2 * gx, rr = Math.min(wd / 2, cw * 0.3);
+      // regroupés par couleur : un chemin par fil
+      const G = new Map();
+      for (let i = 0; i < out.length; i += 4) {
+        const c = out[i + 3], col = c < 0 ? acc[-1 - c] : seq[c]; let P = G.get(col); if (!P) G.set(col, (P = new Path2D()));
+        const x = out[i] - wd / 2, y = out[i + 1] + gy, hh = out[i + 2] - out[i + 1] - 2 * gy; P.roundRect(x, y, wd, hh, rr);
+      }
+      for (const [col, P] of G) { ctx.fillStyle = col; ctx.fill(P); }
+      if (p.relief > 0) {
+        // relief du fil : une ligne claire à gauche, une ombre à droite, sur toute la colonne
+        const H = new Path2D(), S = new Path2D();
+        for (let i = 0; i < out.length; i += 4) { const y = out[i + 1] + gy + rr * 0.6, hh = out[i + 2] - out[i + 1] - 2 * gy - rr * 1.2; if (hh <= 0) continue; H.rect(out[i] - wd * 0.28, y, wd * 0.16, hh); S.rect(out[i] + wd * 0.2, y, wd * 0.22, hh); }
+        ctx.fillStyle = `rgba(255,255,255,${0.22 * p.relief})`; ctx.fill(H);
+        ctx.fillStyle = `rgba(0,0,0,${0.18 * p.relief})`; ctx.fill(S);
+      }
+      app.finish(ctx);
+    });
+
+    function toSVG() {
+      const { w, h } = app.size, f = (v) => +v.toFixed(2), { out, cw, seq, acc } = stitches(w, h, simT);
+      const gx = cw * p.jour / 2, gy = Math.min(cw, (out[2] - out[1])) * p.jour * 0.25, wd = cw - 2 * gx, rr = Math.min(wd / 2, cw * 0.3);
+      let s = `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><rect width="100%" height="100%" fill="${p.fond}"/>`;
+      const G = new Map();
+      for (let i = 0; i < out.length; i += 4) {
+        const c = out[i + 3], col = c < 0 ? acc[-1 - c] : seq[c], x = out[i] - wd / 2, y = out[i + 1] + gy, hh = out[i + 2] - out[i + 1] - 2 * gy;
+        G.set(col, (G.get(col) || '') + `<rect x="${f(x)}" y="${f(y)}" width="${f(wd)}" height="${f(hh)}" rx="${f(rr)}"/>`);
+      }
+      for (const [col, r] of G) s += `<g fill="${col}">${r}</g>`;
+      return s + '</svg>';
+    }
+  </script>
+</body>
+</html>
