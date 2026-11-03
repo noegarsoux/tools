@@ -1,0 +1,15 @@
+{
+  "slug": "parapluies",
+  "title": "Parapluies",
+  "type": "motion",
+  "description": "Une foule de parapluies vue d'en haut traverse une place sous la pluie : baleines, quartiers colorés, logo imprimé, ombres et ronds dans les flaques.",
+  "tags": ["foule", "pluie", "vue-aerienne", "motif", "logo", "svg"],
+  "inspiration": [
+    "Les photographies aériennes de foules sous la pluie",
+    "Les Parapluies de Cherbourg et leurs couleurs",
+    "Les passages piétons vus d'un balcon"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}

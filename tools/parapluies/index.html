@@ -1,0 +1,289 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Parapluies</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Parapluies : vue d'en haut. Chaque parapluie est un polygone de baleines dont les pans se creusent entre
+    // deux pointes (courbe quadratique vers l'intérieur). L'éclairage d'un pan dépend de son orientation par rapport
+    // à la lumière : la toile paraît bombée. Les piétons suivent une consigne de flux (traverser, voies opposées,
+    // flâner, tourner en rond) avec une répulsion douce entre voisins ; les plus grands passent au-dessus.
+    // Au sol, les gouttes font des ronds qui s'élargissent ; les parapluies portent une ombre décalée.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const BIT = PAL('bitmap'), GLY = PAL('glyphes'), SAL = PAL('salon'), ORB = PAL('orbite');
+
+    let simT = 0, vKey = '', logoM = null, logoKey = '', ptr = null, F = null, fKey = '', rip = [], lastN = 0;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.05, vignette: 0.16 },
+      hint: 'Les parapluies s\'écartent du pointeur · clic : ouvrir un parapluie · molette : taille',
+      notes: 'Vue d\'un balcon, une place sous la pluie n\'est plus qu\'un ballet de parapluies : des polygones de toile tendus sur leurs baleines, qui se croisent, s\'évitent, tournent un peu dans la main. Ici, chaque pan est éclairé selon son orientation pour paraître bombé ; les quartiers alternent, les bordures et les pois se peignent sur la toile, et le logo s\'imprime au sommet. La pluie fait des ronds au sol. Approchez le pointeur pour que la foule s\'écarte, cliquez pour ouvrir un parapluie.',
+      params: {
+        'Foule': {
+          flux: { type: 'select', label: 'Mouvement', options: { foule: 'Traversées en tous sens', passage: 'Passage piéton', place: 'Flânerie sur la place', ronde: 'Ronde autour du centre' }, value: 'foule' },
+          nombre: { type: 'range', label: 'Nombre', min: 3, max: 160, step: 1, value: 46 },
+          vitesse: { type: 'range', label: 'Vitesse de marche', min: 0, max: 2.5, step: 0.01, value: 1 },
+          taille: { type: 'range', label: 'Taille', min: 0.04, max: 0.24, step: 0.002, value: 0.1 },
+          ecart: { type: 'range', label: 'Écart de taille', min: 0, max: 0.6, step: 0.01, value: 0.25 },
+        },
+        'Parapluie': {
+          baleines: { type: 'range', label: 'Baleines', min: 5, max: 16, step: 1, value: 8 },
+          motif: { type: 'select', label: 'Toile', options: { uni: 'Unie', quartiers: 'Quartiers alternés', bordure: 'Bordure', pois: 'Pois', melange: 'Un peu de tout' }, value: 'melange' },
+          logos: { type: 'range', label: 'Part de parapluies au logo', min: 0, max: 1, step: 0.01, value: 0.3 },
+          relief: { type: 'range', label: 'Bombé', min: 0, max: 1, step: 0.01, value: 0.6 },
+          tourne: { type: 'range', label: 'Tournoiement', min: 0, max: 1, step: 0.01, value: 0.35 },
+          image: { type: 'file', label: 'Logo', accept: 'image/*' },
+        },
+        'Pluie': {
+          pluie: { type: 'range', label: 'Pluie', min: 0, max: 1, step: 0.01, value: 0.5 },
+          ombres: { type: 'range', label: 'Ombres', min: 0, max: 1, step: 0.01, value: 0.55 },
+        },
+        'Couleurs': {
+          sol: { type: 'color', label: 'Sol', value: '#3a3c40' },
+          couleurs: { type: 'palette', label: 'Toiles', value: ['#e8552b', '#f4c53a', '#4b6cf0', '#f2f0ea', '#16161a', '#e79ab5'] },
+        },
+      },
+      presets: {
+        'Place mouillée': {},
+        'Passage piéton': { flux: 'passage', nombre: 60, taille: 0.085, ecart: 0.15, motif: 'uni', couleurs: ['#16161a', '#16161a', '#16161a', '#e8552b', '#2b2d33'] },
+        'Ronde': { flux: 'ronde', nombre: 28, taille: 0.11, motif: 'quartiers', baleines: 10, sol: '#2c3a36' },
+        'Flânerie': { flux: 'place', nombre: 24, taille: 0.14, vitesse: 0.5, motif: 'pois', couleurs: [GLY[3], GLY[5], GLY[6], GLY[4], GLY[1]] },
+        'Marée noire': { nombre: 120, taille: 0.06, ecart: 0.1, motif: 'uni', logos: 0, couleurs: ['#111111', '#1c1c1f', '#262628', '#e5502a'], pluie: 0.8 },
+        'Quartiers': { motif: 'quartiers', baleines: 12, nombre: 30, taille: 0.13, couleurs: [BIT[2], BIT[4], BIT[3], BIT[0]] },
+        'Logos': { logos: 1, motif: 'uni', nombre: 36, couleurs: [BIT[2], BIT[3], BIT[1]], baleines: 8 },
+        'Grands parapluies': { nombre: 9, taille: 0.24, ecart: 0.2, vitesse: 0.4, flux: 'place', motif: 'bordure', baleines: 14 },
+        'Salon': { sol: '#26282c', couleurs: SAL.slice(1).concat([SAL[0]]), motif: 'melange', nombre: 54 },
+        'Orbite': { sol: '#cfc9bd', couleurs: ORB, flux: 'ronde', nombre: 40, taille: 0.08, ombres: 0.35, motif: 'quartiers' },
+      },
+      brand(colors) {
+        const s = colors.slice().sort((a, b) => lum(a) - lum(b));
+        return { sol: mix(s[0], '#3a3c40', 0.5), couleurs: s.length > 1 ? s.slice(1).concat([s[0]]) : [s[0], '#f2f0ea'] };
+      },
+      pointer: {
+        down: (q) => { ptr = { x: q.x, y: q.y, down: true, moved: 0, t: simT }; },
+        drag: (q) => { if (ptr) { ptr.moved += Math.hypot(q.x - ptr.x, q.y - ptr.y); ptr.x = q.x; ptr.y = q.y; } },
+        move: (q) => { if (!ptr || !ptr.down) ptr = { x: q.x, y: q.y, down: false, t: simT }; else { ptr.x = q.x; ptr.y = q.y; } ptr.t = simT; },
+        up: (q) => { if (ptr && ptr.down && ptr.moved < 6) openAt(ptr.x, ptr.y); if (ptr) ptr.down = false; },
+        wheel: (q, dy) => app.set('taille', Math.max(0.04, Math.min(0.24, +(p.taille * (dy > 0 ? 0.93 : 1.07)).toFixed(3)))),
+      },
+      onChange(k) { if (['*', 'image'].includes(k)) logoKey = ''; },
+      export: { name: 'parapluies', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    function hex(x) { const n = parseInt(x.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
+    function lum(x) { const c = hex(x); return (c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114) / 255; }
+    function mix(a, b, t) { const A = hex(a), C = hex(b); return '#' + A.map((v, i) => Math.round(v + (C[i] - v) * t).toString(16).padStart(2, '0')).join(''); }
+    function rng(s) { let a = s >>> 0; return () => { a = (a + 0x6d2b79f5) >>> 0; let t = a; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+
+    function buildLogo() {
+      const img0 = p.image || app.logoImg, key = img0 ? (img0.src || 'c') : 'demo'; if (key === logoKey) return; logoKey = key; vKey = '';
+      const M = 200, c = document.createElement('canvas'); c.width = c.height = M; const x = c.getContext('2d', { willReadFrequently: true }), L = M * 0.94, cx = M / 2;
+      if (img0) { const iw = img0.naturalWidth || img0.width, ih = img0.naturalHeight || img0.height, s = L / Math.max(iw, ih); x.drawImage(img0, cx - iw * s / 2, cx - ih * s / 2, iw * s, ih * s); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(cx, cx, L * 0.48, 0, TAU); x.arc(cx, cx, L * 0.27, 0, TAU, true); x.fill('evenodd'); x.fillRect(cx - L * 0.07, cx - L * 0.5, L * 0.14, L); }
+      const d = x.getImageData(0, 0, M, M).data; let transp = 0; for (let i = 3; i < d.length; i += 4) if (d[i] < 128) transp++; const useA = transp > M * M * 0.05;
+      const F = new Float64Array(M * M); for (let i = 0; i < M * M; i++) { const o = i * 4, l = (d[o] * 0.2126 + d[o + 1] * 0.7152 + d[o + 2] * 0.0722) / 255; F[i] = useA ? d[o + 3] / 255 : (d[o + 3] / 255) * Math.min(1, Math.max(0, (0.75 - l) * 2)); }
+      { const G2 = new Float64Array(M * M); for (let j = 1; j < M - 1; j++) for (let i = 1; i < M - 1; i++) { let a = 0; for (let b = -1; b <= 1; b++) for (let c = -1; c <= 1; c++) a += F[(j + b) * M + i + c] * (b || c ? (b && c ? 1 : 2) : 4); G2[j * M + i] = a / 16; } F.set(G2); }
+      for (let k = 0; k < M; k++) F[k] = F[(M - 1) * M + k] = F[k * M] = F[k * M + M - 1] = 0;
+      logoM = contours(F, M, M, 0.5, 0, 0, 1).filter((c) => c.closed && c.pts.length > 6).map((c) => chaikin(chaikin(c.pts, true), true).map((q) => [q[0] / M - 0.5, q[1] / M - 0.5]));
+    }
+    // carrés marchants + chaînage
+    function contours(F, nx, ny, lev, ox, oy, cs) {
+      const pt = new Map(), adj = new Map();
+      const P = (id) => { let q = pt.get(id); if (q) return q; const cell = id >> 1, i = cell % nx, j = (cell - i) / nx; let a, b, ax, ay, bx, by; if (id & 1) { a = F[j * nx + i]; b = F[(j + 1) * nx + i]; ax = bx = i; ay = j; by = j + 1; } else { a = F[j * nx + i]; b = F[j * nx + i + 1]; ay = by = j; ax = i; bx = i + 1; } const t = (lev - a) / (b - a || 1e-9); q = [ox + (ax + (bx - ax) * t) * cs, oy + (ay + (by - ay) * t) * cs]; pt.set(id, q); return q; };
+      const link = (a, b) => { (adj.get(a) || adj.set(a, []).get(a)).push(b); (adj.get(b) || adj.set(b, []).get(b)).push(a); };
+      for (let j = 0; j < ny - 1; j++) for (let i = 0; i < nx - 1; i++) {
+        const A = F[j * nx + i] > lev, B = F[j * nx + i + 1] > lev, C = F[(j + 1) * nx + i + 1] > lev, D = F[(j + 1) * nx + i] > lev, idx = A | (B << 1) | (C << 2) | (D << 3);
+        if (idx === 0 || idx === 15) continue;
+        const T = (j * nx + i) * 2, R = (j * nx + i + 1) * 2 + 1, Bo = ((j + 1) * nx + i) * 2, Le = (j * nx + i) * 2 + 1;
+        const ctr = (F[j * nx + i] + F[j * nx + i + 1] + F[(j + 1) * nx + i + 1] + F[(j + 1) * nx + i]) / 4 > lev;
+        switch (idx) {
+          case 1: case 14: link(Le, T); break; case 2: case 13: link(T, R); break; case 3: case 12: link(Le, R); break;
+          case 4: case 11: link(R, Bo); break; case 6: case 9: link(T, Bo); break; case 7: case 8: link(Le, Bo); break;
+          case 5: if (ctr) { link(Le, Bo); link(T, R); } else { link(Le, T); link(R, Bo); } break;
+          case 10: if (ctr) { link(Le, T); link(R, Bo); } else { link(Le, Bo); link(T, R); } break;
+        }
+      }
+      const seen = new Set(), out = [];
+      const walk = (s) => { const L = [s]; seen.add(s); let cur = s; for (;;) { const nb = (adj.get(cur) || []).find((x) => !seen.has(x)); if (nb === undefined) break; seen.add(nb); L.push(nb); cur = nb; } return L; };
+      for (const [id, nb] of adj) if (nb.length === 1 && !seen.has(id)) out.push({ pts: walk(id).map(P), closed: false });
+      for (const [id] of adj) if (!seen.has(id)) out.push({ pts: walk(id).map(P), closed: true });
+      return out;
+    }
+    function chaikin(pts, closed) {
+      const o = []; const n = pts.length; for (let k = 0; k < (closed ? n : n - 1); k++) { const a = pts[k], b = pts[(k + 1) % n]; o.push([a[0] * 0.75 + b[0] * 0.25, a[1] * 0.75 + b[1] * 0.25], [a[0] * 0.25 + b[0] * 0.75, a[1] * 0.25 + b[1] * 0.75]); }
+      if (!closed) { o.unshift(pts[0]); o.push(pts[n - 1]); } return o;
+    }
+
+
+    const LIGHT = -2.3; // la lumière vient d'en haut à gauche
+    function makeUmb(R, w, h, opts = {}) {
+      const m = Math.min(w, h), C = p.couleurs.length ? p.couleurs : ['#e8552b'], ci = Math.floor(R() * C.length);
+      const mo = p.motif === 'melange' ? ['uni', 'uni', 'quartiers', 'bordure', 'pois'][Math.floor(R() * 5)] : p.motif;
+      let c2 = Math.floor(R() * C.length); if (C.length > 1 && c2 === ci) c2 = (c2 + 1) % C.length;
+      return { x: R() * w, y: R() * h, vx: 0, vy: 0, r: m * p.taille * 0.5 * (1 + p.ecart * (R() * 2 - 1)), a: R() * TAU, wa: 0, ph: R() * TAU, col: C[ci], col2: C[c2], mo, logo: R() < p.logos, n: p.baleines, open: 1, dir: R() * TAU, lane: R(), seed: R(), sp: 0.8 + R() * 0.4, ...opts };
+    }
+    function spawnEdge(u, w, h, R) {
+      const pad = u.r * 1.3, s = Math.floor(R() * 4);
+      if (s === 0) { u.x = -pad; u.y = R() * h; } else if (s === 1) { u.x = w + pad; u.y = R() * h; } else if (s === 2) { u.x = R() * w; u.y = -pad; } else { u.x = R() * w; u.y = h + pad; }
+      const tx = w * (0.15 + R() * 0.7), ty = h * (0.15 + R() * 0.7); u.dir = Math.atan2(ty - u.y, tx - u.x);
+    }
+    function crowd(w, h) {
+      buildLogo();
+      const key = [p.flux, p.nombre, p.taille, p.ecart, p.baleines, p.motif, p.logos, p.couleurs.join(), logoKey, app.seed, w, h].join();
+      if (key === fKey && F) return F; fKey = key;
+      const R = rng(app.seed * 733 + 11), L = [];
+      for (let k = 0; k < p.nombre; k++) { const u = makeUmb(R, w, h); place(u, k, w, h, R); L.push(u); }
+      F = { L, R, w, h, extra: 0 }; rip = []; return F;
+    }
+    function place(u, k, w, h, R) {
+      const fl = p.flux;
+      if (fl === 'passage') { const go = k % 2 ? 1 : -1, band = h * 0.36; u.dir = go > 0 ? 0 : Math.PI; u.y = h / 2 + (u.lane - 0.5) * band * 0.9; u.x = R() * w; }
+      else if (fl === 'ronde') { const ring = 0.18 + u.lane * 0.3, a = R() * TAU, m = Math.min(w, h); u.x = w / 2 + Math.cos(a) * ring * m; u.y = h / 2 + Math.sin(a) * ring * m; u.dir = a + Math.PI / 2; }
+      else u.dir = R() * TAU;
+    }
+    function openAt(x, y) {
+      if (!F) return; const u = makeUmb(F.R, F.w, F.h, { x, y, open: 0 }); place(u, F.L.length, F.w, F.h, F.R); u.x = x; u.y = y; u.mine = true;
+      F.L.push(u); if (F.L.length > p.nombre + 30) { const i = F.L.findIndex((v) => v.mine); F.L.splice(i >= 0 && i < F.L.length - 1 ? i : 0, 1); }
+    }
+
+    function step(dt) {
+      const { w, h, L, R } = F, m = Math.min(w, h), V = m * 0.06 * p.vitesse, fl = p.flux;
+      for (const u of L) {
+        if (u.open < 1) u.open = Math.min(1, u.open + dt * 1.6);
+        // consigne de cap
+        let tx = Math.cos(u.dir), ty = Math.sin(u.dir);
+        if (fl === 'ronde') { const dx = u.x - w / 2, dy = u.y - h / 2, d = Math.hypot(dx, dy) || 1, want = (0.18 + u.lane * 0.3) * m; tx = -dy / d + (want - d) / m * 4 * dx / d; ty = dx / d + (want - d) / m * 4 * dy / d; }
+        else if (fl === 'passage') { const want = h / 2 + (u.lane - 0.5) * h * 0.36 * 0.9; ty = (want - u.y) / m * 3; }
+        else if (fl === 'place') { u.dir += Math.sin(simT * 0.3 + u.seed * 40) * dt * 0.8; const dx = u.x - w / 2, dy = u.y - h / 2; tx -= dx / m * 1.4; ty -= dy / m * 1.4; }
+        else u.dir += Math.sin(simT * 0.2 + u.seed * 30) * dt * 0.15;
+        const tl = Math.hypot(tx, ty) || 1, sp = V * u.sp;
+        u.vx += (tx / tl * sp - u.vx) * Math.min(1, dt * 1.5); u.vy += (ty / tl * sp - u.vy) * Math.min(1, dt * 1.5);
+      }
+      // répulsion douce entre voisins, et fuite devant le pointeur
+      const cell = m * p.taille, grid = new Map(), K = (i, j) => i * 4099 + j;
+      L.forEach((u, i) => { const k = K(Math.floor(u.x / cell), Math.floor(u.y / cell)); (grid.get(k) || grid.set(k, []).get(k)).push(i); });
+      L.forEach((u, i) => {
+        const gi = Math.floor(u.x / cell), gj = Math.floor(u.y / cell);
+        for (let a = -1; a <= 1; a++) for (let b = -1; b <= 1; b++) for (const j of grid.get(K(gi + a, gj + b)) || []) {
+          if (j <= i) continue; const v = L[j], dx = v.x - u.x, dy = v.y - u.y, d = Math.hypot(dx, dy) || 1, R0 = (u.r + v.r) * 0.82 * Math.min(u.open, v.open);
+          if (d < R0) { const f = (R0 - d) / R0 * m * 0.35 * dt * 6; u.vx -= dx / d * f; u.vy -= dy / d * f; v.vx += dx / d * f; v.vy += dy / d * f; }
+        }
+      });
+      if (ptr && simT - ptr.t < 2.5) for (const u of L) { const dx = u.x - ptr.x, dy = u.y - ptr.y, d = Math.hypot(dx, dy) || 1, Rp = u.r + m * 0.12; if (d < Rp) { const f = (Rp - d) / Rp * m * 2.2 * dt; u.vx += dx / d * f; u.vy += dy / d * f; } }
+      for (const u of L) {
+        u.x += u.vx * dt; u.y += u.vy * dt;
+        const sp = Math.hypot(u.vx, u.vy); u.ph += sp / (m * 0.02) * dt; // le pas fait osciller la toile
+        u.wa += (Math.sin(simT * 0.7 + u.seed * 20) * p.tourne * 1.2 - u.wa) * dt; u.a += u.wa * dt;
+        const pad = u.r * 1.4;
+        if (fl === 'foule' && (u.x < -pad * 1.5 || u.x > w + pad * 1.5 || u.y < -pad * 1.5 || u.y > h + pad * 1.5)) spawnEdge(u, w, h, R);
+        if (fl === 'passage') { if (u.x > w + pad) u.x = -pad; if (u.x < -pad) u.x = w + pad; }
+        if (fl === 'place' || fl === 'ronde') { u.x = Math.max(-pad * 0.5, Math.min(w + pad * 0.5, u.x)); u.y = Math.max(-pad * 0.5, Math.min(h + pad * 0.5, u.y)); }
+      }
+      // gouttes au sol
+      const rate = p.pluie * w * h / 2200; let n = rate * dt + (F.carry || 0); F.carry = n % 1;
+      for (let k = 0; k < Math.floor(n); k++) rip.push({ x: R() * w, y: R() * h, t: simT, s: 0.6 + R() * 0.8 });
+      rip = rip.filter((q) => simT - q.t < 0.9);
+    }
+
+    // ——— Dessin d'un parapluie (repère local, rayon 1) ———
+    function tips(n) { return Array.from({ length: n }, (_, k) => k / n * TAU); }
+    function panel(g, a0, a1, o, sag) { const am = (a0 + a1) / 2; g.beginPath(); g.moveTo(0, 0); g.lineTo(Math.cos(a0) * o, Math.sin(a0) * o); g.quadraticCurveTo(Math.cos(am) * o * sag, Math.sin(am) * o * sag, Math.cos(a1) * o, Math.sin(a1) * o); g.closePath(); }
+    function shade(col, a, rot) { const k = Math.cos(a + rot - LIGHT) * p.relief; return k > 0 ? mix(col, '#ffffff', k * 0.32) : mix(col, '#000000', -k * 0.3); }
+    // chaque parapluie garde son image, refaite quand son angle (quantifié) ou son ouverture change
+    let dKey = '';
+    function drawUmb(g, u) {
+      const dpr = app.size.dpr, Q = TAU / 120, aq = Math.round(u.a / Q) * Q, oq = Math.round(u.open * 12) / 12, key = dKey + aq.toFixed(3) + ':' + oq;
+      const S = Math.ceil(u.r * 2.12 * dpr) + 2;
+      if (u.sk !== key) { if (!u.cv || u.cv.width !== S) { u.cv = document.createElement('canvas'); u.cv.width = u.cv.height = S; } const c = u.cv.getContext('2d'); c.setTransform(1, 0, 0, 1, 0, 0); c.clearRect(0, 0, S, S); c.translate(S / 2, S / 2); c.scale(u.r * dpr, u.r * dpr); paintUmb(c, u, aq, oq); u.sk = key; }
+      const sc = (0.35 + 0.65 * u.open) * (1 + 0.015 * Math.sin(u.ph * 2)), q = S / dpr * sc;
+      g.drawImage(u.cv, u.x - q / 2, u.y - q / 2, q, q);
+    }
+    function paintUmb(g, u, rot, o) {
+      const n = u.n, A = tips(n), sag = 0.86 + 0.06 * (1 - o);
+      g.save(); g.rotate(rot);
+      for (let k = 0; k < n; k++) {
+        const a0 = A[k], a1 = A[(k + 1) % n] + (k === n - 1 ? TAU : 0), am = (a0 + a1) / 2, base = u.mo === 'quartiers' && k % 2 ? u.col2 : u.col;
+        panel(g, a0, a1, 1, sag); g.fillStyle = shade(base, am, rot); g.fill();
+        if (u.mo === 'bordure') { g.save(); panel(g, a0, a1, 1, sag); g.clip(); g.beginPath(); g.arc(0, 0, 0.78, 0, TAU); g.rect(-2, -2, 4, 4); g.fillStyle = shade(u.col2, am, rot); g.fill('evenodd'); g.restore(); }
+        if (u.mo === 'pois') { g.save(); panel(g, a0, a1, 1, sag); g.clip(); g.fillStyle = shade(u.col2, am, rot); for (const [rr, da] of [[0.36, 0], [0.68, -0.22], [0.68, 0.22]]) { const aa = am + da * (TAU / n) * 1.4; g.beginPath(); g.arc(Math.cos(aa) * rr, Math.sin(aa) * rr, 0.075, 0, TAU); g.fill(); } g.restore(); }
+      }
+      // baleines : un trait clair d'un côté, sombre de l'autre
+      g.lineWidth = 0.022; for (let k = 0; k < n; k++) { const a = A[k]; g.beginPath(); g.moveTo(0, 0); g.lineTo(Math.cos(a) * 0.99, Math.sin(a) * 0.99); g.strokeStyle = Math.cos(a + rot - LIGHT) > 0 ? 'rgba(255,255,255,0.22)' : 'rgba(0,0,0,0.22)'; g.stroke(); }
+      if (u.logo && logoM) { g.save(); g.rotate(-rot); g.scale(0.86, 0.86); g.beginPath(); for (const Lp of logoM) { Lp.forEach((q, i) => (i ? g.lineTo(q[0], q[1]) : g.moveTo(q[0], q[1]))); g.closePath(); } g.fillStyle = lum(u.col) > 0.55 ? '#16161a' : '#f6f3ec'; g.globalAlpha = 0.92; g.fill('evenodd'); g.restore(); }
+      // reflet du dôme et embout
+      const gr = g.createRadialGradient(Math.cos(LIGHT) * 0.35, Math.sin(LIGHT) * 0.35, 0, 0, 0, 1); gr.addColorStop(0, `rgba(255,255,255,${0.16 * p.relief})`); gr.addColorStop(1, 'rgba(255,255,255,0)');
+      g.save(); g.rotate(-rot); g.beginPath(); g.arc(0, 0, 0.95, 0, TAU); g.fillStyle = gr; g.fill(); g.restore();
+      for (let k = 0; k < n; k++) { const a = A[k]; g.beginPath(); g.arc(Math.cos(a), Math.sin(a), 0.028, 0, TAU); g.fillStyle = '#d9d6cf'; g.fill(); }
+      g.beginPath(); g.arc(0, 0, 0.055, 0, TAU); g.fillStyle = '#dcd8d0'; g.fill(); g.beginPath(); g.arc(-0.015, -0.015, 0.025, 0, TAU); g.fillStyle = '#ffffff'; g.fill();
+      g.restore();
+    }
+    function umbShadow(g, u, off) {
+      const n = u.n, A = tips(n), o = u.open, s = u.r * (0.35 + 0.65 * o) * 1.02;
+      g.save(); g.translate(u.x + off, u.y + off * 1.25); g.scale(s, s); g.rotate(u.a); g.beginPath();
+      for (let k = 0; k <= n; k++) { const a0 = A[k % n] + (k === n ? TAU : 0), am = a0 - Math.PI / n; if (k === 0) g.moveTo(Math.cos(a0), Math.sin(a0)); else g.quadraticCurveTo(Math.cos(am) * 0.86, Math.sin(am) * 0.86, Math.cos(a0), Math.sin(a0)); }
+      g.fill(); g.restore();
+    }
+
+    app.loop((t, dt) => {
+      dt = Math.min(1 / 20, dt || 0);
+      const { w, h, dpr } = app.size; crowd(w, h);
+      if (app.thumbnail) { if (!F.th) { F.th = true; for (let k = 0; k < 60; k++) { simT += 1 / 30; step(1 / 30); } } }
+      else { simT += dt; step(dt); }
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = p.sol; ctx.fillRect(0, 0, w, h);
+      const m = Math.min(w, h), light = lum(p.sol) > 0.5;
+      if (p.flux === 'passage') { const band = h * 0.4, sw = m * 0.05; ctx.fillStyle = light ? 'rgba(255,255,255,0.55)' : 'rgba(240,236,226,0.13)'; for (let x = -sw; x < w + sw; x += sw * 2) ctx.fillRect(x, h / 2 - band / 2, sw, band); }
+      // ronds de pluie
+      ctx.lineWidth = Math.max(0.6, m * 0.0016);
+      for (const q of rip) { const e = (simT - q.t) / 0.9, r = m * 0.012 * q.s * (0.2 + e); ctx.strokeStyle = light ? `rgba(0,0,0,${0.22 * (1 - e)})` : `rgba(255,255,255,${0.28 * (1 - e)})`; ctx.beginPath(); ctx.ellipse(q.x, q.y, r, r * 0.9, 0, 0, TAU); ctx.stroke(); }
+      // ombres, puis parapluies du plus petit au plus grand (les grands sont plus haut)
+      dKey = [p.relief, logoKey, app.size.dpr].join() + ':';
+      const L = F.L.slice().sort((a, b) => a.r - b.r);
+      if (p.ombres > 0) { ctx.fillStyle = `rgba(0,0,0,${0.32 * p.ombres})`; for (const u of L) umbShadow(ctx, u, u.r * 0.28 * (0.5 + p.ombres)); }
+      for (const u of L) drawUmb(ctx, u);
+      app.finish(ctx);
+    });
+
+    function toSVG() {
+      const { w, h } = app.size, f = (v) => +v.toFixed(2), g3 = (v) => +v.toFixed(3); crowd(w, h);
+      const m = Math.min(w, h), light = lum(p.sol) > 0.5; let s = `<rect width="100%" height="100%" fill="${p.sol}"/>`, defs = '';
+      if (p.flux === 'passage') { const band = h * 0.4, sw = m * 0.05; s += `<g fill="${light ? '#ffffff' : '#f0ece2'}" opacity="${light ? 0.55 : 0.13}">`; for (let x = -sw; x < w + sw; x += sw * 2) s += `<rect x="${f(x)}" y="${f(h / 2 - band / 2)}" width="${f(sw)}" height="${f(band)}"/>`; s += '</g>'; }
+      s += `<g fill="none" stroke="${light ? '#000' : '#fff'}" stroke-width="${f(Math.max(0.6, m * 0.0016))}">`; for (const q of rip) { const e = (simT - q.t) / 0.9, r = m * 0.012 * q.s * (0.2 + e); s += `<ellipse cx="${f(q.x)}" cy="${f(q.y)}" rx="${f(r)}" ry="${f(r * 0.9)}" opacity="${g3((light ? 0.22 : 0.28) * (1 - e))}"/>`; } s += '</g>';
+      const L = F.L.slice().sort((a, b) => a.r - b.r), P = (x, y) => g3(x) + ' ' + g3(y);
+      const outline = (n, sag) => { const A = tips(n); let d = `M${P(1, 0)}`; for (let k = 1; k <= n; k++) { const a = k / n * TAU, am = a - Math.PI / n; d += `Q${P(Math.cos(am) * sag, Math.sin(am) * sag)} ${P(Math.cos(a), Math.sin(a))}`; } return d + 'Z'; };
+      const pan = (a0, a1, sag) => { const am = (a0 + a1) / 2; return `M0 0L${P(Math.cos(a0), Math.sin(a0))}Q${P(Math.cos(am) * sag, Math.sin(am) * sag)} ${P(Math.cos(a1), Math.sin(a1))}Z`; };
+      if (logoM) defs += `<path id="lg" fill-rule="evenodd" d="${logoM.map((Lp) => 'M' + Lp.map((q) => P(q[0], q[1])).join('L') + 'Z').join('')}"/>`;
+      if (p.ombres > 0) { s += `<g fill="#000" opacity="${g3(0.32 * p.ombres)}">`; for (const u of L) { const sc = u.r * (0.35 + 0.65 * u.open) * 1.02, off = u.r * 0.28 * (0.5 + p.ombres); s += `<path transform="translate(${f(u.x + off)} ${f(u.y + off * 1.25)}) scale(${g3(sc)}) rotate(${f(u.a * 180 / Math.PI)})" d="${outline(u.n, 0.86)}"/>`; } s += '</g>'; }
+      L.forEach((u, ui) => {
+        const n = u.n, A = tips(n), sag = 0.86 + 0.06 * (1 - u.open), sc = u.r * (0.35 + 0.65 * u.open) * (1 + 0.015 * Math.sin(u.ph * 2));
+        let g = `<g transform="translate(${f(u.x)} ${f(u.y)}) scale(${g3(sc)})"><g transform="rotate(${f(u.a * 180 / Math.PI)})">`;
+        for (let k = 0; k < n; k++) {
+          const a0 = A[k], a1 = A[(k + 1) % n] + (k === n - 1 ? TAU : 0), am = (a0 + a1) / 2, base = u.mo === 'quartiers' && k % 2 ? u.col2 : u.col, d = pan(a0, a1, sag);
+          g += `<path d="${d}" fill="${shade(base, am, u.a)}"/>`;
+          if (u.mo === 'bordure' || u.mo === 'pois') { const id = `c${ui}_${k}`; defs += `<clipPath id="${id}"><path d="${d}"/></clipPath>`;
+            if (u.mo === 'bordure') g += `<path clip-path="url(#${id})" fill-rule="evenodd" fill="${shade(u.col2, am, u.a)}" d="M-2 -2H2V2H-2ZM0.78 0A0.78 0.78 0 1 0 -0.78 0A0.78 0.78 0 1 0 0.78 0Z"/>`;
+            else { g += `<g clip-path="url(#${id})" fill="${shade(u.col2, am, u.a)}">`; for (const [rr, da] of [[0.36, 0], [0.68, -0.22], [0.68, 0.22]]) { const aa = am + da * (TAU / n) * 1.4; g += `<circle cx="${g3(Math.cos(aa) * rr)}" cy="${g3(Math.sin(aa) * rr)}" r="0.075"/>`; } g += '</g>'; } }
+        }
+        for (let k = 0; k < n; k++) { const a = A[k]; g += `<path d="M0 0L${P(Math.cos(a) * 0.99, Math.sin(a) * 0.99)}" stroke="${Math.cos(a + u.a - LIGHT) > 0 ? '#fff' : '#000'}" stroke-opacity="0.22" stroke-width="0.022"/><circle cx="${g3(Math.cos(a))}" cy="${g3(Math.sin(a))}" r="0.028" fill="#d9d6cf"/>`; }
+        g += '</g>';
+        if (u.logo && logoM) g += `<use href="#lg" transform="scale(0.86)" fill="${lum(u.col) > 0.55 ? '#16161a' : '#f6f3ec'}" opacity="0.92"/>`;
+        g += `<circle r="0.055" fill="#dcd8d0"/><circle cx="-0.015" cy="-0.015" r="0.025" fill="#fff"/></g>`; s += g;
+      });
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><defs>${defs}</defs>${s}</svg>`;
+    }
+  </script>
+</body>
+</html>
