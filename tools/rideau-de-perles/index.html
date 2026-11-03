@@ -1,0 +1,230 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Rideau de perles</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Rideau de perles : chaque fil est une chaîne de points (intégration de Verlet + longueurs imposées), accrochée
+    // en haut et libre en bas. La couleur de chaque perle est fixée au repos selon sa place dans la grille (rayures,
+    // vagues, damier, dégradé, logo) : immobile, le rideau forme une image ; dès qu'il bouge, l'image se déforme.
+    // Le vent est une onde qui parcourt le rideau ; une « main » invisible le traverse de temps en temps,
+    // et le doigt écarte les fils.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const BIEN = PAL('biennale'), MEN = PAL('menthe'), KB = PAL('kegelbahn');
+
+    let simT = 0, C = null, cKey = '', ptr = null, hand = null, nextHand = 4, logoM = null, logoKey = '';
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.03, vignette: 0.12 },
+      hint: 'Glissez pour passer la main dans le rideau · clic : écarter les fils · molette : nombre de fils',
+      notes: 'Le rideau de perles est une image qui se laisse traverser. Au repos, chaque perle est à sa place et l\'ensemble forme un motif, ou même un portrait, comme dans les tableaux de perles de verre. Dès qu\'on passe, les fils s\'écartent, se balancent, se croisent, et l\'image se brouille avant de se recomposer lentement. Chaque fil est ici une petite chaîne de points soumise à la pesanteur ; le vent la fait onduler, une main invisible traverse de temps en temps le rideau, et votre doigt peut l\'écarter. Le logo est tissé dans le rideau avec les perles d\'accent.',
+      params: {
+        'Rideau': {
+          fils: { type: 'range', label: 'Fils', min: 8, max: 120, step: 1, value: 44 },
+          taille: { type: 'range', label: 'Taille des perles', min: 0.4, max: 1.2, step: 0.01, value: 0.85 },
+          forme: { type: 'select', label: 'Perles', options: { ronde: 'Rondes', tube: 'Tubes', mixte: 'Alternées' }, value: 'ronde' },
+          longueur: { type: 'range', label: 'Longueur', min: 0.4, max: 1, step: 0.01, value: 0.92 },
+          frange: { type: 'range', label: 'Frange', min: 0, max: 1, step: 0.01, value: 0.25 },
+        },
+        'Mouvement': {
+          vent: { type: 'range', label: 'Vent', min: 0, max: 1, step: 0.01, value: 0.25 },
+          passage: { type: 'range', label: 'Passage d\'une main (s, 0 = jamais)', min: 0, max: 30, step: 0.5, value: 7 },
+          main: { type: 'range', label: 'Largeur de la main', min: 0.03, max: 0.3, step: 0.005, value: 0.1 },
+          amorti: { type: 'range', label: 'Amorti', min: 0, max: 1, step: 0.01, value: 0.35 },
+        },
+        'Motif': {
+          motif: { type: 'select', label: 'Motif', options: { rayures: 'Rayures', vagues: 'Vagues', damier: 'Damier', degrade: 'Dégradé', losanges: 'Losanges' }, value: 'vagues' },
+          echelle: { type: 'range', label: 'Échelle du motif', min: 0.2, max: 3, step: 0.01, value: 1 },
+        },
+        'Logo tissé': {
+          logo: { type: 'toggle', label: 'Inclure le logo', value: false },
+          tailleLogo: { type: 'range', label: 'Taille du logo', min: 0.3, max: 1, step: 0.01, value: 0.7, show: (q) => q.logo },
+          image: { type: 'file', label: 'Logo', accept: 'image/*', show: (q) => q.logo },
+        },
+        'Couleurs': {
+          fond: { type: 'color', label: 'Fond', value: '#1b1714' },
+          fil: { type: 'color', label: 'Fil et tringle', value: '#5a4a3c' },
+          couleurs: { type: 'palette', label: 'Perles', value: ['#e5452a', '#f2b0c8', '#f2e640', '#f4f3f0'] },
+          accent: { type: 'color', label: 'Logo', value: '#2f5fd0', show: (q) => q.logo },
+        },
+      },
+      presets: {
+        'Perles': {},
+        'Rayures': { motif: 'rayures', fils: 36, echelle: 1.4, couleurs: ['#f4f3f0', '#e5452a', '#3a5fe0', '#f2e640'] },
+        'Tubes': { forme: 'tube', fils: 52, motif: 'degrade', couleurs: ['#486cfc', '#f272ba', '#edd14b'], fond: '#0d0d12' },
+        'Damier': { motif: 'damier', fils: 30, taille: 1, echelle: 1.5, couleurs: ['#111111', '#f4f3f0'], fond: '#7a7066', fil: '#3a332c' },
+        'Chaînette': { forme: 'mixte', fils: 64, taille: 0.6, couleurs: ['#c7ccd2', '#8e959e', '#e9edf0'], fond: '#22262c', fil: '#6d737a', motif: 'losanges' },
+        'Grand vent': { vent: 0.9, passage: 0, frange: 0.6, fils: 40 },
+        'Logo': { logo: true, fils: 64, taille: 0.95, motif: 'degrade', couleurs: ['#f4f3f0', '#e8e2d6'], accent: '#e5452a', vent: 0.15, passage: 9, frange: 0 },
+        'Biennale': { fond: BIEN[1], fil: '#444444', couleurs: [BIEN[2], BIEN[3], BIEN[4], BIEN[0]], accent: BIEN[0], motif: 'losanges' },
+        'Menthe': { fond: MEN[1], fil: MEN[3], couleurs: [MEN[0], MEN[2], MEN[3]], accent: MEN[0], forme: 'tube' },
+        'Kegelbahn': { fond: KB[0], fil: '#2a2630', couleurs: KB.slice(1), accent: KB[3], motif: 'rayures', fils: 50 },
+      },
+      brand(colors) {
+        const s = colors.slice().sort((a, b) => lum(a) - lum(b)), L = s[s.length - 1], D = s[0];
+        return { fond: D, fil: mix(D, L, 0.3), couleurs: s.length > 1 ? s.slice(1) : [L], accent: s[Math.floor(s.length / 2)] };
+      },
+      pointer: {
+        down: (q) => { ptr = { x: q.x, y: q.y, px: q.x, py: q.y, moved: 0 }; },
+        drag: (q) => { if (!ptr) return; ptr.moved += Math.hypot(q.x - ptr.x, q.y - ptr.y); ptr.px = ptr.x; ptr.py = ptr.y; ptr.x = q.x; ptr.y = q.y; },
+        up: () => { if (ptr && ptr.moved < 6) part(ptr.x, ptr.y); ptr = null; },
+        wheel: (q, dy) => app.set('fils', Math.max(8, Math.min(120, p.fils + (dy > 0 ? 4 : -4)))),
+      },
+      onChange(k) { if (['*', 'logo', 'image'].includes(k)) logoKey = ''; },
+      export: { name: 'rideau-de-perles', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    function hex(x) { const n = parseInt(x.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
+    function lum(x) { const c = hex(x); return (c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114) / 255; }
+    function mix(a, b, t) { const A = hex(a), D = hex(b); return '#' + A.map((v, i) => Math.round(v + (D[i] - v) * t).toString(16).padStart(2, '0')).join(''); }
+    function rng(s) { let a = s >>> 0; return () => { a = (a + 0x6d2b79f5) >>> 0; let t = a; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+
+    // ——— Logo ———
+    function buildLogo() {
+      const img0 = p.image || app.logoImg, key = [p.logo, img0 ? (img0.src || 'c') : 'demo'].join(); if (key === logoKey) return; logoKey = key; cKey = '';
+      const M = 200, c = document.createElement('canvas'); c.width = c.height = M; const x = c.getContext('2d', { willReadFrequently: true }), L = M * 0.94, cx = M / 2;
+      if (img0) { const iw = img0.naturalWidth || img0.width, ih = img0.naturalHeight || img0.height, s = L / Math.max(iw, ih); x.drawImage(img0, cx - iw * s / 2, cx - ih * s / 2, iw * s, ih * s); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(cx, cx, L * 0.48, 0, TAU); x.arc(cx, cx, L * 0.27, 0, TAU, true); x.fill('evenodd'); x.fillRect(cx - L * 0.07, cx - L * 0.5, L * 0.14, L); }
+      const d = x.getImageData(0, 0, M, M).data; let transp = 0; for (let i = 3; i < d.length; i += 4) if (d[i] < 128) transp++; const useA = transp > M * M * 0.05;
+      const m = new Uint8Array(M * M); for (let i = 0; i < M * M; i++) { const o = i * 4, l = (d[o] * 0.2126 + d[o + 1] * 0.7152 + d[o + 2] * 0.0722) / 255; m[i] = (useA ? d[o + 3] > 128 : d[o + 3] > 128 && l < 0.5) ? 1 : 0; }
+      logoM = { m, M };
+    }
+
+    // ——— Fils ———
+    function curtain(w, h) {
+      buildLogo();
+      const key = [p.fils, p.taille, p.longueur, p.frange, p.forme, p.motif, p.echelle, p.couleurs.join(), p.accent, p.logo, p.tailleLogo, logoKey, app.seed, w, h].join(); if (key === cKey && C) return C; cKey = key;
+      const R = rng(app.seed * 3301 + 5), nf = p.fils, sx = w / nf, d = sx * 0.95, top = h * 0.05, m = Math.min(w, h), Cs = p.couleurs.length ? p.couleurs : ['#ffffff'], S = m * p.tailleLogo;
+      const strands = [];
+      for (let i = 0; i < nf; i++) {
+        const x0 = (i + 0.5) * sx, fr = p.frange * (0.5 + 0.5 * Math.sin(i * 0.37 + R() * 0.5)) * (0.6 + 0.4 * Math.sin(i * 0.11)), len = (h - top) * p.longueur * (1 - fr * 0.45), n = Math.max(2, Math.floor(len / d));
+        const X = new Float32Array(n + 1), Y = new Float32Array(n + 1), PX = new Float32Array(n + 1), PY = new Float32Array(n + 1), col = [];
+        for (let k = 0; k <= n; k++) {
+          X[k] = PX[k] = x0; Y[k] = PY[k] = top + k * d;
+          if (k === 0) { col.push(null); continue; }
+          // couleur fixée au repos
+          const u = (x0 / m) / p.echelle, v = ((top + k * d) / m) / p.echelle; let ci;
+          if (p.motif === 'rayures') ci = Math.floor(u * 6);
+          else if (p.motif === 'vagues') ci = Math.floor(v * 5 + Math.sin(u * 7) * 0.8);
+          else if (p.motif === 'damier') ci = Math.floor(u * 6) + Math.floor(v * 6);
+          else if (p.motif === 'losanges') ci = Math.floor(Math.abs(((u * 6) % 2) - 1) + v * 6);
+          else ci = Math.floor(v * 1.2 * Cs.length + Math.sin(u * 5 + v * 3) * 0.6);
+          let c = Cs[((ci % Cs.length) + Cs.length) % Cs.length];
+          if (p.logo && logoM) { const a = Math.floor(((x0 - w / 2) / S + 0.5) * logoM.M), b = Math.floor(((top + k * d - h * 0.48) / S + 0.5) * logoM.M); if (a >= 0 && b >= 0 && a < logoM.M && b < logoM.M && logoM.m[b * logoM.M + a]) c = p.accent; }
+          col.push(c);
+        }
+        strands.push({ x0, n, X, Y, PX, PY, col });
+      }
+      C = { strands, d, sx, top, m };
+      return C;
+    }
+    function part(x, y) { if (!C) return; for (const S of C.strands) for (let k = 1; k <= S.n; k++) { const dx = S.X[k] - x, dy = S.Y[k] - y, r = C.m * p.main * 1.4; if (Math.abs(dx) < r && Math.abs(dy) < r * 2) { const f = (1 - Math.abs(dx) / r) * (1 - Math.abs(dy) / (r * 2)); S.PX[k] -= Math.sign(dx || 1) * f * C.m * 0.03; } } }
+
+    function step(t, dt, w, h) {
+      const { strands, d, m } = C, g = m * 1.8 * dt * dt, damp = 0.995 - p.amorti * 0.04, hr = m * p.main;
+      // la main invisible : elle traverse le rideau de gauche à droite (ou l'inverse), à hauteur variable
+      if (p.passage > 0 && !hand && t > nextHand) { const dir = Math.random() < 0.5 ? 1 : -1; hand = { t0: t, dir, y: h * (0.3 + Math.random() * 0.4) }; }
+      let hx = null, hy = 0, hv = 0;
+      if (hand) { const a = (t - hand.t0) / 2.4; if (a > 1) { hand = null; nextHand = t + p.passage; } else { hx = hand.dir > 0 ? -w * 0.1 + a * w * 1.2 : w * 1.1 - a * w * 1.2; hy = hand.y + Math.sin(a * Math.PI) * h * 0.05; hv = hand.dir; } }
+      const pushers = []; if (hx != null) pushers.push([hx, hy, hv]); if (ptr && ptr.moved > 2) pushers.push([ptr.x, ptr.y, Math.sign(ptr.x - ptr.px) || 0]);
+      for (const S of strands) {
+        const { X, Y, PX, PY, n } = S;
+        for (let k = 1; k <= n; k++) {
+          const vx = (X[k] - PX[k]) * damp, vy = (Y[k] - PY[k]) * damp; PX[k] = X[k]; PY[k] = Y[k];
+          const wv = p.vent * m * 1.4 * (Math.sin(t * 0.8 - S.x0 / m * 2.2 + Y[k] / m) * 0.7 + Math.sin(t * 1.9 + S.x0 / m * 5) * 0.3) * (k / n) * dt * dt;
+          X[k] += vx + wv; Y[k] += vy + g;
+        }
+        // la main repousse les perles sur son passage
+        for (const [px, py, dir] of pushers) {
+          if (Math.abs(S.x0 - px) > hr * 3 && Math.abs(X[n] - px) > hr * 3) continue;
+          for (let k = 1; k <= n; k++) { const dx = X[k] - px, dy = (Y[k] - py) / 2.2; const dd = Math.hypot(dx, dy); if (dd < hr) { let side = Math.sign(dx || 1); if (dir !== 0 && side === dir && (X[k] - S.x0) * dir > hr * 1.3) side = -dir; const nx = px + side * Math.sqrt(Math.max(0, hr * hr - dy * dy)), jump = nx - X[k]; PX[k] += jump * (Math.abs(jump) > hr * 0.5 ? 1 : 0.7); X[k] = nx; } }
+        }
+        // longueurs imposées (le premier point reste accroché)
+        for (let it = 0; it < 3; it++) {
+          X[0] = S.x0; Y[0] = C.top;
+          for (let k = 1; k <= n; k++) { const dx = X[k] - X[k - 1], dy = Y[k] - Y[k - 1], dl = Math.hypot(dx, dy) || 1e-6, df = (dl - d) / dl; if (k === 1) { X[k] -= dx * df; Y[k] -= dy * df; } else { X[k - 1] += dx * df * 0.5; Y[k - 1] += dy * df * 0.5; X[k] -= dx * df * 0.5; Y[k] -= dy * df * 0.5; } }
+        }
+        // passe finale du haut vers le bas : le fil ne s'allonge jamais
+        for (let k = 1; k <= n; k++) { const dx = X[k] - X[k - 1], dy = Y[k] - Y[k - 1], dl = Math.hypot(dx, dy) || 1e-6; if (dl > d) { const nx = X[k - 1] + dx / dl * d, ny = Y[k - 1] + dy / dl * d; PX[k] += (nx - X[k]) * 0.9; PY[k] += (ny - Y[k]) * 0.9; X[k] = nx; Y[k] = ny; } }
+      }
+    }
+
+    // ——— Dessin ———
+    function render(pen, w, h) {
+      const { strands, d, sx } = C, br = Math.min(d, sx) * 0.5 * p.taille;
+      pen.bg(p.fond);
+      const lines = []; for (const S of strands) { const pts = []; for (let k = 0; k <= S.n; k++) pts.push([S.X[k], S.Y[k]]); lines.push(pts); }
+      pen.threads(lines, p.fil, Math.max(0.6, br * 0.12));
+      pen.rod(C.top, p.fil, w, br);
+      const round = new Map(), tubes = new Map();
+      for (const S of strands) for (let k = 1; k <= S.n; k++) {
+        const c = S.col[k], tube = p.forme === 'tube' || (p.forme === 'mixte' && k % 2 === 0);
+        if (tube) { const ax = S.X[k - 1], ay = S.Y[k - 1], bx = S.X[k], by = S.Y[k], L = tubes.get(c) || []; L.push([ax + (bx - ax) * 0.18, ay + (by - ay) * 0.18, ax + (bx - ax) * 0.92, ay + (by - ay) * 0.92]); tubes.set(c, L); }
+        else { const L = round.get(c) || []; L.push([S.X[k], S.Y[k]]); round.set(c, L); }
+      }
+      for (const [c, L] of tubes) pen.tubes(L, c, br * 1.25);
+      for (const [c, L] of round) pen.beads(L, c, br);
+    }
+
+    const sprites = new Map(); let spKey = '';
+    function sprite(c, r, dpr) {
+      const k = [r, dpr].join(); if (k !== spKey) { spKey = k; sprites.clear(); } let S = sprites.get(c); if (S) return S;
+      const s = Math.ceil(r * 2.2 * dpr) + 2, cv = document.createElement('canvas'); cv.width = cv.height = s; const g = cv.getContext('2d'), o = s / 2;
+      g.fillStyle = mix(c, '#000000', 0.25); g.beginPath(); g.arc(o, o, r * dpr, 0, TAU); g.fill();
+      g.fillStyle = c; g.beginPath(); g.arc(o - r * dpr * 0.08, o - r * dpr * 0.1, r * dpr * 0.86, 0, TAU); g.fill();
+      g.fillStyle = 'rgba(255,255,255,0.55)'; g.beginPath(); g.arc(o - r * dpr * 0.32, o - r * dpr * 0.36, r * dpr * 0.24, 0, TAU); g.fill();
+      S = { cv, s }; sprites.set(c, S); return S;
+    }
+
+    const tsprites = new Map(); let tsKey = '';
+    function tubeSprite(c, lw, len, dpr) {
+      const k = [lw.toFixed(2), len.toFixed(1), dpr].join(); if (k !== tsKey) { tsKey = k; tsprites.clear(); } let S = tsprites.get(c); if (S) return S;
+      const W = lw + 2, H = len + lw + 2, cv = document.createElement('canvas'); cv.width = Math.ceil(W * dpr); cv.height = Math.ceil(H * dpr); const g = cv.getContext('2d'); g.scale(dpr, dpr); g.lineCap = 'round';
+      g.strokeStyle = mix(c, '#000000', 0.25); g.lineWidth = lw; g.beginPath(); g.moveTo(W / 2, H / 2 - len / 2); g.lineTo(W / 2, H / 2 + len / 2); g.stroke(); g.strokeStyle = c; g.lineWidth = lw * 0.7; g.stroke();
+      S = { cv, w: W, h: H }; tsprites.set(c, S); return S;
+    }
+
+    app.loop((t, dt) => {
+      dt = Math.min(1 / 30, dt || 0);
+      const { w, h, dpr } = app.size; curtain(w, h);
+      if (app.thumbnail) { simT = 0; hand = null; nextHand = 1e9; for (const S of C.strands) for (let k = 0; k <= S.n; k++) { S.X[k] = S.PX[k] = S.x0; S.Y[k] = S.PY[k] = C.top + k * C.d; } for (let k = 0; k < 180; k++) { simT = k / 60; step(simT, 1 / 60, w, h); } }
+      else { simT += dt; step(simT, dt, w, h); }
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      render({
+        bg(c) { ctx.fillStyle = c; ctx.fillRect(0, 0, w, h); },
+        threads(L, c, lw) { const P = new Path2D(); for (const pts of L) { P.moveTo(pts[0][0], pts[0][1]); for (let k = 1; k < pts.length; k++) P.lineTo(pts[k][0], pts[k][1]); } ctx.strokeStyle = c; ctx.lineWidth = lw; ctx.stroke(P); },
+        rod(y, c, W, r) { ctx.fillStyle = c; ctx.fillRect(0, y - r * 0.6, W, r * 1.2); ctx.fillStyle = mix(c, '#ffffff', 0.25); ctx.fillRect(0, y - r * 0.6, W, r * 0.35); },
+        tubes(L, c, lw) { const P = new Path2D(); let any = false, T = null; for (const l of L) { const dx = l[2] - l[0], dy = l[3] - l[1]; if (Math.abs(dx) < Math.abs(dy) * 0.12) { T = T || tubeSprite(c, lw, Math.hypot(dx, dy), dpr); ctx.drawImage(T.cv, (l[0] + l[2]) / 2 - T.w / 2, (l[1] + l[3]) / 2 - T.h / 2, T.w, T.h); } else { P.moveTo(l[0], l[1]); P.lineTo(l[2], l[3]); any = true; } } if (!any) return; ctx.lineCap = 'round'; ctx.strokeStyle = mix(c, '#000000', 0.25); ctx.lineWidth = lw; ctx.stroke(P); ctx.strokeStyle = c; ctx.lineWidth = lw * 0.7; ctx.stroke(P); },
+        beads(L, c, r) { const S = sprite(c, r, dpr), sz = S.s / dpr; for (const q of L) ctx.drawImage(S.cv, q[0] - sz / 2, q[1] - sz / 2, sz, sz); },
+      }, w, h);
+      app.finish(ctx);
+    });
+
+    function toSVG() {
+      const { w, h } = app.size, f = (v) => +v.toFixed(2); curtain(w, h);
+      let s = `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">`;
+      render({
+        bg(c) { s += `<rect width="100%" height="100%" fill="${c}"/>`; },
+        threads(L, c, lw) { s += `<path d="${L.map((pts) => 'M' + pts.map((q) => f(q[0]) + ' ' + f(q[1])).join('L')).join('')}" stroke="${c}" stroke-width="${f(lw)}" fill="none"/>`; },
+        rod(y, c, W, r) { s += `<rect x="0" y="${f(y - r * 0.6)}" width="${W}" height="${f(r * 1.2)}" fill="${c}"/>`; },
+        tubes(L, c, lw) { const d = L.map((l) => `M${f(l[0])} ${f(l[1])}L${f(l[2])} ${f(l[3])}`).join(''); s += `<path d="${d}" stroke="${mix(c, '#000000', 0.25)}" stroke-width="${f(lw)}" stroke-linecap="round" fill="none"/><path d="${d}" stroke="${c}" stroke-width="${f(lw * 0.7)}" stroke-linecap="round" fill="none"/>`; },
+        beads(L, c, r) { s += `<g fill="${c}">` + L.map((q) => `<circle cx="${f(q[0])}" cy="${f(q[1])}" r="${f(r)}"/>`).join('') + `</g><g fill="#ffffff" fill-opacity="0.55">` + L.map((q) => `<circle cx="${f(q[0] - r * 0.32)}" cy="${f(q[1] - r * 0.36)}" r="${f(r * 0.24)}"/>`).join('') + '</g>'; },
+      }, w, h);
+      return s + '</svg>';
+    }
+  </script>
+</body>
+</html>
