@@ -1,0 +1,15 @@
+{
+  "slug": "tricot-jacquard",
+  "title": "Tricot jacquard",
+  "type": "motion",
+  "description": "Une écharpe se tricote maille après maille sous l'aiguille : bandes jacquard, étoiles nordiques, chevrons et logo aux couleurs de la marque.",
+  "tags": ["textile", "grille", "motif", "pixel", "logo", "svg"],
+  "inspiration": [
+    "Les pulls jacquard de Fair Isle",
+    "Les étoiles et sapins des tricots nordiques",
+    "Les grilles de point compté"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}
