@@ -1,0 +1,15 @@
+{
+  "slug": "spirales-premiers",
+  "title": "Spirales de nombres premiers",
+  "type": "motion",
+  "description": "Les entiers posés en spirale, les nombres premiers allumés : en reculant, des bras puis des rayons apparaissent, colorés par familles de restes.",
+  "tags": ["mathematiques", "points", "spirale", "nombres", "logo", "svg"],
+  "inspiration": [
+    "Stanislaw Ulam, la spirale griffonnée en réunion (1963)",
+    "Robert Sacks, la spirale de Sacks (1994)",
+    "Les spirales polaires des nombres premiers (r = n, θ = n radians)"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}
