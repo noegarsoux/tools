@@ -1,0 +1,15 @@
+{
+  "slug": "metronomes",
+  "title": "Métronomes",
+  "type": "motion",
+  "description": "Des dizaines de métronomes battent chacun à leur rythme sur une planche qui bouge, puis se synchronisent peu à peu ; le logo bat à contretemps.",
+  "tags": ["cinetique", "rythme", "synchronisation", "grille", "logo", "svg"],
+  "inspiration": [
+    "L'expérience des métronomes sur une planche roulante",
+    "Le modèle de synchronisation de Kuramoto",
+    "Le Poème symphonique pour 100 métronomes de György Ligeti"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}
