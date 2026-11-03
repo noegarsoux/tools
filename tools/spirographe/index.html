@@ -1,0 +1,268 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Spirographe</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Spirographe : une roue dentée (rt dents) roule dans un anneau (Rt dents), un stylo planté dans un de ses
+    // trous trace une hypotrochoïde ; en extérieur, une épitrochoïde. Même module pour les deux engrenages :
+    // rayon = dents × module. Centre de la roue C = (R ∓ r)·(cos t, sin t), rotation propre φ = ∓(R ∓ r)/r · t.
+    // La figure se referme après rt / pgcd(Rt, rt) tours du centre et compte Rt / pgcd boucles.
+    // Chaque couche prend une autre roue, un autre trou et une autre encre ; les traits s'accumulent sur une
+    // feuille hors écran (mélange multiplicatif sur papier clair), et restent recalculables pour l'export SVG.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const BIE = PAL('biennale'), LUZ = PAL('luzern'), MEN = PAL('menthe');
+    const WHEELS = [24, 30, 32, 36, 40, 42, 45, 48, 50, 52, 56, 60, 63, 64, 72, 75, 80, 84];
+
+    let vKey = '', logoM = null, logoKey = '', ptr = null, S = null, gKey = '', logoP = null, logoPK = '', ink = null, inkKey = '';
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.05, vignette: 0.22 },
+      hint: 'Glisser autour : faire rouler la roue à la main · clic : nouvelle couche · molette : trou du stylo',
+      notes: 'Le jeu de roues dentées des années 1960 : une roue roule dans un anneau, un stylo planté dans un de ses trous trace des rosaces qui se referment après un nombre exact de tours. Chaque couche change de roue, de trou et d’encre. On peut faire rouler la roue à la main, et l’export SVG reprend les tracés en vectoriel.',
+      params: {
+        'Engrenages': {
+          anneau: { type: 'range', label: 'Dents de l’anneau', min: 60, max: 150, step: 1, value: 96 },
+          roue: { type: 'range', label: 'Dents de la roue', min: 20, max: 84, step: 1, value: 56 },
+          trou: { type: 'range', label: 'Trou du stylo', min: 0.1, max: 0.95, step: 0.01, value: 0.6 },
+          mode: { type: 'select', label: 'Roue', options: { dedans: 'Dans l’anneau', dehors: 'Autour de l’anneau' }, value: 'dedans' },
+          couches: { type: 'range', label: 'Couches', min: 1, max: 8, step: 1, value: 4 },
+          varier: { type: 'toggle', label: 'Changer de roue à chaque couche', value: true },
+          decalage: { type: 'range', label: 'Décalage entre couches', min: 0, max: 1, step: 0.01, value: 0.15 },
+          vitesse: { type: 'range', label: 'Boucles par seconde', min: 0.2, max: 8, step: 0.1, value: 1.6 },
+          trait: { type: 'range', label: 'Épaisseur du stylo', min: 0.4, max: 4, step: 0.05, value: 1.3 },
+          engrenages: { type: 'toggle', label: 'Montrer les engrenages', value: true },
+          image: { type: 'file', label: 'Image du logo', accept: 'image/*' },
+        },
+        'Couleurs': {
+          couleurs: { type: 'palette', label: 'Encres', value: ['#e5452a', '#2f5fd0', '#1f9a6a', '#7d38e7'] },
+          plastique: { type: 'color', label: 'Plastique', value: '#9dd3f0' },
+          papier: { type: 'color', label: 'Papier', value: '#f4f0e6' },
+        },
+      },
+      presets: {
+        'Rosaces': {},
+        'Dentelle': { anneau: 105, roue: 52, trou: 0.86, couches: 2, varier: false, decalage: 0.03, trait: 0.7, vitesse: 6, couleurs: ['#2f5fd0', '#e5452a'] },
+        'Une seule': { couches: 1, roue: 63, trou: 0.8, couleurs: ['#16161a'], vitesse: 2.4 },
+        'Autour': { mode: 'dehors', anneau: 72, roue: 40, couches: 3, couleurs: ['#e5452a', '#f2a03a', '#2f5fd0'] },
+        'Étoiles': { anneau: 150, roue: 60, trou: 0.95, couches: 3, varier: false, decalage: 0.33, couleurs: ['#7d38e7', '#e5452a', '#f2a03a'] },
+        'Feutres épais': { trait: 3.4, couches: 5, vitesse: 1.2, couleurs: ['#f2e640', '#e5452a', '#2f5fd0', '#1f9a6a', '#f2b0c8'] },
+        'Sans engrenages': { engrenages: false, couches: 6, vitesse: 4 },
+        'Ardoise': { papier: '#1b1d24', plastique: '#f2e640', couleurs: ['#f4f3f0', '#9dd3f0', '#f2b0c8', '#f2e640'] },
+        'Biennale': { couleurs: [BIE[2], BIE[3], BIE[4]], papier: BIE[1], plastique: BIE[3] },
+        'Luzern': { couleurs: [LUZ[0], LUZ[1], LUZ[2]], papier: LUZ[3], plastique: LUZ[4] },
+        'Menthe': { couleurs: [MEN[0], MEN[2], MEN[3]], papier: MEN[1], plastique: MEN[2] },
+      },
+      brand(colors) {
+        const s = colors.slice().sort((a, b) => lum(a) - lum(b)), L = s[s.length - 1], inks = s.slice(0, -1);
+        return { couleurs: inks.length ? inks : ['#16161a'], papier: L, plastique: inks[Math.floor(inks.length / 2)] || '#9dd3f0' };
+      },
+      pointer: {
+        down: (q) => { if (!S) return; ptr = { x: q.x, y: q.y, moved: 0, a: Math.atan2(q.y - S.cy, q.x - S.cx) }; },
+        drag: (q) => {
+          if (!ptr || !S) return; ptr.moved = Math.max(ptr.moved, Math.hypot(q.x - ptr.x, q.y - ptr.y));
+          const a = Math.atan2(q.y - S.cy, q.x - S.cx); let d = a - ptr.a; d = ((d + Math.PI) % TAU + TAU) % TAU - Math.PI; ptr.a = a;
+          if (ptr.moved > 6) { S.hand = 1.2; advance(d); }
+        },
+        up: () => { if (ptr && ptr.moved <= 6 && S) nextLayer(); ptr = null; },
+        wheel: (q, dy) => app.set('trou', Math.max(0.1, Math.min(0.95, +(p.trou + (dy > 0 ? -0.05 : 0.05)).toFixed(2)))),
+      },
+      onChange(k) {
+        if (['*', 'image'].includes(k)) logoKey = '';
+        if (k === '*' || ['anneau', 'roue', 'mode', 'varier', 'decalage', 'couches'].includes(k)) gKey = '';
+        if (k === 'trou' && S) { const L = S.layers[S.layers.length - 1]; L.hole = p.trou; L.t = 0; L.tMax = 0; inkKey = ''; }
+        if (['trait', 'couleurs', 'papier'].includes(k)) inkKey = '';
+      },
+      export: { name: 'spirographe', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    function hex(x) { const n = parseInt(x.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
+    function lum(x) { const c = hex(x); return (c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114) / 255; }
+    function mix(a, b, t) { const A = hex(a), C = hex(b); return '#' + A.map((v, i) => Math.round(v + (C[i] - v) * t).toString(16).padStart(2, '0')).join(''); }
+    function rgba(c, a) { const h = hex(c); return `rgba(${h[0]},${h[1]},${h[2]},${a})`; }
+    function rng(s) { return () => { s |= 0; s = (s + 0x6d2b79f5) | 0; let t = Math.imul(s ^ (s >>> 15), 1 | s); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+    const col = (i) => { const c = p.couleurs; return c.length ? c[((i % c.length) + c.length) % c.length] : '#e5452a'; };
+    const gcd = (a, b) => b ? gcd(b, a % b) : a;
+
+    function buildLogo() {
+      const img0 = p.image || app.logoImg, key = img0 ? (img0.src || 'c') : 'demo'; if (key === logoKey) return; logoKey = key; vKey = '';
+      const M = 200, c = document.createElement('canvas'); c.width = c.height = M; const x = c.getContext('2d', { willReadFrequently: true }), L = M * 0.94, cx = M / 2;
+      if (img0) { const iw = img0.naturalWidth || img0.width, ih = img0.naturalHeight || img0.height, s = L / Math.max(iw, ih); x.drawImage(img0, cx - iw * s / 2, cx - ih * s / 2, iw * s, ih * s); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(cx, cx, L * 0.48, 0, TAU); x.arc(cx, cx, L * 0.27, 0, TAU, true); x.fill('evenodd'); x.fillRect(cx - L * 0.07, cx - L * 0.5, L * 0.14, L); }
+      const d = x.getImageData(0, 0, M, M).data; let transp = 0; for (let i = 3; i < d.length; i += 4) if (d[i] < 128) transp++; const useA = transp > M * M * 0.05;
+      const F = new Float64Array(M * M); for (let i = 0; i < M * M; i++) { const o = i * 4, l = (d[o] * 0.2126 + d[o + 1] * 0.7152 + d[o + 2] * 0.0722) / 255; F[i] = useA ? d[o + 3] / 255 : (d[o + 3] / 255) * Math.min(1, Math.max(0, (0.75 - l) * 2)); }
+      { const G2 = new Float64Array(M * M); for (let j = 1; j < M - 1; j++) for (let i = 1; i < M - 1; i++) { let a = 0; for (let b = -1; b <= 1; b++) for (let c = -1; c <= 1; c++) a += F[(j + b) * M + i + c] * (b || c ? (b && c ? 1 : 2) : 4); G2[j * M + i] = a / 16; } F.set(G2); }
+      for (let k = 0; k < M; k++) F[k] = F[(M - 1) * M + k] = F[k * M] = F[k * M + M - 1] = 0;
+      logoM = contours(F, M, M, 0.5, 0, 0, 1).filter((c) => c.closed && c.pts.length > 6).map((c) => chaikin(chaikin(c.pts, true), true).map((q) => [q[0] / M - 0.5, q[1] / M - 0.5]));
+    }
+    // carrés marchants + chaînage
+    function contours(F, nx, ny, lev, ox, oy, cs) {
+      const pt = new Map(), adj = new Map();
+      const P = (id) => { let q = pt.get(id); if (q) return q; const cell = id >> 1, i = cell % nx, j = (cell - i) / nx; let a, b, ax, ay, bx, by; if (id & 1) { a = F[j * nx + i]; b = F[(j + 1) * nx + i]; ax = bx = i; ay = j; by = j + 1; } else { a = F[j * nx + i]; b = F[j * nx + i + 1]; ay = by = j; ax = i; bx = i + 1; } const t = (lev - a) / (b - a || 1e-9); q = [ox + (ax + (bx - ax) * t) * cs, oy + (ay + (by - ay) * t) * cs]; pt.set(id, q); return q; };
+      const link = (a, b) => { (adj.get(a) || adj.set(a, []).get(a)).push(b); (adj.get(b) || adj.set(b, []).get(b)).push(a); };
+      for (let j = 0; j < ny - 1; j++) for (let i = 0; i < nx - 1; i++) {
+        const A = F[j * nx + i] > lev, B = F[j * nx + i + 1] > lev, C = F[(j + 1) * nx + i + 1] > lev, D = F[(j + 1) * nx + i] > lev, idx = A | (B << 1) | (C << 2) | (D << 3);
+        if (idx === 0 || idx === 15) continue;
+        const T = (j * nx + i) * 2, R = (j * nx + i + 1) * 2 + 1, Bo = ((j + 1) * nx + i) * 2, Le = (j * nx + i) * 2 + 1;
+        const ctr = (F[j * nx + i] + F[j * nx + i + 1] + F[(j + 1) * nx + i + 1] + F[(j + 1) * nx + i]) / 4 > lev;
+        switch (idx) {
+          case 1: case 14: link(Le, T); break; case 2: case 13: link(T, R); break; case 3: case 12: link(Le, R); break;
+          case 4: case 11: link(R, Bo); break; case 6: case 9: link(T, Bo); break; case 7: case 8: link(Le, Bo); break;
+          case 5: if (ctr) { link(Le, Bo); link(T, R); } else { link(Le, T); link(R, Bo); } break;
+          case 10: if (ctr) { link(Le, T); link(R, Bo); } else { link(Le, Bo); link(T, R); } break;
+        }
+      }
+      const seen = new Set(), out = [];
+      const walk = (s) => { const L = [s]; seen.add(s); let cur = s; for (;;) { const nb = (adj.get(cur) || []).find((x) => !seen.has(x)); if (nb === undefined) break; seen.add(nb); L.push(nb); cur = nb; } return L; };
+      for (const [id, nb] of adj) if (nb.length === 1 && !seen.has(id)) out.push({ pts: walk(id).map(P), closed: false });
+      for (const [id] of adj) if (!seen.has(id)) out.push({ pts: walk(id).map(P), closed: true });
+      return out;
+    }
+    function chaikin(pts, closed) {
+      const o = []; const n = pts.length; for (let k = 0; k < (closed ? n : n - 1); k++) { const a = pts[k], b = pts[(k + 1) % n]; o.push([a[0] * 0.75 + b[0] * 0.25, a[1] * 0.75 + b[1] * 0.25], [a[0] * 0.25 + b[0] * 0.75, a[1] * 0.25 + b[1] * 0.75]); }
+      if (!closed) { o.unshift(pts[0]); o.push(pts[n - 1]); } return o;
+    }
+
+    function logoPath() {
+      if (!logoM) return null; if (logoP && logoPK === logoKey) return logoP; logoPK = logoKey; logoP = new Path2D();
+      for (const L of logoM) { logoP.moveTo(L[0][0], L[0][1]); for (let k = 1; k < L.length; k++) logoP.lineTo(L[k][0], L[k][1]); logoP.closePath(); }
+      return logoP;
+    }
+
+    // ——— couches ———
+    function makeLayer(i) {
+      const Rt = Math.round(p.anneau), R = S.rnd;
+      let rt = Math.round(p.roue), hole = p.trou;
+      if (p.varier && i > 0) { const ok = WHEELS.filter((w) => p.mode === 'dehors' ? w <= Math.max(24, p.roue) : w < Rt - 6); rt = ok[Math.floor(R() * ok.length)] || rt; hole = Math.max(0.3, Math.min(0.95, 0.45 + R() * 0.5)); }
+      if (p.mode === 'dedans') rt = Math.min(rt, Rt - 6);
+      const loops = rt / gcd(Rt, rt);
+      return { rt, hole, ci: S.cycle * Math.round(p.couches) + i, off: i * p.decalage * TAU / (Rt / gcd(Rt, rt)), T: TAU * loops, t: 0, tMax: 0 };
+    }
+    function build(w, h) {
+      S = { w, h, layers: [], cycle: S ? S.cycle : 0, rnd: rng((app.seed || 1) * 4111), hold: 0, fade: 0, hand: 0 };
+      layout(); S.layers.push(makeLayer(0)); inkKey = '';
+    }
+    function layout() {
+      const { w, h } = S, u0 = Math.min(w, h), Rt = Math.round(p.anneau), out = p.mode === 'dehors';
+      S.cx = w / 2; S.cy = h / 2;
+      S.m = (u0 * 0.44) / (out ? Rt + 2 * Math.round(p.roue) + 3 : Rt + 5);
+      S.R = Rt * S.m;
+    }
+    function geom(L, t) {
+      const { R, m } = S, r = L.rt * m, out = p.mode === 'dehors';
+      const D = out ? R + r : R - r, k = D / r, a = t + L.off;
+      const cx = S.cx + D * Math.cos(a), cy = S.cy + D * Math.sin(a), phi = out ? k * t + L.off + Math.PI : -k * t + L.off;
+      return { cx, cy, r, phi, px: cx + L.hole * r * Math.cos(phi), py: cy + L.hole * r * Math.sin(phi) };
+    }
+    function stepOf(L) { const { r } = geom(L, 0); const D = p.mode === 'dehors' ? S.R + r : S.R - r; return Math.max(0.002, 2 / (D + L.hole * r * D / r + 1)); }
+    function strokeLayer(x, L, t0, t1, dpr) {
+      if (t1 <= t0) return; const st = stepOf(L);
+      x.strokeStyle = col(L.ci); x.lineWidth = Math.max(0.5, p.trait * Math.min(S.w, S.h) / 700) * dpr; x.lineCap = 'round'; x.lineJoin = 'round';
+      x.beginPath(); let g = geom(L, t0); x.moveTo(g.px * dpr, g.py * dpr);
+      for (let t = t0 + st; t < t1 + st; t += st) { g = geom(L, Math.min(t, t1)); x.lineTo(g.px * dpr, g.py * dpr); }
+      x.stroke();
+    }
+    function advance(dtT) {
+      // fait avancer (ou reculer) le paramètre t de la couche courante en dessinant le segment parcouru
+      const L = S.layers[S.layers.length - 1], t0 = L.t; L.t = Math.max(0, Math.min(L.T, L.t + dtT));
+      if (ink && L.t > L.tMax) { const a = Math.max(t0, L.tMax); L.tMax = L.t; prepInk(); strokeLayer(ink.x, L, Math.min(a, L.t), L.t, app.size.dpr); }
+      L.tMax = Math.max(L.tMax, L.t);
+    }
+    function nextLayer() {
+      const n = S.layers.length;
+      if (n >= Math.round(p.couches)) { S.cycle++; S.layers = []; inkKey = ''; }
+      S.layers.push(makeLayer(S.layers.length)); S.hold = 0;
+    }
+    function prepInk() {
+      const { w, h, dpr } = app.size, key = [w, h, dpr, p.papier, p.trait, p.couleurs.join()].join('|');
+      if (!ink) { const c = document.createElement('canvas'); ink = { c, x: c.getContext('2d') }; }
+      if (key === inkKey) return; inkKey = key;
+      ink.c.width = Math.round(w * dpr); ink.c.height = Math.round(h * dpr); ink.x.clearRect(0, 0, ink.c.width, ink.c.height);
+      ink.x.globalCompositeOperation = lum(p.papier) > 0.5 ? 'multiply' : 'screen';
+      for (const L of S.layers) strokeLayer(ink.x, L, 0, L.tMax, dpr);
+    }
+
+    // ——— engrenages ———
+    function gearPath(cx, cy, r, n, rot, inner, depth) {
+      // contour denté : dents trapézoïdales, vers l'extérieur ou vers l'intérieur
+      const P = new Path2D(), d = depth * (inner ? -1 : 1);
+      for (let i = 0; i < n; i++) {
+        const a0 = rot + TAU * i / n, s = TAU / n;
+        const pts = [[a0, 0], [a0 + s * 0.18, d], [a0 + s * 0.5, d], [a0 + s * 0.68, 0]];
+        for (let j = 0; j < 4; j++) { const [a, dd] = pts[j], rr = r + dd; const X = cx + rr * Math.cos(a), Y = cy + rr * Math.sin(a); i === 0 && j === 0 ? P.moveTo(X, Y) : P.lineTo(X, Y); }
+      }
+      P.closePath(); return P;
+    }
+    function drawGears(x) {
+      const L = S.layers[S.layers.length - 1], g = geom(L, L.t), { R, m } = S, Rt = Math.round(p.anneau), out = p.mode === 'dehors';
+      const pl = p.plastique, dk = lum(p.papier) < 0.45, edge = mix(pl, dk ? '#ffffff' : '#000000', 0.35), lw = Math.max(1, Math.min(S.w, S.h) / 600);
+      // anneau
+      x.save(); x.lineWidth = lw; x.strokeStyle = rgba(edge, 0.8);
+      const ring = new Path2D(); const outerR = out ? R - m * 1.2 : R + m * 9;
+      if (out) { ring.addPath(gearPath(S.cx, S.cy, R - m * 0.6, Rt, 0, false, m * 1.2)); ring.moveTo(S.cx + R * 0.35, S.cy); ring.arc(S.cx, S.cy, R * 0.35, 0, TAU, true); }
+      else { ring.arc(S.cx, S.cy, outerR, 0, TAU); ring.addPath(gearPath(S.cx, S.cy, R + m * 0.6, Rt, 0, true, m * 1.2)); }
+      x.fillStyle = rgba(pl, 0.32); x.fill(ring, 'evenodd'); x.stroke(ring);
+      // roue
+      const r = g.r, wheel = gearPath(g.cx, g.cy, r - m * 0.6, L.rt, g.phi, false, m * 1.2);
+      x.fillStyle = rgba(pl, 0.3); x.fill(wheel); x.stroke(wheel);
+      // trous en spirale, le trou du stylo marqué
+      x.fillStyle = rgba(p.papier, 0.85);
+      const nh = Math.max(6, Math.round(L.rt / 4));
+      for (let i = 0; i < nh; i++) { const f = 0.3 + 0.65 * i / (nh - 1), a = g.phi + i * 2.39996; x.beginPath(); x.arc(g.cx + f * r * Math.cos(a), g.cy + f * r * Math.sin(a), Math.max(1.2, m * 0.9), 0, TAU); x.fill(); }
+      const lp = logoPath(); if (lp && r > 30) { const s = r * 0.42; x.save(); x.translate(g.cx, g.cy); x.rotate(g.phi); x.scale(s, s); x.fillStyle = rgba(edge, 0.55); x.fill(lp, 'evenodd'); x.restore(); }
+      // stylo : capuchon vu de dessus
+      x.fillStyle = col(L.ci); x.strokeStyle = mix(col(L.ci), '#000000', 0.4); x.lineWidth = lw;
+      x.beginPath(); x.arc(g.px, g.py, Math.max(3, m * 2.2), 0, TAU); x.fill(); x.stroke();
+      x.fillStyle = rgba('#ffffff', 0.5); x.beginPath(); x.arc(g.px - m * 0.7, g.py - m * 0.7, Math.max(1, m * 0.7), 0, TAU); x.fill();
+      x.restore();
+    }
+
+    app.loop((t, dt) => {
+      dt = Math.min(1 / 20, dt || 0);
+      const { w, h, dpr } = app.size; buildLogo();
+      const key = [w, h, app.seed].join('|'); if (!S || key !== gKey) { const keep = S && S.w === w && S.h === h && gKey; gKey = key; if (!keep) S = null; build(w, h); }
+      layout();
+      if (app.thumbnail) {
+        // vignette : toutes les couches, la dernière aux trois quarts
+        S.layers = []; S.cycle = 0; S.rnd = rng((app.seed || 1) * 4111);
+        for (let i = 0; i < Math.round(p.couches); i++) { const L = makeLayer(i); L.t = L.tMax = i === Math.round(p.couches) - 1 ? L.T * 0.75 : L.T; S.layers.push(L); }
+        inkKey = '';
+      }
+      prepInk();
+      const L = S.layers[S.layers.length - 1];
+      if (!app.thumbnail) {
+        if (S.hand > 0) S.hand -= dt;
+        else if (L.t < L.T) { const lobes = Math.round(p.anneau) / gcd(Math.round(p.anneau), L.rt); advance(L.T * dt / Math.max(1.5, lobes / p.vitesse)); }
+        else { S.hold += dt; if (S.hold > (S.layers.length >= Math.round(p.couches) ? 3.5 : 0.6)) nextLayer(); }
+      }
+      ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.fillStyle = p.papier; ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(ink.c, 0, 0);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      if (p.engrenages) drawGears(ctx);
+      app.finish(ctx);
+    });
+
+    // ——— SVG ———
+    function toSVG() {
+      const { w, h } = app.size, f = (v) => +v.toFixed(2), lw = Math.max(0.5, p.trait * Math.min(w, h) / 700);
+      let o = `<rect width="100%" height="100%" fill="${p.papier}"/><g fill="none" stroke-linecap="round" stroke-linejoin="round" stroke-width="${f(lw)}" style="mix-blend-mode:${lum(p.papier) > 0.5 ? 'multiply' : 'screen'}">`;
+      for (const L of S.layers) { if (L.tMax <= 0) continue; const st = stepOf(L) * 1.5; let d = ''; for (let t = 0; t < L.tMax + st; t += st) { const g = geom(L, Math.min(t, L.tMax)); d += (d ? 'L' : 'M') + f(g.px) + ' ' + f(g.py); } o += `<path d="${d}" stroke="${col(L.ci)}"/>`; }
+      o += '</g>';
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">${o}</svg>`;
+    }
+  </script>
+</body>
+</html>
