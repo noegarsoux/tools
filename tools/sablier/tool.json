@@ -1,0 +1,15 @@
+{
+  "slug": "sablier",
+  "title": "Sablier",
+  "type": "motion",
+  "description": "Un sablier grain par grain : le sable teinté de strates ou du logo passe le col, se déforme et s’empile, puis le sablier se retourne ou s’incline à la main.",
+  "tags": ["simulation", "sable", "automate", "interaction", "logo", "svg"],
+  "inspiration": [
+    "Les sabliers de verre soufflé et leurs montures en bois",
+    "Les bouteilles de sable coloré en strates",
+    "Les automates cellulaires de sable qui tombent et glissent"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}
