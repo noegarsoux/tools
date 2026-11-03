@@ -1,0 +1,225 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tourbillons de poursuite</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Tourbillons de poursuite : n souris aux sommets d'un polygone, chacune court vers la suivante. À chaque pas,
+    // V_i ← V_i + λ·(V_{i+1} − V_i) : le polygone rétrécit en tournant et ses sommets tracent des spirales logarithmiques.
+    // On pave le plan de carrés, de triangles ou d'hexagones, on alterne le sens d'une tuile à l'autre, et λ varie
+    // en vague à travers la grille. Le doigt y sème des torsions qui s'estompent ; le logo inverse le sens de rotation.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const BIEN = PAL('biennale'), GLY = PAL('glyphes'), SAL = PAL('salon'), MEN = PAL('menthe'), KB = PAL('kegelbahn');
+
+    let simT = 0, bumps = [], logoM = null, logoKey = '', last = null;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: false,
+      finish: { grain: 0.02, vignette: 0.08 },
+      hint: 'Glissez pour tordre les tuiles · molette : taille des tuiles',
+      notes: 'En 1877, Édouard Lucas pose le problème des souris : trois souris aux coins d\'un triangle se poursuivent chacune la suivante ; où se rencontrent-elles, et par quel chemin ? Elles tracent des spirales logarithmiques qui s\'enroulent vers le centre. En dessinant le polygone à chaque petit pas, on obtient ces tourbillons que tant d\'élèves ont griffonnés dans les marges de leurs cahiers : des carrés qui tournent sur eux-mêmes en rétrécissant. Pavés côte à côte, en alternant le sens de rotation, ils donnent une surface qui semble se visser et se dévisser. Ici le pas de poursuite ondule à travers la grille, le doigt ajoute des torsions locales et le logo inverse le sens des tuiles qu\'il recouvre.',
+      params: {
+        'Pavage': {
+          forme: { type: 'segmented', label: 'Tuiles', options: { carre: 'Carrés', triangle: 'Triangles', hexagone: 'Hexagones' }, value: 'carre' },
+          cases: { type: 'range', label: 'Tuiles (petit côté)', min: 2, max: 16, step: 1, value: 6 },
+          alterner: { type: 'toggle', label: 'Alterner le sens', value: true },
+        },
+        'Poursuite': {
+          pas: { type: 'range', label: 'Pas de poursuite λ', min: 0.02, max: 0.35, step: 0.005, value: 0.08 },
+          iterations: { type: 'range', label: 'Pas dessinés', min: 8, max: 160, step: 1, value: 60 },
+          vague: { type: 'range', label: 'Vague de torsion', min: 0, max: 1, step: 0.01, value: 0.55 },
+          longueur: { type: 'range', label: 'Longueur d\'onde', min: 0.2, max: 3, step: 0.01, value: 1 },
+          vitesse: { type: 'range', label: 'Vitesse', min: 0, max: 2, step: 0.01, value: 0.4 },
+        },
+        'Rendu': {
+          style: { type: 'segmented', label: 'Style', options: { traits: 'Traits', aplats: 'Aplats', spirales: 'Spirales' }, value: 'traits' },
+          epaisseur: { type: 'range', label: 'Épaisseur', min: 0.3, max: 3, step: 0.05, value: 0.8, show: (q) => q.style !== 'aplats' },
+          marge: { type: 'range', label: 'Joint entre tuiles', min: 0, max: 0.2, step: 0.005, value: 0.02 },
+        },
+        'Logo à rebours': {
+          logo: { type: 'toggle', label: 'Le logo inverse le sens', value: false },
+          tailleLogo: { type: 'range', label: 'Taille du logo', min: 0.3, max: 1.8, step: 0.01, value: 1.2, show: (q) => q.logo },
+          image: { type: 'file', label: 'Logo', accept: 'image/*', show: (q) => q.logo },
+        },
+        'Couleurs': {
+          fond: { type: 'color', label: 'Fond', value: '#f1ece1' },
+          couleurs: { type: 'palette', label: 'Du bord au cœur', value: ['#1b1b1f', '#2c3566', '#486cfc'] },
+          accent: { type: 'color', label: 'Logo', value: '#ef5a2f', show: (q) => q.logo },
+        },
+      },
+      presets: {
+        'Carrés': {},
+        'Triangles': { forme: 'triangle', cases: 5, pas: 0.07, couleurs: ['#1b1b1f', '#ef5a2f', '#edd14b'], iterations: 70 },
+        'Hexagones': { forme: 'hexagone', cases: 5, pas: 0.06, couleurs: ['#0b0c12', '#486cfc', '#7fe0c2'], fond: '#f4f1ea' },
+        'Aplats': { style: 'aplats', pas: 0.1, iterations: 50, couleurs: ['#16161c', '#f1ece1'], fond: '#f1ece1', cases: 7, marge: 0 },
+        'Spirales': { style: 'spirales', forme: 'hexagone', pas: 0.04, iterations: 140, cases: 4, epaisseur: 1.1, fond: '#0b0b10', couleurs: ['#486cfc', '#f272ba', '#edd14b'] },
+        'Nuit': { fond: '#0b0b10', couleurs: ['#2a2a33', '#f272ba', '#edd14b'], cases: 8, pas: 0.09 },
+        'Logo': { logo: true, cases: 10, style: 'aplats', couleurs: ['#16161c', '#f1ece1'], fond: '#f1ece1', accent: '#ef5a2f', pas: 0.13, iterations: 32, marge: 0, vague: 0.3 },
+        'Biennale': { fond: BIEN[0], couleurs: [BIEN[1], BIEN[2], BIEN[4]], forme: 'triangle', cases: 6 },
+        'Menthe': { fond: MEN[1], couleurs: [MEN[0], MEN[2], MEN[3]], forme: 'hexagone', style: 'aplats', cases: 6 },
+        'Kegelbahn': { fond: KB[0], couleurs: [KB[1], KB[2]], cases: 9, style: 'spirales', pas: 0.05, iterations: 110 },
+      },
+      brand(colors) {
+        const s = colors.slice().sort((a, b) => lum(a) - lum(b));
+        return { fond: s[s.length - 1], couleurs: s.length > 1 ? s.slice(0, -1) : ['#000000'], accent: s[Math.floor(s.length / 2)] };
+      },
+      pointer: {
+        down: (q) => { last = [q.x, q.y]; addBump(q.x, q.y); },
+        drag: (q) => { if (last && Math.hypot(q.x - last[0], q.y - last[1]) > 12) { addBump(q.x, q.y); last = [q.x, q.y]; } },
+        up: () => { last = null; },
+        wheel: (q, dy) => app.set('cases', Math.max(2, Math.min(16, p.cases + (dy > 0 ? 1 : -1)))),
+      },
+      onChange(k) { if (['*', 'logo', 'image'].includes(k)) logoKey = ''; },
+      export: { name: 'poursuite', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    function hex(x) { const n = parseInt(x.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
+    function lum(x) { const c = hex(x); return (c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114) / 255; }
+    function mix(a, b, t) { const A = hex(a), B = hex(b); return '#' + A.map((v, i) => Math.round(v + (B[i] - v) * t).toString(16).padStart(2, '0')).join(''); }
+    function addBump(x, y) { bumps.push({ x, y, t: simT }); if (bumps.length > 80) bumps.shift(); }
+
+    // ——— Logo ———
+    function buildLogo() {
+      const img0 = p.image || app.logoImg, key = [p.logo, img0 ? (img0.src || 'c') : 'demo'].join(); if (key === logoKey) return; logoKey = key;
+      logoM = null; if (!p.logo) return;
+      const M = 200, c = document.createElement('canvas'); c.width = c.height = M; const x = c.getContext('2d', { willReadFrequently: true }), L = M * 0.94, cx = M / 2;
+      if (img0) { const iw = img0.naturalWidth || img0.width, ih = img0.naturalHeight || img0.height, s = L / Math.max(iw, ih); x.drawImage(img0, cx - iw * s / 2, cx - ih * s / 2, iw * s, ih * s); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(cx, cx, L * 0.48, 0, TAU); x.arc(cx, cx, L * 0.27, 0, TAU, true); x.fill('evenodd'); x.fillRect(cx - L * 0.07, cx - L * 0.5, L * 0.14, L); }
+      const d = x.getImageData(0, 0, M, M).data; let transp = 0; for (let i = 3; i < d.length; i += 4) if (d[i] < 128) transp++; const useA = transp > M * M * 0.05;
+      const m = new Uint8Array(M * M); for (let i = 0; i < M * M; i++) { const o = i * 4, l = (d[o] * 0.2126 + d[o + 1] * 0.7152 + d[o + 2] * 0.0722) / 255; m[i] = (useA ? d[o + 3] > 128 : d[o + 3] > 128 && l < 0.5) ? 1 : 0; }
+      logoM = { m, M };
+    }
+    function inLogo(X, Y, w, h) {
+      if (!logoM || !p.logo) return false; const S = Math.min(w, h) * 0.5 * p.tailleLogo, u = Math.floor(((X - w / 2) / S * 0.5 + 0.5) * logoM.M), v = Math.floor(((Y - h / 2) / S * 0.5 + 0.5) * logoM.M);
+      return u >= 0 && v >= 0 && u < logoM.M && v < logoM.M && logoM.m[v * logoM.M + u] === 1;
+    }
+
+    // ——— Pavage : liste de tuiles (sommets écran, sens) ———
+    function tiles(w, h) {
+      const out = [], m = Math.min(w, h), n = p.cases;
+      if (p.forme === 'carre') {
+        const s = m / n, nx = Math.ceil(w / s / 2) + 1, ny = Math.ceil(h / s / 2) + 1;
+        for (let j = -ny; j < ny; j++) for (let i = -nx; i < nx; i++) { const x = w / 2 + i * s, y = h / 2 + j * s; out.push({ V: [[x, y], [x + s, y], [x + s, y + s], [x, y + s]], par: (i + j) & 1 }); }
+      } else if (p.forme === 'triangle') {
+        const s = m / n * 1.15, th = s * Math.sqrt(3) / 2, nx = Math.ceil(w / s) + 2, ny = Math.ceil(h / th / 2) + 1;
+        for (let j = -ny; j < ny; j++) for (let i = -nx; i < nx; i++) {
+          const y = h / 2 + j * th, x = w / 2 + i * s / 2 + (j & 1 ? s / 2 : 0) - s / 2;
+          if ((i & 1) === 0) out.push({ V: [[x, y + th], [x + s / 2, y], [x + s, y + th]], par: 0 });
+          else out.push({ V: [[x, y], [x + s, y], [x + s / 2, y + th]], par: 1 });
+        }
+      } else {
+        const R = m / n * 0.62, hw = R * Math.sqrt(3), vh = R * 1.5, nx = Math.ceil(w / hw / 2) + 2, ny = Math.ceil(h / vh / 2) + 2;
+        for (let j = -ny; j < ny; j++) for (let i = -nx; i < nx; i++) {
+          const cx = w / 2 + i * hw + (j & 1 ? hw / 2 : 0), cy = h / 2 + j * vh, V = [];
+          for (let k = 0; k < 6; k++) { const a = Math.PI / 6 + k * TAU / 6; V.push([cx + Math.cos(a) * R, cy + Math.sin(a) * R]); }
+          out.push({ V, par: ((i + (j & 1 ? 1 : 0)) % 3 + 3) % 3 === 0 ? 1 : (i + j) & 1 });
+        }
+      }
+      return out.filter((T) => T.V.some((q) => q[0] > -60 && q[0] < w + 60 && q[1] > -60 && q[1] < h + 60));
+    }
+
+    // ——— Tourbillons ———
+    function build(w, h, t) {
+      buildLogo();
+      const T = tiles(w, h), m = Math.min(w, h), out = [], N = p.iterations | 0, kmax = p.style === 'spirales' ? 1 : 0;
+      for (const tile of T) {
+        let cx = 0, cy = 0; for (const q of tile.V) { cx += q[0]; cy += q[1]; } cx /= tile.V.length; cy /= tile.V.length;
+        // le pas λ ondule en vague à travers la grille ; les torsions du doigt s'y ajoutent et s'estompent
+        const ph = ((cx - w / 2) * 0.8 + (cy - h / 2) * 0.6) / m / p.longueur * TAU, wave = Math.sin(ph - t * p.vitesse * 1.6);
+        let lam = p.pas * (1 + p.vague * 0.85 * wave);
+        for (const b of bumps) { const age = t - b.t, d2 = ((cx - b.x) ** 2 + (cy - b.y) ** 2) / (m * m * 0.012); if (age < 6 && d2 < 9) lam += p.pas * 1.6 * Math.exp(-d2) * Math.max(0, 1 - age / 6); }
+        lam = Math.max(0.004, Math.min(0.48, lam));
+        const inv = inLogo(cx, cy, w, h);
+        let rev = (p.alterner ? tile.par === 1 : false) !== inv;
+        // joint : on rétrécit un peu la tuile vers son centre
+        let V = tile.V.map((q) => [cx + (q[0] - cx) * (1 - p.marge), cy + (q[1] - cy) * (1 - p.marge)]);
+        if (rev) V = V.slice().reverse();
+        const polys = [V.map((q) => q.slice())], n = V.length;
+        for (let k = 0; k < N; k++) {
+          const W = V.map((q, i) => { const r = V[(i + 1) % n]; return [q[0] + (r[0] - q[0]) * lam, q[1] + (r[1] - q[1]) * lam]; });
+          V = W; polys.push(V);
+          if (Math.hypot(V[0][0] - V[1][0], V[0][1] - V[1][1]) < (p.style === 'aplats' ? 1.5 : 0.6)) break;
+        }
+        out.push({ polys, inv, cx, cy });
+      }
+      return out;
+    }
+    function colorAt(u, inv) {
+      const C = p.couleurs.length ? p.couleurs : ['#000000'];
+      if (inv && p.logo) return p.style === 'aplats' ? (u === 0 ? p.accent : p.fond) : mix(p.accent, C[0], u * 0.5);
+      if (C.length === 1) return C[0];
+      const x = Math.max(0, Math.min(1, u)) * (C.length - 1), i = Math.min(C.length - 2, Math.floor(x)); return mix(C[i], C[i + 1], Math.round((x - i) * 8) / 8);
+    }
+
+    // groupes de chemins par couleur : traits (polygones), aplats (bandes alternées), spirales (trajectoires des sommets)
+    function groups(w, h, t) {
+      const B = build(w, h, t), G = new Map(), add = (col, kind, pts) => { const k = col + '|' + kind; let L = G.get(k); if (!L) G.set(k, (L = [])); L.push(pts); };
+      for (const T of B) {
+        const P = T.polys, N = P.length;
+        if (p.style === 'traits') for (let k = 0; k < N; k++) add(colorAt(k / Math.max(1, N - 1), T.inv), 's', P[k]);
+        else if (p.style === 'aplats') {
+          // une bande sur deux : polygone k moins polygone k+1, tracés en pair-impair
+          const C = p.couleurs.length ? p.couleurs : ['#000000'];
+          if (C.length > 2 && !(T.inv && p.logo)) { for (let k = 0; k < N - 1; k += 2) add(colorAt(k / Math.max(1, N - 2) * 0.999, false), 'e', [P[k], P[k + 1]]); }
+          else add(T.inv && p.logo ? p.accent : C[0], 'e', P.slice(0, N - (N & 1)));
+        } else {
+          const n = P[0].length;
+          // chaque trajectoire en tronçons dégradés, du bord (pâle) vers le cœur
+          const seg = 6;
+          for (let i = 0; i < n; i++) for (let k = 0; k < N - 1; k += seg) add(colorAt(k / Math.max(1, N - 1), T.inv), 'o', P.slice(k, Math.min(N, k + seg + 1)).map((q) => q[i]));
+        }
+      }
+      return G;
+    }
+
+    app.loop((t, dt) => {
+      dt = Math.min(0.1, dt || 0);
+      if (!app.thumbnail) simT += dt; else simT = 1.3;
+      if (bumps.length && simT - bumps[0].t > 6) bumps = bumps.filter((b) => simT - b.t < 6);
+      const { w, h, dpr } = app.size, G = groups(w, h, simT);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = p.fond; ctx.fillRect(0, 0, w, h);
+      ctx.lineJoin = 'round'; ctx.lineCap = 'round'; ctx.lineWidth = p.epaisseur;
+      for (const [key, L] of G) {
+        const [col, kind] = key.split('|'), P2 = new Path2D();
+        if (kind === 'e') {
+          // une tuile à la fois : un petit chemin pair-impair se remplit bien plus vite qu'un grand
+          ctx.fillStyle = col;
+          for (const item of L) { const P3 = new Path2D(); for (const poly of item) { P3.moveTo(poly[0][0], poly[0][1]); for (let i = 1; i < poly.length; i++) P3.lineTo(poly[i][0], poly[i][1]); P3.closePath(); } ctx.fill(P3, 'evenodd'); }
+          continue;
+        }
+        for (const item of L) {
+          if (kind === 'e') continue;
+          else { P2.moveTo(item[0][0], item[0][1]); for (let i = 1; i < item.length; i++) P2.lineTo(item[i][0], item[i][1]); if (kind === 's') P2.closePath(); }
+        }
+        if (kind === 'e') { ctx.fillStyle = col; ctx.fill(P2, 'evenodd'); } else { ctx.strokeStyle = col; ctx.stroke(P2); }
+      }
+      app.finish(ctx);
+    });
+
+    function toSVG() {
+      const { w, h } = app.size, f = (v) => +v.toFixed(1), G = groups(w, h, simT);
+      let s = `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><rect width="100%" height="100%" fill="${p.fond}"/>`;
+      const poly = (P, close) => 'M' + P.map((q) => f(q[0]) + ' ' + f(q[1])).join('L') + (close ? 'z' : '');
+      for (const [key, L] of G) {
+        const [col, kind] = key.split('|');
+        if (kind === 'e') s += `<path d="${L.map((it) => it.map((P) => poly(P, true)).join('')).join('')}" fill="${col}" fill-rule="evenodd"/>`;
+        else s += `<path d="${L.map((P) => poly(P, kind === 's')).join('')}" fill="none" stroke="${col}" stroke-width="${f(p.epaisseur)}" stroke-linejoin="round" stroke-linecap="round"/>`;
+      }
+      return s + '</svg>';
+    }
+  </script>
+</body>
+</html>
