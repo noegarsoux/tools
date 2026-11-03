@@ -1,0 +1,15 @@
+{
+  "slug": "harpe",
+  "title": "Harpe",
+  "type": "motion",
+  "description": "Des cordes tendues vibrent selon l'équation des ondes, pincées en arpège ou au doigt, avec leur traîne de vibration ; le logo les colore là où il passe.",
+  "tags": ["onde", "musique", "lignes", "physique", "logo", "svg"],
+  "inspiration": [
+    "Les cordes vibrantes de d'Alembert (1747)",
+    "Les harpes laser de Jean-Michel Jarre",
+    "Les sculptures à fils de Naum Gabo"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}
