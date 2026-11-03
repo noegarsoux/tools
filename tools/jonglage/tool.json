@@ -1,0 +1,15 @@
+{
+  "slug": "jonglage",
+  "title": "Jonglage",
+  "type": "motion",
+  "description": "Un jongleur invisible lit des siteswaps : balles au logo, anneaux ou massues suivent leurs paraboles, changent de main, et le diagramme en échelle déroule les lancers.",
+  "tags": ["animation", "rythme", "physique", "interaction", "logo", "svg"],
+  "inspiration": [
+    "La notation siteswap des jongleurs",
+    "Les diagrammes en échelle qui décrivent les figures",
+    "Les balles, anneaux et massues des numéros de cirque"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}
