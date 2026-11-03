@@ -1,0 +1,15 @@
+{
+  "slug": "bassins-newton",
+  "title": "Bassins de Newton",
+  "type": "motion",
+  "description": "La méthode de Newton partie de chaque point : les bassins des racines se touchent en frontières fractales ; on déplace les racines, le pas se tord en spirales.",
+  "tags": ["mathematiques", "fractale", "couleur", "webgl", "logo", "svg"],
+  "inspiration": [
+    "Isaac Newton et Joseph Raphson, la méthode des tangentes",
+    "Arthur Cayley, le problème des bassins dans le plan complexe (1879)",
+    "John Hubbard, les fractales de Newton (années 1980)"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}
