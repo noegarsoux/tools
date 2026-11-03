@@ -1,0 +1,15 @@
+{
+  "slug": "ecran-epingles",
+  "title": "Écran d'épingles",
+  "type": "motion",
+  "description": "Des milliers d'épingles poussées par-derrière : le logo, des sphères qui roulent ou un relief s'impriment en volume, puis une secousse remet tout à plat.",
+  "tags": ["relief", "grille", "points", "ombre", "logo", "svg"],
+  "inspiration": [
+    "Le jouet Pin Art de Ward Fleming",
+    "L'écran d'épingles d'Alexandre Alexeïeff et Claire Parker",
+    "Les bas-reliefs de clous"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}
