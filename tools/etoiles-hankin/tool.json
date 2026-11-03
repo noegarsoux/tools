@@ -1,0 +1,15 @@
+{
+  "slug": "etoiles-hankin",
+  "title": "Étoiles de Hankin",
+  "type": "motion",
+  "description": "Des rayons partis du milieu de chaque côté d'un pavage se croisent en étoiles et rosaces islamiques ; l'angle de contact ondule et le logo colore ses tuiles.",
+  "tags": ["geometrie", "pavage", "motif", "islamique", "logo", "svg"],
+  "inspiration": [
+    "La méthode des polygones en contact d'Ernest Hanbury Hankin (1925)",
+    "Les zelliges marocains et les panneaux girih de l'Alhambra",
+    "Les travaux de Craig S. Kaplan sur les motifs étoilés"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}
