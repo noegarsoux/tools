@@ -1,0 +1,299 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Labyrinthe</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Labyrinthe parfait : un arbre couvrant de la grille, un seul chemin entre deux cases. Trois façons de le creuser :
+    // le parcours en profondeur (longs couloirs), l'algorithme de Prim (buissons serrés), celui de Wilson (marches
+    // aléatoires à boucles effacées : chaque labyrinthe possible a la même chance). Une fois creusé, on mesure la
+    // distance de chaque case à la source en suivant les couloirs, et la couleur s'écoule le long de cette distance.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const BIEN = PAL('biennale'), GLY = PAL('glyphes'), SAL = PAL('salon'), MEN = PAL('menthe'), KB = PAL('kegelbahn');
+    const DX = [1, 0, -1, 0], DY = [0, 1, 0, -1], BIT = [1, 2, 4, 8], OPP = [2, 3, 0, 1];
+
+    let cols = 0, rows = 0, cell = 0, ox = 0, oy = 0, allowed = null, conn = null, ord = null, nOrd = 0, par = null;
+    let dist = null, maxD = 1, far = -1, bpar = null, src = -1, reveal = 0, layoutKey = '', genCount = 0, clock = 0, sinceDone = 0, held = false;
+    let mask = null, logoCells = null;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.03, vignette: 0.12 },
+      hint: 'Touchez une case pour y placer la source · molette : taille des cases',
+      notes: 'Un labyrinthe parfait relie toutes les cases par un seul chemin, sans boucle : c\'est un arbre couvrant de la grille. Le parcours en profondeur avance tant qu\'il peut puis revient sur ses pas : de longs couloirs sinueux. L\'algorithme de Prim fait pousser l\'arbre par tous ses bords à la fois : des buissons de culs-de-sac. Celui de David Wilson lance des marches aléatoires qui effacent leurs propres boucles jusqu\'à toucher l\'arbre : tous les labyrinthes possibles y ont exactement la même probabilité. Une fois le labyrinthe creusé, chaque case reçoit sa distance à la source en suivant les couloirs, et la couleur s\'écoule le long de cette distance. Le chemin en couleur d\'accent mène à la case la plus lointaine.',
+      params: {
+        'Labyrinthe': {
+          algo: { type: 'segmented', label: 'Creusement', options: { profondeur: 'Couloirs', prim: 'Buissons', wilson: 'Uniforme' }, value: 'profondeur' },
+          taille: { type: 'range', label: 'Taille des cases', min: 5, max: 48, step: 1, value: 13 },
+          biais: { type: 'range', label: 'Penchant horizontal', min: -1, max: 1, step: 0.05, value: 0 },
+          nouveau: { type: 'button', label: 'Nouveau labyrinthe', action: () => { genCount++; layoutKey = ''; } },
+        },
+        'Mouvement': {
+          vitesse: { type: 'range', label: 'Cases creusées par seconde', min: 20, max: 6000, step: 10, value: 900 },
+          flux: { type: 'range', label: 'Écoulement de la couleur', min: -2, max: 2, step: 0.05, value: 0.5 },
+          periode: { type: 'range', label: 'Longueur d\'une vague (cases)', min: 4, max: 600, step: 1, value: 90 },
+          renouveler: { type: 'range', label: 'Nouveau labyrinthe après (s, 0 = jamais)', min: 0, max: 90, step: 1, value: 30 },
+        },
+        'Logo dans le labyrinthe': {
+          logo: { type: 'segmented', label: 'Logo', options: { aucun: 'Aucun', dedans: 'Labyrinthe dedans', dehors: 'Logo plein' }, value: 'aucun' },
+          image: { type: 'file', label: 'Logo', accept: 'image/*', show: (q) => q.logo !== 'aucun' },
+        },
+        'Rendu': {
+          rendu: { type: 'segmented', label: 'Dessin', options: { couloirs: 'Couloirs', murs: 'Murs' }, value: 'couloirs' },
+          largeur: { type: 'range', label: 'Largeur du trait', min: 0.08, max: 0.95, step: 0.01, value: 0.55 },
+          chemin: { type: 'toggle', label: 'Chemin vers la case la plus lointaine', value: true },
+        },
+        'Couleurs': {
+          fond: { type: 'color', label: 'Fond', value: '#101012' },
+          couleurs: { type: 'palette', label: 'Vagues', value: ['#486cfc', '#f272ba', '#ef5a2f', '#edd14b'] },
+          accent: { type: 'color', label: 'Chemin et logo', value: '#f4f1ea' },
+        },
+      },
+      presets: {
+        'Couloirs': {},
+        'Buissons': { algo: 'prim', taille: 10, largeur: 0.6, couleurs: ['#7fe0c2', '#486cfc', '#1d2a4a'], periode: 60, flux: 0.7 },
+        'Uniforme': { algo: 'wilson', taille: 12, rendu: 'murs', largeur: 0.22, couleurs: ['#edd14b', '#ef5a2f', '#f272ba', '#486cfc'], periode: 140, flux: 0.4 },
+        'Mosaïque': { algo: 'profondeur', taille: 9, rendu: 'murs', largeur: 0.3, couleurs: GLY.slice(2, 7), periode: 220, flux: 0.3 },
+        'Fil': { algo: 'profondeur', taille: 7, largeur: 0.3, couleurs: ['#f4f1ea', '#3a3a44', '#26262c', '#26262c'], periode: 260, flux: 1.2, chemin: true, accent: '#ef5a2f' },
+        'Strates': { algo: 'prim', biais: 0.85, taille: 11, largeur: 0.7, couleurs: ['#ef5a2f', '#edd14b', '#f4f1ea'], periode: 120, flux: -0.5 },
+        'Logo': { logo: 'dehors', algo: 'profondeur', taille: 10, largeur: 0.5, couleurs: ['#2c2c33', '#3a3a44'], accent: '#ef5a2f', periode: 80, chemin: false },
+        'Dedans': { logo: 'dedans', algo: 'wilson', taille: 8, largeur: 0.6, couleurs: ['#486cfc', '#f272ba', '#edd14b'], chemin: true },
+        'Biennale': { algo: 'prim', taille: 14, fond: BIEN[0], couleurs: [BIEN[1], BIEN[2], BIEN[3]], accent: BIEN[4], rendu: 'murs', largeur: 0.18 },
+        'Menthe': { algo: 'wilson', taille: 12, fond: MEN[1], couleurs: [MEN[2], MEN[3], MEN[0]], accent: MEN[3], largeur: 0.5 },
+        'Kegelbahn': { algo: 'profondeur', biais: -0.6, taille: 12, fond: KB[0], couleurs: [KB[1], KB[2]], accent: KB[2], largeur: 0.45, periode: 50 },
+      },
+      brand(colors) {
+        const s = colors.slice().sort((a, b) => lum(a) - lum(b)), rest = s.slice(1);
+        return { fond: s[0], couleurs: rest.length ? rest : ['#ffffff'], accent: s[s.length - 1] };
+      },
+      pointer: {
+        down: (q) => { held = true; setSource(q.x, q.y); },
+        drag: (q) => { if (held) setSource(q.x, q.y); },
+        up: () => { held = false; },
+        wheel: (q, dy) => app.set('taille', Math.max(5, Math.min(48, p.taille + (dy > 0 ? 1 : -1)))),
+      },
+      onChange(k) {
+        if (['*', 'algo', 'taille', 'biais', 'logo', 'image'].includes(k)) layoutKey = '';
+      },
+      onSeed() { layoutKey = ''; },
+      export: { name: 'labyrinthe', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    function hex(x) { const n = parseInt(x.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
+    function lum(x) { const c = hex(x); return (c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114) / 255; }
+    function mix(a, b, t) { const A = hex(a), B = hex(b); return '#' + A.map((v, i) => Math.round(v + (B[i] - v) * t).toString(16).padStart(2, '0')).join(''); }
+    function mulberry(a) { return () => { a |= 0; a = (a + 0x6d2b79f5) | 0; let t = Math.imul(a ^ (a >>> 15), 1 | a); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+
+    // ——— La grille et la forme permise ———
+    function buildMask(w, h) {
+      const img0 = p.image || app.logoImg;
+      const c = document.createElement('canvas'); c.width = cols; c.height = rows; const x = c.getContext('2d', { willReadFrequently: true });
+      const L = Math.min(cols, rows) * (p.logo === 'dedans' ? 0.86 : 0.6), cx = cols / 2, cy = rows / 2;
+      if (img0) { const iw = img0.naturalWidth || img0.width, ih = img0.naturalHeight || img0.height, k = L / Math.max(iw, ih); x.drawImage(img0, cx - iw * k / 2, cy - ih * k / 2, iw * k, ih * k); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(cx, cy, L * 0.48, 0, TAU); x.arc(cx, cy, L * 0.27, 0, TAU, true); x.fill('evenodd'); x.fillRect(cx - L * 0.07, cy - L * 0.5, L * 0.14, L); }
+      const N = cols * rows, d = x.getImageData(0, 0, cols, rows).data; let transp = 0; for (let i = 3; i < d.length; i += 4) if (d[i] < 128) transp++;
+      const useA = transp > N * 0.05, m = new Uint8Array(N);
+      for (let i = 0; i < N; i++) { const l = (d[i * 4] * 0.2126 + d[i * 4 + 1] * 0.7152 + d[i * 4 + 2] * 0.0722) / 255; m[i] = (useA ? d[i * 4 + 3] > 128 : d[i * 4 + 3] > 128 && l < 0.5) ? 1 : 0; }
+      return m;
+    }
+
+    function layout() {
+      const { w, h } = app.size, key = [w, h, p.taille, p.algo, p.biais, p.logo, p.image ? (p.image.src || 1) : 0, app.logoImg ? 1 : 0, genCount].join();
+      if (key === layoutKey && conn) return; layoutKey = key;
+      cell = p.taille; const margin = cell * 1.2;
+      cols = Math.max(4, Math.floor((w - margin * 2) / cell)); rows = Math.max(4, Math.floor((h - margin * 2) / cell));
+      ox = Math.round((w - cols * cell) / 2); oy = Math.round((h - rows * cell) / 2);
+      const N = cols * rows; allowed = new Uint8Array(N).fill(1); logoCells = null;
+      if (p.logo !== 'aucun') {
+        mask = buildMask(w, h);
+        if (p.logo === 'dedans') { allowed = mask; if (!allowed.some((v) => v)) allowed.fill(1); }
+        else { logoCells = mask; for (let i = 0; i < N; i++) if (mask[i]) allowed[i] = 0; }
+      }
+      generate();
+      src = roots[0]; computeDist(); reveal = app.thumbnail ? nOrd : 0; sinceDone = 0;
+    }
+
+    // ——— Creusement : un arbre couvrant par composante, en gardant l'ordre de creusement ———
+    let roots = [];
+    function generate() {
+      const N = cols * rows, rng = mulberry(((app.rng()() * 4294967296) >>> 0) ^ (genCount * 2654435761));
+      conn = new Uint8Array(N); ord = new Int32Array(N); par = new Int32Array(N).fill(-1); nOrd = 0; roots = [];
+      const seen = new Uint8Array(N), wH = 1 + Math.max(0, p.biais) * 6, wV = 1 + Math.max(0, -p.biais) * 6, wMax = Math.max(wH, wV);
+      const carve = (a, b, dir) => { conn[a] |= BIT[dir]; conn[b] |= BIT[OPP[dir]]; par[b] = a; seen[b] = 1; ord[nOrd++] = b; };
+      const nb = (c, dir) => { const x = c % cols + DX[dir], y = (c / cols | 0) + DY[dir]; if (x < 0 || y < 0 || x >= cols || y >= rows) return -1; const n = y * cols + x; return allowed[n] ? n : -1; };
+      const wDir = (dir) => dir % 2 === 0 ? wH : wV;
+      // la première racine : la case permise la plus proche du centre
+      const order = []; for (let i = 0; i < N; i++) if (allowed[i]) order.push(i);
+      const cx = cols / 2, cy = rows / 2; order.sort((a, b) => ((a % cols - cx) ** 2 + ((a / cols | 0) - cy) ** 2) - ((b % cols - cx) ** 2 + ((b / cols | 0) - cy) ** 2));
+      for (const r0 of order) {
+        if (seen[r0]) continue;
+        roots.push(r0); seen[r0] = 1; ord[nOrd++] = r0;
+        if (p.algo === 'profondeur') {
+          const st = [r0];
+          while (st.length) {
+            const c = st[st.length - 1], opts = [], ws = []; let tot = 0;
+            for (let d = 0; d < 4; d++) { const n = nb(c, d); if (n >= 0 && !seen[n]) { opts.push(d); tot += wDir(d); ws.push(tot); } }
+            if (!opts.length) { st.pop(); continue; }
+            const r = rng() * tot; let k = 0; while (ws[k] < r) k++;
+            const d = opts[k], n = nb(c, d); carve(c, n, d); st.push(n);
+          }
+        } else if (p.algo === 'prim') {
+          // bords candidats (case de l'arbre, direction), tirés au hasard avec le penchant
+          const E = [], EW = [];
+          const pushE = (c) => { for (let d = 0; d < 4; d++) { const n = nb(c, d); if (n >= 0 && !seen[n]) { E.push(c * 4 + d); EW.push(wDir(d)); } } };
+          pushE(r0);
+          while (E.length) {
+            // tirage pondéré par rejet : un bord au hasard, gardé avec une probabilité proportionnelle à son poids
+            let i = (rng() * E.length) | 0; for (let tr = 0; tr < 24 && rng() * wMax > EW[i]; tr++) i = (rng() * E.length) | 0;
+            const e = E[i]; E[i] = E[E.length - 1]; E.pop(); EW[i] = EW[EW.length - 1]; EW.pop();
+            const c = e >> 2, d = e & 3, n = nb(c, d); if (n < 0 || seen[n]) continue;
+            carve(c, n, d); pushE(n);
+          }
+        } else {
+          // Wilson : marche aléatoire jusqu'à l'arbre, la dernière direction prise en chaque case efface les boucles
+          const comp = []; { const q = [r0], vis = new Uint8Array(N); vis[r0] = 1; while (q.length) { const c = q.pop(); comp.push(c); for (let d = 0; d < 4; d++) { const n = nb(c, d); if (n >= 0 && !vis[n]) { vis[n] = 1; q.push(n); } } } }
+          for (let i = comp.length - 1; i > 0; i--) { const j = (rng() * (i + 1)) | 0; [comp[i], comp[j]] = [comp[j], comp[i]]; }
+          const next = new Int8Array(N).fill(-1);
+          for (const s0 of comp) {
+            if (seen[s0]) continue;
+            let c = s0;
+            while (!seen[c]) {
+              const opts = [], ws = []; let tot = 0;
+              for (let d = 0; d < 4; d++) if (nb(c, d) >= 0) { opts.push(d); tot += wDir(d); ws.push(tot); }
+              const r = rng() * tot; let k = 0; while (ws[k] < r) k++;
+              next[c] = opts[k]; c = nb(c, opts[k]);
+            }
+            // le chemin effacé de ses boucles, ajouté depuis l'arbre vers son départ
+            const path = []; c = s0; while (!seen[c]) { path.push(c); c = nb(c, next[c]); }
+            for (let k = path.length - 1; k >= 0; k--) { const a = path[k], d = next[a], b = nb(a, d); conn[a] |= BIT[d]; conn[b] |= BIT[OPP[d]]; par[a] = b; seen[a] = 1; ord[nOrd++] = a; }
+          }
+        }
+      }
+    }
+
+    // ——— Distances le long des couloirs, depuis la source (et depuis la racine des autres composantes) ———
+    function computeDist() {
+      const N = cols * rows; dist = new Int32Array(N).fill(-1); bpar = new Int32Array(N).fill(-1);
+      const q = new Int32Array(N); let h = 0, t = 0;
+      const starts = [src, ...roots.filter((r) => r !== src)];
+      maxD = 1; far = src;
+      for (const s of starts) {
+        if (s < 0 || dist[s] >= 0) continue; dist[s] = 0; q[t++] = s;
+        while (h < t) {
+          const c = q[h++];
+          for (let d = 0; d < 4; d++) if (conn[c] & BIT[d]) { const n = c + DX[d] + DY[d] * cols; if (dist[n] < 0) { dist[n] = dist[c] + 1; bpar[n] = c; q[t++] = n; if (s === src && dist[n] > dist[far]) far = n; } }
+        }
+      }
+      for (let i = 0; i < N; i++) if (dist[i] > maxD) maxD = dist[i];
+    }
+    function setSource(x, y) {
+      if (!conn) return; const i = Math.floor((x - ox) / cell), j = Math.floor((y - oy) / cell);
+      if (i < 0 || j < 0 || i >= cols || j >= rows) return; const c = j * cols + i;
+      if (!allowed[c] || c === src) return; src = c; computeDist(); clock = 0;
+    }
+
+    // ——— Couleurs : la palette parcourue en boucle ———
+    const Q = 36; let lut = [], lutKey = '';
+    function colors() {
+      const key = p.couleurs.join(); if (key === lutKey) return; lutKey = key;
+      const C = p.couleurs.length ? p.couleurs : ['#ffffff'], n = C.length; lut = [];
+      for (let q = 0; q < Q; q++) { if (n === 1) { lut.push(C[0]); continue; } const u = q / Q * n, i = Math.floor(u) % n; lut.push(mix(C[i], C[(i + 1) % n], u - Math.floor(u))); }
+    }
+    const binOf = (c) => { const v = dist[c] / p.periode - clock * p.flux; return Math.floor((v - Math.floor(v)) * Q) % Q; };
+
+    // les éléments à dessiner, en coordonnées écran : couloirs (segments), cases (carrés), murs, chemin, logo
+    function geometry() {
+      const N = cols * rows, B = Array.from({ length: Q }, () => []), walls = [], path = [], logo = [];
+      const X = (c) => ox + (c % cols + 0.5) * cell, Y = (c) => oy + ((c / cols | 0) + 0.5) * cell;
+      const vis = new Uint8Array(N); for (let k = 0; k < Math.min(reveal, nOrd); k++) vis[ord[k]] = 1;
+      if (p.rendu === 'couloirs') {
+        for (let k = 0; k < Math.min(reveal, nOrd); k++) {
+          const c = ord[k], a = par[c], b = binOf(c);
+          if (a < 0) B[b].push(0, X(c), Y(c), X(c), Y(c)); else B[b].push(0, X(a), Y(a), X(c), Y(c));
+        }
+      } else {
+        for (let k = 0; k < Math.min(reveal, nOrd); k++) { const c = ord[k]; B[binOf(c)].push(1, ox + (c % cols) * cell, oy + (c / cols | 0) * cell, cell, cell); }
+        for (let c = 0; c < N; c++) {
+          if (!vis[c]) continue; const x0 = ox + (c % cols) * cell, y0 = oy + (c / cols | 0) * cell;
+          if (!(conn[c] & 1) || !vis[c + 1]) walls.push(x0 + cell, y0, x0 + cell, y0 + cell);
+          if (!(conn[c] & 2) || !vis[c + cols]) walls.push(x0, y0 + cell, x0 + cell, y0 + cell);
+          if (c % cols === 0 || !vis[c - 1]) walls.push(x0, y0, x0, y0 + cell);
+          if (c < cols || !vis[c - cols]) walls.push(x0, y0, x0 + cell, y0);
+        }
+      }
+      if (p.chemin && reveal >= nOrd && far >= 0) { let c = far; while (c >= 0) { path.push(X(c), Y(c)); if (c === src) break; c = bpar[c]; } }
+      if (logoCells) for (let j = 0; j < rows; j++) for (let i = 0; i < cols; i++) {
+        if (!logoCells[j * cols + i]) continue; let e = i; while (e + 1 < cols && logoCells[j * cols + e + 1]) e++;
+        logo.push(ox + i * cell, oy + j * cell, (e - i + 1) * cell, cell); i = e;
+      }
+      return { B, walls, path, logo };
+    }
+
+    const pathW = () => Math.max(1.2, cell * (p.rendu === 'couloirs' ? Math.min(0.3, p.largeur * 0.45) : 0.22));
+    app.loop((t, dt) => {
+      dt = Math.min(0.1, dt || 0);
+      const { w, h, dpr } = app.size;
+      layout(); colors();
+      if (!app.thumbnail) {
+        clock += dt;
+        if (reveal < nOrd) reveal = Math.min(nOrd, reveal + Math.max(1, dt * p.vitesse));
+        else { sinceDone += dt; if (p.renouveler > 0 && sinceDone > p.renouveler && !held) { genCount++; layoutKey = ''; } }
+      }
+      const G = geometry();
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = p.fond; ctx.fillRect(0, 0, w, h);
+      if (G.logo.length) { ctx.fillStyle = p.accent; ctx.beginPath(); for (let i = 0; i < G.logo.length; i += 4) ctx.rect(G.logo[i], G.logo[i + 1], G.logo[i + 2] + 0.4, G.logo[i + 3] + 0.4); ctx.fill(); }
+      const lw = cell * p.largeur;
+      ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+      for (let q = 0; q < Q; q++) {
+        const L = G.B[q]; if (!L.length) continue; const P2 = new Path2D();
+        for (let i = 0; i < L.length; i += 5) { if (L[i] === 0) { P2.moveTo(L[i + 1], L[i + 2]); P2.lineTo(L[i + 3], L[i + 4]); } else P2.rect(L[i + 1], L[i + 2], L[i + 3] + 0.5, L[i + 4] + 0.5); }
+        if (p.rendu === 'couloirs') { ctx.strokeStyle = lut[q]; ctx.lineWidth = lw; ctx.stroke(P2); } else { ctx.fillStyle = lut[q]; ctx.fill(P2); }
+      }
+      if (G.walls.length) {
+        const P2 = new Path2D(); for (let i = 0; i < G.walls.length; i += 4) { P2.moveTo(G.walls[i], G.walls[i + 1]); P2.lineTo(G.walls[i + 2], G.walls[i + 3]); }
+        ctx.strokeStyle = p.fond; ctx.lineWidth = Math.max(1, lw); ctx.lineCap = 'square'; ctx.stroke(P2);
+      }
+      if (G.path.length > 2) {
+        ctx.beginPath(); ctx.moveTo(G.path[0], G.path[1]); for (let i = 2; i < G.path.length; i += 2) ctx.lineTo(G.path[i], G.path[i + 1]);
+        const pw = pathW(); ctx.lineCap = 'round';
+        // un liseré couleur de fond détache le chemin des couloirs
+        ctx.strokeStyle = p.fond; ctx.lineWidth = pw + Math.max(2, cell * 0.16); ctx.stroke();
+        ctx.strokeStyle = p.accent; ctx.lineWidth = pw; ctx.stroke();
+        ctx.fillStyle = p.accent; for (const c of [src, far]) { ctx.beginPath(); ctx.arc(ox + (c % cols + 0.5) * cell, oy + ((c / cols | 0) + 0.5) * cell, Math.max(2.5, cell * 0.32), 0, TAU); ctx.fill(); }
+      }
+      app.finish(ctx);
+    });
+
+    function toSVG() {
+      const { w, h } = app.size, f = (v) => +v.toFixed(2), G = geometry(), lw = cell * p.largeur;
+      let s = `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><rect width="100%" height="100%" fill="${p.fond}"/>`;
+      if (G.logo.length) { let d = ''; for (let i = 0; i < G.logo.length; i += 4) d += `M${f(G.logo[i])} ${f(G.logo[i + 1])}h${f(G.logo[i + 2])}v${f(G.logo[i + 3])}h${f(-G.logo[i + 2])}z`; s += `<path fill="${p.accent}" d="${d}"/>`; }
+      for (let q = 0; q < Q; q++) {
+        const L = G.B[q]; if (!L.length) continue; let d = '';
+        for (let i = 0; i < L.length; i += 5) d += L[i] === 0 ? `M${f(L[i + 1])} ${f(L[i + 2])}L${f(L[i + 3])} ${f(L[i + 4])}` : `M${f(L[i + 1])} ${f(L[i + 2])}h${f(L[i + 3])}v${f(L[i + 4])}h${f(-L[i + 3])}z`;
+        s += p.rendu === 'couloirs' ? `<path d="${d}" fill="none" stroke="${lut[q]}" stroke-width="${f(lw)}" stroke-linecap="round"/>` : `<path d="${d}" fill="${lut[q]}"/>`;
+      }
+      if (G.walls.length) { let d = ''; for (let i = 0; i < G.walls.length; i += 4) d += `M${f(G.walls[i])} ${f(G.walls[i + 1])}L${f(G.walls[i + 2])} ${f(G.walls[i + 3])}`; s += `<path d="${d}" fill="none" stroke="${p.fond}" stroke-width="${f(Math.max(1, lw))}" stroke-linecap="square"/>`; }
+      if (G.path.length > 2) {
+        let d = `M${f(G.path[0])} ${f(G.path[1])}`; for (let i = 2; i < G.path.length; i += 2) d += `L${f(G.path[i])} ${f(G.path[i + 1])}`;
+        s += `<path d="${d}" fill="none" stroke="${p.fond}" stroke-width="${f(pathW() + Math.max(2, cell * 0.16))}" stroke-linecap="round" stroke-linejoin="round"/><path d="${d}" fill="none" stroke="${p.accent}" stroke-width="${f(pathW())}" stroke-linecap="round" stroke-linejoin="round"/>`;
+        for (const c of [src, far]) s += `<circle cx="${f(ox + (c % cols + 0.5) * cell)}" cy="${f(oy + ((c / cols | 0) + 0.5) * cell)}" r="${f(Math.max(2.5, cell * 0.32))}" fill="${p.accent}"/>`;
+      }
+      return s + '</svg>';
+    }
+  </script>
+</body>
+</html>
