@@ -1,0 +1,15 @@
+{
+  "slug": "kirigami",
+  "title": "Kirigami",
+  "type": "motion",
+  "description": "Une feuille découpée en carrés reliés par leurs coins : on la tire, elle s'ouvre dans les deux sens et laisse passer la lumière, motif ou logo éclaté.",
+  "tags": ["kirigami", "auxetique", "mecanisme", "decoupe", "logo", "svg"],
+  "inspiration": [
+    "Grima et Evans, Auxetic behavior from rotating squares (2000)",
+    "Rafsanjani et Bertoldi, Buckling-induced kirigami (2017)",
+    "Kirigami japonais, papiers découpés et grilles métalliques déployées"
+  ],
+  "author": "claude",
+  "created": "2026-11-02",
+  "status": "finished"
+}
