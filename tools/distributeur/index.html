@@ -1,0 +1,386 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Distributeur de boules</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Distributeur de boules : un tas de billes (dynamique par positions : gravité, puis contacts résolus
+    // plusieurs fois par pas, grille de voisinage) dans un globe ou un bocal. Un tour de manivelle libère la bille
+    // la plus basse, qui tombe dans le socle et ressort par la trappe dans le plateau. Le plateau trop plein
+    // s'efface par la plus ancienne, et une bille neuve retombe par le couvercle : la boucle ne s'arrête pas.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const BIE = PAL('biennale'), LUZ = PAL('luzern'), MEN = PAL('menthe');
+
+    let vKey = '', logoM = null, logoKey = '', ptr = null, S = null, gKey = '', simT = 0;
+    const cache = {};
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.035, vignette: 0.2 },
+      hint: 'Clic : un tour de manivelle · glissez dans le globe pour remuer les billes · molette : secousse',
+      notes: 'Un distributeur de boules de gomme : les billes aux couleurs de la marque s’entassent dans le globe, un tour de manivelle libère la plus basse, qui ressort par la trappe et roule dans le plateau. Quand le plateau déborde, une bille neuve retombe par le couvercle. Le logo est frappé sur le socle. Cliquez pour tourner la manivelle, glissez dans le globe pour remuer le tas.',
+      params: {
+        'Billes': {
+          remplissage: { type: 'range', label: 'Remplissage', min: 0.15, max: 0.95, step: 0.01, value: 0.62 },
+          taille: { type: 'range', label: 'Taille', min: 0.5, max: 2.2, step: 0.05, value: 1 },
+          variation: { type: 'range', label: 'Variation de taille', min: 0, max: 0.4, step: 0.01, value: 0.06 },
+          couleurs: { type: 'palette', label: 'Couleurs', value: ['#e5452a', '#f2c230', '#2f5fd0', '#f4f1ea', '#5bb08a', '#f2b0c8'] },
+          brillance: { type: 'range', label: 'Brillance', min: 0, max: 1, step: 0.01, value: 0.7 },
+        },
+        'Mouvement': {
+          auto: { type: 'toggle', label: 'Manivelle automatique', value: true },
+          cadence: { type: 'range', label: 'Intervalle (s)', min: 0.6, max: 8, step: 0.1, value: 2.2 },
+          gravite: { type: 'range', label: 'Gravité', min: 0.3, max: 2, step: 0.01, value: 1 },
+          rebond: { type: 'range', label: 'Rebond', min: 0, max: 0.7, step: 0.01, value: 0.25 },
+          plateau: { type: 'range', label: 'Billes dans le plateau', min: 1, max: 8, step: 1, value: 4 },
+        },
+        'Machine': {
+          forme: { type: 'select', label: 'Réservoir', options: { globe: 'Globe', bocal: 'Bocal', capsule: 'Capsule' }, value: 'globe' },
+          corps: { type: 'color', label: 'Corps', value: '#e5452a' },
+          metal: { type: 'color', label: 'Métal', value: '#c9ccd1' },
+          encre: { type: 'color', label: 'Logo', value: '#f4f1ea' },
+          verre: { type: 'color', label: 'Teinte du verre', value: '#dfe9f2' },
+          fond: { type: 'color', label: 'Fond', value: '#f2e3c9' },
+          echelle: { type: 'range', label: 'Échelle', min: 0.6, max: 1.15, step: 0.01, value: 1 },
+          image: { type: 'file', label: 'Image du logo', accept: 'image/*' },
+        },
+      },
+      presets: {
+        'Classique': {},
+        'Pastel': { couleurs: ['#f2b0c8', '#b9a0e6', '#a4e0bc', '#f7e08c', '#9dd3f0', '#ffffff'], corps: '#f4f1ea', metal: '#e8c9a8', encre: '#e57d9e', fond: '#fbe3ea', verre: '#ffffff', brillance: 0.5 },
+        'Monochrome': { couleurs: ['#2f5fd0', '#2552b8', '#3d6fe0', '#1f4aa6'], corps: '#16161a', metal: '#9aa0aa', encre: '#2f5fd0', fond: '#f4f1ea', brillance: 0.9 },
+        'Bocal': { forme: 'bocal', remplissage: 0.72, taille: 0.75, corps: '#2f5fd0', encre: '#f2c230', fond: '#f4f1ea' },
+        'Géantes': { remplissage: 0.55, taille: 2.1, variation: 0, cadence: 3.2, plateau: 2, corps: '#16161a', encre: '#e5452a', fond: '#e9e4da' },
+        'Capsule': { forme: 'capsule', remplissage: 0.5, taille: 0.85, corps: '#5bb08a', encre: '#16161a', couleurs: ['#16161a', '#f4f1ea', '#e5452a'], fond: '#e9efe6' },
+        'Nuit': { fond: '#14161c', corps: '#2a2d36', metal: '#7d838f', encre: '#f2c230', verre: '#7f9ccf', couleurs: ['#f2c230', '#e5452a', '#ffffff'], brillance: 1 },
+        'Rebonds': { rebond: 0.65, gravite: 1.6, cadence: 0.8, remplissage: 0.4, taille: 1.2, corps: '#f2c230', encre: '#16161a', fond: '#2f5fd0' },
+        'Biennale': { couleurs: BIE.slice(0, 4), corps: BIE[2], encre: BIE[0], metal: '#d6d4cf', fond: BIE[4] },
+        'Luzern': { couleurs: [LUZ[0], LUZ[1], LUZ[2], LUZ[4]], corps: LUZ[3], encre: LUZ[0], metal: LUZ[2], fond: LUZ[2], verre: '#ffffff' },
+        'Menthe': { couleurs: [MEN[0], MEN[2], MEN[3]], corps: MEN[3], encre: MEN[0], metal: '#dfe4e2', fond: MEN[0], verre: MEN[2], forme: 'bocal' },
+      },
+      brand(colors) {
+        const s = colors.slice().sort((a, b) => lum(a) - lum(b)), D = s[0], L = s[s.length - 1], mid = s.length > 2 ? s.slice(1, -1) : [D];
+        return { couleurs: colors.slice(), corps: mid[0], encre: L, fond: mix(L, mid[mid.length - 1], 0.12), metal: mix(L, D, 0.25) };
+      },
+      pointer: {
+        down: (q) => { ptr = { x: q.x, y: q.y, px: q.x, py: q.y, moved: 0, stir: !!S && inside(q.x, q.y, -S.r) }; },
+        drag: (q) => { if (!ptr) return; ptr.moved += Math.hypot(q.x - ptr.x, q.y - ptr.y); ptr.x = q.x; ptr.y = q.y; },
+        up: () => { if (ptr && ptr.moved < 6 && S) crank(); ptr = null; },
+        wheel: () => { if (S) for (const b of S.b) if (b.z === 0) { b.py += S.r * (0.3 + Math.random() * 0.6) * p.gravite; b.px += (Math.random() - 0.5) * S.r * 0.6; } },
+      },
+      onChange(k) { if (['*', 'image'].includes(k)) logoKey = ''; },
+      export: { name: 'distributeur', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    function hex(x) { const n = parseInt(x.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
+    function lum(x) { const c = hex(x); return (c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114) / 255; }
+    function mix(a, b, t) { const A = hex(a), C = hex(b); return '#' + A.map((v, i) => Math.round(v + (C[i] - v) * t).toString(16).padStart(2, '0')).join(''); }
+    function rgba(c, a) { const h = hex(c); return `rgba(${h[0]},${h[1]},${h[2]},${a})`; }
+    function rng(s) { let a = s >>> 0; return () => { a = (a + 0x6d2b79f5) >>> 0; let t = a; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+    const ease = (x) => (x <= 0 ? 0 : x >= 1 ? 1 : x * x * (3 - 2 * x));
+
+    function buildLogo() {
+      const img0 = p.image || app.logoImg, key = img0 ? (img0.src || 'c') : 'demo'; if (key === logoKey) return; logoKey = key; vKey = '';
+      const M = 200, c = document.createElement('canvas'); c.width = c.height = M; const x = c.getContext('2d', { willReadFrequently: true }), L = M * 0.94, cx = M / 2;
+      if (img0) { const iw = img0.naturalWidth || img0.width, ih = img0.naturalHeight || img0.height, s = L / Math.max(iw, ih); x.drawImage(img0, cx - iw * s / 2, cx - ih * s / 2, iw * s, ih * s); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(cx, cx, L * 0.48, 0, TAU); x.arc(cx, cx, L * 0.27, 0, TAU, true); x.fill('evenodd'); x.fillRect(cx - L * 0.07, cx - L * 0.5, L * 0.14, L); }
+      const d = x.getImageData(0, 0, M, M).data; let transp = 0; for (let i = 3; i < d.length; i += 4) if (d[i] < 128) transp++; const useA = transp > M * M * 0.05;
+      const F = new Float64Array(M * M); for (let i = 0; i < M * M; i++) { const o = i * 4, l = (d[o] * 0.2126 + d[o + 1] * 0.7152 + d[o + 2] * 0.0722) / 255; F[i] = useA ? d[o + 3] / 255 : (d[o + 3] / 255) * Math.min(1, Math.max(0, (0.75 - l) * 2)); }
+      { const G2 = new Float64Array(M * M); for (let j = 1; j < M - 1; j++) for (let i = 1; i < M - 1; i++) { let a = 0; for (let b = -1; b <= 1; b++) for (let c = -1; c <= 1; c++) a += F[(j + b) * M + i + c] * (b || c ? (b && c ? 1 : 2) : 4); G2[j * M + i] = a / 16; } F.set(G2); }
+      for (let k = 0; k < M; k++) F[k] = F[(M - 1) * M + k] = F[k * M] = F[k * M + M - 1] = 0;
+      logoM = contours(F, M, M, 0.5, 0, 0, 1).filter((c) => c.closed && c.pts.length > 6).map((c) => chaikin(chaikin(c.pts, true), true).map((q) => [q[0] / M - 0.5, q[1] / M - 0.5]));
+    }
+    // carrés marchants + chaînage
+    function contours(F, nx, ny, lev, ox, oy, cs) {
+      const pt = new Map(), adj = new Map();
+      const P = (id) => { let q = pt.get(id); if (q) return q; const cell = id >> 1, i = cell % nx, j = (cell - i) / nx; let a, b, ax, ay, bx, by; if (id & 1) { a = F[j * nx + i]; b = F[(j + 1) * nx + i]; ax = bx = i; ay = j; by = j + 1; } else { a = F[j * nx + i]; b = F[j * nx + i + 1]; ay = by = j; ax = i; bx = i + 1; } const t = (lev - a) / (b - a || 1e-9); q = [ox + (ax + (bx - ax) * t) * cs, oy + (ay + (by - ay) * t) * cs]; pt.set(id, q); return q; };
+      const link = (a, b) => { (adj.get(a) || adj.set(a, []).get(a)).push(b); (adj.get(b) || adj.set(b, []).get(b)).push(a); };
+      for (let j = 0; j < ny - 1; j++) for (let i = 0; i < nx - 1; i++) {
+        const A = F[j * nx + i] > lev, B = F[j * nx + i + 1] > lev, C = F[(j + 1) * nx + i + 1] > lev, D = F[(j + 1) * nx + i] > lev, idx = A | (B << 1) | (C << 2) | (D << 3);
+        if (idx === 0 || idx === 15) continue;
+        const T = (j * nx + i) * 2, R = (j * nx + i + 1) * 2 + 1, Bo = ((j + 1) * nx + i) * 2, Le = (j * nx + i) * 2 + 1;
+        const ctr = (F[j * nx + i] + F[j * nx + i + 1] + F[(j + 1) * nx + i + 1] + F[(j + 1) * nx + i]) / 4 > lev;
+        switch (idx) {
+          case 1: case 14: link(Le, T); break; case 2: case 13: link(T, R); break; case 3: case 12: link(Le, R); break;
+          case 4: case 11: link(R, Bo); break; case 6: case 9: link(T, Bo); break; case 7: case 8: link(Le, Bo); break;
+          case 5: if (ctr) { link(Le, Bo); link(T, R); } else { link(Le, T); link(R, Bo); } break;
+          case 10: if (ctr) { link(Le, T); link(R, Bo); } else { link(Le, Bo); link(T, R); } break;
+        }
+      }
+      const seen = new Set(), out = [];
+      const walk = (s) => { const L = [s]; seen.add(s); let cur = s; for (;;) { const nb = (adj.get(cur) || []).find((x) => !seen.has(x)); if (nb === undefined) break; seen.add(nb); L.push(nb); cur = nb; } return L; };
+      for (const [id, nb] of adj) if (nb.length === 1 && !seen.has(id)) out.push({ pts: walk(id).map(P), closed: false });
+      for (const [id] of adj) if (!seen.has(id)) out.push({ pts: walk(id).map(P), closed: true });
+      return out;
+    }
+    function chaikin(pts, closed) {
+      const o = []; const n = pts.length; for (let k = 0; k < (closed ? n : n - 1); k++) { const a = pts[k], b = pts[(k + 1) % n]; o.push([a[0] * 0.75 + b[0] * 0.25, a[1] * 0.75 + b[1] * 0.25], [a[0] * 0.25 + b[0] * 0.75, a[1] * 0.25 + b[1] * 0.75]); }
+      if (!closed) { o.unshift(pts[0]); o.push(pts[n - 1]); } return o;
+    }
+
+    // ——— géométrie ———
+    function build(w, h) {
+      const Rg = Math.min((h * 0.88) / 3.75, w * 0.36) * p.echelle;
+      const top = h / 2 - Rg * 3.75 / 2;
+      const G = { x: w / 2, y: top + Rg * 0.3 + Rg };
+      const shp = p.forme;
+      // réservoir : demi-largeur, demi-hauteur, rayon d'angle (le globe est un cercle)
+      const box = shp === 'globe' ? { hw: Rg, hh: Rg, cr: Rg } : shp === 'bocal' ? { hw: Rg * 0.92, hh: Rg, cr: Rg * 0.22 } : { hw: Rg * 0.72, hh: Rg, cr: Rg * 0.72 };
+      const yb0 = G.y + box.hh * 0.9, bh = Rg * 1.5, yb1 = yb0 + bh;
+      const r = Rg * 0.062 * p.taille;
+      const base = { y0: yb0, y1: yb1, wt: Rg * 0.56, wb: Rg * 0.86, logo: { x: G.x, y: yb0 + bh * 0.21, s: Rg * 0.46 }, crank: { x: G.x, y: yb0 + bh * 0.49, r: Rg * 0.19 }, mouth: { x: G.x, y: yb0 + bh * 0.71, w: Math.min(r * 2.8, Rg * 0.3), h: Math.min(r * 2.3, Rg * 0.2) } };
+      const tray = { x: G.x, y: yb1 - bh * 0.07, w: Math.max(r * 1.1 * p.plateau + r, Rg * 0.42), lip: r * 1.05 };
+      const old = S;
+      S = { w, h, Rg, G, box, base, tray, r, b: [], tN: 0, cr: 0, crT: -1, door: 0, next: 1.2, top };
+      const R = rng(app.seed * 17 + 5), C = p.couleurs.length ? p.couleurs : ['#e5452a'];
+      let A = 0; const ns = 60; for (let i = 0; i < ns; i++) for (let j = 0; j < ns; j++) if (sdf(G.x + ((i + 0.5) / ns * 2 - 1) * box.hw, G.y + ((j + 0.5) / ns * 2 - 1) * box.hh, box, G) < -r) A++;
+      A *= (box.hw * 2 / ns) * (box.hh * 2 / ns);
+      const n = Math.min(1200, Math.max(8, Math.round(p.remplissage * A * 0.84 / (Math.PI * r * r * (1 + p.variation * p.variation)))));
+      for (let i = 0; i < n; i++) {
+        let x, y, tries = 0; do { x = G.x + (R() * 2 - 1) * box.hw; y = G.y + (R() * 2 - 1) * box.hh; tries++; } while (!inside(x, y, r, box, G) && tries < 50);
+        const rr = r * (1 + (R() * 2 - 1) * p.variation);
+        S.b.push({ x, y, px: x, py: y, r: rr, c: Math.floor(R() * C.length), z: 0, id: i, a: 1 });
+      }
+      S.tN = n;
+      // le tas se pose avant le premier affichage
+      for (let k = 0; k < 160; k++) step(1 / 60, true);
+      for (const b of S.b) { b.px = b.x; b.py = b.y; }
+    }
+    // distance signée au réservoir (négative dedans)
+    function sdf(x, y, box = S.box, G = S.G) {
+      const qx = Math.abs(x - G.x) - (box.hw - box.cr), qy = Math.abs(y - G.y) - (box.hh - box.cr);
+      const ox = Math.max(qx, 0), oy = Math.max(qy, 0);
+      return Math.hypot(ox, oy) + Math.min(Math.max(qx, qy), 0) - box.cr;
+    }
+    function inside(x, y, m, box, G) { return sdf(x, y, box, G) < -m; }
+    function sdfGrad(x, y) { const e = 0.5, d0 = sdf(x, y); const gx = sdf(x + e, y) - d0, gy = sdf(x, y + e) - d0, l = Math.hypot(gx, gy) || 1; return [gx / l, gy / l]; }
+
+    function crank() { if (!S || S.crT >= 0) return; S.crT = 0; S.released = false; }
+
+    function step(dt, quiet) {
+      const g = S.Rg * 9 * p.gravite, B = S.b, bot = { x: S.G.x, y: S.G.y + S.box.hh };
+      if (!quiet) {
+        S.next -= dt;
+        if (p.auto && S.next <= 0 && S.crT < 0) { crank(); S.next = p.cadence; }
+        if (S.crT >= 0) {
+          S.crT += dt; S.cr = ease(S.crT / 0.9) * TAU;
+          if (!S.released && S.crT > 0.45) {
+            S.released = true;
+            let best = null, bd = 1e9; for (const b of B) if (b.z === 0) { const d = Math.hypot(b.x - bot.x, b.y - bot.y); if (d < bd) { bd = d; best = b; } }
+            if (best && bd < S.r * 4) { best.z = 1; best.t = 0; }
+          }
+          if (S.crT > 0.9) { S.crT = -1; S.cr = 0; }
+        }
+        S.door = Math.max(0, S.door - dt * 2.5);
+      }
+      for (const b of B) {
+        if (b.z === 3) { b.a -= dt * 2.5; continue; }
+        const vx = (b.x - b.px), vy = (b.y - b.py); b.px = b.x; b.py = b.y;
+        if (b.z === 1) { b.t += dt; b.x += (bot.x - b.x) * Math.min(1, dt * 10); b.y += vy * 0.98 + g * dt * dt; if (b.y > S.base.y0 + S.r * 2) { b.z = 2; b.t = 0; b.hidden = 0.35; } continue; }
+        if (b.z === 2 && b.hidden > 0) { b.hidden -= dt; if (b.hidden <= 0) { const m = S.base.mouth; b.x = m.x + (Math.random() - 0.5) * S.r * 0.4; b.y = m.y; b.px = b.x - S.r * 0.02; b.py = b.y - S.r * 0.06; S.door = 1; } else { b.x = S.base.mouth.x; b.y = S.base.mouth.y; } continue; }
+        b.x += vx * 0.995; b.y += vy * 0.995 + g * dt * dt;
+      }
+      // plateau trop plein : la plus ancienne s'efface, une neuve tombe par le couvercle
+      const inTray = B.filter((b) => b.z === 2 && !(b.hidden > 0));
+      if (inTray.length > p.plateau) {
+        const o = inTray.reduce((a, c) => (c.t2 < a.t2 ? c : a)); o.z = 3;
+        const C = p.couleurs.length ? p.couleurs : ['#e5452a'];
+        const nb = { x: S.G.x + (Math.random() - 0.5) * S.r * 2, y: S.G.y - S.box.hh + S.r * 1.2, r: o.r, c: Math.floor(Math.random() * C.length), z: 0, id: S.tN++, a: 1 };
+        nb.px = nb.x; nb.py = nb.y - S.r * 0.15; B.push(nb);
+      }
+      for (let i = B.length - 1; i >= 0; i--) if (B[i].z === 3 && B[i].a <= 0) B.splice(i, 1);
+      for (const b of B) if (b.z === 2 && b.t2 == null) b.t2 = simT + Math.random() * 1e-3;
+      // contraintes
+      const cell = S.r * 2.6, grid = new Map(), key = (i, j) => i * 73856093 ^ j * 19349663;
+      const act = B.filter((b) => b.z === 0 || b.z === 1 || (b.z === 2 && !(b.hidden > 0)));
+      const st = ptr && ptr.stir ? { x: ptr.x, y: ptr.y, r: S.Rg * 0.13 } : null;
+      for (let it = 0; it < 4; it++) {
+        grid.clear();
+        for (const b of act) { const k = key(Math.floor(b.x / cell), Math.floor(b.y / cell)); let l = grid.get(k); if (!l) grid.set(k, (l = [])); l.push(b); }
+        for (const b of act) {
+          const ci = Math.floor(b.x / cell), cj = Math.floor(b.y / cell);
+          for (let di = -1; di <= 1; di++) for (let dj = -1; dj <= 1; dj++) {
+            const l = grid.get(key(ci + di, cj + dj)); if (!l) continue;
+            for (const o of l) {
+              if (o.id <= b.id) continue;
+              if ((o.z === 2) !== (b.z === 2)) continue;
+              const dx = o.x - b.x, dy = o.y - b.y, d2 = dx * dx + dy * dy, m = b.r + o.r; if (d2 >= m * m || d2 < 1e-9) continue;
+              const d = Math.sqrt(d2), k = (m - d) / d * 0.5; b.x -= dx * k; b.y -= dy * k; o.x += dx * k; o.y += dy * k;
+              if (it === 3) { const nx = dx / d, ny = dy / d, vt = ((o.x - o.px) - (b.x - b.px)) * -ny + ((o.y - o.py) - (b.y - b.py)) * nx, c = vt * 0.12; b.x -= ny * c; b.y += nx * c; o.x += ny * c; o.y -= nx * c; }
+            }
+          }
+        }
+        for (const b of act) {
+          if (b.z === 0) {
+            const d = sdf(b.x, b.y) + b.r; if (d > 0) { const n = sdfGrad(b.x, b.y); b.x -= n[0] * d; b.y -= n[1] * d; const vn = (b.x - b.px) * n[0] + (b.y - b.py) * n[1]; if (vn > 0) { b.px += n[0] * vn * (1 + p.rebond); b.py += n[1] * vn * (1 + p.rebond); } if (it === 3) { const vt = (b.x - b.px) * -n[1] + (b.y - b.py) * n[0]; b.px += -n[1] * vt * 0.15; b.py += n[0] * vt * 0.15; } }
+            if (st) { const dx = b.x - st.x, dy = b.y - st.y, dd = Math.hypot(dx, dy), m = st.r + b.r; if (dd < m && dd > 1e-6) { b.x += dx / dd * (m - dd); b.y += dy / dd * (m - dd); } }
+          } else if (b.z === 2) {
+            const T = S.tray, fl = T.y - b.r; if (b.y > fl) { const vy = b.y - b.py; b.y = fl; if (vy > 0) b.py = b.y + vy * p.rebond; b.px += (b.x - b.px) * 0.08; }
+            const xl = T.x - T.w + b.r, xr = T.x + T.w - b.r; if (b.x < xl) { b.x = xl; b.px = b.x + Math.abs(b.x - b.px) * 0; } if (b.x > xr) { b.x = xr; b.px = b.x; }
+          }
+        }
+      }
+      // tri de rendu : les plus hautes devant ne compte pas ici (vue de face), on garde l'ordre
+    }
+
+    // ——— sprites de billes ———
+    function sprite(col, rp) {
+      const key = col + '|' + rp + '|' + p.brillance; if (cache[key]) return cache[key];
+      const s = Math.ceil(rp * 2.6), c = document.createElement('canvas'); c.width = c.height = s; const g = c.getContext('2d'), o = s / 2;
+      // ombre portée douce
+      const sh = g.createRadialGradient(o + rp * 0.18, o + rp * 0.28, rp * 0.5, o + rp * 0.18, o + rp * 0.28, rp * 1.25); sh.addColorStop(0, 'rgba(0,0,0,0.35)'); sh.addColorStop(1, 'rgba(0,0,0,0)');
+      g.fillStyle = sh; g.fillRect(0, 0, s, s);
+      const gr = g.createRadialGradient(o - rp * 0.35, o - rp * 0.4, rp * 0.05, o, o, rp);
+      gr.addColorStop(0, mix(col, '#ffffff', 0.35)); gr.addColorStop(0.55, col); gr.addColorStop(1, mix(col, '#000000', 0.38));
+      g.fillStyle = gr; g.beginPath(); g.arc(o, o, rp, 0, TAU); g.fill();
+      // lumière rebondie en bas
+      g.strokeStyle = rgba(mix(col, '#ffffff', 0.4), 0.35); g.lineWidth = rp * 0.08; g.beginPath(); g.arc(o, o, rp * 0.9, Math.PI * 0.2, Math.PI * 0.7); g.stroke();
+      if (p.brillance > 0) { const hg = g.createRadialGradient(o - rp * 0.38, o - rp * 0.42, 0, o - rp * 0.38, o - rp * 0.42, rp * 0.42); hg.addColorStop(0, `rgba(255,255,255,${0.95 * p.brillance})`); hg.addColorStop(1, 'rgba(255,255,255,0)'); g.fillStyle = hg; g.beginPath(); g.arc(o, o, rp, 0, TAU); g.fill(); }
+      cache[key] = c; return c;
+    }
+
+    // ——— couches fixes ———
+    function rrPath(g, x, y, w, h, r) { g.beginPath(); g.moveTo(x + r, y); g.arcTo(x + w, y, x + w, y + h, r); g.arcTo(x + w, y + h, x, y + h, r); g.arcTo(x, y + h, x, y, r); g.arcTo(x, y, x + w, y, r); g.closePath(); }
+    function resPath(g, pad = 0) { const { hw, hh, cr } = S.box, G = S.G; rrPath(g, G.x - hw - pad, G.y - hh - pad, (hw + pad) * 2, (hh + pad) * 2, cr + pad); }
+    function layer(name, w, h, dpr, fn, extra) {
+      const key = [name, w, h, dpr, S.Rg, p.forme, p.corps, p.metal, p.encre, p.verre, p.fond, p.plateau, p.taille, logoKey, extra].join('|');
+      let L = cache['L' + name]; if (L && L.key === key) return L.c;
+      const c = (L && L.c) || document.createElement('canvas'); c.width = Math.ceil(w * dpr); c.height = Math.ceil(h * dpr);
+      const g = c.getContext('2d'); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, w, h); fn(g); cache['L' + name] = { key, c }; return c;
+    }
+    function metalGrad(g, x0, x1, col) { const lg = g.createLinearGradient(x0, 0, x1, 0); lg.addColorStop(0, mix(col, '#000000', 0.35)); lg.addColorStop(0.3, mix(col, '#ffffff', 0.45)); lg.addColorStop(0.55, col); lg.addColorStop(1, mix(col, '#000000', 0.45)); return lg; }
+    function backLayer(g) {
+      const { w, h, G, box, Rg, base, tray } = S;
+      g.fillStyle = p.fond; g.fillRect(0, 0, w, h);
+      const tg = g.createLinearGradient(0, 0, 0, h); tg.addColorStop(0, 'rgba(255,255,255,0.1)'); tg.addColorStop(0.75, 'rgba(0,0,0,0)'); tg.addColorStop(1, 'rgba(0,0,0,0.12)'); g.fillStyle = tg; g.fillRect(0, 0, w, h);
+      // ombre au sol
+      g.save(); g.filter = `blur(${Rg * 0.06}px)`; g.fillStyle = 'rgba(0,0,0,0.3)'; g.beginPath(); g.ellipse(G.x + Rg * 0.06, base.y1 + Rg * 0.03, base.wb * 1.25, Rg * 0.08, 0, 0, TAU); g.fill(); g.restore();
+      // intérieur du réservoir (verre du fond)
+      resPath(g); const ig = g.createRadialGradient(G.x - box.hw * 0.3, G.y - box.hh * 0.3, 0, G.x, G.y, Math.max(box.hw, box.hh) * 1.1); ig.addColorStop(0, rgba(p.verre, 0.25)); ig.addColorStop(1, rgba(mix(p.verre, '#000000', 0.3), 0.4)); g.fillStyle = ig; g.fill();
+    }
+    function frontLayer(g) {
+      const { G, box, Rg, base, tray, r } = S, M = p.metal;
+      // reflets du verre
+      g.save(); resPath(g); g.clip();
+      const vg = g.createRadialGradient(G.x, G.y, Math.min(box.hw, box.hh) * 0.6, G.x, G.y, Math.max(box.hw, box.hh) * 1.05); vg.addColorStop(0, 'rgba(255,255,255,0)'); vg.addColorStop(1, rgba(mix(p.verre, '#ffffff', 0.3), 0.35)); g.fillStyle = vg; g.fillRect(G.x - box.hw, G.y - box.hh, box.hw * 2, box.hh * 2);
+      g.fillStyle = 'rgba(255,255,255,0.55)'; g.beginPath(); g.ellipse(G.x - box.hw * 0.52, G.y - box.hh * 0.45, box.hw * 0.12, box.hh * 0.32, 0.45, 0, TAU); g.fill();
+      g.fillStyle = 'rgba(255,255,255,0.3)'; g.beginPath(); g.ellipse(G.x - box.hw * 0.3, G.y - box.hh * 0.72, box.hw * 0.07, box.hh * 0.08, 0.6, 0, TAU); g.fill();
+      g.fillStyle = 'rgba(255,255,255,0.18)'; g.beginPath(); g.ellipse(G.x + box.hw * 0.62, G.y + box.hh * 0.3, box.hw * 0.05, box.hh * 0.28, -0.3, 0, TAU); g.fill();
+      g.restore();
+      g.strokeStyle = rgba(mix(p.verre, '#ffffff', 0.5), 0.7); g.lineWidth = Math.max(1, Rg * 0.012); resPath(g, -Rg * 0.006); g.stroke();
+      // couvercle
+      const lw = Math.min(box.hw * 0.62, Rg * 0.55), ly = G.y - box.hh;
+      g.fillStyle = metalGrad(g, G.x - lw, G.x + lw, M); g.beginPath(); g.ellipse(G.x, ly + Rg * 0.02, lw, Rg * 0.1, 0, Math.PI, TAU); g.lineTo(G.x + lw, ly + Rg * 0.06); g.ellipse(G.x, ly + Rg * 0.06, lw, Rg * 0.06, 0, 0, Math.PI); g.closePath(); g.fill();
+      g.fillStyle = metalGrad(g, G.x - lw * 0.35, G.x + lw * 0.35, p.corps); g.beginPath(); g.ellipse(G.x, ly - Rg * 0.07, lw * 0.35, Rg * 0.13, 0, Math.PI, TAU); g.closePath(); g.fill();
+      g.fillStyle = metalGrad(g, G.x - lw * 0.12, G.x + lw * 0.12, M); g.beginPath(); g.arc(G.x, ly - Rg * 0.2, lw * 0.11, 0, TAU); g.fill();
+      // collier
+      const cy = base.y0, cw = Math.min(box.hw * 0.75, Rg * 0.7);
+      g.fillStyle = metalGrad(g, G.x - cw, G.x + cw, M); rrPath(g, G.x - cw, cy - Rg * 0.07, cw * 2, Rg * 0.12, Rg * 0.03); g.fill();
+      // socle (trapèze arrondi)
+      const { y0, y1, wt, wb } = base;
+      g.save(); g.beginPath(); g.moveTo(G.x - wt, y0 + Rg * 0.04); g.lineTo(G.x + wt, y0 + Rg * 0.04); g.quadraticCurveTo(G.x + wt * 1.02, y0 + (y1 - y0) * 0.6, G.x + wb, y1 - Rg * 0.06); g.lineTo(G.x + wb, y1); g.lineTo(G.x - wb, y1); g.lineTo(G.x - wb, y1 - Rg * 0.06); g.quadraticCurveTo(G.x - wt * 1.02, y0 + (y1 - y0) * 0.6, G.x - wt, y0 + Rg * 0.04); g.closePath();
+      const bgr = g.createLinearGradient(G.x - wb, 0, G.x + wb, 0); bgr.addColorStop(0, mix(p.corps, '#000000', 0.35)); bgr.addColorStop(0.28, mix(p.corps, '#ffffff', 0.22)); bgr.addColorStop(0.5, p.corps); bgr.addColorStop(1, mix(p.corps, '#000000', 0.45));
+      g.fillStyle = bgr; g.fill(); g.clip();
+      g.restore();
+      g.fillStyle = metalGrad(g, G.x - wb * 1.04, G.x + wb * 1.04, M); rrPath(g, G.x - wb * 1.04, y1 - Rg * 0.055, wb * 2.08, Rg * 0.07, Rg * 0.02); g.fill();
+      // logo frappé
+      if (logoM) {
+        const L = base.logo, path = (dx, dy) => { g.beginPath(); for (const lp of logoM) { lp.forEach((q, i) => (i ? g.lineTo(L.x + dx + q[0] * L.s, L.y + dy + q[1] * L.s) : g.moveTo(L.x + dx + q[0] * L.s, L.y + dy + q[1] * L.s))); g.closePath(); } };
+        g.fillStyle = 'rgba(0,0,0,0.3)'; path(Rg * 0.006, Rg * 0.01); g.fill('evenodd');
+        g.fillStyle = p.encre; path(0, 0); g.fill('evenodd');
+      }
+      // plaque de la manivelle
+      const K = base.crank;
+      g.fillStyle = 'rgba(0,0,0,0.25)'; g.beginPath(); g.arc(K.x + Rg * 0.01, K.y + Rg * 0.02, K.r * 1.05, 0, TAU); g.fill();
+      const kg = g.createRadialGradient(K.x - K.r * 0.4, K.y - K.r * 0.5, 0, K.x, K.y, K.r * 1.1); kg.addColorStop(0, mix(M, '#ffffff', 0.55)); kg.addColorStop(0.6, M); kg.addColorStop(1, mix(M, '#000000', 0.4));
+      g.fillStyle = kg; g.beginPath(); g.arc(K.x, K.y, K.r, 0, TAU); g.fill();
+      g.fillStyle = mix(M, '#000000', 0.55); rrPath(g, K.x - K.r * 0.06, K.y - K.r * 0.62, K.r * 0.12, K.r * 0.32, K.r * 0.05); g.fill();
+      // bouche de la trappe
+      const m = base.mouth;
+      g.fillStyle = mix(M, '#000000', 0.15); rrPath(g, m.x - m.w * 0.62, m.y - m.h * 0.6, m.w * 1.24, m.h * 1.1, m.w * 0.2); g.fill();
+      g.fillStyle = '#0d0d10'; rrPath(g, m.x - m.w * 0.5, m.y - m.h * 0.5, m.w, m.h * 0.9, m.w * 0.16); g.fill();
+      // plateau (fond)
+      const T = tray; g.fillStyle = mix(M, '#000000', 0.3); rrPath(g, T.x - T.w, T.y - T.lip * 1.1, T.w * 2, T.lip * 1.1, T.lip * 0.3); g.fill();
+    }
+    function trayFront(g) {
+      const T = S.tray, M = p.metal; g.fillStyle = metalGrad(g, T.x - T.w * 1.06, T.x + T.w * 1.06, M); rrPath(g, T.x - T.w * 1.06, T.y - T.lip * 0.55, T.w * 2.12, T.lip * 0.85, T.lip * 0.3); g.fill();
+      g.fillStyle = 'rgba(255,255,255,0.35)'; g.fillRect(T.x - T.w * 0.95, T.y - T.lip * 0.48, T.w * 1.9, Math.max(1, T.lip * 0.1));
+    }
+
+    app.loop((t, dt) => {
+      dt = Math.min(1 / 20, dt || 0);
+      const { w, h, dpr } = app.size; buildLogo();
+      const key = [w, h, p.remplissage, p.taille, p.variation, p.forme, p.echelle, p.plateau, app.seed, (p.couleurs || []).length].join('|'); if (!S || key !== gKey) { gKey = key; build(w, h); }
+      if (app.thumbnail) { if (!S.th) { S.th = true; for (let k = 0; k < 4; k++) { crank(); for (let j = 0; j < 150; j++) { simT += 1 / 60; step(1 / 60); } } crank(); for (let j = 0; j < 36; j++) { simT += 1 / 60; step(1 / 60); } } }
+      else { const n = 2; for (let k = 0; k < n; k++) { simT += dt / n; step(dt / n); } }
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.drawImage(layer('back', w, h, dpr, backLayer), 0, 0);
+      const C = p.couleurs.length ? p.couleurs : ['#e5452a'], rp = Math.max(2, Math.round(S.r * dpr * 2) / 2), sc = 1 / dpr;
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      const draw = (b) => { const sp = sprite(C[b.c % C.length], Math.max(1, Math.round(b.r * dpr * 2) / 2)), s = sp.width; ctx.drawImage(sp, b.x * dpr - s / 2, b.y * dpr - s / 2); };
+      ctx.save(); ctx.setTransform(dpr, 0, 0, dpr, 0, 0); resPath(ctx); ctx.clip(); ctx.setTransform(1, 0, 0, 1, 0, 0);
+      for (const b of S.b) if (b.z === 0 || b.z === 1) draw(b);
+      ctx.restore();
+      ctx.drawImage(layer('front', w, h, dpr, frontLayer), 0, 0);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      // manivelle tournante
+      const K = S.base.crank, M = p.metal, a = S.cr - Math.PI / 2;
+      ctx.save(); ctx.translate(K.x, K.y); ctx.rotate(S.cr);
+      ctx.fillStyle = 'rgba(0,0,0,0.3)'; ctx.fillRect(-K.r * 0.95 + K.r * 0.05, -K.r * 0.13 + K.r * 0.1, K.r * 1.9, K.r * 0.26);
+      ctx.fillStyle = metalGrad(ctx, -K.r, K.r, M); ctx.beginPath(); ctx.moveTo(-K.r * 0.95, -K.r * 0.11); ctx.lineTo(K.r * 0.95, -K.r * 0.11); ctx.quadraticCurveTo(K.r * 1.08, 0, K.r * 0.95, K.r * 0.11); ctx.lineTo(-K.r * 0.95, K.r * 0.11); ctx.quadraticCurveTo(-K.r * 1.08, 0, -K.r * 0.95, -K.r * 0.11); ctx.fill();
+      ctx.fillStyle = mix(M, '#ffffff', 0.5); ctx.beginPath(); ctx.arc(0, 0, K.r * 0.2, 0, TAU); ctx.fill(); ctx.fillStyle = mix(M, '#000000', 0.3); ctx.beginPath(); ctx.arc(0, 0, K.r * 0.08, 0, TAU); ctx.fill();
+      ctx.restore();
+      // volet de la trappe
+      const m = S.base.mouth, op = ease(S.door);
+      ctx.fillStyle = metalGrad(ctx, m.x - m.w * 0.5, m.x + m.w * 0.5, M); ctx.fillRect(m.x - m.w * 0.5, m.y - m.h * 0.5, m.w, m.h * 0.9 * (1 - op * 0.75));
+      ctx.fillStyle = 'rgba(0,0,0,0.25)'; ctx.fillRect(m.x - m.w * 0.5, m.y - m.h * 0.5 + m.h * 0.9 * (1 - op * 0.75) - 1, m.w, 1.5);
+      // billes sorties et plateau
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      for (const b of S.b) if ((b.z === 2 && !(b.hidden > 0)) || b.z === 3) { if (b.z === 3) { ctx.globalAlpha = Math.max(0, b.a); } draw(b); ctx.globalAlpha = 1; }
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0); trayFront(ctx);
+      app.finish(ctx);
+    });
+
+    // ——— SVG ———
+    function toSVG() {
+      const { w, h } = app.size, f = (v) => +v.toFixed(2); buildLogo(); const { G, box, Rg, base, tray } = S, M = p.metal, C = p.couleurs.length ? p.couleurs : ['#e5452a'];
+      let defs = '', o = `<rect width="100%" height="100%" fill="${p.fond}"/>`;
+      C.forEach((c, i) => { defs += `<radialGradient id="b${i}" cx="0.32" cy="0.3" r="0.75"><stop offset="0" stop-color="${mix(c, '#ffffff', 0.45 * p.brillance + 0.1)}"/><stop offset="0.5" stop-color="${c}"/><stop offset="1" stop-color="${mix(c, '#000000', 0.38)}"/></radialGradient>`; });
+      defs += `<linearGradient id="met" x1="0" x2="1"><stop offset="0" stop-color="${mix(M, '#000000', 0.35)}"/><stop offset="0.3" stop-color="${mix(M, '#ffffff', 0.45)}"/><stop offset="0.55" stop-color="${M}"/><stop offset="1" stop-color="${mix(M, '#000000', 0.45)}"/></linearGradient>`;
+      defs += `<linearGradient id="corps" x1="0" x2="1"><stop offset="0" stop-color="${mix(p.corps, '#000000', 0.35)}"/><stop offset="0.28" stop-color="${mix(p.corps, '#ffffff', 0.22)}"/><stop offset="0.5" stop-color="${p.corps}"/><stop offset="1" stop-color="${mix(p.corps, '#000000', 0.45)}"/></linearGradient>`;
+      const res = `<rect x="${f(G.x - box.hw)}" y="${f(G.y - box.hh)}" width="${f(box.hw * 2)}" height="${f(box.hh * 2)}" rx="${f(box.cr)}"/>`;
+      defs += `<clipPath id="res">${res}</clipPath>`;
+      o += `<ellipse cx="${f(G.x + Rg * 0.06)}" cy="${f(base.y1 + Rg * 0.03)}" rx="${f(base.wb * 1.25)}" ry="${f(Rg * 0.08)}" fill="#000" opacity="0.22"/>`;
+      o += `<rect x="${f(G.x - box.hw)}" y="${f(G.y - box.hh)}" width="${f(box.hw * 2)}" height="${f(box.hh * 2)}" rx="${f(box.cr)}" fill="${p.verre}" opacity="0.3"/>`;
+      const ball = (b) => `<circle cx="${f(b.x)}" cy="${f(b.y)}" r="${f(b.r)}" fill="url(#b${b.c % C.length})"/>`;
+      o += `<g clip-path="url(#res)">${S.b.filter((b) => b.z === 0 || b.z === 1).map(ball).join('')}<ellipse cx="${f(G.x - box.hw * 0.52)}" cy="${f(G.y - box.hh * 0.45)}" rx="${f(box.hw * 0.12)}" ry="${f(box.hh * 0.32)}" transform="rotate(25.8 ${f(G.x - box.hw * 0.52)} ${f(G.y - box.hh * 0.45)})" fill="#fff" opacity="0.55"/></g>`;
+      o += `<rect x="${f(G.x - box.hw)}" y="${f(G.y - box.hh)}" width="${f(box.hw * 2)}" height="${f(box.hh * 2)}" rx="${f(box.cr)}" fill="none" stroke="#ffffff" stroke-opacity="0.6" stroke-width="${f(Math.max(1, Rg * 0.012))}"/>`;
+      const lw = Math.min(box.hw * 0.62, Rg * 0.55), ly = G.y - box.hh;
+      o += `<path d="M${f(G.x - lw)} ${f(ly + Rg * 0.02)}A${f(lw)} ${f(Rg * 0.1)} 0 0 1 ${f(G.x + lw)} ${f(ly + Rg * 0.02)}L${f(G.x + lw)} ${f(ly + Rg * 0.06)}A${f(lw)} ${f(Rg * 0.06)} 0 0 1 ${f(G.x - lw)} ${f(ly + Rg * 0.06)}Z" fill="url(#met)"/>`;
+      o += `<path d="M${f(G.x - lw * 0.35)} ${f(ly - Rg * 0.07)}A${f(lw * 0.35)} ${f(Rg * 0.13)} 0 0 1 ${f(G.x + lw * 0.35)} ${f(ly - Rg * 0.07)}Z" fill="${p.corps}"/><circle cx="${f(G.x)}" cy="${f(ly - Rg * 0.2)}" r="${f(lw * 0.11)}" fill="url(#met)"/>`;
+      const cw = Math.min(box.hw * 0.75, Rg * 0.7); o += `<rect x="${f(G.x - cw)}" y="${f(base.y0 - Rg * 0.07)}" width="${f(cw * 2)}" height="${f(Rg * 0.12)}" rx="${f(Rg * 0.03)}" fill="url(#met)"/>`;
+      const { y0, y1, wt, wb } = base;
+      o += `<path d="M${f(G.x - wt)} ${f(y0 + Rg * 0.04)}L${f(G.x + wt)} ${f(y0 + Rg * 0.04)}Q${f(G.x + wt * 1.02)} ${f(y0 + (y1 - y0) * 0.6)} ${f(G.x + wb)} ${f(y1 - Rg * 0.06)}L${f(G.x + wb)} ${f(y1)}L${f(G.x - wb)} ${f(y1)}L${f(G.x - wb)} ${f(y1 - Rg * 0.06)}Q${f(G.x - wt * 1.02)} ${f(y0 + (y1 - y0) * 0.6)} ${f(G.x - wt)} ${f(y0 + Rg * 0.04)}Z" fill="url(#corps)"/>`;
+      if (logoM) { const L = base.logo, lp = (dx, dy) => logoM.map((l) => 'M' + l.map((q) => f(L.x + dx + q[0] * L.s) + ' ' + f(L.y + dy + q[1] * L.s)).join('L') + 'Z').join(''); o += `<path fill-rule="evenodd" fill="#000" opacity="0.3" d="${lp(Rg * 0.006, Rg * 0.01)}"/><path fill-rule="evenodd" fill="${p.encre}" d="${lp(0, 0)}"/>`; }
+      const K = base.crank; o += `<circle cx="${f(K.x)}" cy="${f(K.y)}" r="${f(K.r)}" fill="url(#met)"/><g transform="translate(${f(K.x)} ${f(K.y)}) rotate(${f(S.cr * 180 / Math.PI)})"><rect x="${f(-K.r * 0.97)}" y="${f(-K.r * 0.11)}" width="${f(K.r * 1.94)}" height="${f(K.r * 0.22)}" rx="${f(K.r * 0.1)}" fill="${mix(M, '#ffffff', 0.25)}" stroke="${mix(M, '#000000', 0.3)}" stroke-width="1"/><circle r="${f(K.r * 0.2)}" fill="${mix(M, '#ffffff', 0.5)}"/></g>`;
+      const m = base.mouth; o += `<rect x="${f(m.x - m.w * 0.62)}" y="${f(m.y - m.h * 0.6)}" width="${f(m.w * 1.24)}" height="${f(m.h * 1.1)}" rx="${f(m.w * 0.2)}" fill="${mix(M, '#000000', 0.15)}"/><rect x="${f(m.x - m.w * 0.5)}" y="${f(m.y - m.h * 0.5)}" width="${f(m.w)}" height="${f(m.h * 0.9 * (1 - ease(S.door) * 0.75))}" fill="url(#met)"/>`;
+      const T = tray; o += `<rect x="${f(T.x - T.w)}" y="${f(T.y - T.lip * 1.1)}" width="${f(T.w * 2)}" height="${f(T.lip * 1.1)}" fill="${mix(M, '#000000', 0.3)}"/>`;
+      o += S.b.filter((b) => b.z === 2 && !(b.hidden > 0)).map(ball).join('');
+      o += `<rect x="${f(T.x - T.w * 1.06)}" y="${f(T.y - T.lip * 0.55)}" width="${f(T.w * 2.12)}" height="${f(T.lip * 0.85)}" rx="${f(T.lip * 0.3)}" fill="url(#met)"/><rect x="${f(G.x - wb * 1.04)}" y="${f(y1 - Rg * 0.055)}" width="${f(wb * 2.08)}" height="${f(Rg * 0.07)}" rx="${f(Rg * 0.02)}" fill="url(#met)"/>`;
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><defs>${defs}</defs>${o}</svg>`;
+    }
+  </script>
+</body>
+</html>
