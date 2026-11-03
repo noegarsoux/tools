@@ -1,0 +1,352 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sablier</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Sablier : un automate de sable dans le repère du verre. La gravité est tournée dans ce repère (8 directions),
+    // chaque grain tombe, accélère en chute libre, glisse en diagonale et passe le col. Le sable de départ est
+    // teinté (strates, logo, damier…) et le motif se déforme en traversant le col. Le sablier se retourne seul
+    // quand le haut est vide ; on peut l'incliner à la main.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const BIE = PAL('biennale'), LUZ = PAL('luzern'), MEN = PAL('menthe');
+    const DX = [1, 1, 0, -1, -1, -1, 0, 1], DY = [0, 1, 1, 1, 0, -1, -1, -1];
+
+    let vKey = '', logoM = null, logoKey = '', ptr = null, S = null, gKey = '', cKey = '', simT = 0, bgC = null, bgKey = '';
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.04, vignette: 0.3 },
+      hint: 'Glisser : incliner le sablier · clic : le retourner · molette : largeur du col',
+      notes: 'Un sablier dont chaque grain est simulé : le sable tombe, accélère, glisse sur les talus et passe le col en filet. Le sable de départ porte un motif (strates, logo, damier, diagonales) qui se déforme en traversant. Le sablier se retourne seul quand le haut est vide ; on peut aussi l’incliner à la main et regarder le sable rouler.',
+      params: {
+        'Sablier': {
+          forme: { type: 'select', label: 'Forme', options: { classique: 'Classique', cone: 'Cônes', bulbes: 'Bulbes', tube: 'Tube' }, value: 'classique' },
+          col: { type: 'range', label: 'Col', min: 0.03, max: 0.4, step: 0.01, value: 0.06 },
+          grains: { type: 'range', label: 'Finesse du grain', min: 110, max: 340, step: 2, value: 200 },
+          remplissage: { type: 'range', label: 'Remplissage', min: 0.2, max: 1, step: 0.01, value: 0.75 },
+          vitesse: { type: 'range', label: 'Vitesse', min: 0.5, max: 6, step: 0.5, value: 1.5 },
+          friction: { type: 'range', label: 'Friction', min: 0, max: 1, step: 0.01, value: 0.35 },
+          retourner: { type: 'toggle', label: 'Retourner seul', value: true },
+          pause: { type: 'range', label: 'Pause avant retournement (s)', min: 0, max: 4, step: 0.1, value: 1 },
+        },
+        'Sable': {
+          motif: { type: 'select', label: 'Motif du sable', options: { strates: 'Strates', logo: 'Logo', damier: 'Damier', diagonales: 'Diagonales', points: 'Points', poivre: 'Poivre et sel' }, value: 'strates' },
+          strates: { type: 'range', label: 'Bandes', min: 2, max: 16, step: 1, value: 6 },
+          couleurs: { type: 'palette', label: 'Sable', value: ['#e5452a', '#f2b0c8', '#f2e640', '#f4f3f0'] },
+          melange: { type: 'range', label: 'Nuances du grain', min: 0, max: 1, step: 0.01, value: 0.45 },
+          image: { type: 'file', label: 'Image du logo', accept: 'image/*' },
+        },
+        'Verre': {
+          monture: { type: 'color', label: 'Monture', value: '#2a2420' },
+          colonnes: { type: 'toggle', label: 'Colonnes', value: true },
+          reflets: { type: 'range', label: 'Reflets', min: 0, max: 1, step: 0.01, value: 0.6 },
+          fond: { type: 'color', label: 'Fond', value: '#111111' },
+        },
+      },
+      presets: {
+        'Classique': {},
+        'Logo': { motif: 'logo', strates: 3, couleurs: ['#e5452a', '#f4f3f0', '#d9d4c8'], remplissage: 0.85 },
+        'Cônes': { forme: 'cone', motif: 'diagonales', strates: 8, couleurs: ['#2f5fd0', '#9dd3f0', '#f4f1ea'], fond: '#0d1220', monture: '#c9ccd2' },
+        'Bulbes': { forme: 'bulbes', motif: 'points', couleurs: ['#7d38e7', '#f2b0c8', '#f4f1ea'], col: 0.12, fond: '#16101e' },
+        'Tube': { forme: 'tube', motif: 'damier', strates: 7, couleurs: ['#111111', '#e5452a'], fond: '#e4e0d6', monture: '#111111', col: 0.14 },
+        'Sable fin': { grains: 330, col: 0.07, vitesse: 4, couleurs: ['#c9a36a', '#e8d2a6', '#8a6a3c'], motif: 'strates', strates: 12, melange: 0.7 },
+        'Gros grains': { grains: 116, col: 0.12, vitesse: 2, motif: 'poivre', couleurs: ['#16161a', '#f4f1ea', '#e5452a'], melange: 0.2 },
+        'Coulée rapide': { vitesse: 6, col: 0.3, friction: 0.1, pause: 0.3, motif: 'diagonales', strates: 5 },
+        'Biennale': { couleurs: [BIE[2], BIE[3], BIE[4], BIE[0]], fond: BIE[1], monture: BIE[0], motif: 'logo' },
+        'Luzern': { couleurs: [LUZ[0], LUZ[1], LUZ[2], LUZ[4]], fond: LUZ[3], monture: LUZ[2], forme: 'bulbes', motif: 'strates', strates: 9 },
+        'Menthe': { couleurs: [MEN[2], MEN[3], MEN[0]], fond: MEN[1], monture: MEN[0], forme: 'cone', motif: 'logo' },
+      },
+      brand(colors) {
+        const s = colors.slice().sort((a, b) => lum(a) - lum(b)), D = s[0], L = s[s.length - 1], mid = s.length > 2 ? s.slice(1, -1) : [L];
+        return { couleurs: mid.concat([L]), fond: mix(D, '#000000', 0.3), monture: mix(L, D, 0.55), motif: 'logo' };
+      },
+      pointer: {
+        down: (q) => { ptr = { x: q.x, y: q.y, moved: 0, a0: S ? S.A : 0 }; if (S) { S.flip = null; S.hold = true; S.rest = 0; } },
+        drag: (q) => { if (!ptr || !S) return; ptr.moved = Math.max(ptr.moved, Math.hypot(q.x - ptr.x, q.y - ptr.y)); if (ptr.moved > 6) S.A = ptr.a0 + (q.x - ptr.x) / Math.max(200, S.w) * Math.PI * 1.4; },
+        up: () => { if (!S) return; S.hold = false; if (ptr && ptr.moved <= 6) startFlip(); else settle(); ptr = null; },
+        wheel: (q, dy) => app.set('col', Math.max(0.03, Math.min(0.4, +(p.col + (dy > 0 ? -0.02 : 0.02)).toFixed(2)))),
+      },
+      onChange(k) { if (['*', 'image'].includes(k)) logoKey = ''; },
+      export: { name: 'sablier', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    function hex(x) { const n = parseInt(x.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
+    function lum(x) { const c = hex(x); return (c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114) / 255; }
+    function mix(a, b, t) { const A = hex(a), C = hex(b); return '#' + A.map((v, i) => Math.round(v + (C[i] - v) * t).toString(16).padStart(2, '0')).join(''); }
+    function rgba(c, a) { const h = hex(c); return `rgba(${h[0]},${h[1]},${h[2]},${a})`; }
+    function rng(s) { let a = s >>> 0; return () => { a = (a + 0x6d2b79f5) >>> 0; let t = a; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+    const ease = (x) => x < 0.5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2;
+
+    function buildLogo() {
+      const img0 = p.image || app.logoImg, key = img0 ? (img0.src || 'c') : 'demo'; if (key === logoKey) return; logoKey = key; vKey = '';
+      const M = 200, c = document.createElement('canvas'); c.width = c.height = M; const x = c.getContext('2d', { willReadFrequently: true }), L = M * 0.94, cx = M / 2;
+      if (img0) { const iw = img0.naturalWidth || img0.width, ih = img0.naturalHeight || img0.height, s = L / Math.max(iw, ih); x.drawImage(img0, cx - iw * s / 2, cx - ih * s / 2, iw * s, ih * s); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(cx, cx, L * 0.48, 0, TAU); x.arc(cx, cx, L * 0.27, 0, TAU, true); x.fill('evenodd'); x.fillRect(cx - L * 0.07, cx - L * 0.5, L * 0.14, L); }
+      const d = x.getImageData(0, 0, M, M).data; let transp = 0; for (let i = 3; i < d.length; i += 4) if (d[i] < 128) transp++; const useA = transp > M * M * 0.05;
+      const F = new Float64Array(M * M); for (let i = 0; i < M * M; i++) { const o = i * 4, l = (d[o] * 0.2126 + d[o + 1] * 0.7152 + d[o + 2] * 0.0722) / 255; F[i] = useA ? d[o + 3] / 255 : (d[o + 3] / 255) * Math.min(1, Math.max(0, (0.75 - l) * 2)); }
+      { const G2 = new Float64Array(M * M); for (let j = 1; j < M - 1; j++) for (let i = 1; i < M - 1; i++) { let a = 0; for (let b = -1; b <= 1; b++) for (let c = -1; c <= 1; c++) a += F[(j + b) * M + i + c] * (b || c ? (b && c ? 1 : 2) : 4); G2[j * M + i] = a / 16; } F.set(G2); }
+      for (let k = 0; k < M; k++) F[k] = F[(M - 1) * M + k] = F[k * M] = F[k * M + M - 1] = 0;
+      logoM = contours(F, M, M, 0.5, 0, 0, 1).filter((c) => c.closed && c.pts.length > 6).map((c) => chaikin(chaikin(c.pts, true), true).map((q) => [q[0] / M - 0.5, q[1] / M - 0.5]));
+    }
+    // carrés marchants + chaînage
+    function contours(F, nx, ny, lev, ox, oy, cs) {
+      const pt = new Map(), adj = new Map();
+      const P = (id) => { let q = pt.get(id); if (q) return q; const cell = id >> 1, i = cell % nx, j = (cell - i) / nx; let a, b, ax, ay, bx, by; if (id & 1) { a = F[j * nx + i]; b = F[(j + 1) * nx + i]; ax = bx = i; ay = j; by = j + 1; } else { a = F[j * nx + i]; b = F[j * nx + i + 1]; ay = by = j; ax = i; bx = i + 1; } const t = (lev - a) / (b - a || 1e-9); q = [ox + (ax + (bx - ax) * t) * cs, oy + (ay + (by - ay) * t) * cs]; pt.set(id, q); return q; };
+      const link = (a, b) => { (adj.get(a) || adj.set(a, []).get(a)).push(b); (adj.get(b) || adj.set(b, []).get(b)).push(a); };
+      for (let j = 0; j < ny - 1; j++) for (let i = 0; i < nx - 1; i++) {
+        const A = F[j * nx + i] > lev, B = F[j * nx + i + 1] > lev, C = F[(j + 1) * nx + i + 1] > lev, D = F[(j + 1) * nx + i] > lev, idx = A | (B << 1) | (C << 2) | (D << 3);
+        if (idx === 0 || idx === 15) continue;
+        const T = (j * nx + i) * 2, R = (j * nx + i + 1) * 2 + 1, Bo = ((j + 1) * nx + i) * 2, Le = (j * nx + i) * 2 + 1;
+        const ctr = (F[j * nx + i] + F[j * nx + i + 1] + F[(j + 1) * nx + i + 1] + F[(j + 1) * nx + i]) / 4 > lev;
+        switch (idx) {
+          case 1: case 14: link(Le, T); break; case 2: case 13: link(T, R); break; case 3: case 12: link(Le, R); break;
+          case 4: case 11: link(R, Bo); break; case 6: case 9: link(T, Bo); break; case 7: case 8: link(Le, Bo); break;
+          case 5: if (ctr) { link(Le, Bo); link(T, R); } else { link(Le, T); link(R, Bo); } break;
+          case 10: if (ctr) { link(Le, T); link(R, Bo); } else { link(Le, Bo); link(T, R); } break;
+        }
+      }
+      const seen = new Set(), out = [];
+      const walk = (s) => { const L = [s]; seen.add(s); let cur = s; for (;;) { const nb = (adj.get(cur) || []).find((x) => !seen.has(x)); if (nb === undefined) break; seen.add(nb); L.push(nb); cur = nb; } return L; };
+      for (const [id, nb] of adj) if (nb.length === 1 && !seen.has(id)) out.push({ pts: walk(id).map(P), closed: false });
+      for (const [id] of adj) if (!seen.has(id)) out.push({ pts: walk(id).map(P), closed: true });
+      return out;
+    }
+    function chaikin(pts, closed) {
+      const o = []; const n = pts.length; for (let k = 0; k < (closed ? n : n - 1); k++) { const a = pts[k], b = pts[(k + 1) % n]; o.push([a[0] * 0.75 + b[0] * 0.25, a[1] * 0.75 + b[1] * 0.25], [a[0] * 0.25 + b[0] * 0.75, a[1] * 0.25 + b[1] * 0.75]); }
+      if (!closed) { o.unshift(pts[0]); o.push(pts[n - 1]); } return o;
+    }
+
+    // ——— profil du verre : demi-largeur (px) à la hauteur v (px, 0 = col) ———
+    function profile(v) {
+      const T = S.prof, K = T.length - 1, x = Math.min(1, Math.abs(v) / S.Hh) * K, k = Math.min(K - 1, Math.floor(x)), f = x - k;
+      return x >= K ? 0 : T[k] * (1 - f) + T[k + 1] * f;
+    }
+    // table du profil ; les épaules trop plates sont comblées en entonnoir (pente ≤ 1,8) pour que le sable n'y reste pas
+    function makeProfile() {
+      const K = 400, T = new Float32Array(K + 1); for (let k = 0; k <= K; k++) T[k] = rawProfile(k / K);
+      const lim = 1.8 * S.Hh / K; for (let k = K - 1; k >= 0; k--) T[k] = Math.max(T[k], T[k + 1] - lim);
+      S.prof = T;
+    }
+    function rawProfile(t) {
+      const { R } = S, n = Math.max(R * p.col, S.cs * 1.6);
+      let r;
+      if (p.forme === 'cone') r = n + (R - n) * Math.min(1, t / 0.9);
+      else if (p.forme === 'bulbes') { const c = Math.sqrt(Math.max(0, 0.2025 - (t - 0.55) * (t - 0.55))) / 0.45 * R; r = Math.max(n * (t < 0.2 ? 1 : 0), c); }
+      else if (p.forme === 'tube') r = t < 0.14 ? n + (R * 0.82 - n) * Math.sqrt(t / 0.14) : R * 0.82;
+      else r = n + (R - n) * Math.pow(Math.sin(Math.PI * 0.5 * Math.min(1, t / 0.72)), 1.25);
+      if (t > 0.86 && p.forme !== 'bulbes') r *= Math.sqrt(Math.max(0, 1 - Math.pow((t - 0.86) / 0.14, 2))) * 0.35 + 0.65;
+      return t >= 1 ? 0 : r;
+    }
+
+    // ——— construction ———
+    function build(w, h) {
+      const Ht = Math.min(h * 0.88, w * 1.2), Hh = Ht * 0.41, wf = p.forme === 'bulbes' ? 0.5 : p.forme === 'tube' ? 0.36 : 0.44, R = Hh * wf;
+      const GH = Math.round(p.grains), cs = (Hh * 2) / GH, GW = Math.ceil((R * 2) / cs) + 4;
+      const N = GW * GH;
+      S = { w, h, Hh, R, cs, GW, GH, N, cx: w / 2, cy: h / 2, Ht, G: new Uint8Array(N), Sh: new Uint8Array(N), V: new Uint8Array(N), ord: [], A: S ? Math.round(S.A / Math.PI) * Math.PI : 0, flip: null, hold: false, empt: 0, total: 0, img: null, off: null, rest: 1, seedR: rng(app.seed * 31 + 7), rs: (app.seed * 2654435761) >>> 0 || 1 };
+      walls();
+      fill();
+    }
+    function walls() {
+      makeProfile(); const { GW, GH, cs, G } = S;
+      for (let j = 0; j < GH; j++) {
+        const v = (j + 0.5 - GH / 2) * cs, r = profile(v);
+        for (let i = 0; i < GW; i++) {
+          const u = (i + 0.5 - GW / 2) * cs, k = j * GW + i, inside = Math.abs(u) < r && i > 0 && i < GW - 1 && j > 0 && j < GH - 1;
+          if (!inside) G[k] = 255; else if (G[k] === 255) G[k] = 0;
+        }
+      }
+      S.ord = []; S.total = 0; for (let k = 0; k < S.N; k++) if (G[k] && G[k] !== 255) S.total++;
+    }
+    function fill() {
+      const { GW, GH, G, Sh, cs } = S, R = S.seedR, ncol = Math.max(1, p.couleurs.length);
+      // cellules de la moitié « haute » (par rapport à la gravité), triées du col vers le haut
+      const up = Math.cos(S.A) >= 0 ? -1 : 1, cells = [];
+      for (let j = 1; j < GH - 1; j++) { const v = (j + 0.5 - GH / 2) * cs; if (v * up <= cs) continue; for (let i = 1; i < GW - 1; i++) if (G[j * GW + i] === 0) cells.push(j * GW + i); }
+      cells.sort((a, b) => Math.abs(Math.floor(a / GW) - GH / 2) - Math.abs(Math.floor(b / GW) - GH / 2));
+      // volume utile : on laisse la place sous le col pour que le sable puisse tomber
+      const n = Math.floor(cells.length * p.remplissage * 0.92), start = 0, sel = cells.slice(start, start + n);
+      let j0 = GH, j1 = 0, i0 = GW, i1 = 0; for (const k of sel) { const j = Math.floor(k / GW), i = k % GW; j0 = Math.min(j0, j); j1 = Math.max(j1, j); i0 = Math.min(i0, i); i1 = Math.max(i1, i); }
+      const bh = Math.max(1, j1 - j0), bw = Math.max(1, i1 - i0), ns = Math.round(p.strates);
+      let mask = null;
+      if (p.motif === 'logo' && logoM) {
+        // le logo se place dans la partie large du sable, là où il reste visible le plus longtemps
+        const jc = Math.round(up < 0 ? j1 - bh * 0.6 : j0 + bh * 0.6); let a = GW, b = 0; for (const k of sel) if (Math.floor(k / GW) === jc) { const i = k % GW; a = Math.min(a, i); b = Math.max(b, i); }
+        const rw = b > a ? b - a : bw, side = Math.min(rw * 0.86, bh * 0.62), c = document.createElement('canvas'); c.width = GW; c.height = GH; const x = c.getContext('2d', { willReadFrequently: true });
+        x.translate(b > a ? (a + b + 1) / 2 : (i0 + i1 + 1) / 2, jc + 0.5); if (up > 0) x.rotate(Math.PI); x.scale(side, side); x.beginPath();
+        for (const L of logoM) { x.moveTo(L[0][0], L[0][1]); for (let k = 1; k < L.length; k++) x.lineTo(L[k][0], L[k][1]); x.closePath(); }
+        x.fillStyle = '#000'; x.fill('evenodd'); mask = x.getImageData(0, 0, GW, GH).data;
+      }
+      for (const k of sel) {
+        const j = Math.floor(k / GW), i = k % GW, fy = (up < 0 ? (j1 - j) : (j - j0)) / bh, fx = (i - i0) / bw;
+        let c;
+        switch (p.motif) {
+          case 'logo': c = mask && mask[k * 4 + 3] > 110 ? 0 : 1 + (Math.floor(fy * ns) % Math.max(1, ncol - 1)); break;
+          case 'damier': { const s = bw / ns * 1.2; c = (Math.floor((i - i0) / s) + Math.floor((up < 0 ? j1 - j : j - j0) / s)) % 2 ? 0 : 1 + (Math.floor(fy * 3) % Math.max(1, ncol - 1)); break; }
+          case 'diagonales': c = Math.floor((fx * bw + fy * bh) / (bw * 1.2 / ns)) % ncol; break;
+          case 'points': { const s = bw / ns * 1.4, gx = (i - i0) / s, gy = (up < 0 ? j1 - j : j - j0) / s, cxp = Math.floor(gx) + 0.5, cyp = Math.floor(gy) + 0.5; c = Math.hypot(gx - cxp, gy - cyp) < 0.32 ? 0 : 1 + (Math.floor(fy * ns * 0.5) % Math.max(1, ncol - 1)); break; }
+          case 'poivre': c = Math.floor(R() * ncol); break;
+          default: c = Math.floor(fy * ns) % ncol;
+        }
+        G[k] = 1 + Math.min(ncol - 1, c); Sh[k] = Math.floor(R() * 256); S.V[k] = 0;
+      }
+      S.total = sel.length; S.empt = 0;
+    }
+    function order(d) {
+      if (S.ord[d]) return S.ord[d];
+      const { GW, GH, G } = S, L = [], R = rng(d * 97 + 13);
+      for (let j = 1; j < GH - 1; j++) for (let i = 1; i < GW - 1; i++) if (G[j * GW + i] !== 255) L.push([(i * DX[d] + j * DY[d]) * (DX[d] && DY[d] ? 0.7071 : 1) + R() * 0.6, j * GW + i]);
+      L.sort((a, b) => b[0] - a[0]);
+      return (S.ord[d] = Int32Array.from(L, (e) => e[1]));
+    }
+
+    // ——— automate ———
+    function step() {
+      const gx = Math.sin(S.A), gy = Math.cos(S.A), ang = Math.atan2(gy, gx), d = ((Math.round(ang / (Math.PI / 4)) % 8) + 8) % 8;
+      // la direction quantifiée est tirée au hasard entre les deux voisines pour les angles intermédiaires
+      const q = ang / (Math.PI / 4), fr = q - Math.floor(q);
+      const { G, Sh, V, GW } = S; let rs = S.rs;
+      const rnd = () => { rs ^= rs << 13; rs ^= rs >>> 17; rs ^= rs << 5; return (rs >>> 0) / 4294967296; };
+      const dd = (rnd() < Math.abs(fr - 0.5) * 2 || Math.abs(fr - 0.5) > 0.42) ? d : ((fr < 0.5 ? d - 1 : d + 1) + 8) % 8;
+      const ord = order(dd), o1 = DX[dd] + DY[dd] * GW, oa = DX[(dd + 1) & 7] + DY[(dd + 1) & 7] * GW, ob = DX[(dd + 7) & 7] + DY[(dd + 7) & 7] * GW;
+      const axial = (dd & 1) === 0, sA = DX[(dd + 2) & 7] + DY[(dd + 2) & 7] * GW, sB = -sA, slide = 1 - p.friction * 0.8, vmax = 3;
+      const mv = (a, b) => { G[b] = G[a]; Sh[b] = Sh[a]; G[a] = 0; V[a] = 0; };
+      for (let n = 0; n < ord.length; n++) {
+        const k = ord[n], c = G[k]; if (c === 0 || c === 255) continue;
+        if (G[k + o1] === 0) {
+          const v = Math.min(vmax, V[k] + 1); let t = k + o1;
+          for (let s = 1; s < v; s++) { if (G[t + o1] !== 0) break; t += o1; }
+          mv(k, t); V[t] = v; continue;
+        }
+        V[k] = 0;
+        if (rnd() > slide) continue;
+        const f = rnd() < 0.5, A = f ? oa : ob, B = f ? ob : oa;
+        if (G[k + A] === 0) mv(k, k + A); else if (G[k + B] === 0) mv(k, k + B);
+        // le verre est lisse : un grain posé sur la paroi glisse le long d'une pente plus douce (pas de cavalier)
+        else if (axial && G[k + o1] === 255) { const sa = f ? sA : sB, sb = f ? sB : sA; if (G[k + sa] === 0 && G[k + sa + sa + o1] === 0) mv(k, k + sa + sa + o1); else if (G[k + sb] === 0 && G[k + sb + sb + o1] === 0) mv(k, k + sb + sb + o1); }
+      }
+      S.rs = rs;
+    }
+    function upperCount() {
+      const { G, GW, GH } = S, gy = Math.cos(S.A); let n = 0;
+      for (let j = 1; j < GH - 1; j++) { const v = j + 0.5 - GH / 2; if (v * gy > -1) continue; const row = j * GW; for (let i = 1; i < GW - 1; i++) { const c = G[row + i]; if (c && c !== 255) n++; } }
+      return n;
+    }
+    function startFlip() { const a0 = S.A, base = Math.round(a0 / Math.PI) * Math.PI, dir = S.flipDir = -(S.flipDir || -1); S.flip = { a0, a1: base + dir * Math.PI, t0: simT, dur: 1.3 }; S.empt = 0; }
+    function settle() { const a0 = S.A, a1 = Math.round(a0 / Math.PI) * Math.PI; if (Math.abs(a1 - a0) > 1e-3) S.flip = { a0, a1, t0: simT, dur: 0.5 + Math.abs(a1 - a0) * 0.5 }; }
+
+    // ——— dessin ———
+    function backdrop(dpr) {
+      const { w, h } = S, key = [w, h, dpr, p.fond].join('|'); if (bgC && key === bgKey) return bgC; bgKey = key;
+      bgC = document.createElement('canvas'); bgC.width = Math.round(w * dpr); bgC.height = Math.round(h * dpr); const x = bgC.getContext('2d'); x.scale(dpr, dpr);
+      x.fillStyle = p.fond; x.fillRect(0, 0, w, h);
+      const L = lum(p.fond), g = x.createRadialGradient(w / 2, h * 0.45, 0, w / 2, h * 0.45, Math.max(w, h) * 0.7);
+      g.addColorStop(0, rgba(L > 0.5 ? '#ffffff' : mix(p.fond, '#ffffff', 0.12), 0.5)); g.addColorStop(1, rgba(p.fond, 0)); x.fillStyle = g; x.fillRect(0, 0, w, h);
+      return bgC;
+    }
+    function glassPath(x, off) {
+      const { Hh } = S, n = 90; x.beginPath();
+      for (let k = 0; k <= n; k++) { const v = -Hh + (2 * Hh * k) / n; x.lineTo(profile(Math.max(-Hh * 0.999, Math.min(Hh * 0.999, v))) + off, v); }
+      for (let k = n; k >= 0; k--) { const v = -Hh + (2 * Hh * k) / n; x.lineTo(-profile(Math.max(-Hh * 0.999, Math.min(Hh * 0.999, v))) - off, v); }
+      x.closePath();
+    }
+    function lut() {
+      const cols = p.couleurs.length ? p.couleurs : ['#d9b27a'], L = new Uint32Array((cols.length + 1) * 16), m = p.melange;
+      cols.forEach((c, i) => { const h = hex(c); for (let s = 0; s < 16; s++) { const f = 1 + ((s - 7.5) / 7.5) * m * 0.22; const r = Math.max(0, Math.min(255, h[0] * f)), g = Math.max(0, Math.min(255, h[1] * f)), b = Math.max(0, Math.min(255, h[2] * f)); L[(i + 1) * 16 + s] = (255 << 24) | (b << 16) | (g << 8) | r; } });
+      return L;
+    }
+    function drawSand() {
+      const { GW, GH, G, Sh, N } = S;
+      if (!S.off) { S.off = document.createElement('canvas'); S.off.width = GW; S.off.height = GH; S.offx = S.off.getContext('2d'); S.img = S.offx.createImageData(GW, GH); S.u32 = new Uint32Array(S.img.data.buffer); }
+      const L = lut(), U = S.u32, nc = p.couleurs.length || 1;
+      for (let k = 0; k < N; k++) { const c = G[k]; U[k] = c && c !== 255 ? L[Math.min(nc, c) * 16 + (Sh[k] >> 4)] : 0; }
+      S.offx.putImageData(S.img, 0, 0);
+    }
+    function frame(x, sandImg) {
+      const { Hh, R, cs } = S, mt = p.monture, capH = Hh * 0.075, capW = R * 1.32, gl = lum(p.fond) > 0.5;
+      // verre (fond)
+      glassPath(x, cs * 0.6); x.fillStyle = gl ? 'rgba(255,255,255,0.35)' : 'rgba(255,255,255,0.05)'; x.fill();
+      if (sandImg) { x.imageSmoothingEnabled = false; x.drawImage(sandImg, -S.GW * cs / 2, -S.GH * cs / 2, S.GW * cs, S.GH * cs); x.imageSmoothingEnabled = true; }
+      // reflets
+      if (p.reflets > 0) {
+        glassPath(x, cs * 0.6); x.strokeStyle = gl ? rgba('#000000', 0.2 + 0.3 * p.reflets) : rgba('#ffffff', 0.25 + 0.45 * p.reflets); x.lineWidth = Math.max(1, Hh * 0.008); x.stroke();
+        x.save(); glassPath(x, cs * 0.6); x.clip();
+        const g = x.createLinearGradient(-R, 0, R, 0); g.addColorStop(0, rgba('#ffffff', 0)); g.addColorStop(0.16, rgba('#ffffff', 0.22 * p.reflets)); g.addColorStop(0.24, rgba('#ffffff', 0)); g.addColorStop(0.78, rgba('#ffffff', 0)); g.addColorStop(0.86, rgba('#ffffff', 0.12 * p.reflets)); g.addColorStop(1, rgba('#ffffff', 0));
+        x.fillStyle = g; x.fillRect(-R * 1.2, -Hh, R * 2.4, Hh * 2); x.restore();
+      } else { glassPath(x, cs * 0.6); x.strokeStyle = rgba(gl ? '#000000' : '#ffffff', 0.35); x.lineWidth = 1; x.stroke(); }
+      // monture
+      const sh = lum(mt) > 0.5 ? mix(mt, '#000000', 0.25) : mix(mt, '#ffffff', 0.18);
+      if (p.colonnes) for (const sx of [-1, 1]) { const px = sx * capW * 0.88, pw = Math.max(2, R * 0.08); x.fillStyle = mt; x.fillRect(px - pw / 2, -Hh - capH * 0.2, pw, Hh * 2 + capH * 0.4); x.fillStyle = sh; x.fillRect(px - pw / 2, -Hh, pw * 0.3, Hh * 2); }
+      for (const sy of [-1, 1]) {
+        const y0 = sy < 0 ? -Hh - capH : Hh; x.fillStyle = mt; rr(x, -capW, y0, capW * 2, capH, capH * 0.3); x.fill();
+        x.fillStyle = sh; x.fillRect(-capW * 0.94, sy < 0 ? y0 + capH * 0.12 : y0 + capH * 0.7, capW * 1.88, capH * 0.16);
+      }
+    }
+    function rr(x, a, b, w, h, r) { x.beginPath(); x.moveTo(a + r, b); x.arcTo(a + w, b, a + w, b + h, r); x.arcTo(a + w, b + h, a, b + h, r); x.arcTo(a, b + h, a, b, r); x.arcTo(a, b, a + w, b, r); x.closePath(); }
+
+    app.loop((t, dt) => {
+      dt = Math.min(1 / 20, dt || 0);
+      const { w, h, dpr } = app.size; buildLogo();
+      const key = [w, h, p.forme, p.grains, p.remplissage, p.motif, p.strates, p.couleurs.length, app.seed, logoKey].join('|');
+      if (!S || key !== gKey) { gKey = key; cKey = p.col; build(w, h); }
+      if (cKey !== p.col) { cKey = p.col; walls(); }
+      if (app.thumbnail) { if (!S.th) { S.th = true; for (let k = 0; k < 160; k++) step(); } }
+      else {
+        simT += dt;
+        if (S.flip) { const u = Math.min(1, (simT - S.flip.t0) / S.flip.dur); S.A = S.flip.a0 + (S.flip.a1 - S.flip.a0) * ease(u); if (u >= 1) { S.A = S.flip.a1; S.flip = null; } }
+        if (S.rest > 0) S.rest -= dt; else S.acc = (S.acc || 0) + p.vitesse; while (S.acc >= 1) { S.acc -= 1; step(); }
+        if (!S.flip && !S.hold && p.retourner) {
+          S.cnt = (S.cnt || 0) + 1;
+          if (S.cnt % 8 === 0) { const up = upperCount(); if (up <= Math.max(2, S.total * 0.002)) S.empt += dt * 8; else S.empt = 0; }
+          if (S.empt > p.pause) startFlip();
+        }
+      }
+      ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.drawImage(backdrop(dpr), 0, 0);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      drawSand();
+      // ombre portée
+      const sw = Math.abs(Math.cos(S.A)) * S.R * 1.4 + Math.abs(Math.sin(S.A)) * S.Hh * 1.05;
+      const gsh = ctx.createRadialGradient(S.cx, S.cy + S.Ht * 0.5, 0, S.cx, S.cy + S.Ht * 0.5, sw * 1.2); gsh.addColorStop(0, rgba('#000000', lum(p.fond) > 0.5 ? 0.18 : 0.35)); gsh.addColorStop(1, rgba('#000000', 0));
+      ctx.save(); ctx.translate(0, 0); ctx.scale(1, 1); ctx.fillStyle = gsh; ctx.beginPath(); ctx.ellipse(S.cx, S.cy + S.Ht * 0.5, sw * 1.2, S.Ht * 0.035, 0, 0, TAU); ctx.fill(); ctx.restore();
+      ctx.save(); ctx.translate(S.cx, S.cy); ctx.rotate(S.A); frame(ctx, S.off); ctx.restore();
+      app.finish(ctx);
+    });
+
+    // ——— SVG ———
+    function toSVG() {
+      const { w, h } = app.size, f = (v) => +v.toFixed(2); const { GW, GH, G, cs, Hh, R } = S, cols = p.couleurs.length ? p.couleurs : ['#d9b27a'];
+      let o = `<rect width="100%" height="100%" fill="${p.fond}"/>`;
+      o += `<g transform="translate(${f(S.cx)} ${f(S.cy)}) rotate(${f(S.A * 180 / Math.PI)})">`;
+      // verre
+      let d = ''; const n = 90; for (let k = 0; k <= n; k++) { const v = -Hh + (2 * Hh * k) / n; d += (k ? 'L' : 'M') + f(profile(Math.max(-Hh * 0.999, Math.min(Hh * 0.999, v))) + cs * 0.6) + ' ' + f(v); }
+      for (let k = n; k >= 0; k--) { const v = -Hh + (2 * Hh * k) / n; d += 'L' + f(-profile(Math.max(-Hh * 0.999, Math.min(Hh * 0.999, v))) - cs * 0.6) + ' ' + f(v); }
+      o += `<path d="${d}Z" fill="#ffffff" fill-opacity="${lum(p.fond) > 0.5 ? 0.35 : 0.05}"/>`;
+      // sable : plages horizontales de même couleur
+      const paths = cols.map(() => []), x0 = -GW * cs / 2, y0 = -GH * cs / 2;
+      for (let j = 0; j < GH; j++) {
+        let i = 0; while (i < GW) { const c = G[j * GW + i]; if (!c || c === 255) { i++; continue; } let e = i + 1; while (e < GW && G[j * GW + e] === c) e++; paths[Math.min(cols.length, c) - 1].push(`M${f(x0 + i * cs)} ${f(y0 + j * cs)}h${f((e - i) * cs)}v${f(cs)}h${f(-(e - i) * cs)}Z`); i = e; }
+      }
+      paths.forEach((P, i) => { if (P.length) o += `<path fill="${cols[i]}" d="${P.join('')}"/>`; });
+      o += `<path d="${d}Z" fill="none" stroke="${lum(p.fond) > 0.5 ? '#000000' : '#ffffff'}" stroke-opacity="${f(lum(p.fond) > 0.5 ? 0.2 + 0.3 * p.reflets : 0.25 + 0.45 * p.reflets)}" stroke-width="${f(Math.max(1, Hh * 0.008))}"/>`;
+      const capH = Hh * 0.075, capW = R * 1.32;
+      if (p.colonnes) for (const sx of [-1, 1]) { const pw = Math.max(2, R * 0.08); o += `<rect x="${f(sx * capW * 0.88 - pw / 2)}" y="${f(-Hh - capH * 0.2)}" width="${f(pw)}" height="${f(Hh * 2 + capH * 0.4)}" fill="${p.monture}"/>`; }
+      for (const sy of [-1, 1]) o += `<rect x="${f(-capW)}" y="${f(sy < 0 ? -Hh - capH : Hh)}" width="${f(capW * 2)}" height="${f(capH)}" rx="${f(capH * 0.3)}" fill="${p.monture}"/>`;
+      o += '</g>';
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">${o}</svg>`;
+    }
+  </script>
+</body>
+</html>
