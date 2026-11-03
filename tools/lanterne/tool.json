@@ -1,0 +1,15 @@
+{
+  "slug": "lanterne",
+  "title": "Lanterne",
+  "type": "motion",
+  "description": "Une lanterne tournante percée d’étoiles, de cercles ou du logo projette ses formes colorées sur les murs, le sol et le plafond d’une chambre noire.",
+  "tags": ["lumiere", "projection", "3d", "interaction", "logo", "svg"],
+  "inspiration": [
+    "Les veilleuses tournantes qui projettent des étoiles au plafond",
+    "Les lanternes de papier percé et leurs gélatines colorées",
+    "Les ombres qui s’étirent en glissant vers les coins d’une pièce"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}
