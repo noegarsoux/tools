@@ -1,0 +1,295 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Culbutos</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Culbutos : des poupées lestées qui se relèvent toujours. Chaque jouet est une demi-sphère de rayon ρ
+    // (unité de la simulation) surmontée d'une tête ; son centre de masse est à d sous le centre de la sphère.
+    // Il roule sans glisser : X = x0 + ρθ. Lagrangien : (I + ρ² + d² − 2ρd cos θ)·θ'' + ρd sin θ·θ'² + g d sin θ = 0.
+    // Les voisins se cognent : chaque jouet est approché par deux cercles (base, tête), et un choc échange une
+    // impulsion le long de la normale, convertie en vitesse angulaire par le bras de levier du point de contact.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const BIE = PAL('biennale'), LUZ = PAL('luzern'), MEN = PAL('menthe');
+    const FORMES = { oeuf: { rh: 0.72, H: 0.95 }, bonhomme: { rh: 0.6, H: 1.4 }, quille: { rh: 0.42, H: 1.75 } };
+    const G = 50, I0 = 0.4;
+
+    let vKey = '', logoM = null, logoKey = '', ptr = null, S = null, gKey = '', logoP = null, logoPK = '';
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.05, vignette: 0.3 },
+      hint: 'Glisser un culbuto : le pencher puis le lâcher · clic : une pichenette · molette : écart entre les jouets',
+      notes: 'Une rangée de culbutos, ces poupées lestées qui se relèvent toujours. Ils roulent sur leur base ronde, oscillent, s’amortissent, et se cognent les uns les autres : une pichenette au bout de la rangée se propage comme une vague. La forme (œuf, bonhomme, quille), le lest, l’écart et les motifs sont réglables, et le ventre porte le logo.',
+      params: {
+        'Culbutos': {
+          nombre: { type: 'range', label: 'Culbutos', min: 1, max: 9, step: 1, value: 5 },
+          forme: { type: 'select', label: 'Forme', options: { oeuf: 'Œuf', bonhomme: 'Bonhomme', quille: 'Quille' }, value: 'bonhomme' },
+          lest: { type: 'range', label: 'Lest', min: 0.15, max: 0.75, step: 0.01, value: 0.4 },
+          amorti: { type: 'range', label: 'Amortissement', min: 0, max: 1, step: 0.01, value: 0.25 },
+          ecart: { type: 'range', label: 'Écart', min: 1.9, max: 3.2, step: 0.01, value: 2.6 },
+          poussees: { type: 'range', label: 'Pichenettes par minute', min: 0, max: 40, step: 1, value: 20 },
+          force: { type: 'range', label: 'Force des pichenettes', min: 0.2, max: 1.5, step: 0.01, value: 0.8 },
+          motif: { type: 'select', label: 'Motif', options: { uni: 'Uni', rayures: 'Rayures', pois: 'Pois' }, value: 'rayures' },
+          chapeau: { type: 'toggle', label: 'Chapeau', value: true },
+          image: { type: 'file', label: 'Image du logo', accept: 'image/*' },
+        },
+        'Couleurs': {
+          couleurs: { type: 'palette', label: 'Jouets', value: ['#e5452a', '#2f5fd0', '#f2e640', '#1f9a6a'] },
+          visage: { type: 'color', label: 'Visage', value: '#f5e3d0' },
+          trait: { type: 'color', label: 'Contour', value: '#1d1b1f' },
+          sol: { type: 'color', label: 'Table', value: '#c9b79c' },
+          fond: { type: 'color', label: 'Fond', value: '#efe8dc' },
+        },
+      },
+      presets: {
+        'Rangée': {},
+        'Œufs': { forme: 'oeuf', motif: 'pois', nombre: 6, couleurs: ['#f2b0c8', '#9dd3f0', '#f2e640', '#f4f3f0'] },
+        'Quilles': { forme: 'quille', nombre: 8, ecart: 2.3, lest: 0.55, couleurs: ['#f4f3f0', '#e5452a'], motif: 'rayures' },
+        'Seul': { nombre: 1, poussees: 10, amorti: 0.12, force: 1.2 },
+        'Domino': { nombre: 9, ecart: 2.15, poussees: 8, force: 1.3, amorti: 0.15, chapeau: false },
+        'Mou': { lest: 0.18, amorti: 0.1, poussees: 6 },
+        'Nerveux': { lest: 0.72, amorti: 0.35, poussees: 36, force: 0.6 },
+        'Nuit': { fond: '#151821', sol: '#262a36', trait: '#f4f3f0', couleurs: ['#7d38e7', '#2f5fd0', '#f2b0c8'], visage: '#f2e9df' },
+        'Biennale': { couleurs: [BIE[2], BIE[3], BIE[4]], fond: BIE[1], sol: BIE[0], trait: '#16161a' },
+        'Luzern': { couleurs: [LUZ[0], LUZ[1], LUZ[2]], fond: LUZ[3], sol: LUZ[4], trait: '#16161a' },
+        'Menthe': { couleurs: [MEN[2], MEN[3], MEN[0]], fond: MEN[1], sol: MEN[0], trait: '#16161a', motif: 'uni' },
+      },
+      brand(colors) {
+        const s = colors.slice().sort((a, b) => lum(a) - lum(b)), D = s[0], L = s[s.length - 1], mid = s.length > 2 ? s.slice(1, -1) : s;
+        return { couleurs: mid, trait: D, fond: L, sol: mix(L, D, 0.3), visage: mix(L, '#f5e3d0', 0.4) };
+      },
+      pointer: {
+        down: (q) => { if (!S) return; const i = pick(q.x, q.y); ptr = { x: q.x, y: q.y, moved: 0, i }; },
+        drag: (q) => {
+          if (!ptr || !S) return; ptr.moved = Math.max(ptr.moved, Math.hypot(q.x - ptr.x, q.y - ptr.y));
+          if (ptr.moved > 6 && ptr.i >= 0) { const T = S.toys[ptr.i], tgt = Math.max(-1.2, Math.min(1.2, (q.x - ptr.x) / (S.px * 2.2))); T.grab = tgt; }
+        },
+        up: (q) => {
+          if (!ptr || !S) { ptr = null; return; }
+          if (ptr.moved <= 6) { const i = ptr.i >= 0 ? ptr.i : 0, T = S.toys[i], s = q && q.x < xOf(T) * S.px + S.ox ? 1 : -1; T.w += s * 3.5 * p.force; }
+          if (ptr.i >= 0) S.toys[ptr.i].grab = null; ptr = null;
+        },
+        wheel: (q, dy) => app.set('ecart', Math.max(1.9, Math.min(3.2, +(p.ecart + (dy > 0 ? -0.05 : 0.05)).toFixed(2)))),
+      },
+      onChange(k) { if (['*', 'image'].includes(k)) logoKey = ''; if (k === '*' || k === 'nombre') gKey = ''; },
+      export: { name: 'culbutos', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    function hex(x) { const n = parseInt(x.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
+    function lum(x) { const c = hex(x); return (c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114) / 255; }
+    function mix(a, b, t) { const A = hex(a), C = hex(b); return '#' + A.map((v, i) => Math.round(v + (C[i] - v) * t).toString(16).padStart(2, '0')).join(''); }
+    function rgba(c, a) { const h = hex(c); return `rgba(${h[0]},${h[1]},${h[2]},${a})`; }
+    function rng(s) { return () => { s |= 0; s = (s + 0x6d2b79f5) | 0; let t = Math.imul(s ^ (s >>> 15), 1 | s); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+    const col = (i) => { const c = p.couleurs; return c.length ? c[((i % c.length) + c.length) % c.length] : '#e5452a'; };
+
+    function buildLogo() {
+      const img0 = p.image || app.logoImg, key = img0 ? (img0.src || 'c') : 'demo'; if (key === logoKey) return; logoKey = key; vKey = '';
+      const M = 200, c = document.createElement('canvas'); c.width = c.height = M; const x = c.getContext('2d', { willReadFrequently: true }), L = M * 0.94, cx = M / 2;
+      if (img0) { const iw = img0.naturalWidth || img0.width, ih = img0.naturalHeight || img0.height, s = L / Math.max(iw, ih); x.drawImage(img0, cx - iw * s / 2, cx - ih * s / 2, iw * s, ih * s); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(cx, cx, L * 0.48, 0, TAU); x.arc(cx, cx, L * 0.27, 0, TAU, true); x.fill('evenodd'); x.fillRect(cx - L * 0.07, cx - L * 0.5, L * 0.14, L); }
+      const d = x.getImageData(0, 0, M, M).data; let transp = 0; for (let i = 3; i < d.length; i += 4) if (d[i] < 128) transp++; const useA = transp > M * M * 0.05;
+      const F = new Float64Array(M * M); for (let i = 0; i < M * M; i++) { const o = i * 4, l = (d[o] * 0.2126 + d[o + 1] * 0.7152 + d[o + 2] * 0.0722) / 255; F[i] = useA ? d[o + 3] / 255 : (d[o + 3] / 255) * Math.min(1, Math.max(0, (0.75 - l) * 2)); }
+      { const G2 = new Float64Array(M * M); for (let j = 1; j < M - 1; j++) for (let i = 1; i < M - 1; i++) { let a = 0; for (let b = -1; b <= 1; b++) for (let c = -1; c <= 1; c++) a += F[(j + b) * M + i + c] * (b || c ? (b && c ? 1 : 2) : 4); G2[j * M + i] = a / 16; } F.set(G2); }
+      for (let k = 0; k < M; k++) F[k] = F[(M - 1) * M + k] = F[k * M] = F[k * M + M - 1] = 0;
+      logoM = contours(F, M, M, 0.5, 0, 0, 1).filter((c) => c.closed && c.pts.length > 6).map((c) => chaikin(chaikin(c.pts, true), true).map((q) => [q[0] / M - 0.5, q[1] / M - 0.5]));
+    }
+    // carrés marchants + chaînage
+    function contours(F, nx, ny, lev, ox, oy, cs) {
+      const pt = new Map(), adj = new Map();
+      const P = (id) => { let q = pt.get(id); if (q) return q; const cell = id >> 1, i = cell % nx, j = (cell - i) / nx; let a, b, ax, ay, bx, by; if (id & 1) { a = F[j * nx + i]; b = F[(j + 1) * nx + i]; ax = bx = i; ay = j; by = j + 1; } else { a = F[j * nx + i]; b = F[j * nx + i + 1]; ay = by = j; ax = i; bx = i + 1; } const t = (lev - a) / (b - a || 1e-9); q = [ox + (ax + (bx - ax) * t) * cs, oy + (ay + (by - ay) * t) * cs]; pt.set(id, q); return q; };
+      const link = (a, b) => { (adj.get(a) || adj.set(a, []).get(a)).push(b); (adj.get(b) || adj.set(b, []).get(b)).push(a); };
+      for (let j = 0; j < ny - 1; j++) for (let i = 0; i < nx - 1; i++) {
+        const A = F[j * nx + i] > lev, B = F[j * nx + i + 1] > lev, C = F[(j + 1) * nx + i + 1] > lev, D = F[(j + 1) * nx + i] > lev, idx = A | (B << 1) | (C << 2) | (D << 3);
+        if (idx === 0 || idx === 15) continue;
+        const T = (j * nx + i) * 2, R = (j * nx + i + 1) * 2 + 1, Bo = ((j + 1) * nx + i) * 2, Le = (j * nx + i) * 2 + 1;
+        const ctr = (F[j * nx + i] + F[j * nx + i + 1] + F[(j + 1) * nx + i + 1] + F[(j + 1) * nx + i]) / 4 > lev;
+        switch (idx) {
+          case 1: case 14: link(Le, T); break; case 2: case 13: link(T, R); break; case 3: case 12: link(Le, R); break;
+          case 4: case 11: link(R, Bo); break; case 6: case 9: link(T, Bo); break; case 7: case 8: link(Le, Bo); break;
+          case 5: if (ctr) { link(Le, Bo); link(T, R); } else { link(Le, T); link(R, Bo); } break;
+          case 10: if (ctr) { link(Le, T); link(R, Bo); } else { link(Le, Bo); link(T, R); } break;
+        }
+      }
+      const seen = new Set(), out = [];
+      const walk = (s) => { const L = [s]; seen.add(s); let cur = s; for (;;) { const nb = (adj.get(cur) || []).find((x) => !seen.has(x)); if (nb === undefined) break; seen.add(nb); L.push(nb); cur = nb; } return L; };
+      for (const [id, nb] of adj) if (nb.length === 1 && !seen.has(id)) out.push({ pts: walk(id).map(P), closed: false });
+      for (const [id] of adj) if (!seen.has(id)) out.push({ pts: walk(id).map(P), closed: true });
+      return out;
+    }
+    function chaikin(pts, closed) {
+      const o = []; const n = pts.length; for (let k = 0; k < (closed ? n : n - 1); k++) { const a = pts[k], b = pts[(k + 1) % n]; o.push([a[0] * 0.75 + b[0] * 0.25, a[1] * 0.75 + b[1] * 0.25], [a[0] * 0.25 + b[0] * 0.75, a[1] * 0.25 + b[1] * 0.75]); }
+      if (!closed) { o.unshift(pts[0]); o.push(pts[n - 1]); } return o;
+    }
+
+    function logoPath() {
+      if (!logoM) return null; if (logoP && logoPK === logoKey) return logoP; logoPK = logoKey; logoP = new Path2D();
+      for (const L of logoM) { logoP.moveTo(L[0][0], L[0][1]); for (let k = 1; k < L.length; k++) logoP.lineTo(L[k][0], L[k][1]); logoP.closePath(); }
+      return logoP;
+    }
+
+    // ——— simulation (unités de ρ) ———
+    function build(w, h) {
+      const n = Math.round(p.nombre); S = { w, h, n, toys: [], t: 0, next: 0.3, side: 0, rnd: rng((app.seed || 1) * 3301) };
+      for (let i = 0; i < n; i++) S.toys.push({ th: (S.rnd() - 0.5) * 0.1, w: 0, grab: null });
+      layout();
+    }
+    function layout() {
+      const { w, h, n } = S, F = FORMES[p.forme], top = F.H + F.rh * (p.chapeau ? 2.1 : 1.15), span = (n - 1) * p.ecart + 2 + 0.6;
+      S.px = Math.min(w * 0.92 / span, h * 0.62 / (top + 1));
+      S.floor = h * 0.5 + (top + 1) * S.px * 0.5 - S.px * 0.05; S.ox = w / 2;
+    }
+    const x0Of = (i) => (i - (S.n - 1) / 2) * p.ecart;
+    const xOf = (T) => x0Of(S.toys.indexOf(T)) + T.th;
+    const lestD = () => p.lest;
+    // centre de la sphère et rotation d'un vecteur du repère du jouet
+    const cen = (i) => [x0Of(i) + S.toys[i].th, -1];
+    const rot = (th, q) => [q[0] * Math.cos(th) - q[1] * Math.sin(th), q[0] * Math.sin(th) + q[1] * Math.cos(th)];
+    const Ieff = (th) => { const d = lestD(); return I0 + 1 + d * d - 2 * d * Math.cos(th); };
+
+    function circles(i) {
+      const T = S.toys[i], F = FORMES[p.forme], c = cen(i), hq = rot(T.th, [0, -F.H]);
+      const mq = rot(T.th, [0, -F.H * 0.5]);
+      return [{ c, r: 1 }, { c: [c[0] + mq[0], c[1] + mq[1]], r: (1 + F.rh) * 0.5 }, { c: [c[0] + hq[0], c[1] + hq[1]], r: F.rh }];
+    }
+    function sim(dt) {
+      const sub = 6, h = dt / sub, d = lestD(), damp = 0.15 + p.amorti * 2.4;
+      for (let s = 0; s < sub; s++) {
+        for (const T of S.toys) {
+          if (T.grab !== null && T.grab !== undefined) { const k = 60; T.w += (k * (T.grab - T.th) - 12 * T.w) * h; T.th += T.w * h; continue; }
+          const acc = -(d * Math.sin(T.th) * T.w * T.w + G * d * Math.sin(T.th)) / Ieff(T.th) - damp * T.w;
+          T.w += acc * h; T.th += T.w * h;
+          if (Math.abs(T.th) > 1.35) { T.th = Math.sign(T.th) * 1.35; T.w *= -0.3; }
+        }
+        // chocs entre voisins
+        for (let i = 0; i < S.n - 1; i++) {
+          const A = S.toys[i], Bt = S.toys[i + 1], ca = circles(i), cb = circles(i + 1);
+          for (const a of ca) for (const b of cb) {
+            const dx = b.c[0] - a.c[0], dy = b.c[1] - a.c[1], dist = Math.hypot(dx, dy), pen = a.r + b.r - dist;
+            if (pen <= 0) continue;
+            const n = [dx / dist, dy / dist], pa = [a.c[0] + n[0] * a.r, a.c[1] + n[1] * a.r];
+            const qa = [pa[0] - ca[0].c[0], pa[1] - ca[0].c[1]], qb = [pa[0] - cb[0].c[0], pa[1] - cb[0].c[1]];
+            const la = (1 - qa[1]) * n[0] + qa[0] * n[1], lb = (1 - qb[1]) * n[0] + qb[0] * n[1];
+            const Ia = Ieff(A.th), Ib = Ieff(Bt.th), vn = Bt.w * lb - A.w * la;
+            if (vn < 0) { const J = -(1 + 0.75) * vn / (la * la / Ia + lb * lb / Ib); A.w -= J * la / Ia; Bt.w += J * lb / Ib; }
+            const k = pen * 0.9 / (la * la + lb * lb + 1e-6); A.th -= k * la; Bt.th += k * lb;
+          }
+        }
+      }
+    }
+    function autoPush(dt) {
+      if (p.poussees <= 0 || ptr) return;
+      S.next -= dt; if (S.next > 0) return;
+      S.next = 60 / p.poussees * (0.75 + S.rnd() * 0.5);
+      // le plus souvent au bout de la rangée, en alternant les côtés ; parfois au hasard
+      let i, s;
+      if (S.rnd() < 0.75) { S.side ^= 1; i = S.side ? 0 : S.n - 1; s = S.side ? 1 : -1; } else { i = Math.floor(S.rnd() * S.n); s = S.rnd() < 0.5 ? -1 : 1; }
+      S.toys[i].w += s * (3.2 + S.rnd() * 1.8) * p.force;
+    }
+    function pick(x, y) {
+      let best = -1, bd = 1e9;
+      for (let i = 0; i < S.n; i++) for (const c of circles(i)) { const X = S.ox + c.c[0] * S.px, Y = S.floor + c.c[1] * S.px, dd = Math.hypot(x - X, y - Y) - c.r * S.px; if (dd < bd) { bd = dd; best = i; } }
+      return bd < S.px * 0.6 ? best : -1;
+    }
+
+    // ——— dessin (repère du jouet, unités de ρ, centre de la sphère à l'origine) ———
+    function bodyD(k) {
+      const F = FORMES[p.forme], r1 = 1, r2 = F.rh, H = F.H, al = Math.asin((r1 - r2) / H), f = (v) => +(v * k).toFixed(2);
+      const n = [Math.cos(al), -Math.sin(al)], P1r = [r1 * n[0], r1 * n[1]], P2r = [r2 * n[0], -H + r2 * n[1]];
+      return `M${f(P2r[0])} ${f(P2r[1])}L${f(P1r[0])} ${f(P1r[1])}A${f(r1)} ${f(r1)} 0 1 1 ${f(-P1r[0])} ${f(P1r[1])}L${f(-P2r[0])} ${f(P2r[1])}A${f(r2)} ${f(r2)} 0 0 1 ${f(P2r[0])} ${f(P2r[1])}Z`;
+    }
+    // décor commun au canevas et au SVG : liste de formes dans le repère du jouet
+    function decor(i) {
+      const F = FORMES[p.forme], rh = F.rh, H = F.H, out = [], c0 = col(i), c1 = col(i + 1), c2 = col(i + 2);
+      if (p.motif === 'rayures') for (let y = -H - rh; y < 1.05; y += 0.24) out.push({ k: 'rect', x: -1.2, y, w: 2.4, h: 0.1, fill: c1, clip: 1 });
+      else if (p.motif === 'pois') for (let y = -H - rh, j = 0; y < 1.05; y += 0.26, j++) for (let x = -1.2 + (j % 2) * 0.13; x < 1.2; x += 0.26) out.push({ k: 'circle', x, y, r: 0.055, fill: c1, clip: 1 });
+      // col
+      out.push({ k: 'rect', x: -1.2, y: -H + rh * 0.78, w: 2.4, h: 0.16, fill: c2, clip: 1 });
+      // visage
+      out.push({ k: 'circle', x: 0, y: -H, r: rh * 0.78, fill: p.visage, stroke: p.trait, w: 0.025 });
+      for (const s of [-1, 1]) { out.push({ k: 'circle', x: s * rh * 0.27, y: -H - rh * 0.1, r: rh * 0.085, fill: p.trait }); out.push({ k: 'circle', x: s * rh * 0.48, y: -H + rh * 0.2, r: rh * 0.13, fill: rgba(c0, 0.5) }); }
+      out.push({ k: 'arc', x: 0, y: -H + rh * 0.12, r: rh * 0.26, a0: 0.35, a1: Math.PI - 0.35, stroke: p.trait, w: 0.035 });
+      // ventre au logo
+      out.push({ k: 'circle', x: 0, y: 0.08, r: 0.48, fill: p.visage, stroke: p.trait, w: 0.035 });
+      out.push({ k: 'logo', x: 0, y: 0.08, s: 0.62 });
+      // chapeau
+      if (p.chapeau) {
+        const yb = -H - rh * 0.62, hw = Math.sqrt(Math.max(0, rh * rh - (rh * 0.62) ** 2)) * 1.12;
+        out.push({ k: 'poly', pts: [[-hw, yb], [hw, yb], [rh * 0.12, yb - rh * 1.25]], fill: c2, stroke: p.trait, w: 0.035 });
+        out.push({ k: 'circle', x: rh * 0.12, y: yb - rh * 1.25, r: rh * 0.2, fill: c1, stroke: p.trait, w: 0.035 });
+      }
+      return out;
+    }
+    function drawToy(x, i) {
+      const T = S.toys[i], c = cen(i), k = S.px, lw = Math.max(1, k * 0.035);
+      x.save(); x.translate(S.ox + c[0] * k, S.floor + c[1] * k); x.rotate(T.th);
+      const body = new Path2D(bodyD(k)); x.fillStyle = col(i); x.fill(body);
+      x.save(); x.clip(body);
+      // modelé : ombre propre du côté opposé à la lumière
+      const g = x.createLinearGradient(-k, 0, k, 0); g.addColorStop(0, rgba('#ffffff', 0.18)); g.addColorStop(0.55, rgba('#ffffff', 0)); g.addColorStop(1, rgba('#000000', 0.18));
+      for (const it of decor(i)) if (it.clip) drawIt(x, it, k);
+      x.fillStyle = g; x.fillRect(-k * 1.3, -k * 4, k * 2.6, k * 5.2);
+      x.restore();
+      for (const it of decor(i)) if (!it.clip) drawIt(x, it, k);
+      x.strokeStyle = p.trait; x.lineWidth = lw; x.stroke(body);
+      x.restore();
+    }
+    function drawIt(x, it, k) {
+      if (it.k === 'rect') { x.fillStyle = it.fill; x.fillRect(it.x * k, it.y * k, it.w * k, it.h * k); }
+      else if (it.k === 'circle') { x.beginPath(); x.arc(it.x * k, it.y * k, it.r * k, 0, TAU); x.fillStyle = it.fill; x.fill(); if (it.stroke) { x.strokeStyle = it.stroke; x.lineWidth = Math.max(1, it.w * k); x.stroke(); } }
+      else if (it.k === 'arc') { x.beginPath(); x.arc(it.x * k, it.y * k, it.r * k, it.a0, it.a1); x.strokeStyle = it.stroke; x.lineWidth = Math.max(1, it.w * k); x.lineCap = 'round'; x.stroke(); }
+      else if (it.k === 'poly') { x.beginPath(); it.pts.forEach((q, j) => j ? x.lineTo(q[0] * k, q[1] * k) : x.moveTo(q[0] * k, q[1] * k)); x.closePath(); x.fillStyle = it.fill; x.fill(); x.strokeStyle = it.stroke; x.lineWidth = Math.max(1, it.w * k); x.lineJoin = 'round'; x.stroke(); }
+      else if (it.k === 'logo') { const lp = logoPath(); if (lp) { x.save(); x.translate(it.x * k, it.y * k); x.scale(it.s * k, it.s * k); x.fillStyle = p.trait; x.fill(lp, 'evenodd'); x.restore(); } }
+    }
+
+    app.loop((t, dt) => {
+      dt = Math.min(1 / 20, dt || 0);
+      const { w, h, dpr } = app.size; buildLogo();
+      const key = [w, h, app.seed, Math.round(p.nombre)].join('|'); if (!S || key !== gKey) { gKey = key; build(w, h); }
+      layout();
+      if (app.thumbnail) S.toys.forEach((T, i) => { T.th = 0.38 * Math.sin(i * 1.3 + 0.6) * Math.exp(-i * 0.12); T.w = 0; });
+      else { S.t += dt; autoPush(dt); sim(dt); }
+      ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.fillStyle = p.fond; ctx.fillRect(0, 0, canvas.width, canvas.height); ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = p.sol; ctx.fillRect(0, S.floor, w, h - S.floor); ctx.fillStyle = rgba('#000000', 0.12); ctx.fillRect(0, S.floor, w, Math.max(1, S.px * 0.03));
+      // ombres au sol
+      for (let i = 0; i < S.n; i++) { const c = cen(i); ctx.fillStyle = rgba('#000000', 0.16); ctx.beginPath(); ctx.ellipse(S.ox + (c[0] + 0.15) * S.px, S.floor + S.px * 0.04, S.px * (0.95 + Math.abs(S.toys[i].th) * 0.3), S.px * 0.14, 0, 0, TAU); ctx.fill(); }
+      for (let i = 0; i < S.n; i++) drawToy(ctx, i);
+      app.finish(ctx);
+    });
+
+    // ——— SVG ———
+    function toSVG() {
+      const { w, h } = app.size, f = (v) => +v.toFixed(2), k = S.px;
+      let o = `<rect width="100%" height="100%" fill="${p.fond}"/><rect y="${f(S.floor)}" width="${w}" height="${f(h - S.floor)}" fill="${p.sol}"/>`, defs = `<clipPath id="corps"><path d="${bodyD(k)}"/></clipPath>`;
+      let lp = ''; if (logoM) for (const L of logoM) { const st = Math.max(1, Math.floor(L.length / 120)); lp += 'M' + f(L[0][0] * 100) + ' ' + f(L[0][1] * 100); for (let q = st; q < L.length; q += st) lp += 'L' + f(L[q][0] * 100) + ' ' + f(L[q][1] * 100); lp += 'Z'; }
+      const fillA = (c) => c.startsWith('rgba') ? `fill="#000" style="fill:${c}"` : `fill="${c}"`;
+      const svgIt = (it) => {
+        if (it.k === 'rect') return `<rect x="${f(it.x * k)}" y="${f(it.y * k)}" width="${f(it.w * k)}" height="${f(it.h * k)}" fill="${it.fill}"/>`;
+        if (it.k === 'circle') return `<circle cx="${f(it.x * k)}" cy="${f(it.y * k)}" r="${f(it.r * k)}" ${fillA(it.fill)}${it.stroke ? ` stroke="${it.stroke}" stroke-width="${f(Math.max(1, it.w * k))}"` : ''}/>`;
+        if (it.k === 'arc') { const A = [(it.x + it.r * Math.cos(it.a0)) * k, (it.y + it.r * Math.sin(it.a0)) * k], B = [(it.x + it.r * Math.cos(it.a1)) * k, (it.y + it.r * Math.sin(it.a1)) * k]; return `<path d="M${f(A[0])} ${f(A[1])}A${f(it.r * k)} ${f(it.r * k)} 0 0 1 ${f(B[0])} ${f(B[1])}" fill="none" stroke="${it.stroke}" stroke-width="${f(Math.max(1, it.w * k))}" stroke-linecap="round"/>`; }
+        if (it.k === 'poly') return `<path d="${it.pts.map((q, j) => (j ? 'L' : 'M') + f(q[0] * k) + ' ' + f(q[1] * k)).join('')}Z" fill="${it.fill}" stroke="${it.stroke}" stroke-width="${f(Math.max(1, it.w * k))}" stroke-linejoin="round"/>`;
+        if (it.k === 'logo') return lp ? `<path d="${lp}" transform="translate(${f(it.x * k)} ${f(it.y * k)}) scale(${f(it.s * k / 100)})" fill="${p.trait}" fill-rule="evenodd"/>` : '';
+        return '';
+      };
+      for (let i = 0; i < S.n; i++) { const c = cen(i); o += `<ellipse cx="${f(S.ox + (c[0] + 0.15) * k)}" cy="${f(S.floor + k * 0.04)}" rx="${f(k * (0.95 + Math.abs(S.toys[i].th) * 0.3))}" ry="${f(k * 0.14)}" fill="#000" fill-opacity="0.16"/>`; }
+      for (let i = 0; i < S.n; i++) {
+        const T = S.toys[i], c = cen(i), D = decor(i);
+        o += `<g transform="translate(${f(S.ox + c[0] * k)} ${f(S.floor + c[1] * k)}) rotate(${f(T.th * 180 / Math.PI)})"><path d="${bodyD(k)}" fill="${col(i)}"/><g clip-path="url(#corps)">${D.filter((it) => it.clip).map(svgIt).join('')}</g>${D.filter((it) => !it.clip).map(svgIt).join('')}<path d="${bodyD(k)}" fill="none" stroke="${p.trait}" stroke-width="${f(Math.max(1, k * 0.035))}"/></g>`;
+      }
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><defs>${defs}</defs>${o}</svg>`;
+    }
+  </script>
+</body>
+</html>
