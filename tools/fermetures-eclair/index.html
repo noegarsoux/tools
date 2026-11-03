@@ -1,0 +1,411 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Fermetures éclair</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Fermetures éclair : N fermetures parallèles cousues dans un tissu. Chaque fermeture suit une ligne médiane
+    // c(y) (droite ou ondulée). Sous le curseur, les deux rangées de dents s'engrènent ; au-dessus, elles
+    // s'écartent en V : demi-écart g(y) = G·(1 − e^(−3·(ys − y)/Lv)). Le tissu est un grand rectangle percé
+    // (règle pair-impair) des fentes ouvertes, qui laissent voir le dessous : une doublure avec le logo.
+    // Les dents sont des sprites (métal ou plastique) posés le long de chaque bord, inclinés selon sa pente.
+    // Le curseur suit sa consigne avec un ressort ; son accélération fait balancer la tirette (pendule).
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const ACI = PAL('acide'), BIT = PAL('bitmap'), MEN = PAL('menthe'), ORB = PAL('orbite');
+
+    let simT = 0, vKey = '', logoM = null, logoKey = '', ptr = null, Z = [], UL = null, ulKey = '', TX = null, txKey = '', SP = null, spKey = '';
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.04, vignette: 0.16 },
+      hint: 'Glissez une fermeture pour l\'ouvrir ou la fermer · clic : tout ouvrir ou tout fermer · molette : taille des dents',
+      notes: 'Une fermeture éclair, ce sont deux rangées de dents décalées d\'une demi-dent, cousues sur deux rubans. Le curseur les force à s\'engrener en descendant et les écarte en remontant : au-dessus de lui, le tissu s\'ouvre en V. Ici, plusieurs fermetures traversent un même tissu et, en s\'ouvrant, laissent voir la doublure et le logo imprimé dessous. Les curseurs bougent seuls, en vague, ensemble ou au hasard, et leur tirette se balance à chaque à-coup. Glissez une fermeture pour la tirer vous-même.',
+      params: {
+        'Fermetures': {
+          nombre: { type: 'range', label: 'Nombre', min: 1, max: 9, step: 1, value: 4 },
+          orientation: { type: 'segmented', label: 'Sens', options: { verticale: 'Verticales', horizontale: 'Horizontales' }, value: 'verticale' },
+          ondulation: { type: 'range', label: 'Ondulation', min: 0, max: 1, step: 0.01, value: 0.25 },
+          frequence: { type: 'range', label: 'Fréquence des ondes', min: 0.3, max: 4, step: 0.05, value: 1.2 },
+          ouverture: { type: 'range', label: 'Ouverture', min: 0.1, max: 1, step: 0.01, value: 0.75 },
+          longueur: { type: 'range', label: 'Longueur du V', min: 0.05, max: 1, step: 0.01, value: 0.3 },
+          taille: { type: 'range', label: 'Taille des dents', min: 0.006, max: 0.04, step: 0.0005, value: 0.018 },
+        },
+        'Curseurs': {
+          matiere: { type: 'select', label: 'Matière', options: { or: 'Laiton doré', argent: 'Argent', bronze: 'Bronze', plastique: 'Plastique' }, value: 'or' },
+          tirette: { type: 'segmented', label: 'Tirette', options: { plate: 'Plate', anneau: 'Anneau', cordon: 'Cordon' }, value: 'plate' },
+          mode: { type: 'select', label: 'Mouvement', options: { vague: 'En vague', vaetvient: 'Va-et-vient', ensemble: 'Ensemble', hasard: 'Au hasard' }, value: 'vague' },
+          vitesse: { type: 'range', label: 'Vitesse', min: 0.1, max: 3, step: 0.01, value: 1 },
+          balancement: { type: 'range', label: 'Balancement', min: 0, max: 1, step: 0.01, value: 0.6 },
+        },
+        'Tissu et doublure': {
+          trame: { type: 'segmented', label: 'Tissu', options: { serge: 'Sergé', toile: 'Toile', cuir: 'Cuir' }, value: 'serge' },
+          tissus: { type: 'palette', label: 'Tissus', value: ['#26365c', '#2f4473'] },
+          ruban: { type: 'color', label: 'Ruban', value: '#141a2a' },
+          dents: { type: 'color', label: 'Dents en plastique', value: '#e5452a' },
+          motif: { type: 'segmented', label: 'Doublure', options: { logo: 'Logo', logos: 'Logos', rayures: 'Rayures' }, value: 'logo' },
+          dessous: { type: 'color', label: 'Doublure', value: '#f2c230' },
+          encre: { type: 'color', label: 'Impression', value: '#16161a' },
+          echelle: { type: 'range', label: 'Taille du motif', min: 0.2, max: 1.2, step: 0.01, value: 0.75 },
+          image: { type: 'file', label: 'Logo', accept: 'image/*' },
+        },
+      },
+      presets: {
+        'Blouson': {},
+        'Une seule': { nombre: 1, taille: 0.034, ouverture: 1, longueur: 0.55, ondulation: 0, mode: 'vaetvient', matiere: 'argent', tirette: 'anneau', tissus: ['#1b1b1e'], ruban: '#0c0c0e', dessous: '#e5452a', encre: '#f4f1ea', echelle: 0.85 },
+        'Rideau': { nombre: 9, taille: 0.01, ondulation: 0, ouverture: 1, longueur: 0.5, mode: 'vague', vitesse: 0.7, trame: 'toile', tissus: ['#7a1420', '#8c1a28'], ruban: '#3a0a10', dessous: '#16161a', encre: '#f2c230', motif: 'logos', echelle: 0.5 },
+        'Horizontales': { orientation: 'horizontale', nombre: 5, mode: 'ensemble', ondulation: 0.15, frequence: 2, tissus: ['#e9e4d8', '#d9d2c2'], ruban: '#2a2a2e', matiere: 'argent', dessous: '#2f5fd0', encre: '#f4f1ea', trame: 'toile' },
+        'Plastique': { matiere: 'plastique', dents: '#f2c230', tirette: 'cordon', tissus: ['#e57d9e', '#d86a8e', '#f2b0c8'], ruban: '#f2c230', dessous: '#3a6fd0', encre: '#f4f1ea', motif: 'rayures', nombre: 3, taille: 0.026 },
+        'Ondulées': { nombre: 3, ondulation: 1, frequence: 2.6, ouverture: 0.9, longueur: 0.45, mode: 'vaetvient', tissus: ['#2e3b25', '#3b4a30'], ruban: '#1a2214', matiere: 'bronze', dessous: '#f4f1ea', encre: '#e0402f' },
+        'Cuir noir': { trame: 'cuir', tissus: ['#1a1a1c', '#222225'], ruban: '#0a0a0b', matiere: 'argent', tirette: 'anneau', dessous: '#e5452a', encre: '#16161a', motif: 'rayures', nombre: 2, taille: 0.026, ondulation: 0.1 },
+        'Au hasard': { mode: 'hasard', nombre: 6, taille: 0.014, ondulation: 0.4, frequence: 1.6, tissus: ['#c9c2b2', '#b9b1a0', '#d6cfbf'], ruban: '#4a4238', dessous: '#16161a', encre: '#e5452a', motif: 'logos', echelle: 0.45, trame: 'toile' },
+        'Acide': { tissus: [ACI[1]], ruban: '#000000', matiere: 'argent', dessous: ACI[2], encre: ACI[1], tirette: 'anneau', nombre: 3, ouverture: 1, mode: 'ensemble', trame: 'cuir' },
+        'Menthe': { tissus: [MEN[3], mix(MEN[3], '#000000', 0.12)], ruban: MEN[1], matiere: 'plastique', dents: MEN[0], dessous: MEN[2], encre: MEN[1], tirette: 'cordon', nombre: 5, mode: 'vaetvient', motif: 'logos', echelle: 0.6 },
+        'Orbite': { orientation: 'horizontale', nombre: 3, ondulation: 0.6, frequence: 1, tissus: [ORB[1]], ruban: '#000000', matiere: 'or', dessous: ORB[0], encre: ORB[2], ouverture: 1, longueur: 0.6, taille: 0.024, mode: 'vague', vitesse: 0.8 },
+      },
+      brand(colors) {
+        const s = colors.slice().sort((a, b) => lum(a) - lum(b)), D = s[0], L = s[s.length - 1];
+        const mid = s.length > 2 ? s.slice(1, -1) : [D];
+        return { tissus: mid, ruban: mix(mid[0], '#000000', 0.45), dessous: L, encre: D, dents: mid[mid.length - 1] };
+      },
+      pointer: {
+        down: (q) => { const L = toLocal(q), i = pick(L); ptr = { x: q.x, y: q.y, moved: 0, i }; if (i >= 0) { Z[i].grab = true; Z[i].hold = simT + 5; } },
+        drag: (q) => { if (!ptr) return; ptr.moved += Math.hypot(q.x - ptr.x, q.y - ptr.y); ptr.x = q.x; ptr.y = q.y; if (ptr.i >= 0 && Z[ptr.i] && G) { const L = toLocal(q); Z[ptr.i].tgt = Math.max(0, Math.min(1, (L[1] - G.yMin) / (G.yMax - G.yMin))); Z[ptr.i].hold = simT + 5; } },
+        up: () => {
+          if (ptr && ptr.moved < 6) { const open = Z.reduce((a, z) => a + z.s, 0) / Math.max(1, Z.length) < 0.5; Z.forEach((z, k) => { z.tgt = open ? 1 : 0; z.hold = simT + 6 + k * 0.12; }); }
+          if (ptr && ptr.i >= 0 && Z[ptr.i]) Z[ptr.i].grab = false; ptr = null;
+        },
+        wheel: (q, dy) => app.set('taille', Math.max(0.006, Math.min(0.04, +(p.taille * (dy > 0 ? 0.93 : 1.07)).toFixed(4)))),
+      },
+      onChange(k) { if (['*', 'image'].includes(k)) logoKey = ''; },
+      export: { name: 'fermetures-eclair', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    function hex(x) { const n = parseInt(x.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
+    function lum(x) { const c = hex(x); return (c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114) / 255; }
+    function mix(a, b, t) { const A = hex(a), C = hex(b); return '#' + A.map((v, i) => Math.round(v + (C[i] - v) * t).toString(16).padStart(2, '0')).join(''); }
+    function rng(s) { let a = s >>> 0; return () => { a = (a + 0x6d2b79f5) >>> 0; let t = a; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+
+    function buildLogo() {
+      const img0 = p.image || app.logoImg, key = img0 ? (img0.src || 'c') : 'demo'; if (key === logoKey) return; logoKey = key; vKey = '';
+      const M = 200, c = document.createElement('canvas'); c.width = c.height = M; const x = c.getContext('2d', { willReadFrequently: true }), L = M * 0.94, cx = M / 2;
+      if (img0) { const iw = img0.naturalWidth || img0.width, ih = img0.naturalHeight || img0.height, s = L / Math.max(iw, ih); x.drawImage(img0, cx - iw * s / 2, cx - ih * s / 2, iw * s, ih * s); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(cx, cx, L * 0.48, 0, TAU); x.arc(cx, cx, L * 0.27, 0, TAU, true); x.fill('evenodd'); x.fillRect(cx - L * 0.07, cx - L * 0.5, L * 0.14, L); }
+      const d = x.getImageData(0, 0, M, M).data; let transp = 0; for (let i = 3; i < d.length; i += 4) if (d[i] < 128) transp++; const useA = transp > M * M * 0.05;
+      const F = new Float64Array(M * M); for (let i = 0; i < M * M; i++) { const o = i * 4, l = (d[o] * 0.2126 + d[o + 1] * 0.7152 + d[o + 2] * 0.0722) / 255; F[i] = useA ? d[o + 3] / 255 : (d[o + 3] / 255) * Math.min(1, Math.max(0, (0.75 - l) * 2)); }
+      { const G2 = new Float64Array(M * M); for (let j = 1; j < M - 1; j++) for (let i = 1; i < M - 1; i++) { let a = 0; for (let b = -1; b <= 1; b++) for (let c = -1; c <= 1; c++) a += F[(j + b) * M + i + c] * (b || c ? (b && c ? 1 : 2) : 4); G2[j * M + i] = a / 16; } F.set(G2); }
+      for (let k = 0; k < M; k++) F[k] = F[(M - 1) * M + k] = F[k * M] = F[k * M + M - 1] = 0;
+      logoM = contours(F, M, M, 0.5, 0, 0, 1).filter((c) => c.closed && c.pts.length > 6).map((c) => chaikin(chaikin(c.pts, true), true).map((q) => [q[0] / M - 0.5, q[1] / M - 0.5]));
+    }
+    // carrés marchants + chaînage
+    function contours(F, nx, ny, lev, ox, oy, cs) {
+      const pt = new Map(), adj = new Map();
+      const P = (id) => { let q = pt.get(id); if (q) return q; const cell = id >> 1, i = cell % nx, j = (cell - i) / nx; let a, b, ax, ay, bx, by; if (id & 1) { a = F[j * nx + i]; b = F[(j + 1) * nx + i]; ax = bx = i; ay = j; by = j + 1; } else { a = F[j * nx + i]; b = F[j * nx + i + 1]; ay = by = j; ax = i; bx = i + 1; } const t = (lev - a) / (b - a || 1e-9); q = [ox + (ax + (bx - ax) * t) * cs, oy + (ay + (by - ay) * t) * cs]; pt.set(id, q); return q; };
+      const link = (a, b) => { (adj.get(a) || adj.set(a, []).get(a)).push(b); (adj.get(b) || adj.set(b, []).get(b)).push(a); };
+      for (let j = 0; j < ny - 1; j++) for (let i = 0; i < nx - 1; i++) {
+        const A = F[j * nx + i] > lev, B = F[j * nx + i + 1] > lev, C = F[(j + 1) * nx + i + 1] > lev, D = F[(j + 1) * nx + i] > lev, idx = A | (B << 1) | (C << 2) | (D << 3);
+        if (idx === 0 || idx === 15) continue;
+        const T = (j * nx + i) * 2, R = (j * nx + i + 1) * 2 + 1, Bo = ((j + 1) * nx + i) * 2, Le = (j * nx + i) * 2 + 1;
+        const ctr = (F[j * nx + i] + F[j * nx + i + 1] + F[(j + 1) * nx + i + 1] + F[(j + 1) * nx + i]) / 4 > lev;
+        switch (idx) {
+          case 1: case 14: link(Le, T); break; case 2: case 13: link(T, R); break; case 3: case 12: link(Le, R); break;
+          case 4: case 11: link(R, Bo); break; case 6: case 9: link(T, Bo); break; case 7: case 8: link(Le, Bo); break;
+          case 5: if (ctr) { link(Le, Bo); link(T, R); } else { link(Le, T); link(R, Bo); } break;
+          case 10: if (ctr) { link(Le, T); link(R, Bo); } else { link(Le, Bo); link(T, R); } break;
+        }
+      }
+      const seen = new Set(), out = [];
+      const walk = (s) => { const L = [s]; seen.add(s); let cur = s; for (;;) { const nb = (adj.get(cur) || []).find((x) => !seen.has(x)); if (nb === undefined) break; seen.add(nb); L.push(nb); cur = nb; } return L; };
+      for (const [id, nb] of adj) if (nb.length === 1 && !seen.has(id)) out.push({ pts: walk(id).map(P), closed: false });
+      for (const [id] of adj) if (!seen.has(id)) out.push({ pts: walk(id).map(P), closed: true });
+      return out;
+    }
+    function chaikin(pts, closed) {
+      const o = []; const n = pts.length; for (let k = 0; k < (closed ? n : n - 1); k++) { const a = pts[k], b = pts[(k + 1) % n]; o.push([a[0] * 0.75 + b[0] * 0.25, a[1] * 0.75 + b[1] * 0.25], [a[0] * 0.25 + b[0] * 0.75, a[1] * 0.25 + b[1] * 0.75]); }
+      if (!closed) { o.unshift(pts[0]); o.push(pts[n - 1]); } return o;
+    }
+
+    // ——— Géométrie (repère local : fermetures verticales, largeur LW, hauteur LH) ———
+    let G = null;
+    function geo(w, h) {
+      const hor = p.orientation === 'horizontale', LW = hor ? h : w, LH = hor ? w : h, m = Math.min(w, h), N = p.nombre | 0;
+      const sp = LW / N, tl = p.taille * m, P = tl * 1.05;
+      G = {
+        hor, LW, LH, m, N, sp, tl, P, th: P * 0.47, tw: tl * 1.15,
+        amp: Math.min(sp * 0.22, m * 0.08) * p.ondulation, fr: p.frequence,
+        Gm: Math.max(tl * 0.6, sp * 0.5 - tl * 2.2) * p.ouverture, Lv: p.longueur * LH,
+        yMin: tl * 2.2, yMax: LH - tl * 3.5, Ls: tl * 3.3, pad: tl * 4,
+      };
+      while (Z.length < N) { const k = Z.length; Z.push({ s: 0.2, sv: 0, tgt: 0.2, hold: -1, th: 0, thv: 0, nt: 0, grab: false, a: 0 }); }
+      Z.length = N;
+      return G;
+    }
+    const cx = (i, y) => G.sp * (i + 0.5) + G.amp * Math.sin(y / G.LH * TAU * G.fr + i * 1.7);
+    const ysOf = (i) => G.yMin + Z[i].s * (G.yMax - G.yMin);
+    const gap = (i, y, ys) => { const d = ys - y; return d <= 0 ? 0 : G.Gm * (1 - Math.exp(-3 * d / G.Lv)); };
+    // matrice locale → écran (en px CSS)
+    const baseM = () => G.hor ? [0, -1, 1, 0, 0, G.LW] : [1, 0, 0, 1, 0, 0];
+    function toLocal(q) { return G && G.hor ? [G.LW - q.y, q.x] : [q.x, q.y]; }
+    function pick(L) { if (!G) return -1; let bi = -1, bd = 1e9; for (let i = 0; i < G.N; i++) { const d = Math.abs(L[0] - cx(i, L[1])); if (d < bd) { bd = d; bi = i; } } return bd < Math.max(G.sp * 0.5, G.tl * 3) ? bi : -1; }
+
+    // ——— Mouvement des curseurs ———
+    function target(i, T) {
+      const N = G.N, z = Z[i];
+      if (p.mode === 'vague') return 0.5 + 0.5 * Math.sin(T * 0.9 - i * (TAU / Math.max(3, N + 1)) * 0.9);
+      if (p.mode === 'vaetvient') { const u = 0.5 - 0.5 * Math.cos(T * 0.75 + i * 2.3 + (i % 2) * Math.PI); return u * u * (3 - 2 * u); }
+      if (p.mode === 'ensemble') { const u = 0.5 - 0.5 * Math.cos(T * 0.6 - i * 0.12); const v = u * u * (3 - 2 * u); return v * v * (3 - 2 * v); }
+      if (simT >= z.nt) { const R = Math.random(); z.ht = R < 0.3 ? 0 : R < 0.55 ? 1 : Math.random(); z.nt = simT + (0.8 + Math.random() * 2.6) / p.vitesse; }
+      return z.ht ?? 0.3;
+    }
+    function step(dt) {
+      const sub = Math.max(1, Math.ceil(dt / (1 / 120))), h = dt / sub, T = simT * p.vitesse;
+      const grav = G.hor ? [-1, 0] : [0, 1], gA = G.m * 3, Lt = G.tl * 2.6, damp = 0.5 + (1 - p.balancement) * 7;
+      for (let i = 0; i < G.N; i++) {
+        const z = Z[i];
+        if (!z.grab && simT >= z.hold) z.tgt = target(i, T);
+        const k = z.grab ? 260 : 26 * Math.max(0.3, p.vitesse) * Math.max(0.3, p.vitesse), c = 2 * Math.sqrt(k) * (z.grab ? 1 : 0.85);
+        const ys = ysOf(i), sl = (cx(i, ys + 1) - cx(i, ys - 1)) / 2;
+        for (let s = 0; s < sub; s++) {
+          const a = k * (z.tgt - z.s) - c * z.sv; z.sv += a * h; z.s += z.sv * h;
+          if (z.s < 0) { z.s = 0; z.sv = Math.max(0, z.sv); } if (z.s > 1) { z.s = 1; z.sv = Math.min(0, z.sv); }
+          const ay = a * (G.yMax - G.yMin), Fx = grav[0] * gA - sl * ay, Fy = grav[1] * gA - ay;
+          const tha = (Fx * Math.cos(z.th) - Fy * Math.sin(z.th)) / Lt - damp * z.thv;
+          z.thv += tha * h; z.th += z.thv * h;
+        }
+      }
+    }
+
+    // ——— Doublure (repère écran, mise en cache) ———
+    function underlay(w, h, dpr) {
+      buildLogo();
+      const key = [w, h, dpr, p.motif, p.dessous, p.encre, p.echelle, logoKey, p.orientation].join('|'); if (key === ulKey) return UL; ulKey = key;
+      UL = UL || document.createElement('canvas'); UL.width = Math.round(w * dpr); UL.height = Math.round(h * dpr);
+      const g = UL.getContext('2d'); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.fillStyle = p.dessous; g.fillRect(0, 0, w, h);
+      g.fillStyle = p.encre; const m = Math.min(w, h);
+      for (const [x, y, s, r] of motifItems(w, h)) { g.save(); g.translate(x, y); g.rotate(r); g.scale(s, s); g.beginPath(); for (const lp of logoM) { lp.forEach((q, k) => k ? g.lineTo(q[0], q[1]) : g.moveTo(q[0], q[1])); g.closePath(); } g.fill('evenodd'); g.restore(); }
+      if (p.motif === 'rayures') { const sw = m * 0.05 * p.echelle; g.save(); g.translate(w / 2, h / 2); g.rotate(-Math.PI / 4); const R = Math.hypot(w, h) / 2 + sw; for (let x = -R; x < R; x += sw * 2) g.fillRect(x, -R, sw, R * 2); g.restore(); }
+      return UL;
+    }
+    function motifItems(w, h) {
+      const m = Math.min(w, h), out = [];
+      if (p.motif === 'logo') out.push([w / 2, h / 2, m * p.echelle, 0]);
+      else if (p.motif === 'logos') { const s = m * 0.24 * p.echelle, st = s * 1.45; for (let j = 0, y = st * 0.4; y < h + st; j++, y += st) for (let x = (j % 2) * st / 2 - st * 0.1; x < w + st; x += st) out.push([x, y, s, 0]); }
+      return out;
+    }
+
+    // ——— Textures et sprites ———
+    function texture(dpr) {
+      const key = [p.trame, dpr].join('|'); if (key === txKey) return TX; txKey = key;
+      const R = rng(11), S = p.trame === 'cuir' ? 160 : p.trame === 'toile' ? 6 : 8, c = document.createElement('canvas'); c.width = c.height = Math.round(S * dpr);
+      const g = c.getContext('2d'); g.scale(dpr, dpr);
+      if (p.trame === 'serge') { g.lineWidth = 1.6; for (let k = -2; k < 3; k++) { g.strokeStyle = 'rgba(0,0,0,0.22)'; g.beginPath(); g.moveTo(k * S - 1, -1); g.lineTo(k * S + S + 1, S + 1); g.stroke(); g.strokeStyle = 'rgba(255,255,255,0.09)'; g.beginPath(); g.moveTo(k * S + S / 2 - 1, -1); g.lineTo(k * S + S * 1.5 + 1, S + 1); g.stroke(); } }
+      else if (p.trame === 'toile') { g.fillStyle = 'rgba(0,0,0,0.16)'; g.fillRect(0, 0, S, 1); g.fillRect(0, 0, 1, S); g.fillStyle = 'rgba(255,255,255,0.08)'; g.fillRect(1, S / 2, S - 1, 1); g.fillRect(S / 2, 1, 1, S - 1); }
+      else { for (let k = 0; k < 520; k++) { const x = R() * S, y = R() * S, r = 1 + R() * R() * 7; for (const [ox, oy] of [[0, 0], [S, 0], [-S, 0], [0, S], [0, -S]]) { g.fillStyle = R() < 0.5 ? `rgba(0,0,0,${0.05 + R() * 0.08})` : `rgba(255,255,255,${0.03 + R() * 0.05})`; g.beginPath(); g.ellipse(x + ox, y + oy, r, r * (0.4 + R() * 0.6), R() * TAU, 0, TAU); g.fill(); } } g.strokeStyle = 'rgba(0,0,0,0.12)'; g.lineWidth = 0.6; for (let k = 0; k < 40; k++) { g.beginPath(); let x = R() * S, y = R() * S; g.moveTo(x, y); for (let s = 0; s < 4; s++) { x += (R() - 0.5) * 18; y += (R() - 0.5) * 18; g.lineTo(x, y); } g.stroke(); } }
+      TX = c; return TX;
+    }
+    function metal() {
+      if (p.matiere === 'plastique') return { b: p.dents, l: mix(p.dents, '#ffffff', 0.5), d: mix(p.dents, '#000000', 0.45) };
+      if (p.matiere === 'argent') return { b: '#b8bdc3', l: '#f6f8fa', d: '#565c63' };
+      if (p.matiere === 'bronze') return { b: '#8c6a48', l: '#e2bf92', d: '#3a281a' };
+      return { b: '#c9a03a', l: '#f8e6a6', d: '#6e4f12' };
+    }
+    function sprites(dpr) {
+      const key = [p.matiere, p.dents, G.tl, dpr].join('|'); if (key === spKey) return SP; spKey = key;
+      const tl = G.tl, th = G.th, M = metal(), pad = tl * 0.4, W = tl + pad * 2, H = th + pad * 2, plast = p.matiere === 'plastique';
+      const mk = (flip) => {
+        const c = document.createElement('canvas'); c.width = Math.ceil(W * dpr); c.height = Math.ceil(H * dpr); const g = c.getContext('2d'); g.scale(dpr, dpr); g.translate(pad + tl * 0.6, pad + th / 2); if (flip) { g.translate(-tl * 0.2, 0); g.scale(-1, 1); }
+        const rr = plast ? [th * 0.5, th * 0.5, th * 0.5, th * 0.5] : [th * 0.15, th * 0.5, th * 0.5, th * 0.15];
+        g.fillStyle = 'rgba(0,0,0,0.35)'; g.beginPath(); g.roundRect(-tl * 0.6 + tl * 0.06, -th / 2 + tl * 0.12, tl, th, rr); g.fill();
+        const gr = g.createLinearGradient(0, -th / 2, 0, th / 2); gr.addColorStop(0, M.l); gr.addColorStop(0.3, M.b); gr.addColorStop(0.75, M.b); gr.addColorStop(1, M.d);
+        g.fillStyle = gr; g.beginPath(); g.roundRect(-tl * 0.6, -th / 2, tl, th, rr); g.fill();
+        const gx = g.createLinearGradient(-tl * 0.6, 0, tl * 0.4, 0); gx.addColorStop(0, 'rgba(0,0,0,0.3)'); gx.addColorStop(0.35, 'rgba(0,0,0,0)'); gx.addColorStop(1, 'rgba(0,0,0,0.12)'); g.fillStyle = gx; g.fill();
+        if (!plast) { g.fillStyle = 'rgba(0,0,0,0.22)'; g.beginPath(); g.ellipse(tl * 0.18, th * 0.05, tl * 0.12, th * 0.24, 0, 0, TAU); g.fill(); }
+        g.fillStyle = 'rgba(255,255,255,0.45)'; g.beginPath(); g.ellipse(-tl * 0.05, -th * 0.22, tl * 0.28, th * 0.1, 0, 0, TAU); g.fill();
+        g.strokeStyle = M.d; g.globalAlpha = 0.6; g.lineWidth = Math.max(0.5, tl * 0.04); g.beginPath(); g.roundRect(-tl * 0.6, -th / 2, tl, th, rr); g.stroke();
+        return c;
+      };
+      SP = { L: mk(false), R: mk(true), W, H, ox: pad + tl * 0.6, oy: pad + th / 2, oxR: pad + tl * 0.4 }; return SP;
+    }
+
+    // ——— Échantillonnage des bords ———
+    function sample() {
+      const dy = Math.max(2, Math.min(G.P * 0.5, G.LH / 260)), Ys = [];
+      for (let y = -G.pad; y < G.LH + G.pad + dy; y += dy) Ys.push(y);
+      const E = [];
+      for (let i = 0; i < G.N; i++) { const ys = ysOf(i), C = Ys.map((y) => cx(i, y)), Gp = Ys.map((y) => gap(i, y, ys)); E.push({ ys, C, Gp }); }
+      return { Ys, E };
+    }
+    function holePath(S, path) {
+      const { Ys, E } = S, o = G.tl * 0.4;
+      for (let i = 0; i < G.N; i++) {
+        const e = E[i]; let last = -1; for (let k = 0; k < Ys.length; k++) if (Ys[k] <= e.ys && e.Gp[k] > o) last = k;
+        if (last < 0) continue;
+        path.moveTo(e.C[0] - Math.max(0, e.Gp[0] - o), Ys[0]);
+        for (let k = 1; k <= last + 1 && k < Ys.length; k++) path.lineTo(e.C[k] - Math.max(0, e.Gp[k] - o), Ys[k]);
+        for (let k = Math.min(last + 1, Ys.length - 1); k >= 0; k--) path.lineTo(e.C[k] + Math.max(0, e.Gp[k] - o), Ys[k]);
+        path.closePath();
+      }
+    }
+    function panelPts(S, j) {
+      const { Ys, E } = S, a = [], L = j === 0 ? null : E[j - 1].C, R = j === G.N ? null : E[j].C;
+      for (let k = 0; k < Ys.length; k++) a.push([L ? L[k] : -G.pad, Ys[k]]);
+      for (let k = Ys.length - 1; k >= 0; k--) a.push([R ? R[k] : G.LW + G.pad, Ys[k]]);
+      return a;
+    }
+    function tapePts(S, i, sd) {
+      const { Ys, E } = S, e = E[i], a = [], tl = G.tl;
+      for (let k = 0; k < Ys.length; k++) a.push([e.C[k] + sd * (e.Gp[k] + tl * 0.6 + G.tw), Ys[k]]);
+      for (let k = Ys.length - 1; k >= 0; k--) a.push([e.C[k] + sd * (e.Gp[k] - tl * 0.4), Ys[k]]);
+      return a;
+    }
+    function teeth(i, fn) {
+      const ys = ysOf(i), P = G.P;
+      for (const sd of [-1, 1]) for (let k = Math.floor(-G.pad / P); k * P < G.LH + G.pad; k++) {
+        const y = k * P + (sd > 0 ? P / 2 : 0), x = cx(i, y) + sd * gap(i, y, ys), sl = (cx(i, y + 1) + sd * gap(i, y + 1, ys) - cx(i, y - 1) - sd * gap(i, y - 1, ys)) / 2;
+        fn(sd, x, y, -Math.atan(sl));
+      }
+    }
+
+    // ——— Curseur et tirette ———
+    function sliderPath(g, tl, Ls) {
+      const Wt = tl * 2.7, Wb = tl * 1.9;
+      g.beginPath(); g.moveTo(-Wt / 2, -Ls * 0.5); g.lineTo(Wt / 2, -Ls * 0.5);
+      g.quadraticCurveTo(Wt / 2 + tl * 0.1, Ls * 0.1, Wb / 2, Ls * 0.5); g.lineTo(-Wb / 2, Ls * 0.5); g.quadraticCurveTo(-Wt / 2 - tl * 0.1, Ls * 0.1, -Wt / 2, -Ls * 0.5); g.closePath();
+    }
+    function drawSlider(g, i, M) {
+      const tl = G.tl, Ls = G.Ls, ys = ysOf(i), x = cx(i, ys), sl = (cx(i, ys + 1) - cx(i, ys - 1)) / 2, z = Z[i];
+      g.save(); g.translate(x, ys); g.rotate(-Math.atan(sl));
+      g.save(); g.translate(tl * 0.18, tl * 0.3); g.fillStyle = 'rgba(0,0,0,0.32)'; sliderPath(g, tl, Ls); g.fill(); g.restore();
+      const gr = g.createLinearGradient(-tl * 1.4, 0, tl * 1.4, 0); gr.addColorStop(0, M.d); gr.addColorStop(0.28, M.l); gr.addColorStop(0.55, M.b); gr.addColorStop(1, M.d);
+      g.fillStyle = gr; sliderPath(g, tl, Ls); g.fill(); g.strokeStyle = M.d; g.lineWidth = Math.max(0.6, tl * 0.06); g.stroke();
+      g.fillStyle = mix(M.d, '#000000', 0.35); g.beginPath(); g.moveTo(-tl * 0.45, -Ls * 0.5); g.lineTo(tl * 0.45, -Ls * 0.5); g.lineTo(0, -Ls * 0.18); g.closePath(); g.fill();
+      const gb = g.createLinearGradient(-tl * 0.45, 0, tl * 0.45, 0); gb.addColorStop(0, M.b); gb.addColorStop(0.4, M.l); gb.addColorStop(1, M.d);
+      g.fillStyle = gb; g.beginPath(); g.roundRect(-tl * 0.42, -Ls * 0.22, tl * 0.84, Ls * 0.5, tl * 0.3); g.fill(); g.stroke();
+      g.restore();
+      // tirette : pendule
+      g.save(); g.translate(x, ys + Ls * 0.02); g.rotate(-z.th); drawTab(g, tl, M, true); drawTab(g, tl, M, false); g.restore();
+    }
+    function drawTab(g, tl, M, shadow) {
+      if (shadow) { g.save(); g.translate(tl * 0.3, tl * 0.45); g.globalAlpha = 0.3; }
+      const L = tl * 3.8;
+      if (p.tirette === 'anneau') {
+        const r = tl * 1.15, cy = L * 0.55;
+        if (!shadow) { g.strokeStyle = M.d; g.lineWidth = tl * 0.36; g.beginPath(); g.moveTo(0, -tl * 0.15); g.lineTo(0, cy - r); g.stroke(); }
+        g.lineWidth = tl * 0.42; g.strokeStyle = shadow ? '#000' : M.d; g.beginPath(); g.arc(0, cy, r, 0, TAU); g.stroke();
+        if (!shadow) { g.lineWidth = tl * 0.26; const gr = g.createLinearGradient(-r, cy - r, r, cy + r); gr.addColorStop(0, M.l); gr.addColorStop(0.5, M.b); gr.addColorStop(1, M.d); g.strokeStyle = gr; g.beginPath(); g.arc(0, cy, r, 0, TAU); g.stroke(); }
+      } else if (p.tirette === 'cordon') {
+        const cw = tl * 0.42, cL = L * 0.95;
+        g.lineCap = 'round'; g.lineWidth = cw; g.strokeStyle = shadow ? '#000' : mix(p.ruban, '#000000', 0.2);
+        g.beginPath(); g.moveTo(-tl * 0.2, 0); g.quadraticCurveTo(-tl * 0.5, cL * 0.6, 0, cL); g.quadraticCurveTo(tl * 0.5, cL * 0.6, tl * 0.2, 0); g.stroke();
+        if (!shadow) { g.lineWidth = cw * 0.35; g.strokeStyle = mix(p.ruban, '#ffffff', 0.25); g.stroke(); }
+        const kr = tl * 0.62; g.fillStyle = shadow ? '#000' : M.b; g.beginPath(); g.ellipse(0, cL * 0.62, kr * 0.85, kr * 1.15, 0, 0, TAU); g.fill();
+        if (!shadow) { const gr = g.createRadialGradient(-kr * 0.3, cL * 0.62 - kr * 0.4, kr * 0.1, 0, cL * 0.62, kr * 1.2); gr.addColorStop(0, M.l); gr.addColorStop(0.5, M.b); gr.addColorStop(1, M.d); g.fillStyle = gr; g.fill(); }
+      } else {
+        const wt = tl * 0.95, wb = tl * 1.45;
+        g.beginPath(); g.moveTo(-wt / 2, -tl * 0.45); g.lineTo(wt / 2, -tl * 0.45); g.lineTo(wb / 2, L - wb / 2); g.arc(0, L - wb / 2, wb / 2, 0, Math.PI); g.closePath();
+        g.roundRect(-tl * 0.28, L * 0.52, tl * 0.56, L * 0.3, tl * 0.28);
+        if (shadow) { g.fillStyle = '#000'; g.fill('evenodd'); }
+        else {
+          const gr = g.createLinearGradient(-wb / 2, 0, wb / 2, 0); gr.addColorStop(0, M.d); gr.addColorStop(0.3, M.l); gr.addColorStop(0.6, M.b); gr.addColorStop(1, M.d);
+          g.fillStyle = gr; g.fill('evenodd'); g.strokeStyle = M.d; g.lineWidth = Math.max(0.6, tl * 0.06); g.stroke();
+          g.fillStyle = 'rgba(255,255,255,0.25)'; g.beginPath(); g.roundRect(-wt * 0.25, -tl * 0.2, wt * 0.18, L * 0.45, tl * 0.1); g.fill();
+        }
+      }
+      if (shadow) g.restore();
+    }
+
+    const poly = (g, a) => { g.moveTo(a[0][0], a[0][1]); for (let k = 1; k < a.length; k++) g.lineTo(a[k][0], a[k][1]); g.closePath(); };
+
+    app.loop((t, dt) => {
+      dt = Math.min(1 / 20, dt || 0);
+      const { w, h, dpr } = app.size; geo(w, h);
+      if (app.thumbnail) { if (!G.th0) { G.th0 = true; simT = 1.6 / Math.max(0.1, p.vitesse); Z.forEach((z, i) => { z.s = z.tgt = target(i, simT * p.vitesse); }); for (let k = 0; k < 60; k++) { simT += 1 / 30; step(1 / 30); } } }
+      else { simT += dt; step(dt); }
+      const B = baseM(), S = sample(), M = metal(), tl = G.tl;
+      ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.drawImage(underlay(w, h, dpr), 0, 0);
+      const setL = () => ctx.setTransform(B[0] * dpr, B[1] * dpr, B[2] * dpr, B[3] * dpr, B[4] * dpr, B[5] * dpr);
+      setL();
+      const holes = new Path2D(); holePath(S, holes);
+      const outer = new Path2D(); outer.rect(-G.pad, -G.pad, G.LW + G.pad * 2, G.LH + G.pad * 2); outer.addPath(holes);
+      // tissu percé
+      ctx.save(); ctx.clip(outer, 'evenodd');
+      const T = p.tissus.length ? p.tissus : ['#26365c'];
+      for (let j = 0; j <= G.N; j++) { ctx.fillStyle = T[j % T.length]; ctx.beginPath(); poly(ctx, panelPts(S, j)); ctx.fill(); }
+      const pat = ctx.createPattern(texture(dpr), 'repeat'); pat.setTransform(new DOMMatrix().scale(1 / dpr)); ctx.fillStyle = pat; ctx.fillRect(-G.pad, -G.pad, G.LW + G.pad * 2, G.LH + G.pad * 2);
+      // le tissu se creuse le long des fentes ouvertes
+      ctx.lineJoin = 'round'; ctx.strokeStyle = 'rgba(0,0,0,0.07)'; for (const k of [9, 6, 3.5]) { ctx.lineWidth = tl * k; ctx.stroke(holes); }
+      ctx.restore();
+      // ombre de l'épaisseur du tissu dans les fentes
+      ctx.save(); ctx.clip(holes); ctx.lineJoin = 'round';
+      ctx.translate(tl * 0.15, tl * 0.25); ctx.strokeStyle = 'rgba(0,0,0,0.22)'; ctx.lineWidth = tl * 2.4; ctx.stroke(holes); ctx.strokeStyle = 'rgba(0,0,0,0.3)'; ctx.lineWidth = tl * 0.9; ctx.stroke(holes);
+      ctx.restore();
+      // rubans
+      for (let i = 0; i < G.N; i++) for (const sd of [-1, 1]) {
+        const a = tapePts(S, i, sd), n = a.length / 2;
+        ctx.fillStyle = 'rgba(0,0,0,0.25)'; ctx.beginPath(); for (let k = 0; k < n; k++) { const x = a[k][0] - sd * tl * 0.05, y = a[k][1] + tl * 0.15; k ? ctx.lineTo(x, y) : ctx.moveTo(x, y); } ctx.lineWidth = tl * 0.35; ctx.strokeStyle = 'rgba(0,0,0,0.22)'; ctx.stroke();
+        ctx.fillStyle = p.ruban; ctx.beginPath(); poly(ctx, a); ctx.fill();
+        ctx.save(); ctx.fillStyle = pat; ctx.globalAlpha = 0.6; ctx.fill(); ctx.restore();
+        ctx.strokeStyle = mix(p.ruban, '#ffffff', 0.3); ctx.lineWidth = Math.max(0.6, tl * 0.08); ctx.setLineDash([tl * 0.55, tl * 0.4]); ctx.beginPath();
+        for (let k = 0; k < n; k++) { const x = (a[k][0] * 0.62 + a[a.length - 1 - k][0] * 0.38), y = a[k][1]; k ? ctx.lineTo(x, y) : ctx.moveTo(x, y); } ctx.stroke(); ctx.setLineDash([]);
+      }
+      // dents
+      const SPR = sprites(dpr);
+      for (let i = 0; i < G.N; i++) teeth(i, (sd, x, y, an) => {
+        const cs = Math.cos(an), sn = Math.sin(an), a = B[0] * cs + B[2] * sn, b = B[1] * cs + B[3] * sn, c = -B[0] * sn + B[2] * cs, d = -B[1] * sn + B[3] * cs;
+        ctx.setTransform(a * dpr, b * dpr, c * dpr, d * dpr, (B[0] * x + B[2] * y + B[4]) * dpr, (B[1] * x + B[3] * y + B[5]) * dpr);
+        ctx.drawImage(sd < 0 ? SPR.L : SPR.R, sd < 0 ? -SPR.ox : -SPR.oxR, -SPR.oy, SPR.W, SPR.H);
+      });
+      setL();
+      for (let i = 0; i < G.N; i++) drawSlider(ctx, i, M);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      app.finish(ctx);
+    });
+
+    function toSVG() {
+      const { w, h } = app.size, f = (v) => +v.toFixed(2); geo(w, h); buildLogo();
+      const S = sample(), B = baseM(), M = metal(), tl = G.tl, T = p.tissus.length ? p.tissus : ['#26365c'];
+      const P = (a) => 'M' + a.map((q) => f(q[0]) + ' ' + f(q[1])).join('L') + 'Z';
+      let s = `<rect width="100%" height="100%" fill="${p.dessous}"/>`;
+      const ld = logoM.map((lp) => 'M' + lp.map((q) => q[0].toFixed(4) + ' ' + q[1].toFixed(4)).join('L') + 'Z').join('');
+      for (const [x, y, sc] of motifItems(w, h)) s += `<path transform="translate(${f(x)} ${f(y)}) scale(${f(sc)})" fill="${p.encre}" fill-rule="evenodd" d="${ld}"/>`;
+      if (p.motif === 'rayures') { const m = Math.min(w, h), sw = m * 0.05 * p.echelle, R = Math.hypot(w, h) / 2 + sw; s += `<g transform="translate(${f(w / 2)} ${f(h / 2)}) rotate(-45)" fill="${p.encre}">`; for (let x = -R; x < R; x += sw * 2) s += `<rect x="${f(x)}" y="${f(-R)}" width="${f(sw)}" height="${f(R * 2)}"/>`; s += '</g>'; }
+      // trous
+      const hp = { d: '', moveTo(x, y) { this.d += `M${f(x)} ${f(y)}`; }, lineTo(x, y) { this.d += `L${f(x)} ${f(y)}`; }, closePath() { this.d += 'Z'; } }; holePath(S, hp);
+      const rect = `M${f(-G.pad)} ${f(-G.pad)}H${f(G.LW + G.pad)}V${f(G.LH + G.pad)}H${f(-G.pad)}Z`;
+      const defs = `<clipPath id="tissu"><path clip-rule="evenodd" d="${rect}${hp.d}"/></clipPath><clipPath id="fentes"><path d="${hp.d || 'M0 0Z'}"/></clipPath><filter id="flou" x="-0.2" y="-0.2" width="1.4" height="1.4"><feGaussianBlur stdDeviation="${f(tl * 0.5)}"/></filter><linearGradient id="dent" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="${M.l}"/><stop offset="0.3" stop-color="${M.b}"/><stop offset="0.75" stop-color="${M.b}"/><stop offset="1" stop-color="${M.d}"/></linearGradient><linearGradient id="met" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="${M.d}"/><stop offset="0.28" stop-color="${M.l}"/><stop offset="0.55" stop-color="${M.b}"/><stop offset="1" stop-color="${M.d}"/></linearGradient>`;
+      s += `<g transform="matrix(${B.join(' ')})">`;
+      s += '<g clip-path="url(#tissu)">'; for (let j = 0; j <= G.N; j++) s += `<path fill="${T[j % T.length]}" d="${P(panelPts(S, j))}"/>`; s += '</g>';
+      if (hp.d) s += `<g clip-path="url(#fentes)"><path d="${hp.d}" fill="none" stroke="#000" stroke-opacity="0.35" stroke-width="${f(tl * 2)}" filter="url(#flou)" transform="translate(${f(tl * 0.15)} ${f(tl * 0.25)})"/></g>`;
+      for (let i = 0; i < G.N; i++) for (const sd of [-1, 1]) s += `<path fill="${p.ruban}" d="${P(tapePts(S, i, sd))}"/>`;
+      const rr = p.matiere === 'plastique' ? G.th * 0.5 : G.th * 0.3;
+      s += `<g fill="url(#dent)" stroke="${M.d}" stroke-width="${f(Math.max(0.5, tl * 0.04))}" stroke-opacity="0.6">`;
+      for (let i = 0; i < G.N; i++) teeth(i, (sd, x, y, an) => { s += `<rect transform="translate(${f(x)} ${f(y)}) rotate(${f(an * 180 / Math.PI)})" x="${f(sd < 0 ? -tl * 0.6 : -tl * 0.4)}" y="${f(-G.th / 2)}" width="${f(tl)}" height="${f(G.th)}" rx="${f(rr)}"/>`; });
+      s += '</g>';
+      for (let i = 0; i < G.N; i++) {
+        const ys = ysOf(i), x = cx(i, ys), sl = (cx(i, ys + 1) - cx(i, ys - 1)) / 2, Ls = G.Ls, Wt = tl * 2.7, Wb = tl * 1.9;
+        const body = `M${f(-Wt / 2)} ${f(-Ls * 0.5)}L${f(Wt / 2)} ${f(-Ls * 0.5)}Q${f(Wt / 2 + tl * 0.1)} ${f(Ls * 0.1)} ${f(Wb / 2)} ${f(Ls * 0.5)}L${f(-Wb / 2)} ${f(Ls * 0.5)}Q${f(-Wt / 2 - tl * 0.1)} ${f(Ls * 0.1)} ${f(-Wt / 2)} ${f(-Ls * 0.5)}Z`;
+        s += `<g transform="translate(${f(x)} ${f(ys)}) rotate(${f(-Math.atan(sl) * 180 / Math.PI)})"><path d="${body}" fill="#000" opacity="0.3" transform="translate(${f(tl * 0.18)} ${f(tl * 0.3)})"/><path d="${body}" fill="url(#met)" stroke="${M.d}" stroke-width="${f(tl * 0.06)}"/><path d="M${f(-tl * 0.45)} ${f(-Ls * 0.5)}L${f(tl * 0.45)} ${f(-Ls * 0.5)}L0 ${f(-Ls * 0.18)}Z" fill="${mix(M.d, '#000000', 0.35)}"/><rect x="${f(-tl * 0.42)}" y="${f(-Ls * 0.22)}" width="${f(tl * 0.84)}" height="${f(Ls * 0.5)}" rx="${f(tl * 0.3)}" fill="${M.b}" stroke="${M.d}" stroke-width="${f(tl * 0.06)}"/></g>`;
+        const L = tl * 3.8, th = Z[i].th * 180 / Math.PI;
+        let tab;
+        if (p.tirette === 'anneau') { const r = tl * 1.15, cy = L * 0.55; tab = `<path d="M0 ${f(-tl * 0.15)}V${f(cy - r)}" stroke="${M.d}" stroke-width="${f(tl * 0.36)}"/><circle cy="${f(cy)}" r="${f(r)}" fill="none" stroke="${M.d}" stroke-width="${f(tl * 0.42)}"/><circle cy="${f(cy)}" r="${f(r)}" fill="none" stroke="${M.b}" stroke-width="${f(tl * 0.26)}"/>`; }
+        else if (p.tirette === 'cordon') { const cL = L * 0.95, kr = tl * 0.62; tab = `<path d="M${f(-tl * 0.2)} 0Q${f(-tl * 0.5)} ${f(cL * 0.6)} 0 ${f(cL)}Q${f(tl * 0.5)} ${f(cL * 0.6)} ${f(tl * 0.2)} 0" fill="none" stroke="${mix(p.ruban, '#000000', 0.2)}" stroke-width="${f(tl * 0.42)}" stroke-linecap="round"/><ellipse cy="${f(cL * 0.62)}" rx="${f(kr * 0.85)}" ry="${f(kr * 1.15)}" fill="${M.b}"/>`; }
+        else { const wt = tl * 0.95, wb = tl * 1.45; tab = `<path fill-rule="evenodd" fill="url(#met)" stroke="${M.d}" stroke-width="${f(tl * 0.06)}" d="M${f(-wt / 2)} ${f(-tl * 0.45)}L${f(wt / 2)} ${f(-tl * 0.45)}L${f(wb / 2)} ${f(L - wb / 2)}A${f(wb / 2)} ${f(wb / 2)} 0 0 1 ${f(-wb / 2)} ${f(L - wb / 2)}Z M${f(-tl * 0.28)} ${f(L * 0.52 + tl * 0.28)}A${f(tl * 0.28)} ${f(tl * 0.28)} 0 0 1 ${f(tl * 0.28)} ${f(L * 0.52 + tl * 0.28)}V${f(L * 0.82 - tl * 0.28)}A${f(tl * 0.28)} ${f(tl * 0.28)} 0 0 1 ${f(-tl * 0.28)} ${f(L * 0.82 - tl * 0.28)}Z"/>`; }
+        s += `<g transform="translate(${f(x)} ${f(ys + G.Ls * 0.02)}) rotate(${f(-th)})">${tab}</g>`;
+      }
+      s += '</g>';
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><defs>${defs}</defs>${s}</svg>`;
+    }
+  </script>
+</body>
+</html>

@@ -1,0 +1,15 @@
+{
+  "slug": "fermetures-eclair",
+  "title": "Fermetures éclair",
+  "type": "motion",
+  "description": "Des fermetures éclair s'ouvrent et se referment sur un tissu et laissent voir le logo caché dessous : dents qui s'engrènent, curseurs et tirettes qui se balancent.",
+  "tags": ["textile", "mecanique", "revelation", "interaction", "logo", "svg"],
+  "inspiration": [
+    "Les fermetures à glissière des blousons et des sacs",
+    "Les vêtements qui s'entrouvrent sur une doublure imprimée",
+    "Les rideaux de scène qui dévoilent l'affiche"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}
