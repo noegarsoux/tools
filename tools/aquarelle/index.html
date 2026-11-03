@@ -1,0 +1,294 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Aquarelle</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Aquarelle : une grille d'eau et de pigments sur un papier à grain. L'eau ne coule que vers le bas de sa
+    // pente (d'une case plus mouillée vers une moins mouillée) et n'entre dans le papier sec que selon son grain ;
+    // elle emporte le pigment en suspension. Les bords sèchent plus vite, l'eau y afflue et y dépose son pigment :
+    // c'est l'auréole. En séchant, le pigment se dépose plus dans les creux du papier (granulation). Les couleurs
+    // se mélangent par soustraction (absorbances qui s'additionnent).
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const BIE = PAL('biennale'), LUZ = PAL('luzern'), MEN = PAL('menthe');
+
+    let vKey = '', logoM = null, logoKey = '', ptr = null, hov = null, S = null, gKey = '', simT = 0, paperC = null, paperKey = '';
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0, vignette: 0.12 },
+      hint: 'Glissez pour peindre · clic : une goutte · molette : taille du pinceau',
+      notes: 'Une aquarelle qui se peint toute seule : un lavis de fond qui épargne le logo, puis le logo lui-même, où l’on dépose une seconde couleur dans le mouillé pour qu’elle fleurisse. L’eau s’étale selon le grain du papier, emporte le pigment vers les bords qui sèchent en premier et y laisse une auréole plus sombre ; le pigment granule dans les creux. Les couleurs de la marque se mélangent comme de vraies couleurs. Peignez par-dessus avec le pointeur.',
+      params: {
+        'Peinture': {
+          composition: { type: 'select', label: 'Composition', options: { logo: 'Logo peint', reserve: 'Logo en réserve', libre: 'Touches libres' }, value: 'logo' },
+          couleurs: { type: 'palette', label: 'Couleurs', value: ['#2f5fd0', '#e5452a', '#f2c230', '#5bb08a'] },
+          pigment: { type: 'range', label: 'Pigment', min: 0.2, max: 2, step: 0.01, value: 1 },
+          eau: { type: 'range', label: 'Eau', min: 0.3, max: 1.5, step: 0.01, value: 0.9 },
+          pinceau: { type: 'range', label: 'Pinceau', min: 0.4, max: 2.5, step: 0.01, value: 1 },
+          echelle: { type: 'range', label: 'Taille du logo', min: 0.3, max: 0.9, step: 0.01, value: 0.6 },
+        },
+        'Papier': {
+          sechage: { type: 'range', label: 'Séchage', min: 0.2, max: 3, step: 0.01, value: 1 },
+          aureole: { type: 'range', label: 'Auréoles', min: 0, max: 1, step: 0.01, value: 0.7 },
+          granulation: { type: 'range', label: 'Granulation', min: 0, max: 1, step: 0.01, value: 0.5 },
+          grain: { type: 'range', label: 'Grain du papier', min: 0, max: 1, step: 0.01, value: 0.5 },
+          resolution: { type: 'range', label: 'Finesse', min: 120, max: 320, step: 10, value: 220 },
+          fond: { type: 'color', label: 'Papier', value: '#f6f1e6' },
+        },
+        'Programme': {
+          auto: { type: 'toggle', label: 'Peindre seul', value: true },
+          vitesse: { type: 'range', label: 'Vitesse du pinceau', min: 0.3, max: 3, step: 0.01, value: 1 },
+          tenue: { type: 'range', label: 'Pose avant nouvelle feuille (s)', min: 1, max: 15, step: 0.5, value: 4 },
+          image: { type: 'file', label: 'Image du logo', accept: 'image/*' },
+        },
+      },
+      presets: {
+        'Lavis': {},
+        'Réserve': { composition: 'reserve', couleurs: ['#2f5fd0', '#7d38e7', '#9dd3f0'], aureole: 0.85 },
+        'Touches libres': { composition: 'libre', couleurs: ['#e5452a', '#f2c230', '#2f5fd0', '#5bb08a', '#f2b0c8'], pinceau: 1.4 },
+        'Mouillé': { eau: 1.4, sechage: 0.4, aureole: 0.9, pigment: 0.8 },
+        'Sec': { eau: 0.45, sechage: 2.4, aureole: 0.3, granulation: 0.8, grain: 0.9 },
+        'Encre': { couleurs: ['#16161a', '#3a3a40'], pigment: 1.6, granulation: 0.2, fond: '#f4f1ea', aureole: 0.9 },
+        'Pastel': { couleurs: ['#f2b0c8', '#b9a0e6', '#a4e0bc', '#f7e08c'], pigment: 0.7, fond: '#fbf8f2' },
+        'Papier kraft': { fond: '#d9c3a0', couleurs: ['#16161a', '#e5452a', '#f4f1ea'], grain: 0.9, granulation: 0.7 },
+        'Biennale': { couleurs: [BIE[2], BIE[3], BIE[4], BIE[1]], fond: BIE[0] },
+        'Luzern': { couleurs: [LUZ[1], LUZ[0], LUZ[2]], composition: 'reserve' },
+        'Menthe': { couleurs: [MEN[3], MEN[2], MEN[1]], fond: MEN[0], composition: 'libre' },
+      },
+      brand(colors) {
+        const s = colors.slice().sort((a, b) => lum(a) - lum(b)), L = s[s.length - 1];
+        return { couleurs: s.slice(0, -1).length ? s.slice(0, -1) : colors.slice(), fond: mix(L, '#ffffff', 0.4) };
+      },
+      pointer: {
+        down: (q) => { ptr = { x: q.x, y: q.y, moved: 0, k: S ? (S.uk = (S.uk + 1) % S.K) : 0 }; },
+        drag: (q) => { if (!ptr || !S) return; const d = Math.hypot(q.x - ptr.x, q.y - ptr.y); ptr.moved += d; const n = Math.ceil(d / (S.cs * 1.5)) || 1; for (let i = 1; i <= n; i++) stamp((ptr.x + (q.x - ptr.x) * i / n) / S.cs, (ptr.y + (q.y - ptr.y) * i / n) / S.cs, S.br, ptr.k, 0.9, null); ptr.x = q.x; ptr.y = q.y; S.userT = simT; },
+        move: (q) => { hov = { x: q.x, y: q.y }; },
+        up: () => { if (ptr && S && ptr.moved < 6) { stamp(ptr.x / S.cs, ptr.y / S.cs, S.br * 1.8, ptr.k, 1.4, null); S.userT = simT; } ptr = null; },
+        wheel: (q, dy) => app.set('pinceau', Math.max(0.4, Math.min(2.5, +(p.pinceau + (dy > 0 ? -0.1 : 0.1)).toFixed(2)))),
+      },
+      onChange(k) { if (['*', 'image'].includes(k)) logoKey = ''; },
+      export: { name: 'aquarelle', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    function hex(x) { const n = parseInt(x.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
+    function lum(x) { const c = hex(x); return (c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114) / 255; }
+    function mix(a, b, t) { const A = hex(a), C = hex(b); return '#' + A.map((v, i) => Math.round(v + (C[i] - v) * t).toString(16).padStart(2, '0')).join(''); }
+    function rng(s) { let a = s >>> 0; return () => { a = (a + 0x6d2b79f5) >>> 0; let t = a; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+
+    function buildLogo() {
+      const img0 = p.image || app.logoImg, key = img0 ? (img0.src || 'c') : 'demo'; if (key === logoKey) return; logoKey = key; vKey = '';
+      const M = 200, c = document.createElement('canvas'); c.width = c.height = M; const x = c.getContext('2d', { willReadFrequently: true }), L = M * 0.94, cx = M / 2;
+      if (img0) { const iw = img0.naturalWidth || img0.width, ih = img0.naturalHeight || img0.height, s = L / Math.max(iw, ih); x.drawImage(img0, cx - iw * s / 2, cx - ih * s / 2, iw * s, ih * s); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(cx, cx, L * 0.48, 0, TAU); x.arc(cx, cx, L * 0.27, 0, TAU, true); x.fill('evenodd'); x.fillRect(cx - L * 0.07, cx - L * 0.5, L * 0.14, L); }
+      const d = x.getImageData(0, 0, M, M).data; let transp = 0; for (let i = 3; i < d.length; i += 4) if (d[i] < 128) transp++; const useA = transp > M * M * 0.05;
+      const F = new Float64Array(M * M); for (let i = 0; i < M * M; i++) { const o = i * 4, l = (d[o] * 0.2126 + d[o + 1] * 0.7152 + d[o + 2] * 0.0722) / 255; F[i] = useA ? d[o + 3] / 255 : (d[o + 3] / 255) * Math.min(1, Math.max(0, (0.75 - l) * 2)); }
+      { const G2 = new Float64Array(M * M); for (let j = 1; j < M - 1; j++) for (let i = 1; i < M - 1; i++) { let a = 0; for (let b = -1; b <= 1; b++) for (let c = -1; c <= 1; c++) a += F[(j + b) * M + i + c] * (b || c ? (b && c ? 1 : 2) : 4); G2[j * M + i] = a / 16; } F.set(G2); }
+      for (let k = 0; k < M; k++) F[k] = F[(M - 1) * M + k] = F[k * M] = F[k * M + M - 1] = 0;
+      logoM = contours(F, M, M, 0.5, 0, 0, 1).filter((c) => c.closed && c.pts.length > 6).map((c) => chaikin(chaikin(c.pts, true), true).map((q) => [q[0] / M - 0.5, q[1] / M - 0.5]));
+    }
+    // carrés marchants + chaînage
+    function contours(F, nx, ny, lev, ox, oy, cs) {
+      const pt = new Map(), adj = new Map();
+      const P = (id) => { let q = pt.get(id); if (q) return q; const cell = id >> 1, i = cell % nx, j = (cell - i) / nx; let a, b, ax, ay, bx, by; if (id & 1) { a = F[j * nx + i]; b = F[(j + 1) * nx + i]; ax = bx = i; ay = j; by = j + 1; } else { a = F[j * nx + i]; b = F[j * nx + i + 1]; ay = by = j; ax = i; bx = i + 1; } const t = (lev - a) / (b - a || 1e-9); q = [ox + (ax + (bx - ax) * t) * cs, oy + (ay + (by - ay) * t) * cs]; pt.set(id, q); return q; };
+      const link = (a, b) => { (adj.get(a) || adj.set(a, []).get(a)).push(b); (adj.get(b) || adj.set(b, []).get(b)).push(a); };
+      for (let j = 0; j < ny - 1; j++) for (let i = 0; i < nx - 1; i++) {
+        const A = F[j * nx + i] > lev, B = F[j * nx + i + 1] > lev, C = F[(j + 1) * nx + i + 1] > lev, D = F[(j + 1) * nx + i] > lev, idx = A | (B << 1) | (C << 2) | (D << 3);
+        if (idx === 0 || idx === 15) continue;
+        const T = (j * nx + i) * 2, R = (j * nx + i + 1) * 2 + 1, Bo = ((j + 1) * nx + i) * 2, Le = (j * nx + i) * 2 + 1;
+        const ctr = (F[j * nx + i] + F[j * nx + i + 1] + F[(j + 1) * nx + i + 1] + F[(j + 1) * nx + i]) / 4 > lev;
+        switch (idx) {
+          case 1: case 14: link(Le, T); break; case 2: case 13: link(T, R); break; case 3: case 12: link(Le, R); break;
+          case 4: case 11: link(R, Bo); break; case 6: case 9: link(T, Bo); break; case 7: case 8: link(Le, Bo); break;
+          case 5: if (ctr) { link(Le, Bo); link(T, R); } else { link(Le, T); link(R, Bo); } break;
+          case 10: if (ctr) { link(Le, T); link(R, Bo); } else { link(Le, Bo); link(T, R); } break;
+        }
+      }
+      const seen = new Set(), out = [];
+      const walk = (s) => { const L = [s]; seen.add(s); let cur = s; for (;;) { const nb = (adj.get(cur) || []).find((x) => !seen.has(x)); if (nb === undefined) break; seen.add(nb); L.push(nb); cur = nb; } return L; };
+      for (const [id, nb] of adj) if (nb.length === 1 && !seen.has(id)) out.push({ pts: walk(id).map(P), closed: false });
+      for (const [id] of adj) if (!seen.has(id)) out.push({ pts: walk(id).map(P), closed: true });
+      return out;
+    }
+    function chaikin(pts, closed) {
+      const o = []; const n = pts.length; for (let k = 0; k < (closed ? n : n - 1); k++) { const a = pts[k], b = pts[(k + 1) % n]; o.push([a[0] * 0.75 + b[0] * 0.25, a[1] * 0.75 + b[1] * 0.25], [a[0] * 0.25 + b[0] * 0.75, a[1] * 0.25 + b[1] * 0.75]); }
+      if (!closed) { o.unshift(pts[0]); o.push(pts[n - 1]); } return o;
+    }
+
+    // ——— grille ———
+    function build(w, h) {
+      const nx = Math.round(p.resolution), cs = w / nx, ny = Math.ceil(h / cs), N = nx * ny, K = Math.max(1, Math.min(6, p.couleurs.length || 1));
+      S = { w, h, nx, ny, cs, N, K, W: new Float32Array(N), P: [], D: [], hgt: new Float32Array(N), mask: new Float32Array(N), uk: -1, br: 0, prog: [], pi: 0, pt: 0, sheet: 0, fade: 0, userT: -99, img: null, can: document.createElement('canvas'), R: rng(app.seed * 31 + 7) };
+      for (let k = 0; k < K; k++) { S.P.push(new Float32Array(N)); S.D.push(new Float32Array(N)); }
+      // grain du papier : bruit de valeur à deux échelles + fibres
+      const R = rng(app.seed * 3 + 1), gw = Math.ceil(nx / 6) + 2, gh = Math.ceil(ny / 6) + 2, G = Array.from({ length: gw * gh }, R), G2 = Array.from({ length: (nx + 2) * (ny + 2) }, R);
+      const sm = (t) => t * t * (3 - 2 * t);
+      for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) { const fx = i / 6, fy = j / 6, x0 = Math.floor(fx), y0 = Math.floor(fy), tx = sm(fx - x0), ty = sm(fy - y0); const a = G[y0 * gw + x0], b = G[y0 * gw + x0 + 1], c = G[(y0 + 1) * gw + x0], d = G[(y0 + 1) * gw + x0 + 1]; const v = (a + (b - a) * tx) * (1 - ty) + (c + (d - c) * tx) * ty; S.hgt[j * nx + i] = 0.55 * v + 0.45 * G2[j * nx + i]; }
+      S.can.width = nx; S.can.height = ny; S.img = S.can.getContext('2d').createImageData(nx, ny);
+      makeMask(); program();
+    }
+    function makeMask() {
+      const { nx, ny } = S, c = document.createElement('canvas'); c.width = nx; c.height = ny; const g = c.getContext('2d');
+      const s = Math.min(nx, ny) * p.echelle; S.lg = { x: nx / 2, y: ny / 2, s };
+      g.fillStyle = '#000'; g.beginPath(); for (const lp of logoM || []) { lp.forEach((q, i) => (i ? g.lineTo(nx / 2 + q[0] * s, ny / 2 + q[1] * s) : g.moveTo(nx / 2 + q[0] * s, ny / 2 + q[1] * s))); g.closePath(); } g.fill('evenodd');
+      const d = g.getImageData(0, 0, nx, ny).data; for (let i = 0; i < nx * ny; i++) S.mask[i] = d[i * 4 + 3] / 255;
+    }
+    // ——— pinceau ———
+    function stamp(cx, cy, rad, k, amt, only) {
+      const { nx, ny, W } = S, r = Math.max(1.2, rad), P = S.P[k % S.K], x0 = Math.max(0, Math.floor(cx - r)), x1 = Math.min(nx - 1, Math.ceil(cx + r)), y0 = Math.max(0, Math.floor(cy - r)), y1 = Math.min(ny - 1, Math.ceil(cy + r));
+      const wa = 0.6 * p.eau * amt, pa = 0.32 * p.pigment * amt;
+      for (let j = y0; j <= y1; j++) for (let i = x0; i <= x1; i++) {
+        const d = Math.hypot(i - cx, j - cy) / r; if (d > 1) continue; const id = j * nx + i;
+        const mk = only === 1 ? S.mask[id] : only === 0 ? 1 - S.mask[id] : 1; if (mk < 0.02) continue;
+        const f = (1 - d * d * d * d) * (0.8 + 0.2 * S.hgt[id]) * mk;
+        W[id] = Math.min(1, Math.max(W[id], wa * f + W[id] * 0.5)); P[id] = Math.max(P[id], pa * f) + pa * f * 0.12;
+      }
+    }
+    // programme du peintre : une suite de gestes
+    function program() {
+      const { nx, ny, R } = S, K = S.K, rot = S.sheet, kk = (i) => (i + rot) % K, prog = [];
+      S.br = Math.max(2, Math.min(nx, ny) * 0.035 * p.pinceau);
+      const bb = (() => { let a = nx, b = ny, c = 0, d = 0; for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) if (S.mask[j * nx + i]) { a = Math.min(a, i); b = Math.min(b, j); c = Math.max(c, i); d = Math.max(d, j); } return c > a ? [a, b, c, d] : [nx * 0.3, ny * 0.3, nx * 0.7, ny * 0.7]; })();
+      const zig = (x0, y0, x1, y1, k, only, sp, amt) => { const pts = []; let dir = 1; for (let y = y0; y <= y1; y += sp) { const yy = y + (R() - 0.5) * sp * 0.3; pts.push(dir > 0 ? [x0, yy] : [x1, yy], dir > 0 ? [x1, yy + sp * 0.2] : [x0, yy + sp * 0.2]); dir = -dir; } prog.push({ t: 'path', pts, k, only, amt, rad: 1.25 }); };
+      const comp = p.composition;
+      if (comp === 'reserve') {
+        zig(-2, -2, nx + 2, ny * 0.55, kk(0), 0, S.br * 1.6, 0.8);
+        zig(-2, ny * 0.45, nx + 2, ny + 2, kk(1 % K), 0, S.br * 1.6, 0.8);
+        prog.push({ t: 'wait', d: 0.4 });
+        for (let i = 0; i < 6; i++) prog.push({ t: 'drop', x: R() * nx, y: R() * ny, k: kk(2 % K), r: S.br * (1 + R()), only: 0 });
+      } else if (comp === 'libre') {
+        for (let s = 0; s < 7; s++) { const x = R() * nx, y = R() * ny, a = R() * TAU, L = (0.2 + R() * 0.4) * nx, pts = []; for (let i = 0; i <= 8; i++) { const t = i / 8; pts.push([x + Math.cos(a) * L * t + Math.sin(t * 5 + s) * S.br, y + Math.sin(a) * L * t + Math.cos(t * 4 + s) * S.br]); } prog.push({ t: 'path', pts, k: kk(s), only: null, amt: 1, rad: 1 + R() * 1.2 }); if (R() < 0.6) prog.push({ t: 'drop', x: pts[4][0], y: pts[4][1], k: kk(s + 1), r: S.br * 1.2, only: null }); }
+      } else {
+        zig(-2, -2, nx + 2, ny + 2, kk(K > 2 ? 2 : 0), 0, S.br * 1.6, 0.4);
+        prog.push({ t: 'wait', d: 0.6 });
+        zig(bb[0] - 2, bb[1] - 2, bb[2] + 2, bb[3] + 2, kk(0), 1, S.br * 1.1, 1);
+        prog.push({ t: 'wait', d: 0.25 });
+        for (let i = 0; i < 5; i++) { let x, y, n = 0; do { x = bb[0] + R() * (bb[2] - bb[0]); y = bb[1] + R() * (bb[3] - bb[1]); n++; } while (S.mask[Math.floor(y) * nx + Math.floor(x)] < 0.5 && n < 50); prog.push({ t: 'drop', x, y, k: kk(1 % K), r: S.br * (0.9 + R() * 0.8), only: 1, amt: 2.2 }); }
+      }
+      for (let i = 0; i < 9; i++) prog.push({ t: 'drop', x: R() * nx, y: R() * ny, k: kk(i), r: S.br * (0.15 + R() * 0.3), only: null, amt: 1.6 });
+      prog.push({ t: 'dry' });
+      S.prog = prog; S.pi = 0; S.pt = 0; S.seg = 0; S.segT = 0;
+    }
+    function runProgram(dt) {
+      const a = S.prog[S.pi]; if (!a) return;
+      if (simT - S.userT < 2.5) return; // l'utilisateur peint : le peintre attend
+      const sp = S.nx * 2.2 * p.vitesse;
+      if (a.t === 'path') {
+        let budget = sp * dt;
+        while (budget > 0 && S.seg < a.pts.length - 1) {
+          const A = a.pts[S.seg], B = a.pts[S.seg + 1], L = Math.hypot(B[0] - A[0], B[1] - A[1]) || 1, rem = L * (1 - S.segT), mv = Math.min(budget, rem);
+          const t0 = S.segT, t1 = S.segT + mv / L, n = Math.max(1, Math.ceil(mv / (S.br * 0.35)));
+          for (let i = 1; i <= n; i++) { const t = t0 + (t1 - t0) * i / n; stamp(A[0] + (B[0] - A[0]) * t, A[1] + (B[1] - A[1]) * t, S.br * (a.rad || 1), a.k, a.amt || 1, a.only); }
+          S.brush = [A[0] + (B[0] - A[0]) * t1, A[1] + (B[1] - A[1]) * t1, a.k];
+          budget -= mv; S.segT = t1; if (S.segT >= 1 - 1e-6) { S.seg++; S.segT = 0; }
+        }
+        if (S.seg >= a.pts.length - 1) { S.pi++; S.seg = 0; S.segT = 0; S.pt = 0; }
+      } else if (a.t === 'wait') { S.pt += dt; S.brush = null; if (S.pt > a.d) { S.pi++; S.pt = 0; } }
+      else if (a.t === 'drop') { stamp(a.x, a.y, a.r, a.k, a.amt || 1.3, a.only); S.brush = [a.x, a.y, a.k]; S.pi++; S.pt = 0; S.prog.splice(S.pi, 0, { t: 'wait', d: 0.18 }); }
+      else if (a.t === 'dry') { S.brush = null; let wet = 0; for (let i = 0; i < S.N; i += 7) if (S.W[i] > 0.01) wet++; S.pt += dt; if ((wet < 3 && S.pt > p.tenue) || S.pt > p.tenue + 14) { S.pi++; S.pt = 0; S.fadeT = 0; } }
+    }
+    // ——— simulation ———
+    function sim(dt) {
+      const { nx, ny, W, hgt, K, P, D } = S, ev = 0.07 * p.sechage * dt, kd = 0.2, cap = 0.2, au = p.aureole, gr = p.granulation;
+      // écoulement : de la case plus mouillée vers la moins mouillée (à droite et en bas)
+      for (let pass = 0; pass < 2; pass++) {
+        const dx = pass === 0 ? 1 : nx;
+        for (let j = 0; j < ny - (pass ? 1 : 0); j++) for (let i = 0; i < nx - (pass ? 0 : 1); i++) {
+          const a = j * nx + i, b = a + dx, wa = W[a], wb = W[b]; if (wa < 0.004 && wb < 0.004) continue;
+          let s, t, f; if (wa > wb) { s = a; t = b; f = wa - wb; } else { s = b; t = a; f = wb - wa; }
+          const wt = W[t]; let fl = kd * f; if (wt < 0.01) { if (W[s] < 0.3) continue; fl *= cap * hgt[t] * hgt[t]; }
+          fl = Math.min(fl, W[s] * 0.25); if (fl <= 0) continue;
+          const c = fl / Math.max(W[s], 1e-4); W[s] -= fl; W[t] += fl;
+          for (let k = 0; k < K; k++) { const pk = P[k], m = pk[s] * c * 0.9; pk[s] -= m; pk[t] += m; }
+        }
+      }
+      // évaporation (plus forte aux bords) et dépôt
+      for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+        const id = j * nx + i, w = W[id]; if (w <= 0) continue;
+        let dry = 0; if (i > 0 && W[id - 1] < 0.01) dry++; if (i < nx - 1 && W[id + 1] < 0.01) dry++; if (j > 0 && W[id - nx] < 0.01) dry++; if (j < ny - 1 && W[id + nx] < 0.01) dry++;
+        const e = ev * (1 + au * 2.5 * dry); let nw = w - e;
+        const dep = 0.0025 * (1 + gr * 3 * (1 - hgt[id])) * dt * 60;
+        if (nw < 0.008) { nw = 0; for (let k = 0; k < K; k++) { D[k][id] += P[k][id]; P[k][id] = 0; } }
+        else for (let k = 0; k < K; k++) { const m = P[k][id] * dep; P[k][id] -= m; D[k][id] += m; }
+        W[id] = nw;
+      }
+    }
+    // ——— rendu ———
+    function absorb() { const C = p.couleurs.length ? p.couleurs : ['#2f5fd0']; return C.slice(0, S.K).map((c) => hex(c).map((v) => -Math.log(Math.max(0.035, v / 255)))); }
+    function paint() {
+      const { nx, ny, W, K, P, D, hgt, img } = S, A = absorb(), pc = hex(p.fond), d = img.data, gr = p.grain;
+      for (let id = 0, o = 0; id < nx * ny; id++, o += 4) {
+        let r = 0, g = 0, b = 0; for (let k = 0; k < K; k++) { const m = D[k][id] + P[k][id] * 0.85; if (m > 0) { r += A[k][0] * m; g += A[k][1] * m; b += A[k][2] * m; } }
+        const pap = 1 - gr * 0.07 * (1 - hgt[id]), wet = W[id] > 0.01 ? 0.965 : 1;
+        d[o] = pc[0] * Math.exp(-r) * pap * wet; d[o + 1] = pc[1] * Math.exp(-g) * pap * wet; d[o + 2] = pc[2] * Math.exp(-b) * pap * wet; d[o + 3] = 255;
+      }
+      S.can.getContext('2d').putImageData(img, 0, 0);
+    }
+    function paper(dpr) {
+      const { w, h } = S, key = [w, h, dpr, p.grain, app.seed].join('|'); if (key === paperKey) return paperC; paperKey = key;
+      const W2 = Math.ceil(w * dpr / 2), H2 = Math.ceil(h * dpr / 2), c = paperC || document.createElement('canvas'); c.width = W2; c.height = H2; paperC = c;
+      const g = c.getContext('2d'), im = g.createImageData(W2, H2), R = rng(app.seed * 77 + 3);
+      for (let i = 0; i < W2 * H2; i++) { const v = 255 - R() * 26 * p.grain; im.data[i * 4] = v; im.data[i * 4 + 1] = v; im.data[i * 4 + 2] = v; im.data[i * 4 + 3] = 255; }
+      g.putImageData(im, 0, 0);
+      g.globalAlpha = 0.12 * p.grain; g.strokeStyle = '#8a8070'; g.lineWidth = 0.6; for (let i = 0; i < W2 * H2 / 900; i++) { const x = R() * W2, y = R() * H2, a = R() * TAU, l = 3 + R() * 10; g.beginPath(); g.moveTo(x, y); g.quadraticCurveTo(x + Math.cos(a) * l, y + Math.sin(a + 0.6) * l, x + Math.cos(a + 0.3) * l * 1.6, y + Math.sin(a + 0.3) * l * 1.6); g.stroke(); }
+      return c;
+    }
+
+    app.loop((t, dt) => {
+      dt = Math.min(1 / 20, dt || 0);
+      const { w, h, dpr } = app.size; buildLogo();
+      const key = [w, h, p.resolution, p.composition, p.echelle, (p.couleurs || []).length, app.seed, logoKey].join('|'); if (!S || key !== gKey) { gKey = key; build(w, h); }
+      S.br = Math.max(2, Math.min(S.nx, S.ny) * 0.035 * p.pinceau);
+      const run = (d) => { simT += d; if (p.auto) runProgram(d); sim(d); };
+      if (app.thumbnail) { if (!S.th) { S.th = true; for (let k = 0; k < 1400 && S.prog[S.pi] && S.prog[S.pi].t !== 'dry'; k++) run(1 / 30); for (let k = 0; k < 90; k++) run(1 / 30); } }
+      else { run(dt); run(dt * 0.5); }
+      // nouvelle feuille : fondu vers le papier, puis on recommence
+      let fade = 0;
+      if (p.auto && S.pi >= S.prog.length && !app.thumbnail) { S.fadeT = (S.fadeT || 0) + dt; fade = Math.min(1, S.fadeT / 1.2); if (S.fadeT > 1.3) { S.W.fill(0); for (let k = 0; k < S.K; k++) { S.P[k].fill(0); S.D[k].fill(0); } S.sheet++; program(); S.fadeT = 0; } }
+      paint();
+      ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high';
+      ctx.drawImage(S.can, 0, 0, S.nx * S.cs * dpr, S.ny * S.cs * dpr);
+      ctx.globalCompositeOperation = 'multiply'; ctx.drawImage(paper(dpr), 0, 0, w * dpr, h * dpr); ctx.globalCompositeOperation = 'source-over';
+      if (fade > 0) { ctx.globalAlpha = fade; ctx.fillStyle = p.fond; ctx.fillRect(0, 0, w * dpr, h * dpr); ctx.globalAlpha = 1; }
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      // pointe du pinceau
+      const C = p.couleurs.length ? p.couleurs : ['#2f5fd0'];
+      if (S.brush && p.auto && !app.thumbnail && fade === 0) { const [bx, by, k] = S.brush; ctx.strokeStyle = C[k % C.length]; ctx.globalAlpha = 0.5; ctx.lineWidth = 1.2; ctx.beginPath(); ctx.arc(bx * S.cs, by * S.cs, S.br * S.cs * 0.9, 0, TAU); ctx.stroke(); ctx.globalAlpha = 1; }
+      if (hov && !ptr && !app.thumbnail) { ctx.strokeStyle = 'rgba(0,0,0,0.25)'; ctx.lineWidth = 1; ctx.beginPath(); ctx.arc(hov.x, hov.y, S.br * S.cs, 0, TAU); ctx.stroke(); }
+      app.finish(ctx);
+    });
+
+    // ——— SVG : courbes de niveau de chaque pigment, en multiplication ———
+    function toSVG() {
+      const { w, h } = app.size, f = (v) => +v.toFixed(1); buildLogo(); const { nx, ny, K, cs } = S, C = p.couleurs.length ? p.couleurs : ['#2f5fd0'];
+      let o = `<rect width="100%" height="100%" fill="${p.fond}"/>`;
+      const X = nx + 2, Y = ny + 2;
+      for (let k = 0; k < K; k++) {
+        const F = new Float64Array(X * Y); let mx = 0;
+        for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) { const v = S.D[k][j * nx + i] + S.P[k][j * nx + i] * 0.85; F[(j + 1) * X + i + 1] = v; if (v > mx) mx = v; }
+        if (mx < 0.01) continue;
+        for (const lev of [0.04, 0.12, 0.25, 0.45, 0.7]) {
+          if (lev > mx) break;
+          const cc = contours(F, X, Y, lev, 0, 0, 1).filter((c) => c.closed && c.pts.length > 3);
+          if (!cc.length) continue;
+          const d = cc.map((c) => 'M' + c.pts.map((q) => f((q[0] - 1 + 0.5) * cs) + ' ' + f((q[1] - 1 + 0.5) * cs)).join('L') + 'Z').join('');
+          o += `<path d="${d}" fill="${C[k % C.length]}" fill-rule="evenodd" fill-opacity="${f(Math.min(0.32, 0.1 + lev * 0.3))}" style="mix-blend-mode:multiply"/>`;
+        }
+      }
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">${o}</svg>`;
+    }
+  </script>
+</body>
+</html>
