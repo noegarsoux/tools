@@ -1,0 +1,15 @@
+{
+  "slug": "culbutos",
+  "title": "Culbutos",
+  "type": "motion",
+  "description": "Une rangée de culbutos lestés qui roulent, oscillent et se relèvent toujours ; une pichenette au bout se propage de jouet en jouet. Logo au ventre.",
+  "tags": ["animation", "jouet", "physique", "interaction", "logo", "svg"],
+  "inspiration": [
+    "Les poupées culbutos lestées qui se relèvent toujours",
+    "Les jouets en bois peints à la main",
+    "Les réactions en chaîne des dominos"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}
