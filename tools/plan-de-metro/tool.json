@@ -1,0 +1,15 @@
+{
+  "slug": "plan-de-metro",
+  "title": "Plan de métro",
+  "type": "motion",
+  "description": "Un réseau de lignes de métro à 45° qui se trace, avec stations, correspondances, fleuve et rames en circulation ; une ligne circulaire suit le logo.",
+  "tags": ["carte", "reseau", "diagramme", "lignes", "logo", "svg"],
+  "inspiration": [
+    "Le plan du métro de Londres de Harry Beck (1933)",
+    "Le plan de New York de Massimo Vignelli (1972)",
+    "Les schémas octilinéaires des réseaux de transport"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}
