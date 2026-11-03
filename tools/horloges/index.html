@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mille horloges</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Mille horloges : chaque cadran a deux aiguilles de même longueur. Une figure donne, pour chaque cadran, deux angles
+    // cibles ; mis bout à bout, les segments forment des lignes continues d'un cadran à l'autre. Au changement de figure,
+    // chaque aiguille part avec un retard qui dépend de sa place (balayage), fait éventuellement quelques tours de plus,
+    // et rejoint sa nouvelle cible en douceur. Certaines figures bougent d'elles-mêmes (vague, tourbillon) : la cible
+    // continue alors de tourner une fois atteinte. Le doigt attire les aiguilles ; le logo se lit en traits d'accent.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const BIEN = PAL('biennale'), MEN = PAL('menthe'), KB = PAL('kegelbahn');
+    const FIGS = ['vague', 'losanges', 'cercles', 'tourbillon', 'grille', 'rayons', 'repos', 'heure'];
+
+    let simT = 0, C = null, cKey = '', figI = 0, figT = 0, figName = '', ptr = null, ptrT = -9, logoM = null, logoKey = '';
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: false,
+      finish: { grain: 0.02, vignette: 0.08 },
+      hint: 'Glissez pour attirer les aiguilles · clic : figure suivante · molette : nombre d\'horloges',
+      notes: 'Une horloge n\'est qu\'un cadran et deux traits. Mettez-en des centaines côte à côte et faites tourner leurs aiguilles ensemble : chaque aiguille devient le segment d\'un dessin plus grand, et les cadrans voisins se passent les lignes comme un relais. Le collectif suédois Humans since 1982 a construit ainsi des murs d\'horloges qui se mettent à danser avant d\'afficher l\'heure. Ici les figures se succèdent : repos en diagonales, losanges, vague qui tourne, cercles concentriques, tourbillon, grille, rayons, puis l\'heure réelle. Chaque aiguille part avec un retard qui dépend de sa place, si bien que les changements traversent la grille en balayage. Le logo se dessine en traits horizontaux d\'accent.',
+      params: {
+        'Grille': {
+          horloges: { type: 'range', label: 'Horloges (petit côté)', min: 3, max: 30, step: 1, value: 9 },
+          cadran: { type: 'range', label: 'Taille du cadran', min: 0.6, max: 1, step: 0.01, value: 0.92 },
+          aiguille: { type: 'range', label: 'Longueur des aiguilles', min: 0.5, max: 1.05, step: 0.01, value: 0.98 },
+          epaisseur: { type: 'range', label: 'Épaisseur', min: 0.02, max: 0.25, step: 0.005, value: 0.09 },
+        },
+        'Chorégraphie': {
+          figure: { type: 'select', label: 'Figure', options: { cycle: 'Enchaîner', repos: 'Repos', losanges: 'Losanges', vague: 'Vague', cercles: 'Cercles', tourbillon: 'Tourbillon', grille: 'Grille', rayons: 'Rayons', heure: 'Heure', logo: 'Logo' }, value: 'cycle' },
+          duree: { type: 'range', label: 'Durée d\'une figure (s)', min: 2, max: 20, step: 0.5, value: 6 },
+          transition: { type: 'range', label: 'Durée de rotation (s)', min: 0.3, max: 6, step: 0.1, value: 2.2 },
+          balayage: { type: 'range', label: 'Balayage (s)', min: 0, max: 4, step: 0.05, value: 1.4 },
+          tours: { type: 'range', label: 'Tours supplémentaires', min: 0, max: 3, step: 1, value: 1 },
+          vitesse: { type: 'range', label: 'Vitesse des figures mouvantes', min: 0, max: 2, step: 0.01, value: 0.6 },
+        },
+        'Logo en aiguilles': {
+          logo: { type: 'toggle', label: 'Inclure le logo', value: false },
+          tailleLogo: { type: 'range', label: 'Taille du logo', min: 0.3, max: 1.8, step: 0.01, value: 1.4, show: (q) => q.logo },
+          image: { type: 'file', label: 'Logo', accept: 'image/*', show: (q) => q.logo },
+        },
+        'Couleurs': {
+          fond: { type: 'color', label: 'Fond', value: '#e8e4dc' },
+          cadranCouleur: { type: 'color', label: 'Cadran', value: '#f6f3ec' },
+          aiguilles: { type: 'color', label: 'Aiguilles', value: '#16161c' },
+          accent: { type: 'color', label: 'Logo', value: '#ef5a2f', show: (q) => q.logo },
+        },
+      },
+      presets: {
+        'Mur': {},
+        'Grandes horloges': { horloges: 5, epaisseur: 0.07, transition: 3, tours: 2 },
+        'Vague': { figure: 'vague', horloges: 14, vitesse: 0.9 },
+        'Tourbillon': { figure: 'tourbillon', horloges: 18, fond: '#101014', cadranCouleur: '#1b1b22', aiguilles: '#f4f1ea', epaisseur: 0.11 },
+        'Losanges': { figure: 'losanges', horloges: 12, aiguilles: '#2c3566' },
+        'Heure': { figure: 'heure', horloges: 4, epaisseur: 0.06, aiguille: 0.8 },
+        'Logo': { logo: true, figure: 'cycle', horloges: 18, accent: '#ef5a2f', duree: 5 },
+        'Biennale': { fond: BIEN[0], cadranCouleur: '#ffffff', aiguilles: BIEN[1], accent: BIEN[2], horloges: 10 },
+        'Menthe': { fond: MEN[1], cadranCouleur: mix(MEN[1], MEN[3], 0.2), aiguilles: MEN[2], accent: MEN[0], horloges: 12 },
+        'Kegelbahn': { fond: KB[0], cadranCouleur: '#141418', aiguilles: KB[3], accent: KB[1], horloges: 12, figure: 'tourbillon' },
+      },
+      brand(colors) {
+        const s = colors.slice().sort((a, b) => lum(a) - lum(b)), L = s[s.length - 1];
+        return { fond: mix(L, s[0], 0.08), cadranCouleur: L, aiguilles: s[0], accent: s[Math.floor(s.length / 2)] };
+      },
+      pointer: {
+        down: (q) => { ptr = [q.x, q.y]; ptrT = simT; ptr.moved = 0; },
+        drag: (q) => { if (ptr) ptr.moved += Math.hypot(q.x - ptr[0], q.y - ptr[1]); ptr = Object.assign([q.x, q.y], { moved: ptr ? ptr.moved : 0 }); ptrT = simT; },
+        up: () => { if (ptr && ptr.moved < 8) nextFig(); ptr = null; },
+        wheel: (q, dy) => app.set('horloges', Math.max(3, Math.min(30, p.horloges + (dy > 0 ? 1 : -1)))),
+      },
+      onChange(k) { if (['*', 'logo', 'image'].includes(k)) logoKey = ''; if (k === '*' || k === 'figure') { figI = 0; figName = ''; } },
+      export: { name: 'mille-horloges', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    function hex(x) { const n = parseInt(x.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
+    function lum(x) { const c = hex(x); return (c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114) / 255; }
+    function mix(a, b, t) { const A = hex(a), B = hex(b); return '#' + A.map((v, i) => Math.round(v + (B[i] - v) * t).toString(16).padStart(2, '0')).join(''); }
+    const ease = (x) => x <= 0 ? 0 : x >= 1 ? 1 : x < 0.5 ? 4 * x * x * x : 1 - (-2 * x + 2) ** 3 / 2;
+
+    // ——— Logo ———
+    function buildLogo() {
+      const img0 = p.image || app.logoImg, key = [p.logo, img0 ? (img0.src || 'c') : 'demo'].join(); if (key === logoKey) return; logoKey = key;
+      logoM = null;
+      const M = 200, c = document.createElement('canvas'); c.width = c.height = M; const x = c.getContext('2d', { willReadFrequently: true }), L = M * 0.94, cx = M / 2;
+      if (img0) { const iw = img0.naturalWidth || img0.width, ih = img0.naturalHeight || img0.height, s = L / Math.max(iw, ih); x.drawImage(img0, cx - iw * s / 2, cx - ih * s / 2, iw * s, ih * s); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(cx, cx, L * 0.48, 0, TAU); x.arc(cx, cx, L * 0.27, 0, TAU, true); x.fill('evenodd'); x.fillRect(cx - L * 0.07, cx - L * 0.5, L * 0.14, L); }
+      const d = x.getImageData(0, 0, M, M).data; let transp = 0; for (let i = 3; i < d.length; i += 4) if (d[i] < 128) transp++; const useA = transp > M * M * 0.05;
+      const m = new Uint8Array(M * M); for (let i = 0; i < M * M; i++) { const o = i * 4, l = (d[o] * 0.2126 + d[o + 1] * 0.7152 + d[o + 2] * 0.0722) / 255; m[i] = (useA ? d[o + 3] > 128 : d[o + 3] > 128 && l < 0.5) ? 1 : 0; }
+      logoM = { m, M };
+    }
+    function inLogo(u, v) {
+      if (!logoM) return false; const S = p.tailleLogo, a = Math.floor((u / S * 0.5 + 0.5) * logoM.M), b = Math.floor((v / S * 0.5 + 0.5) * logoM.M);
+      return a >= 0 && b >= 0 && a < logoM.M && b < logoM.M && logoM.m[b * logoM.M + a] === 1;
+    }
+
+    // ——— Grille et état des aiguilles ———
+    function grid(w, h) {
+      const k = [p.horloges, w, h].join(); if (k === cKey && C) return C; cKey = k;
+      const m = Math.min(w, h), s = m / p.horloges, nx = Math.max(1, Math.floor(w / s)), ny = Math.max(1, Math.floor(h / s)), out = [];
+      for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+        const x = (w - nx * s) / 2 + (i + 0.5) * s, y = (h - ny * s) / 2 + (j + 0.5) * s;
+        out.push({ i, j, x, y, u: (x - w / 2) / (m / 2), v: (y - h / 2) / (m / 2), a: [Math.PI * 1.25, Math.PI * 1.25], from: [Math.PI * 1.25, Math.PI * 1.25], k: [0, 0], acc: false });
+      }
+      C = { s, nx, ny, list: out }; figName = '';
+      return C;
+    }
+    function figList() { return p.figure === 'cycle' ? (p.logo ? ['logo', ...FIGS.slice(0, 3), 'logo', ...FIGS.slice(3)] : FIGS) : [p.figure]; }
+    function nextFig() { figI++; figName = ''; }
+
+    // angles cibles (non bornés : les figures mouvantes tournent en continu)
+    function target(f, c, t) {
+      const T = t * p.vitesse, { u, v, i, j } = c, r = Math.hypot(u, v), a = Math.atan2(v, u);
+      switch (f) {
+        case 'repos': return [Math.PI * 1.25, Math.PI * 1.25];
+        case 'losanges': return (i + j) & 1 ? [Math.PI * 0.25, Math.PI * 1.25] : [Math.PI * 0.75, Math.PI * 1.75];
+        case 'vague': { const ph = (u * 0.9 + v * 0.4) * 1.6 - T * 2.2; return [ph, ph + Math.PI]; }
+        case 'cercles': return [a + Math.PI / 2, a - Math.PI / 2];
+        case 'rayons': return [a, a + Math.PI];
+        case 'tourbillon': { const b = a + Math.PI / 2 + r * 2.4 - T * 1.6; return [b, b + Math.PI * 0.7 + Math.sin(T + r * 3) * 0.3]; }
+        case 'grille': { const q = ((i & 1) ? 1 : 0) + ((j & 1) ? 2 : 0), base = [0, 0.5, 1.5, 1][q] * Math.PI; return [base, base + Math.PI / 2]; }
+        case 'heure': { const d = new Date(), hh = (d.getHours() % 12 + d.getMinutes() / 60) / 12 * TAU - Math.PI / 2, mm = (d.getMinutes() + d.getSeconds() / 60) / 60 * TAU - Math.PI / 2; return [hh, mm]; }
+        case 'logo': return inLogo(u, v) ? [0, Math.PI] : [Math.PI * 1.25, Math.PI * 1.25];
+      }
+      return [0, 0];
+    }
+
+    function update(w, h, t) {
+      buildLogo(); const G = grid(w, h), L = figList();
+      if (p.figure === 'cycle' && figName && t - figT > p.duree + p.transition + p.balayage) { figI++; }
+      const f2 = L[((figI % L.length) + L.length) % L.length];
+      if (f2 !== figName) {
+        // nouvelle figure : chaque aiguille repart de sa position, avec retard, tours en plus, sens alterné
+        figName = f2; figT = t;
+        for (const c of G.list) {
+          const tg = target(f2, c, t + p.transition);
+          for (let k = 0; k < 2; k++) {
+            const dir = k === 0 ? 1 : -1, cur = c.a[k]; let goal = tg[k] + TAU * Math.round((cur - tg[k]) / TAU);
+            goal += dir * TAU * p.tours; if (dir > 0 && goal < cur) goal += TAU; if (dir < 0 && goal > cur) goal -= TAU;
+            c.from[k] = cur; c.k[k] = goal - tg[k];
+          }
+          c.delay = p.balayage * ((c.i + c.j) / Math.max(1, G.nx + G.ny - 2));
+        }
+      }
+      const pull = ptr && t - ptrT < 1.5 ? 1 : Math.max(0, 1 - (t - ptrT - 1.5) / 1.2);
+      for (const c of G.list) {
+        const tg = target(figName, c, t), e = ease((t - figT - c.delay) / p.transition);
+        for (let k = 0; k < 2; k++) c.a[k] = c.from[k] + (tg[k] + c.k[k] - c.from[k]) * e;
+        c.acc = figName === 'logo' && inLogo(c.u, c.v);
+        // attraction du doigt : les aiguilles proches pointent vers lui
+        if (pull > 0 && (ptr || c.lastP)) {
+          const P = ptr || c.lastP; if (ptr) c.lastP = ptr; const dx = P[0] - c.x, dy = P[1] - c.y, d = Math.hypot(dx, dy), wgt = pull * Math.exp(-(d * d) / (G.s * G.s * 9));
+          if (wgt > 0.01) { const aim = Math.atan2(dy, dx); for (let k = 0; k < 2; k++) { const want = aim + (k ? Math.PI : 0); let df = ((want - c.a[k]) % TAU + TAU * 1.5) % TAU - Math.PI; c.a[k] += df * wgt; } }
+        }
+      }
+      return G;
+    }
+
+    function render(G, pen) {
+      const r = G.s * 0.5 * p.cadran, len = r * p.aiguille, lw = G.s * p.epaisseur * 0.5;
+      pen.faces(G.list, r);
+      pen.hands(G.list.filter((c) => !c.acc), len, lw, p.aiguilles);
+      pen.hands(G.list.filter((c) => c.acc), len, lw * 1.15, p.accent);
+    }
+
+    app.loop((t, dt) => {
+      dt = Math.min(0.1, dt || 0);
+      if (!app.thumbnail) simT += dt; else { simT = 20; figI = 2; figName = ''; }
+      const { w, h, dpr } = app.size, G = update(w, h, simT);
+      if (app.thumbnail) { const tt = simT + p.transition + p.balayage + 0.1; update(w, h, tt); }
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = p.fond; ctx.fillRect(0, 0, w, h);
+      render(G, {
+        faces(L, r) {
+          const P = new Path2D(); for (const c of L) { P.moveTo(c.x + r, c.y); P.arc(c.x, c.y, r, 0, TAU); }
+          ctx.fillStyle = p.cadranCouleur; ctx.fill(P); ctx.strokeStyle = mix(p.cadranCouleur, p.aiguilles, 0.12); ctx.lineWidth = Math.max(0.6, r * 0.03); ctx.stroke(P);
+        },
+        hands(L, len, lw, col) {
+          if (!L.length) return; const P = new Path2D(), D = new Path2D();
+          for (const c of L) { for (const a of c.a) { P.moveTo(c.x, c.y); P.lineTo(c.x + Math.cos(a) * len, c.y + Math.sin(a) * len); } D.moveTo(c.x + lw * 0.7, c.y); D.arc(c.x, c.y, lw * 0.7, 0, TAU); }
+          ctx.strokeStyle = col; ctx.lineWidth = lw; ctx.lineCap = 'round'; ctx.stroke(P); ctx.fillStyle = col; ctx.fill(D);
+        },
+      });
+      app.finish(ctx);
+    });
+
+    function toSVG() {
+      const { w, h } = app.size, f = (v) => +v.toFixed(2), G = C || grid(w, h);
+      let s = `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><rect width="100%" height="100%" fill="${p.fond}"/>`;
+      render(G, {
+        faces(L, r) { s += `<g fill="${p.cadranCouleur}" stroke="${mix(p.cadranCouleur, p.aiguilles, 0.12)}" stroke-width="${f(Math.max(0.6, r * 0.03))}">` + L.map((c) => `<circle cx="${f(c.x)}" cy="${f(c.y)}" r="${f(r)}"/>`).join('') + '</g>'; },
+        hands(L, len, lw, col) {
+          if (!L.length) return;
+          s += `<path d="${L.map((c) => c.a.map((a) => `M${f(c.x)} ${f(c.y)}L${f(c.x + Math.cos(a) * len)} ${f(c.y + Math.sin(a) * len)}`).join('')).join('')}" stroke="${col}" stroke-width="${f(lw)}" stroke-linecap="round" fill="none"/>`;
+          s += `<g fill="${col}">` + L.map((c) => `<circle cx="${f(c.x)}" cy="${f(c.y)}" r="${f(lw * 0.7)}"/>`).join('') + '</g>';
+        },
+      });
+      return s + '</svg>';
+    }
+  </script>
+</body>
+</html>
