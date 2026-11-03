@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Écran d'épingles</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Écran d'épingles : chaque épingle a une sortie z (0 = à plat, 1 = sortie à fond). Une forme cachée derrière
+    // l'écran avance et pousse les épingles : z = max(z, forme). Les épingles restent où on les a poussées (frottement)
+    // jusqu'à la secousse, qui les fait retomber rang par rang, du haut vers le bas.
+    // Vue oblique : la tête d'une épingle est décalée de z·D dans la direction de vue, sa tige relie la base à la tête,
+    // et son ombre part de la base à l'opposé de la lumière. On dessine par tranches de z, des plus basses aux plus hautes.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2, NB = 18;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const BIEN = PAL('biennale'), MEN = PAL('menthe'), KB = PAL('kegelbahn');
+    const SEQ = ['logo', 'spheres', 'ondes', 'spirale', 'relief'];
+
+    let simT = 0, dirty = true, frameC = null, frameKey = '', P = null, pKey = '', logoD = null, logoKey = '', ptr = null, cyc = { k: 0, t0: 0 };
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.04, vignette: 0.18 },
+      hint: 'Glissez pour pousser les épingles · clic : secouer l\'écran · molette : densité',
+      notes: 'Posez la main contre un écran d\'épingles et son empreinte apparaît de l\'autre côté, en relief. Les épingles glissent dans leurs trous et restent où on les a poussées ; une secousse, et tout redevient plat. Le cinéaste Alexandre Alexeïeff en faisait des films image par image, le jouet de bureau en a fait un passe-temps. Ici, une forme cachée derrière l\'écran avance lentement : le logo en bas-relief, des sphères qui roulent et laissent leur sillon, des ondes, une spirale, un relief montagneux. Les têtes changent de couleur avec la hauteur, les tiges luisent et les ombres s\'allongent. Glissez pour pousser vous-même, cliquez pour secouer.',
+      params: {
+        'Épingles': {
+          densite: { type: 'range', label: 'Épingles par rangée', min: 24, max: 150, step: 1, value: 64 },
+          grille: { type: 'select', label: 'Grille', options: { quinconce: 'En quinconce', carree: 'Carrée' }, value: 'quinconce' },
+          taille: { type: 'range', label: 'Taille des têtes', min: 0.3, max: 1.1, step: 0.01, value: 0.78 },
+          sortie: { type: 'range', label: 'Longueur de sortie', min: 1, max: 12, step: 0.1, value: 4.5 },
+          angle: { type: 'range', label: 'Angle de vue (°)', min: 0, max: 360, step: 1, value: 115 },
+          ombre: { type: 'range', label: 'Ombres', min: 0, max: 1, step: 0.01, value: 0.55 },
+        },
+        'Empreinte': {
+          forme: { type: 'select', label: 'Forme poussée', options: { cycle: 'Toutes, à tour de rôle', logo: 'Logo', spheres: 'Sphères qui roulent', ondes: 'Ondes', spirale: 'Spirale', relief: 'Relief' }, value: 'cycle' },
+          presse: { type: 'range', label: 'Durée de la poussée (s)', min: 0.5, max: 12, step: 0.1, value: 3.2 },
+          tenue: { type: 'range', label: 'Tenue (s)', min: 0, max: 12, step: 0.1, value: 2.2 },
+          secousse: { type: 'range', label: 'Durée de la secousse (s)', min: 0.3, max: 6, step: 0.1, value: 1.6 },
+          tailleLogo: { type: 'range', label: 'Taille du logo', min: 0.3, max: 1.2, step: 0.01, value: 0.78 },
+          image: { type: 'file', label: 'Logo', accept: 'image/*' },
+        },
+        'Couleurs': {
+          fond: { type: 'color', label: 'Plaque', value: '#1c1d21' },
+          tige: { type: 'color', label: 'Tiges', value: '#8d929b' },
+          couleurs: { type: 'palette', label: 'Têtes, du creux au sommet', value: ['#5a5e66', '#b9bec6', '#f4f5f7'] },
+        },
+      },
+      presets: {
+        'À tour de rôle': {},
+        'Logo': { forme: 'logo', tenue: 5, couleurs: ['#3b3e45', '#9aa0a8', '#e5452a'] },
+        'Sphères': { forme: 'spheres', presse: 5, couleurs: ['#4a4f58', '#c7ccd3', '#ffffff'] },
+        'Ondes': { forme: 'ondes', couleurs: ['#3a5f95', '#7fa9e0', '#f4f8fd'], fond: '#0d1420' },
+        'Relief': { forme: 'relief', densite: 96, sortie: 6, couleurs: ['#2f4a2a', '#8a9a5b', '#e8e2c8', '#ffffff'], fond: '#141812' },
+        'Aiguilles fines': { densite: 120, taille: 0.7, sortie: 7, ombre: 0.4 },
+        'Gros clous': { densite: 30, taille: 0.92, sortie: 2.2, grille: 'carree', couleurs: ['#6b4a2a', '#c8925a', '#f2d6a2'], tige: '#b88a5a', fond: '#24170d' },
+        'Biennale': { fond: BIEN[1], tige: '#777777', couleurs: [BIEN[2], BIEN[3], BIEN[4], BIEN[0]] },
+        'Menthe': { fond: MEN[1], tige: MEN[3], couleurs: [MEN[3], MEN[2], MEN[0]], forme: 'ondes' },
+        'Kegelbahn': { fond: KB[0], tige: '#6a6474', couleurs: [KB[2], KB[1], KB[5], KB[3]], forme: 'spirale' },
+      },
+      brand(colors) {
+        const s = colors.slice().sort((a, b) => lum(a) - lum(b)), L = s[s.length - 1], D = s[0];
+        return { fond: mix(D, '#000000', 0.35), tige: mix(D, L, 0.5), couleurs: s.length > 2 ? s.slice(1) : [mix(D, L, 0.4), L] };
+      },
+      pointer: {
+        down: (q) => { ptr = { x: q.x, y: q.y, moved: 0 }; },
+        drag: (q) => { if (!ptr) return; ptr.moved += Math.hypot(q.x - ptr.x, q.y - ptr.y); ptr.x = q.x; ptr.y = q.y; if (ptr.moved > 4) finger(q.x, q.y); },
+        up: () => { if (ptr && ptr.moved < 6) shake(); ptr = null; },
+        wheel: (q, dy) => app.set('densite', Math.max(24, Math.min(150, p.densite + (dy > 0 ? -3 : 3)))),
+      },
+      onChange(k) { if (['*', 'image'].includes(k)) logoKey = ''; },
+      export: { name: 'ecran-epingles', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    function hex(x) { const n = parseInt(x.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
+    function lum(x) { const c = hex(x); return (c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114) / 255; }
+    function mix(a, b, t) { const A = hex(a), C = hex(b); return '#' + A.map((v, i) => Math.round(v + (C[i] - v) * t).toString(16).padStart(2, '0')).join(''); }
+    function rng(s) { let a = s >>> 0; return () => { a = (a + 0x6d2b79f5) >>> 0; let t = a; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+    function grad(Cs, t) { if (Cs.length < 2) return Cs[0] || '#cccccc'; const x = Math.max(0, Math.min(1, t)) * (Cs.length - 1), i = Math.min(Cs.length - 2, Math.floor(x)); return mix(Cs[i], Cs[i + 1], x - i); }
+
+    // distance euclidienne exacte (Felzenszwalb & Huttenlocher), au carré, en cellules
+    function edt1(f, n, d, v, z) {
+      let k = 0; v[0] = 0; z[0] = -1e20; z[1] = 1e20;
+      for (let q = 1; q < n; q++) { let s; do { const r = v[k]; s = ((f[q] + q * q) - (f[r] + r * r)) / (2 * q - 2 * r); if (s <= z[k]) k--; else break; } while (k >= 0); k++; v[k] = q; z[k] = s; z[k + 1] = 1e20; }
+      k = 0; for (let q = 0; q < n; q++) { while (z[k + 1] < q) k++; const r = v[k]; d[q] = (q - r) * (q - r) + f[r]; }
+    }
+    function edt(F, nx, ny) {
+      const n = Math.max(nx, ny), f = new Float64Array(n), d = new Float64Array(n), v = new Int32Array(n), z = new Float64Array(n + 1);
+      for (let i = 0; i < nx; i++) { for (let j = 0; j < ny; j++) f[j] = F[j * nx + i]; edt1(f, ny, d, v, z); for (let j = 0; j < ny; j++) F[j * nx + i] = d[j]; }
+      for (let j = 0; j < ny; j++) { for (let i = 0; i < nx; i++) f[i] = F[j * nx + i]; edt1(f, nx, d, v, z); for (let i = 0; i < nx; i++) F[j * nx + i] = Math.sqrt(d[i]); }
+    }
+
+    // ——— Logo : distance à l'intérieur du masque (pour un bas-relief à bords arrondis) ———
+    function buildLogo() {
+      const img0 = p.image || app.logoImg, key = img0 ? (img0.src || 'c') : 'demo'; if (key === logoKey) return; logoKey = key;
+      const M = 200, c = document.createElement('canvas'); c.width = c.height = M; const x = c.getContext('2d', { willReadFrequently: true }), L = M * 0.94, cx = M / 2;
+      if (img0) { const iw = img0.naturalWidth || img0.width, ih = img0.naturalHeight || img0.height, s = L / Math.max(iw, ih); x.drawImage(img0, cx - iw * s / 2, cx - ih * s / 2, iw * s, ih * s); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(cx, cx, L * 0.48, 0, TAU); x.arc(cx, cx, L * 0.27, 0, TAU, true); x.fill('evenodd'); x.fillRect(cx - L * 0.07, cx - L * 0.5, L * 0.14, L); }
+      const d = x.getImageData(0, 0, M, M).data; let transp = 0; for (let i = 3; i < d.length; i += 4) if (d[i] < 128) transp++; const useA = transp > M * M * 0.05;
+      const F = new Float64Array(M * M); for (let i = 0; i < M * M; i++) { const o = i * 4, l = (d[o] * 0.2126 + d[o + 1] * 0.7152 + d[o + 2] * 0.0722) / 255, inn = useA ? d[o + 3] > 128 : d[o + 3] > 128 && l < 0.5; F[i] = inn ? 1e20 : 0; }
+      edt(F, M, M); logoD = { F, M };
+    }
+    function logoH(u, v) {
+      const S = p.tailleLogo, M = logoD.M, mu = (u / S + 0.5) * M, mv = (v / S + 0.5) * M; if (mu < 0 || mv < 0 || mu >= M - 1 || mv >= M - 1) return 0;
+      const i = Math.floor(mu), j = Math.floor(mv), fu = mu - i, fv = mv - j, F = logoD.F;
+      const d = (F[j * M + i] * (1 - fu) + F[j * M + i + 1] * fu) * (1 - fv) + (F[(j + 1) * M + i] * (1 - fu) + F[(j + 1) * M + i + 1] * fu) * fv;
+      if (d <= 0.3) return 0; const b = Math.min(1, d / (M * 0.035)), dome = Math.min(1, d / (M * 0.16));
+      return (b * b * (3 - 2 * b)) * (0.72 + 0.28 * dome);
+    }
+    // bruit de valeur pour le relief
+    function vnoise(x, y, s) { const h = (i, j) => { let n = (i * 374761393 + j * 668265263 + s * 2246822519) | 0; n = Math.imul(n ^ (n >>> 13), 1274126177); return ((n ^ (n >>> 16)) >>> 0) / 4294967296; }; const i = Math.floor(x), j = Math.floor(y), fx = x - i, fy = y - j, ux = fx * fx * (3 - 2 * fx), uy = fy * fy * (3 - 2 * fy); return (h(i, j) * (1 - ux) + h(i + 1, j) * ux) * (1 - uy) + (h(i, j + 1) * (1 - ux) + h(i + 1, j + 1) * ux) * uy; }
+
+    // hauteur visée par la forme `kind` en (u, v) — coordonnées centrées, en unités de min(w, h)
+    function shapeH(kind, u, v, tc, k) {
+      if (kind === 'logo') return logoH(u, v);
+      const R = rng(app.seed * 811 + k * 97 + 5);
+      if (kind === 'spheres') {
+        let z = 0; const pr = Math.min(1, tc / p.presse);
+        for (let s = 0; s < 4; s++) { const r = 0.08 + R() * 0.12, a = R() * TAU, x0 = (R() - 0.5) * 1.1, y0 = (R() - 0.5) * 0.7, L = 0.25 + R() * 0.45, cx = x0 + Math.cos(a) * L * (pr - 0.5), cy = y0 + Math.sin(a) * L * (pr - 0.5), d2 = ((u - cx) ** 2 + (v - cy) ** 2) / (r * r); if (d2 < 1) z = Math.max(z, Math.sqrt(1 - d2) * (0.75 + R() * 0.25)); else R(); }
+        return z;
+      }
+      if (kind === 'ondes') { const cx = (R() - 0.5) * 0.4, cy = (R() - 0.5) * 0.3, r = Math.hypot(u - cx, v - cy); return (0.5 + 0.5 * Math.cos(r * 34)) * Math.exp(-r * 1.6) * (r < 0.03 ? 1 : 1); }
+      if (kind === 'spirale') { const r = Math.hypot(u, v), th = Math.atan2(v, u); return (0.5 + 0.5 * Math.cos(th * 2 - r * 30)) * Math.max(0, 1 - r / 0.75) ** 0.7; }
+      const s = (k * 13 + app.seed) | 0, n = vnoise(u * 3 + 10, v * 3 + 10, s) * 0.55 + vnoise(u * 7 + 3, v * 7 + 3, s + 1) * 0.3 + vnoise(u * 15, v * 15, s + 2) * 0.15;
+      return Math.max(0, Math.min(1, (n - 0.32) * 2.2));
+    }
+
+    // ——— Grille d'épingles ———
+    function pins(w, h) {
+      buildLogo();
+      const key = [p.densite, p.grille, w, h].join(); if (key === pKey && P) return P; pKey = key;
+      const sp = w / p.densite, q = p.grille === 'quinconce', rh = q ? sp * 0.866 : sp, nx = Math.ceil(w / sp) + 1, ny = Math.ceil(h / rh) + 2, m = Math.min(w, h);
+      const X = [], Y = [], U = [], V = [], row = [];
+      for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) { const x = (i + (q && j % 2 ? 0.5 : 0)) * sp, y = (j - 0.5) * rh; X.push(x); Y.push(y); U.push((x - w / 2) / m); V.push((y - h / 2) / m); row.push(j / ny); }
+      const n = X.length; P = { sp, n, X: Float32Array.from(X), Y: Float32Array.from(Y), U: Float32Array.from(U), V: Float32Array.from(V), row: Float32Array.from(row), Z: new Float32Array(n), m };
+      P.board = null; return P;
+    }
+    function kindOf(k) { return p.forme === 'cycle' ? SEQ[k % SEQ.length] : p.forme; }
+    function ease(x) { x = Math.max(0, Math.min(1, x)); return x * x * (3 - 2 * x); }
+    function step(dt) {
+      const Pp = P, T = p.presse + p.tenue + p.secousse, tc = simT - cyc.t0;
+      if (tc >= T) { cyc.k++; cyc.t0 = simT; Pp.Z.fill(0); dirty = true; return; }
+      if (tc < p.presse) { const a = ease(tc / p.presse) * 1.04, kind = kindOf(cyc.k); for (let i = 0; i < Pp.n; i++) { const t = shapeH(kind, Pp.U[i], Pp.V[i], tc, cyc.k) * a; if (t > Pp.Z[i]) { Pp.Z[i] = Math.min(1, t); dirty = true; } } }
+      else if (tc >= p.presse + p.tenue) { const r = tc - p.presse - p.tenue, fall = dt / (p.secousse * 0.45); for (let i = 0; i < Pp.n; i++) if (r > Pp.row[i] * p.secousse * 0.5 && Pp.Z[i] > 0) { Pp.Z[i] = Math.max(0, Pp.Z[i] - fall); dirty = true; } }
+    }
+    function finger(x, y) { if (!P) return; const R = Math.max(P.sp * 6, P.m * 0.05); for (let i = 0; i < P.n; i++) { const d = Math.hypot(P.X[i] - x, P.Y[i] - y); if (d < R) { const t = 0.95 * Math.sqrt(1 - (d / R) ** 2); if (t > P.Z[i]) { P.Z[i] = t; dirty = true; } } } }
+    function shake() { const tc = simT - cyc.t0, at = p.presse + p.tenue; if (tc < at) cyc.t0 = simT - at; }
+
+    // ——— Dessin ———
+    function view() {
+      const a = p.angle * Math.PI / 180, D = P.sp * p.sortie;
+      return { ox: Math.cos(a) * D, oy: -Math.sin(a) * D, sx: -Math.cos(a) * D * 0.35 + D * 0.45, sy: Math.sin(a) * D * 0.35 + D * 0.5, hr: P.sp * 0.5 * p.taille };
+    }
+    function buckets() {
+      const B = Array.from({ length: NB }, () => []); for (let i = 0; i < P.n; i++) B[Math.min(NB - 1, Math.floor(P.Z[i] * NB))].push(i); return B;
+    }
+    const sprites = new Map(); let spKey = '';
+    function sprite(b, hr, dpr) {
+      const k = [hr.toFixed(2), dpr, p.couleurs.join()].join(); if (k !== spKey) { spKey = k; sprites.clear(); } let S = sprites.get(b); if (S) return S;
+      const c = grad(p.couleurs.length ? p.couleurs : ['#999999'], (b + 0.5) / NB), s = Math.ceil(hr * 2 * dpr) + 2, cv = document.createElement('canvas'); cv.width = cv.height = s; const g = cv.getContext('2d'), o = s / 2, r = hr * dpr;
+      const gr = g.createRadialGradient(o - r * 0.35, o - r * 0.4, r * 0.05, o, o, r); gr.addColorStop(0, mix(c, '#ffffff', 0.6)); gr.addColorStop(0.45, c); gr.addColorStop(1, mix(c, '#000000', 0.45));
+      g.fillStyle = gr; g.beginPath(); g.arc(o, o, r, 0, TAU); g.fill(); S = { cv, s: s / dpr }; sprites.set(b, S); return S;
+    }
+    function boardLayer(w, h, dpr) {
+      if (P.board && P.board.k === [p.fond, dpr].join()) return P.board.cv;
+      const cv = document.createElement('canvas'); cv.width = Math.ceil(w * dpr); cv.height = Math.ceil(h * dpr); const g = cv.getContext('2d'); g.scale(dpr, dpr);
+      g.fillStyle = p.fond; g.fillRect(0, 0, w, h); g.fillStyle = mix(p.fond, '#000000', 0.55); const r = Math.max(0.6, P.sp * 0.14);
+      for (let i = 0; i < P.n; i++) g.fillRect(P.X[i] - r, P.Y[i] - r, r * 2, r * 2);
+      P.board = { cv, k: [p.fond, dpr].join() }; return cv;
+    }
+
+    app.loop((t, dt) => {
+      dt = Math.min(1 / 20, dt || 0);
+      const { w, h, dpr } = app.size; pins(w, h);
+      if (app.thumbnail) { for (let i = 0; i < P.n; i++) P.Z[i] = Math.min(1, logoH(P.U[i], P.V[i])); }
+      else { simT += dt; step(dt); }
+      // tant que rien ne bouge (tenue, écran à plat), on réutilise l'image précédente
+      const fk = [JSON.stringify(p), w, h, dpr, app.thumbnail ? 1 : 0].join();
+      if (!dirty && fk === frameKey && frameC) { ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.drawImage(frameC, 0, 0); ctx.setTransform(dpr, 0, 0, dpr, 0, 0); app.finish(ctx); return; }
+      frameKey = fk; dirty = false;
+      ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.drawImage(boardLayer(w, h, dpr), 0, 0); ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      const Vw = view(), B = buckets(), lw = Math.max(0.6, Vw.hr * 0.32);
+      // ombres
+      if (p.ombre > 0) { ctx.strokeStyle = `rgba(0,0,0,${0.45 * p.ombre})`; ctx.lineWidth = Vw.hr * 1.5; ctx.lineCap = 'round'; ctx.beginPath(); for (let i = 0; i < P.n; i++) { const z = P.Z[i]; if (z < 0.03) continue; ctx.moveTo(P.X[i], P.Y[i]); ctx.lineTo(P.X[i] + Vw.sx * z, P.Y[i] + Vw.sy * z); } ctx.stroke(); }
+      ctx.lineCap = 'butt';
+      for (let b = 0; b < NB; b++) {
+        const L = B[b]; if (!L.length) continue;
+        if (b > 0) { ctx.strokeStyle = mix(p.tige, '#000000', 0.25); ctx.lineWidth = lw; ctx.beginPath(); for (const i of L) { const z = P.Z[i]; ctx.moveTo(P.X[i], P.Y[i]); ctx.lineTo(P.X[i] + Vw.ox * z, P.Y[i] + Vw.oy * z); } ctx.stroke();
+          ctx.strokeStyle = mix(p.tige, '#ffffff', 0.35); ctx.lineWidth = lw * 0.4; ctx.beginPath(); for (const i of L) { const z = P.Z[i]; ctx.moveTo(P.X[i] - lw * 0.2, P.Y[i] - lw * 0.2); ctx.lineTo(P.X[i] + Vw.ox * z - lw * 0.2, P.Y[i] + Vw.oy * z - lw * 0.2); } ctx.stroke(); }
+        const S = sprite(b, Vw.hr, dpr); for (const i of L) { const z = P.Z[i]; ctx.drawImage(S.cv, P.X[i] + Vw.ox * z - S.s / 2, P.Y[i] + Vw.oy * z - S.s / 2, S.s, S.s); }
+      }
+      if (!frameC || frameC.width !== canvas.width || frameC.height !== canvas.height) { frameC = document.createElement('canvas'); frameC.width = canvas.width; frameC.height = canvas.height; }
+      const fg = frameC.getContext('2d'); fg.setTransform(1, 0, 0, 1, 0, 0); fg.drawImage(canvas, 0, 0);
+      app.finish(ctx);
+    });
+
+    function toSVG() {
+      const { w, h } = app.size, f = (v) => +v.toFixed(1); pins(w, h);
+      const Vw = view(), B = buckets(), lw = Math.max(0.6, Vw.hr * 0.32);
+      let defs = '', s = `<rect width="100%" height="100%" fill="${p.fond}"/>`;
+      if (p.ombre > 0) { let d = ''; for (let i = 0; i < P.n; i++) { const z = P.Z[i]; if (z < 0.03) continue; d += `M${f(P.X[i])} ${f(P.Y[i])}l${f(Vw.sx * z)} ${f(Vw.sy * z)}`; } if (d) s += `<path d="${d}" stroke="#000000" stroke-opacity="${+(0.45 * p.ombre).toFixed(3)}" stroke-width="${f(Vw.hr * 1.5)}" stroke-linecap="round" fill="none"/>`; }
+      for (let b = 0; b < NB; b++) {
+        const L = B[b]; if (!L.length) continue; const c = grad(p.couleurs.length ? p.couleurs : ['#999999'], (b + 0.5) / NB);
+        defs += `<radialGradient id="h${b}" cx="0.33" cy="0.3" r="0.7"><stop offset="0" stop-color="${mix(c, '#ffffff', 0.6)}"/><stop offset="0.45" stop-color="${c}"/><stop offset="1" stop-color="${mix(c, '#000000', 0.45)}"/></radialGradient>`;
+        if (b > 0) { let d = ''; for (const i of L) { const z = P.Z[i]; d += `M${f(P.X[i])} ${f(P.Y[i])}l${f(Vw.ox * z)} ${f(Vw.oy * z)}`; } s += `<path d="${d}" stroke="${mix(p.tige, '#000000', 0.25)}" stroke-width="${f(lw)}" fill="none"/>`; }
+        s += `<g fill="url(#h${b})">` + L.map((i) => `<circle cx="${f(P.X[i] + Vw.ox * P.Z[i])}" cy="${f(P.Y[i] + Vw.oy * P.Z[i])}" r="${f(Vw.hr)}"/>`).join('') + '</g>';
+      }
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><defs>${defs}</defs>${s}</svg>`;
+    }
+  </script>
+</body>
+</html>
