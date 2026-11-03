@@ -1,0 +1,15 @@
+{
+  "slug": "rayons",
+  "title": "Rayons crépusculaires",
+  "type": "motion",
+  "description": "Des faisceaux de lumière qui jaillissent derrière le logo et entre des obstacles en mouvement, en éventails colorés ; on déplace la source au doigt.",
+  "tags": ["lumiere", "rayons", "ombres", "radial", "logo", "svg"],
+  "inspiration": [
+    "Les rayons crépusculaires qui percent les nuages au couchant",
+    "Les affiches à soleil levant et les éventails de rayons de l'Art déco",
+    "Les gloires baroques, comme celle du Bernin à Saint-Pierre de Rome"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}
