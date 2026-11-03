@@ -1,0 +1,15 @@
+{
+  "slug": "horloges",
+  "title": "Mille horloges",
+  "type": "motion",
+  "description": "Une grille d'horloges dont les aiguilles tournent ensemble pour dessiner vagues, losanges, cercles, tourbillons et le logo, puis indiquer l'heure.",
+  "tags": ["cinetique", "grille", "lignes", "temps", "logo", "svg"],
+  "inspiration": [
+    "Les installations d'horloges cinétiques de Humans since 1982",
+    "Les horloges de gare suisses de Hans Hilfiker (1944)",
+    "L'art cinétique des années 1960"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}
