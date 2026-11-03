@@ -1,0 +1,15 @@
+{
+  "slug": "rouleau-a-motif",
+  "title": "Rouleau à motif",
+  "type": "motion",
+  "description": "Un rouleau de peintre à décor en relief déroule son motif sur le mur, logo, chevrons, pois ou fleurs, pâlit quand l’encre s’épuise et repasse au bac.",
+  "tags": ["peinture", "motif", "impression", "interaction", "logo", "svg"],
+  "inspiration": [
+    "Les rouleaux à motif des peintres décorateurs des années 1930",
+    "Les murs peints au pochoir et au rouleau dans les maisons de campagne",
+    "Le motif qui pâlit quand le rouleau manque de peinture"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}
