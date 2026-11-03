@@ -1,0 +1,15 @@
+{
+  "slug": "pieces",
+  "title": "Pièces de monnaie",
+  "type": "motion",
+  "description": "Des pièces frappées du logo pleuvent sur une table : elles tournoient, rebondissent, roulent sur la tranche puis se couchent en tas, en relief et en métal.",
+  "tags": ["metal", "relief", "physique", "chute", "logo", "svg"],
+  "inspiration": [
+    "Les pièces de monnaie et leur frappe en relief",
+    "Le disque d'Euler qui tourne de plus en plus vite avant de se coucher",
+    "Les médailles et jetons gravés"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}

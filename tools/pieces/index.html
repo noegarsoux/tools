@@ -1,0 +1,295 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pièces de monnaie</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Pièces de monnaie : chaque face est un champ de hauteur (logo flouté pour le biseau, grènetis, listel)
+    // éclairé une fois en image (diffus + spéculaire). Une pièce en vol bascule autour d'un axe du plan :
+    // on la dessine écrasée par |cos(bascule)|, la tranche apparaissant décalée de l'épaisseur × sin(bascule).
+    // Au sol, elle rebondit, puis roule sur la tranche comme un disque d'Euler : son inclinaison baisse
+    // pendant que l'axe tourne de plus en plus vite, jusqu'à se coucher. Les pièces couchées sont cuites dans
+    // un calque ; une pièce qui tombe sur une autre s'empile dessus.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const PYR = PAL('pyramides'), ACI = PAL('acide'), TRN = PAL('trame-nuit');
+
+    let simT = 0, vKey = '', logoM = null, logoKey = '', LB = null, ptr = null, W = null, wKey = '', SP = new Map(), spKey = '';
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.05, vignette: 0.2 },
+      hint: 'Clic : lancer une poignée de pièces · glissez pour en semer · molette : taille',
+      notes: 'Une pièce lâchée sur une table tournoie, rebondit, puis roule sur sa tranche en tournant de plus en plus vite avant de se coucher dans un dernier frémissement. Ici, chaque pièce est frappée du logo, avec son biseau, son grènetis et son listel, éclairée comme un métal ; le revers porte des anneaux, une étoile ou des rayons. Elles pleuvent sur la table, s\'entassent au centre, glissent depuis un bord ou tombent en cascade. Cliquez pour lancer une poignée de pièces, glissez pour en semer.',
+      params: {
+        'Chute': {
+          chute: { type: 'select', label: 'Chute', options: { pluie: 'Pluie sur toute la table', tas: 'En tas au centre', jet: 'Lancées depuis le bord', cascade: 'En cascade sur une ligne' }, value: 'pluie' },
+          cadence: { type: 'range', label: 'Pièces par seconde', min: 0.5, max: 30, step: 0.5, value: 5 },
+          nombre: { type: 'range', label: 'Pièces sur la table', min: 10, max: 400, step: 1, value: 120 },
+          taille: { type: 'range', label: 'Taille', min: 0.03, max: 0.25, step: 0.002, value: 0.085 },
+          ecart: { type: 'range', label: 'Écart de taille', min: 0, max: 0.5, step: 0.01, value: 0.2 },
+          rebond: { type: 'range', label: 'Rebond', min: 0, max: 0.8, step: 0.01, value: 0.4 },
+          tournoie: { type: 'range', label: 'Tournoiement', min: 0, max: 2, step: 0.01, value: 1 },
+        },
+        'Frappe': {
+          relief: { type: 'range', label: 'Relief du logo', min: 0, max: 1.5, step: 0.01, value: 0.8 },
+          tailleLogo: { type: 'range', label: 'Taille du logo', min: 0.3, max: 0.8, step: 0.01, value: 0.7 },
+          revers: { type: 'segmented', label: 'Revers', options: { anneaux: 'Anneaux', etoile: 'Étoile', rayons: 'Rayons', logo: 'Logo' }, value: 'anneaux' },
+          image: { type: 'file', label: 'Logo', accept: 'image/*' },
+        },
+        'Métal': {
+          table: { type: 'color', label: 'Table', value: '#1f3a33' },
+          metaux: { type: 'palette', label: 'Métaux', value: ['#d6a943', '#c7cbd1', '#c27443'] },
+          brillance: { type: 'range', label: 'Brillance', min: 0, max: 1, step: 0.01, value: 0.7 },
+        },
+      },
+      presets: {
+        'Tapis vert': {},
+        'Trésor': { chute: 'tas', metaux: ['#d6a943', '#e2b851', '#c99a35'], cadence: 10, nombre: 260, taille: 0.07, table: '#3a1f1f' },
+        'Jets': { chute: 'jet', cadence: 3, taille: 0.1, rebond: 0.3, metaux: ['#c7cbd1', '#d6a943'] },
+        'Cascade': { chute: 'cascade', cadence: 8, taille: 0.06, ecart: 0.05, metaux: ['#c27443', '#d58a5a'] },
+        'Grosses pièces': { taille: 0.22, cadence: 1, nombre: 24, revers: 'etoile' },
+        'Argent': { metaux: ['#c7cbd1', '#b5bac2', '#dfe2e6'], table: '#16181c', revers: 'rayons' },
+        'Monnaie de singe': { metaux: [PYR[2], PYR[3], PYR[4], PYR[5]], table: PYR[0], revers: 'logo', brillance: 0.45 },
+        'Acide': { metaux: [ACI[2], ACI[3]], table: ACI[1], revers: 'anneaux', brillance: 0.5, cadence: 7 },
+        'Nuit': { metaux: [TRN[2], TRN[1]], table: TRN[0], tournoie: 1.6 },
+        'Pluie fine': { cadence: 22, nombre: 360, taille: 0.04, ecart: 0.3, rebond: 0.2 },
+      },
+      brand(colors) {
+        const s = colors.slice().sort((a, b) => lum(a) - lum(b));
+        return { table: s[0], metaux: s.length > 1 ? s.slice(1) : ['#d6a943'] };
+      },
+      pointer: {
+        down: (q) => { ptr = { x: q.x, y: q.y, lx: q.x, ly: q.y, moved: 0 }; },
+        drag: (q) => { if (!ptr || !W) return; ptr.moved += Math.hypot(q.x - ptr.x, q.y - ptr.y); ptr.x = q.x; ptr.y = q.y; if (Math.hypot(q.x - ptr.lx, q.y - ptr.ly) > W.r * 1.6) { drop(q.x, q.y, 0.3); ptr.lx = q.x; ptr.ly = q.y; } },
+        up: () => { if (ptr && ptr.moved < 6) for (let k = 0; k < 7; k++) drop(ptr.x, ptr.y, 1); ptr = null; },
+        wheel: (q, dy) => app.set('taille', Math.max(0.03, Math.min(0.25, +(p.taille * (dy > 0 ? 0.93 : 1.07)).toFixed(3)))),
+      },
+      onChange(k) { if (['*', 'image'].includes(k)) logoKey = ''; },
+      export: { name: 'pieces', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    function hex(x) { const n = parseInt(x.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
+    function lum(x) { const c = hex(x); return (c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114) / 255; }
+    function mix(a, b, t) { const A = hex(a), C = hex(b); return '#' + A.map((v, i) => Math.round(v + (C[i] - v) * t).toString(16).padStart(2, '0')).join(''); }
+    function rng(s) { let a = s >>> 0; return () => { a = (a + 0x6d2b79f5) >>> 0; let t = a; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+
+    function buildLogo() {
+      const img0 = p.image || app.logoImg, key = img0 ? (img0.src || 'c') : 'demo'; if (key === logoKey) return; logoKey = key; vKey = '';
+      const M = 200, c = document.createElement('canvas'); c.width = c.height = M; const x = c.getContext('2d', { willReadFrequently: true }), L = M * 0.94, cx = M / 2;
+      if (img0) { const iw = img0.naturalWidth || img0.width, ih = img0.naturalHeight || img0.height, s = L / Math.max(iw, ih); x.drawImage(img0, cx - iw * s / 2, cx - ih * s / 2, iw * s, ih * s); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(cx, cx, L * 0.48, 0, TAU); x.arc(cx, cx, L * 0.27, 0, TAU, true); x.fill('evenodd'); x.fillRect(cx - L * 0.07, cx - L * 0.5, L * 0.14, L); }
+      const d = x.getImageData(0, 0, M, M).data; let transp = 0; for (let i = 3; i < d.length; i += 4) if (d[i] < 128) transp++; const useA = transp > M * M * 0.05;
+      const F = new Float64Array(M * M); for (let i = 0; i < M * M; i++) { const o = i * 4, l = (d[o] * 0.2126 + d[o + 1] * 0.7152 + d[o + 2] * 0.0722) / 255; F[i] = useA ? d[o + 3] / 255 : (d[o + 3] / 255) * Math.min(1, Math.max(0, (0.75 - l) * 2)); }
+      { const G2 = new Float64Array(M * M); for (let j = 1; j < M - 1; j++) for (let i = 1; i < M - 1; i++) { let a = 0; for (let b = -1; b <= 1; b++) for (let c = -1; c <= 1; c++) a += F[(j + b) * M + i + c] * (b || c ? (b && c ? 1 : 2) : 4); G2[j * M + i] = a / 16; } F.set(G2); }
+      for (let k = 0; k < M; k++) F[k] = F[(M - 1) * M + k] = F[k * M] = F[k * M + M - 1] = 0;
+      logoM = contours(F, M, M, 0.5, 0, 0, 1).filter((c) => c.closed && c.pts.length > 6).map((c) => chaikin(chaikin(c.pts, true), true).map((q) => [q[0] / M - 0.5, q[1] / M - 0.5]));
+    }
+    // carrés marchants + chaînage
+    function contours(F, nx, ny, lev, ox, oy, cs) {
+      const pt = new Map(), adj = new Map();
+      const P = (id) => { let q = pt.get(id); if (q) return q; const cell = id >> 1, i = cell % nx, j = (cell - i) / nx; let a, b, ax, ay, bx, by; if (id & 1) { a = F[j * nx + i]; b = F[(j + 1) * nx + i]; ax = bx = i; ay = j; by = j + 1; } else { a = F[j * nx + i]; b = F[j * nx + i + 1]; ay = by = j; ax = i; bx = i + 1; } const t = (lev - a) / (b - a || 1e-9); q = [ox + (ax + (bx - ax) * t) * cs, oy + (ay + (by - ay) * t) * cs]; pt.set(id, q); return q; };
+      const link = (a, b) => { (adj.get(a) || adj.set(a, []).get(a)).push(b); (adj.get(b) || adj.set(b, []).get(b)).push(a); };
+      for (let j = 0; j < ny - 1; j++) for (let i = 0; i < nx - 1; i++) {
+        const A = F[j * nx + i] > lev, B = F[j * nx + i + 1] > lev, C = F[(j + 1) * nx + i + 1] > lev, D = F[(j + 1) * nx + i] > lev, idx = A | (B << 1) | (C << 2) | (D << 3);
+        if (idx === 0 || idx === 15) continue;
+        const T = (j * nx + i) * 2, R = (j * nx + i + 1) * 2 + 1, Bo = ((j + 1) * nx + i) * 2, Le = (j * nx + i) * 2 + 1;
+        const ctr = (F[j * nx + i] + F[j * nx + i + 1] + F[(j + 1) * nx + i + 1] + F[(j + 1) * nx + i]) / 4 > lev;
+        switch (idx) {
+          case 1: case 14: link(Le, T); break; case 2: case 13: link(T, R); break; case 3: case 12: link(Le, R); break;
+          case 4: case 11: link(R, Bo); break; case 6: case 9: link(T, Bo); break; case 7: case 8: link(Le, Bo); break;
+          case 5: if (ctr) { link(Le, Bo); link(T, R); } else { link(Le, T); link(R, Bo); } break;
+          case 10: if (ctr) { link(Le, T); link(R, Bo); } else { link(Le, Bo); link(T, R); } break;
+        }
+      }
+      const seen = new Set(), out = [];
+      const walk = (s) => { const L = [s]; seen.add(s); let cur = s; for (;;) { const nb = (adj.get(cur) || []).find((x) => !seen.has(x)); if (nb === undefined) break; seen.add(nb); L.push(nb); cur = nb; } return L; };
+      for (const [id, nb] of adj) if (nb.length === 1 && !seen.has(id)) out.push({ pts: walk(id).map(P), closed: false });
+      for (const [id] of adj) if (!seen.has(id)) out.push({ pts: walk(id).map(P), closed: true });
+      return out;
+    }
+    function chaikin(pts, closed) {
+      const o = []; const n = pts.length; for (let k = 0; k < (closed ? n : n - 1); k++) { const a = pts[k], b = pts[(k + 1) % n]; o.push([a[0] * 0.75 + b[0] * 0.25, a[1] * 0.75 + b[1] * 0.25], [a[0] * 0.25 + b[0] * 0.75, a[1] * 0.25 + b[1] * 0.75]); }
+      if (!closed) { o.unshift(pts[0]); o.push(pts[n - 1]); } return o;
+    }
+
+
+    // masque du logo flouté (biseau de la frappe)
+    function logoBlur() {
+      buildLogo(); if (LB && LB.key === logoKey) return LB;
+      const N = 256, c = document.createElement('canvas'); c.width = c.height = N; const g = c.getContext('2d', { willReadFrequently: true });
+      g.setTransform(N, 0, 0, N, N / 2, N / 2); g.beginPath(); for (const L of logoM || []) { L.forEach((q, i) => (i ? g.lineTo(q[0], q[1]) : g.moveTo(q[0], q[1]))); g.closePath(); } g.fillStyle = '#000'; g.fill('evenodd');
+      const d = g.getImageData(0, 0, N, N).data; let A = new Float32Array(N * N); for (let i = 0; i < A.length; i++) A[i] = d[i * 4 + 3] / 255;
+      const T = new Float32Array(N * N), r = 3;
+      for (let pass = 0; pass < 2; pass++) {
+        for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) { let s = 0; for (let k = -r; k <= r; k++) s += A[y * N + Math.max(0, Math.min(N - 1, x + k))]; T[y * N + x] = s / (2 * r + 1); }
+        for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) { let s = 0; for (let k = -r; k <= r; k++) s += T[Math.max(0, Math.min(N - 1, y + k)) * N + x]; A[y * N + x] = s / (2 * r + 1); }
+      }
+      LB = { key: logoKey, A, N }; return LB;
+    }
+    function lbAt(u, v) { const B = LB, N = B.N, x = (u + 0.5) * (N - 1), y = (v + 0.5) * (N - 1); if (x < 0 || y < 0 || x >= N - 1 || y >= N - 1) return 0; const i = Math.floor(x), j = Math.floor(y), a = x - i, b = y - j, A = B.A; return (A[j * N + i] * (1 - a) + A[j * N + i + 1] * a) * (1 - b) + (A[(j + 1) * N + i] * (1 - a) + A[(j + 1) * N + i + 1] * a) * b; }
+
+    // ——— Faces : champ de hauteur éclairé ———
+    function heightAt(face, u, v) {
+      const r = Math.hypot(u, v), sm = (a, b, x) => { const t = Math.max(0, Math.min(1, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
+      let h = 0.55 * sm(0.84, 0.9, r) * (1 - sm(0.97, 1, r)); // listel
+      const ga = Math.atan2(v, u), gn = 64, gd = Math.hypot(r - 0.78, (((ga / TAU * gn) % 1 + 1) % 1 - 0.5) * TAU / gn * 0.78); h += 0.25 * Math.max(0, 1 - gd / 0.018); // grènetis
+      const s = p.tailleLogo, rv = face === 1 ? p.revers : 'logo';
+      if (rv === 'logo') h += p.relief * 0.5 * lbAt(u / (s * 2) * 1, v / (s * 2) * 1);
+      else if (rv === 'anneaux') { if (r < 0.7) h += p.relief * 0.22 * (0.5 + 0.5 * Math.cos(r * 38)) * sm(0.7, 0.62, r); h += p.relief * 0.35 * (1 - sm(0.1, 0.14, r)); }
+      else if (rv === 'etoile') { const k = 5, a = ((ga + Math.PI / 2) % (TAU / k) + TAU / k) % (TAU / k) - Math.PI / k, rs = 0.6 / (1 + 1.4 * Math.abs(Math.sin(a * k / 2) * 0.9)); h += p.relief * 0.45 * sm(rs + 0.01, rs - 0.03, r) * (0.6 + 0.4 * (1 - r / 0.6)); }
+      else if (rv === 'rayons') { if (r < 0.7 && r > 0.12) h += p.relief * 0.2 * Math.max(0, Math.cos(ga * 24)) ** 3 * sm(0.7, 0.6, r); h += p.relief * 0.35 * (1 - sm(0.09, 0.12, r)); }
+      return h;
+    }
+    function faceSprite(col, face, N) {
+      const key = col + face + N; let s = SP.get(key); if (s) return s;
+      const c = document.createElement('canvas'); c.width = c.height = N; const g = c.getContext('2d'), D = g.createImageData(N, N), d = D.data, H = new Float32Array(N * N), base = hex(col), br = p.brillance;
+      for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) { const u = (x + 0.5) / N * 2 - 1, v = (y + 0.5) / N * 2 - 1; H[y * N + x] = Math.hypot(u, v) <= 1 ? heightAt(face, u, v) : 0; }
+      const Lx = -0.48, Ly = -0.62, Lz = 0.62, Hx = Lx, Hy = Ly, Hz = Lz + 1, hl = Math.hypot(Hx, Hy, Hz), k = N / 18;
+      for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) {
+        const o = (y * N + x) * 4, u = (x + 0.5) / N * 2 - 1, v = (y + 0.5) / N * 2 - 1, r = Math.hypot(u, v), al = Math.max(0, Math.min(1, (1 - r) * N / 2)); if (al <= 0) continue;
+        const hx = (H[y * N + Math.min(N - 1, x + 1)] - H[y * N + Math.max(0, x - 1)]) * k, hy = (H[Math.min(N - 1, y + 1) * N + x] - H[Math.max(0, y - 1) * N + x]) * k, nl = Math.hypot(hx, hy, 1), nx = -hx / nl, ny = -hy / nl, nz = 1 / nl;
+        const df = Math.max(0, nx * Lx + ny * Ly + nz * Lz), sp = Math.pow(Math.max(0, (nx * Hx + ny * Hy + nz * Hz) / hl), 30) * br, an = 0.06 * Math.sin(Math.atan2(v, u) * 2 + 0.6) * br; // reflet brossé
+        const sh = 0.42 + 0.7 * df + an;
+        for (let q = 0; q < 3; q++) d[o + q] = Math.max(0, Math.min(255, base[q] * sh + 255 * sp * 0.75));
+        d[o + 3] = 255 * al;
+      }
+      g.putImageData(D, 0, 0); s = c; SP.set(key, s); return s;
+    }
+
+    // ——— Table ———
+    function world(w, h) {
+      logoBlur();
+      const key = [p.chute, p.nombre, p.taille, p.ecart, logoKey, app.seed, w, h].join();
+      if (key === wKey && W) return W; wKey = key;
+      W = { w, h, r: Math.min(w, h) * p.taille / 2, L: [], rest: [], next: 0, R: rng(app.seed * 5711 + 3), layer: null, dirty: true, carry: 0 };
+      // la table démarre déjà garnie
+      const n0 = Math.round(p.nombre * 0.45); for (let k = 0; k < n0; k++) { const c = spawn(); settle(c, true); }
+      return W;
+    }
+    function coin(x, y, R) {
+      const M = p.metaux.length ? p.metaux : ['#d6a943'];
+      return { x, y, z: 0, vx: 0, vy: 0, vz: 0, r: W.r * (1 + p.ecart * (R() * 2 - 1)), ci: Math.floor(R() * 997), rot: R() * TAU, wr: (R() - 0.5) * 4, tilt: R() * TAU, wt: (8 + R() * 10) * (R() < 0.5 ? -1 : 1) * p.tournoie, ax: R() * TAU, state: 'vol', base: 0 };
+    }
+    function spawn() {
+      const { w, h, R } = W, ch = p.chute, m = Math.min(w, h); let c;
+      if (ch === 'tas') { const a = R() * TAU, d = Math.sqrt(R()) * m * 0.16; c = coin(w / 2 + Math.cos(a) * d, h / 2 + Math.sin(a) * d, R); c.z = m * (0.5 + R() * 0.4); }
+      else if (ch === 'jet') { const side = R() < 0.5 ? -1 : 1, y = h * (0.25 + R() * 0.5); c = coin(side < 0 ? -W.r * 2 : w + W.r * 2, y, R); c.vx = -side * m * (0.9 + R() * 0.7); c.vy = (R() - 0.5) * m * 0.3; c.z = m * 0.12; c.vz = m * 0.25; }
+      else if (ch === 'cascade') { const x = w * (0.08 + R() * 0.84); c = coin(x, h * 0.5 + (R() - 0.5) * W.r * 1.2, R); c.z = m * (0.5 + R() * 0.3); c.vy = 0; }
+      else { c = coin(R() * w, R() * h, R); c.z = m * (0.45 + R() * 0.5); }
+      W.L.push(c); return c;
+    }
+    function drop(x, y, spread) {
+      if (!W) return; const R = W.R, c = coin(x + (R() - 0.5) * W.r * 2 * spread, y + (R() - 0.5) * W.r * 2 * spread, R); const m = Math.min(W.w, W.h); c.z = m * (0.25 + R() * 0.3); c.vz = m * 0.3 * R(); c.vx = (R() - 0.5) * m * 0.3 * spread; c.vy = (R() - 0.5) * m * 0.3 * spread; W.L.push(c);
+    }
+    function floorAt(c) { let f = 0; for (const o of W.rest) { const d = Math.hypot(o.x - c.x, o.y - c.y); if (d < (o.r + c.r) * 0.62) f = Math.max(f, o.top); } return f; }
+    function settle(c, instant) {
+      c.state = 'pose'; c.z = c.base = floorAt(c); c.top = c.base + c.r * 0.14; c.face = Math.cos(c.tilt) >= 0 ? 0 : 1;
+      if (instant) c.face = W.R() < 0.55 ? 0 : 1;
+      W.L.splice(W.L.indexOf(c), 1); W.rest.push(c); c.order = W.rest.length;
+      if (W.layer) bake(c);
+      // trop de pièces : les plus anciennes s'effacent
+      if (W.rest.length > p.nombre) { const old = W.rest.splice(0, Math.max(1, Math.round(p.nombre * 0.1))); W.fade = (W.fade || []).concat(old.map((o) => ({ ...o, ft: simT }))); W.dirty = true; }
+    }
+
+    function step(dt) {
+      const { w, h, R } = W, m = Math.min(w, h), g = m * 2.6;
+      W.carry += p.cadence * dt; while (W.carry >= 1) { W.carry -= 1; spawn(); }
+      for (const c of W.L.slice()) {
+        c.rot += c.wr * dt;
+        if (c.state === 'vol') {
+          c.vz -= g * dt; c.z += c.vz * dt; c.x += c.vx * dt; c.y += c.vy * dt; c.tilt += c.wt * dt;
+          const fl = c.base = floorAt(c);
+          if (c.z <= fl) {
+            c.z = fl; const v = -c.vz;
+            c.vx *= 0.55; c.vy *= 0.55;
+            if (v > m * 0.35 && p.rebond > 0.02) { c.vz = v * p.rebond; c.wt *= 0.6; }
+            else { // il roule sur la tranche (disque d'Euler)
+              c.state = 'roule'; c.face = Math.cos(c.tilt) >= 0 ? 0 : 1; c.alpha = Math.min(1.1, 0.25 + Math.abs(Math.sin(c.tilt)) * 0.9); c.a0 = c.alpha; c.psi = c.ax; c.rt = 0; c.vz = 0;
+            }
+          }
+        } else if (c.state === 'roule') {
+          c.rt += dt; c.x += c.vx * dt; c.y += c.vy * dt; c.vx *= Math.exp(-4 * dt); c.vy *= Math.exp(-4 * dt);
+          c.alpha = c.a0 * Math.max(0, 1 - c.rt / (0.9 + c.a0)); const om = Math.min(60, 4 / Math.sqrt(Math.max(0.004, c.alpha))); c.psi += om * dt;
+          if (c.alpha <= 0.002) { c.tilt = c.face ? Math.PI : 0; settle(c); }
+        }
+        if (c.x < -m || c.x > w + m || c.y < -m || c.y > h + m) W.L.splice(W.L.indexOf(c), 1);
+      }
+      if (W.fade) { W.fade = W.fade.filter((o) => simT - o.ft < 0.8); }
+    }
+
+    // ——— Dessin ———
+    function colOf(c) { const M = p.metaux.length ? p.metaux : ['#d6a943']; return M[c.ci % M.length]; }
+    function spriteN(r) { return Math.min(360, Math.max(48, Math.ceil(r * 2 * app.size.dpr / 16) * 16)); }
+    // une pièce inclinée de « t » autour d'un axe d'angle « ax », vue d'en haut
+    function drawCoin(g, c, t, ax, face, al) {
+      const r = c.r * (1 + c.z / Math.min(W.w, W.h) * 0.35), cs = Math.cos(t), sq = Math.abs(cs), sn = Math.sin(t), th = c.r * 0.13, N = spriteN(c.r);
+      g.save(); g.translate(c.x, c.y); g.rotate(ax); if (al < 1) g.globalAlpha = al;
+      // tranche : visible en décalé, perpendiculairement à l'axe
+      if (Math.abs(sn) > 0.02) { const off = th * sn; g.fillStyle = mix(colOf(c), '#000000', 0.42); g.beginPath(); g.ellipse(0, off * 0.5, r, r * sq, 0, 0, TAU); g.ellipse(0, -off * 0.5, r, r * sq, 0, 0, TAU); g.fill(); g.beginPath(); g.rect(-r, -Math.abs(off) * 0.5, r * 2, Math.abs(off)); g.fill(); g.translate(0, -off * 0.5); }
+      g.scale(1, Math.max(0.02, sq)); g.rotate(c.rot - ax);
+      g.drawImage(faceSprite(colOf(c), face, N), -r, -r, r * 2, r * 2);
+      // éclairage global selon l'inclinaison
+      const lit = sn * Math.sin(ax + Math.PI / 2 + 2.2);
+      if (Math.abs(lit) > 0.02) { g.beginPath(); g.arc(0, 0, r, 0, TAU); g.fillStyle = lit > 0 ? `rgba(255,255,255,${0.18 * lit})` : `rgba(0,0,0,${-0.32 * lit})`; g.fill(); }
+      g.restore();
+    }
+    function shadow(g, c, t, ax) {
+      const m = Math.min(W.w, W.h), hgt = Math.max(0, c.z - c.base) / m, off = c.r * 0.12 + hgt * m * 0.35, r = c.r * (1 + hgt * 0.6), sq = Math.max(0.12, Math.abs(Math.cos(t)));
+      g.save(); g.translate(c.x + off * 0.6, c.y + off); g.rotate(ax); g.globalAlpha = 0.38 / (1 + hgt * 5); g.fillStyle = '#000000'; g.beginPath(); g.ellipse(0, 0, r, r * sq, 0, 0, TAU); g.fill(); g.restore();
+    }
+    function bake(c) { const g = W.layer.getContext('2d'); g.setTransform(app.size.dpr, 0, 0, app.size.dpr, 0, 0); shadow(g, c, 0, 0); drawCoin(g, c, c.face ? Math.PI : 0, 0, c.face, 1); }
+
+    app.loop((t, dt) => {
+      dt = Math.min(1 / 20, dt || 0);
+      const { w, h, dpr } = app.size; world(w, h);
+      const k2 = [p.metaux.join(), p.relief, p.tailleLogo, p.revers, p.brillance, logoKey].join(); if (k2 !== spKey) { spKey = k2; SP = new Map(); W.dirty = true; }
+      if (app.thumbnail) { if (!W.th) { W.th = true; for (let k = 0; k < 90; k++) { simT += 1 / 30; step(1 / 30); } } }
+      else { simT += dt; step(dt); }
+      if (!W.layer || W.layer.width !== Math.ceil(w * dpr) || W.layer.height !== Math.ceil(h * dpr) || W.lt !== p.table) { W.layer = document.createElement('canvas'); W.layer.width = Math.ceil(w * dpr); W.layer.height = Math.ceil(h * dpr); W.dirty = true; W.lt = p.table; }
+      if (W.dirty) {
+        W.dirty = false; const g = W.layer.getContext('2d'); g.setTransform(dpr, 0, 0, dpr, 0, 0);
+        const gr = g.createRadialGradient(w * 0.45, h * 0.4, 0, w / 2, h / 2, Math.hypot(w, h) * 0.6); gr.addColorStop(0, mix(p.table, '#ffffff', 0.08)); gr.addColorStop(1, mix(p.table, '#000000', 0.25)); g.fillStyle = gr; g.fillRect(0, 0, w, h);
+        for (const c of W.rest) bake(c);
+      }
+      ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.drawImage(W.layer, 0, 0);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      for (const o of W.fade || []) drawCoin(ctx, o, o.face ? Math.PI : 0, 0, o.face, Math.max(0, 1 - (simT - o.ft) / 0.8)); // les plus anciennes s'effacent
+      const live = W.L.slice().sort((a, b) => a.z - b.z);
+      for (const c of live) { const [tt, ax] = c.state === 'roule' ? [c.alpha, c.psi] : [c.tilt, c.ax]; shadow(ctx, c, tt, ax); }
+      for (const c of live) { if (c.state === 'roule') drawCoin(ctx, c, c.alpha, c.psi, c.face, 1); else drawCoin(ctx, c, c.tilt, c.ax, Math.cos(c.tilt) >= 0 ? 0 : 1, 1); }
+      app.finish(ctx);
+    });
+
+    function toSVG() {
+      const { w, h } = app.size, f = (v) => +v.toFixed(2); world(w, h);
+      let defs = `<radialGradient id="tb" cx="0.45" cy="0.4" r="0.75"><stop offset="0" stop-color="${mix(p.table, '#ffffff', 0.08)}"/><stop offset="1" stop-color="${mix(p.table, '#000000', 0.25)}"/></radialGradient>`, s = `<rect width="100%" height="100%" fill="url(#tb)"/>`;
+      const used = new Set();
+      const face = (c, fc) => { const id = 'f' + (c.ci % Math.max(1, p.metaux.length)) + '_' + fc; if (!used.has(id)) { used.add(id); const N = 192; defs += `<image id="${id}" width="2" height="2" x="-1" y="-1" href="${faceSprite(colOf(c), fc, N).toDataURL('image/png')}"/>`; } return id; };
+      const one = (c, t, ax, fc) => {
+        const r = c.r * (1 + c.z / Math.min(w, h) * 0.35), cs = Math.cos(t), sq = Math.max(0.02, Math.abs(cs)), sn = Math.sin(t), th = c.r * 0.13, off = th * sn; let o = '';
+        const m = Math.min(w, h), hgt = Math.max(0, c.z - c.base) / m, so = c.r * 0.12 + hgt * m * 0.35;
+        o += `<ellipse transform="translate(${f(c.x + so * 0.6)} ${f(c.y + so)}) rotate(${f(ax * 180 / Math.PI)})" rx="${f(c.r * (1 + hgt * 0.6))}" ry="${f(c.r * (1 + hgt * 0.6) * Math.max(0.12, sq))}" fill="#000" opacity="${+(0.38 / (1 + hgt * 5)).toFixed(3)}"/>`;
+        o += `<g transform="translate(${f(c.x)} ${f(c.y)}) rotate(${f(ax * 180 / Math.PI)})">`;
+        if (Math.abs(sn) > 0.02) o += `<g fill="${mix(colOf(c), '#000000', 0.42)}"><ellipse cy="${f(off * 0.5)}" rx="${f(r)}" ry="${f(r * sq)}"/><rect x="${f(-r)}" y="${f(-Math.abs(off) * 0.5)}" width="${f(2 * r)}" height="${f(Math.abs(off))}"/></g>`;
+        o += `<g transform="translate(0 ${f(-off * 0.5)}) scale(1 ${+sq.toFixed(3)}) rotate(${f((c.rot - ax) * 180 / Math.PI)}) scale(${f(r)})"><use href="#${face(c, fc)}"/></g></g>`;
+        return o;
+      };
+      for (const c of W.rest) s += one(c, c.face ? Math.PI : 0, 0, c.face);
+      for (const c of W.L.slice().sort((a, b) => a.z - b.z)) s += c.state === 'roule' ? one(c, c.alpha, c.psi, c.face) : one(c, c.tilt, c.ax, Math.cos(c.tilt) >= 0 ? 0 : 1);
+      return `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><defs>${defs}</defs>${s}</svg>`;
+    }
+  </script>
+</body>
+</html>
