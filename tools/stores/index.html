@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Stores</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Stores : un store vénitien devant une fenêtre. Chaque lame est une bande dont la hauteur visible vaut
+    // d·|cos θ| ; la face avant porte une image (logo, dégradé, rayures) et la face arrière une seconde image,
+    // si bien que les lames fermées d'un côté ou de l'autre recomposent l'une ou l'autre. Entre les lames
+    // ouvertes, on voit le ciel. Les lames ondulent, basculent en cascade ou bougent au vent.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const BIE = PAL('biennale'), LUZ = PAL('luzern'), MEN = PAL('menthe');
+
+    let vKey = '', logoM = null, logoKey = '', ptr = null, hov = null, S = null, gKey = '', simT = 0, faceKey = '', skyKey = '';
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.035, vignette: 0.3 },
+      hint: 'Survoler : écarter les lames · glisser : les incliner · clic : les retourner · molette : remonter le store',
+      notes: 'Un store vénitien devant une fenêtre. Les lames ont deux faces : fermées d’un côté elles recomposent le logo, fermées de l’autre une seconde image, et entre les deux on voit le ciel. Elles ondulent, basculent en cascade ou bougent au vent ; on les écarte du doigt comme pour regarder dehors.',
+      params: {
+        'Store': {
+          lames: { type: 'range', label: 'Lames', min: 10, max: 56, step: 1, value: 26 },
+          largeur: { type: 'range', label: 'Largeur de la fenêtre', min: 0.35, max: 0.92, step: 0.01, value: 0.62 },
+          remontee: { type: 'range', label: 'Remontée', min: 0, max: 0.85, step: 0.01, value: 0 },
+          inclinaison: { type: 'range', label: 'Inclinaison', min: -1, max: 1, step: 0.01, value: 0.55 },
+          mouvement: { type: 'select', label: 'Mouvement', options: { vague: 'Vague', cascade: 'Cascade', vent: 'Vent', respiration: 'Respiration', immobile: 'Immobile' }, value: 'vague' },
+          amplitude: { type: 'range', label: 'Amplitude', min: 0, max: 1, step: 0.01, value: 0.55 },
+          vitesse: { type: 'range', label: 'Vitesse', min: 0.1, max: 2, step: 0.01, value: 0.7 },
+          regard: { type: 'toggle', label: 'Écarter au survol', value: true },
+        },
+        'Lames': {
+          face: { type: 'select', label: 'Face avant', options: { logo: 'Logo', degrade: 'Dégradé', rayures: 'Rayures', uni: 'Uni' }, value: 'logo' },
+          couleurs: { type: 'palette', label: 'Lames', value: ['#f4f3f0', '#e5452a', '#111111'] },
+          courbure: { type: 'range', label: 'Modelé', min: 0, max: 1, step: 0.01, value: 0.6 },
+          cordons: { type: 'toggle', label: 'Cordons', value: true },
+          image: { type: 'file', label: 'Image du logo', accept: 'image/*' },
+        },
+        'Dehors': {
+          ciel: { type: 'palette', label: 'Ciel', value: ['#9dd3f0', '#f2e6c8', '#f2b0c8'] },
+          soleil: { type: 'range', label: 'Soleil', min: 0, max: 1, step: 0.01, value: 0.45 },
+          lumiere: { type: 'range', label: 'Lumière', min: 0, max: 1, step: 0.01, value: 0.6 },
+          fond: { type: 'color', label: 'Mur', value: '#d9d4c8' },
+        },
+      },
+      presets: {
+        'Bureau': {},
+        'Logo fermé': { inclinaison: 0.92, amplitude: 0.2, mouvement: 'respiration' },
+        'Cascade': { mouvement: 'cascade', inclinaison: 0.95, vitesse: 0.8 },
+        'Vent': { mouvement: 'vent', amplitude: 0.8, inclinaison: 0.2, vitesse: 1, lames: 32 },
+        'Coucher de soleil': { ciel: ['#f25f03', '#f2b0c8', '#7d38e7'], soleil: 0.8, fond: '#2a1c22', couleurs: ['#efe6da', '#f25f03', '#2a1c22'], face: 'degrade', lumiere: 0.9 },
+        'Nuit': { ciel: ['#0d1430', '#24305e', '#3c2a5a'], soleil: 0.2, lumiere: 0.3, fond: '#151619', couleurs: ['#2b2e36', '#9db0ef', '#0d0e12'], face: 'rayures' },
+        'Grand ouvert': { inclinaison: 0, amplitude: 0.35, lames: 18, largeur: 0.8 },
+        'Remonté': { remontee: 0.55, inclinaison: 0.6, mouvement: 'vague' },
+        'Biennale': { couleurs: [BIE[0], BIE[2], BIE[1]], ciel: [BIE[4], BIE[3], BIE[0]], fond: BIE[1], face: 'logo', mouvement: 'cascade', inclinaison: 0.95 },
+        'Luzern': { couleurs: [LUZ[4], LUZ[1], LUZ[3]], ciel: [LUZ[0], LUZ[2], LUZ[4]], fond: LUZ[3], face: 'rayures', lames: 40 },
+        'Menthe': { couleurs: [MEN[0], MEN[3], MEN[1]], ciel: [MEN[2], MEN[0], MEN[3]], fond: MEN[1], face: 'logo', mouvement: 'vent', amplitude: 0.5 },
+      },
+      brand(colors) {
+        const s = colors.slice().sort((a, b) => lum(a) - lum(b)), D = s[0], L = s[s.length - 1], A = s.length > 2 ? s[Math.floor(s.length / 2)] : D;
+        return { couleurs: [L, A, D], ciel: [mix(A, '#ffffff', 0.45), mix(L, A, 0.2), mix(A, D, 0.3)], fond: mix(D, L, 0.15), face: 'logo' };
+      },
+      pointer: {
+        down: (q) => { ptr = { x: q.x, y: q.y, moved: 0, i0: p.inclinaison }; hov = { x: q.x, y: q.y, t: simT }; },
+        drag: (q) => { if (!ptr) return; ptr.moved = Math.max(ptr.moved, Math.hypot(q.x - ptr.x, q.y - ptr.y)); hov = { x: q.x, y: q.y, t: simT }; if (ptr.moved > 6) app.set('inclinaison', +Math.max(-1, Math.min(1, ptr.i0 + (q.y - ptr.y) / 220)).toFixed(2)); },
+        move: (q) => { hov = { x: q.x, y: q.y, t: simT }; },
+        up: () => { if (ptr && ptr.moved <= 6 && S) S.flip = !S.flip; ptr = null; },
+        wheel: (q, dy) => app.set('remontee', Math.max(0, Math.min(0.85, +(p.remontee + (dy > 0 ? 0.1 : -0.1)).toFixed(2)))),
+      },
+      onChange(k) { if (['*', 'image'].includes(k)) logoKey = ''; },
+      export: { name: 'stores', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    function hex(x) { const n = parseInt(x.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
+    function lum(x) { const c = hex(x); return (c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114) / 255; }
+    function mix(a, b, t) { const A = hex(a), C = hex(b); return '#' + A.map((v, i) => Math.round(v + (C[i] - v) * t).toString(16).padStart(2, '0')).join(''); }
+    function rgba(c, a) { const h = hex(c); return `rgba(${h[0]},${h[1]},${h[2]},${a})`; }
+    function rng(s) { let a = s >>> 0; return () => { a = (a + 0x6d2b79f5) >>> 0; let t = a; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+    function hash(n) { const x = Math.sin(n * 127.1 + 311.7) * 43758.5453; return x - Math.floor(x); }
+    function vnoise(x, o) { const i = Math.floor(x), f = x - i, u = f * f * (3 - 2 * f); return hash(i + o) * (1 - u) + hash(i + 1 + o) * u; }
+    const sstep = (x) => { x = Math.max(0, Math.min(1, x)); return x * x * (3 - 2 * x); };
+    const C = (k) => { const c = p.couleurs; return c.length ? c[Math.min(k, c.length - 1)] : '#eeeeee'; };
+    const K = (k) => { const c = p.ciel; return c.length ? c[Math.min(k, c.length - 1)] : '#9dd3f0'; };
+
+    function buildLogo() {
+      const img0 = p.image || app.logoImg, key = img0 ? (img0.src || 'c') : 'demo'; if (key === logoKey) return; logoKey = key; vKey = '';
+      const M = 200, c = document.createElement('canvas'); c.width = c.height = M; const x = c.getContext('2d', { willReadFrequently: true }), L = M * 0.94, cx = M / 2;
+      if (img0) { const iw = img0.naturalWidth || img0.width, ih = img0.naturalHeight || img0.height, s = L / Math.max(iw, ih); x.drawImage(img0, cx - iw * s / 2, cx - ih * s / 2, iw * s, ih * s); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(cx, cx, L * 0.48, 0, TAU); x.arc(cx, cx, L * 0.27, 0, TAU, true); x.fill('evenodd'); x.fillRect(cx - L * 0.07, cx - L * 0.5, L * 0.14, L); }
+      const d = x.getImageData(0, 0, M, M).data; let transp = 0; for (let i = 3; i < d.length; i += 4) if (d[i] < 128) transp++; const useA = transp > M * M * 0.05;
+      const F = new Float64Array(M * M); for (let i = 0; i < M * M; i++) { const o = i * 4, l = (d[o] * 0.2126 + d[o + 1] * 0.7152 + d[o + 2] * 0.0722) / 255; F[i] = useA ? d[o + 3] / 255 : (d[o + 3] / 255) * Math.min(1, Math.max(0, (0.75 - l) * 2)); }
+      { const G2 = new Float64Array(M * M); for (let j = 1; j < M - 1; j++) for (let i = 1; i < M - 1; i++) { let a = 0; for (let b = -1; b <= 1; b++) for (let c = -1; c <= 1; c++) a += F[(j + b) * M + i + c] * (b || c ? (b && c ? 1 : 2) : 4); G2[j * M + i] = a / 16; } F.set(G2); }
+      for (let k = 0; k < M; k++) F[k] = F[(M - 1) * M + k] = F[k * M] = F[k * M + M - 1] = 0;
+      logoM = contours(F, M, M, 0.5, 0, 0, 1).filter((c) => c.closed && c.pts.length > 6).map((c) => chaikin(chaikin(c.pts, true), true).map((q) => [q[0] / M - 0.5, q[1] / M - 0.5]));
+    }
+    // carrés marchants + chaînage
+    function contours(F, nx, ny, lev, ox, oy, cs) {
+      const pt = new Map(), adj = new Map();
+      const P = (id) => { let q = pt.get(id); if (q) return q; const cell = id >> 1, i = cell % nx, j = (cell - i) / nx; let a, b, ax, ay, bx, by; if (id & 1) { a = F[j * nx + i]; b = F[(j + 1) * nx + i]; ax = bx = i; ay = j; by = j + 1; } else { a = F[j * nx + i]; b = F[j * nx + i + 1]; ay = by = j; ax = i; bx = i + 1; } const t = (lev - a) / (b - a || 1e-9); q = [ox + (ax + (bx - ax) * t) * cs, oy + (ay + (by - ay) * t) * cs]; pt.set(id, q); return q; };
+      const link = (a, b) => { (adj.get(a) || adj.set(a, []).get(a)).push(b); (adj.get(b) || adj.set(b, []).get(b)).push(a); };
+      for (let j = 0; j < ny - 1; j++) for (let i = 0; i < nx - 1; i++) {
+        const A = F[j * nx + i] > lev, B = F[j * nx + i + 1] > lev, C = F[(j + 1) * nx + i + 1] > lev, D = F[(j + 1) * nx + i] > lev, idx = A | (B << 1) | (C << 2) | (D << 3);
+        if (idx === 0 || idx === 15) continue;
+        const T = (j * nx + i) * 2, R = (j * nx + i + 1) * 2 + 1, Bo = ((j + 1) * nx + i) * 2, Le = (j * nx + i) * 2 + 1;
+        const ctr = (F[j * nx + i] + F[j * nx + i + 1] + F[(j + 1) * nx + i + 1] + F[(j + 1) * nx + i]) / 4 > lev;
+        switch (idx) {
+          case 1: case 14: link(Le, T); break; case 2: case 13: link(T, R); break; case 3: case 12: link(Le, R); break;
+          case 4: case 11: link(R, Bo); break; case 6: case 9: link(T, Bo); break; case 7: case 8: link(Le, Bo); break;
+          case 5: if (ctr) { link(Le, Bo); link(T, R); } else { link(Le, T); link(R, Bo); } break;
+          case 10: if (ctr) { link(Le, T); link(R, Bo); } else { link(Le, Bo); link(T, R); } break;
+        }
+      }
+      const seen = new Set(), out = [];
+      const walk = (s) => { const L = [s]; seen.add(s); let cur = s; for (;;) { const nb = (adj.get(cur) || []).find((x) => !seen.has(x)); if (nb === undefined) break; seen.add(nb); L.push(nb); cur = nb; } return L; };
+      for (const [id, nb] of adj) if (nb.length === 1 && !seen.has(id)) out.push({ pts: walk(id).map(P), closed: false });
+      for (const [id] of adj) if (!seen.has(id)) out.push({ pts: walk(id).map(P), closed: true });
+      return out;
+    }
+    function chaikin(pts, closed) {
+      const o = []; const n = pts.length; for (let k = 0; k < (closed ? n : n - 1); k++) { const a = pts[k], b = pts[(k + 1) % n]; o.push([a[0] * 0.75 + b[0] * 0.25, a[1] * 0.75 + b[1] * 0.25], [a[0] * 0.25 + b[0] * 0.75, a[1] * 0.25 + b[1] * 0.75]); }
+      if (!closed) { o.unshift(pts[0]); o.push(pts[n - 1]); } return o;
+    }
+
+    // ——— géométrie ———
+    function build(w, h) {
+      const n = Math.round(p.lames), winH = h * 0.78, winW = Math.min(w * p.largeur, w - 40), x0 = (w - winW) / 2, y0 = (h - winH) / 2 + h * 0.02;
+      const s = winH / n, d = s * 1.14, R = rng(app.seed * 13 + 5);
+      const old = S;
+      S = { w, h, n, winW, winH, x0, y0, s, d, rail: h * 0.026, th: Array.from({ length: n }, (_, i) => old && old.th[i] !== undefined ? old.th[i] : thetaBase()), lift: old ? old.lift : p.remontee, flip: old ? old.flip : false, base: old ? old.base : thetaBase(),
+        clouds: Array.from({ length: 6 }, () => ({ x: R(), y: 0.1 + R() * 0.55, r: 0.08 + R() * 0.14, v: 0.004 + R() * 0.01 })) };
+      faceKey = skyKey = '';
+    }
+    function thetaBase() { const b = (1 - p.inclinaison) * Math.PI / 2; return S && S.flip ? Math.PI - b : b; }
+
+    // ——— images des deux faces (en coordonnées écran, sur toute la fenêtre) ———
+    function faces(dpr) {
+      const { w, h, x0, y0, winW, winH } = S, key = [w, h, dpr, p.face, p.couleurs.join(), logoKey, x0, winW].join('|'); if (key === faceKey) return; faceKey = key;
+      const mk = () => { const c = document.createElement('canvas'); c.width = Math.round(w * dpr); c.height = Math.round(h * dpr); const x = c.getContext('2d'); x.scale(dpr, dpr); return [c, x]; };
+      const [A, a] = mk(), [B, b] = mk(), L = Math.min(winW, winH) * 0.62, cx = x0 + winW / 2, cy = y0 + winH / 2;
+      const logoPath = (x, sc) => { x.beginPath(); if (!logoM) return; for (const P of logoM) { x.moveTo(cx + P[0][0] * sc, cy + P[0][1] * sc); for (let k = 1; k < P.length; k++) x.lineTo(cx + P[k][0] * sc, cy + P[k][1] * sc); x.closePath(); } };
+      // face avant
+      if (p.face === 'degrade') { const g = a.createLinearGradient(0, y0, 0, y0 + winH); g.addColorStop(0, C(0)); g.addColorStop(0.55, C(1)); g.addColorStop(1, C(2)); a.fillStyle = g; a.fillRect(x0, y0, winW, winH); }
+      else if (p.face === 'rayures') { a.fillStyle = C(0); a.fillRect(x0, y0, winW, winH); a.save(); a.beginPath(); a.rect(x0, y0, winW, winH); a.clip(); a.fillStyle = C(1); const st = winH / 7; for (let k = -12; k < 24; k++) { a.beginPath(); a.moveTo(x0 + k * st * 1.6, y0 + winH); a.lineTo(x0 + k * st * 1.6 + st * 0.7, y0 + winH); a.lineTo(x0 + k * st * 1.6 + st * 0.7 + winH, y0); a.lineTo(x0 + k * st * 1.6 + winH, y0); a.closePath(); a.fill(); } a.restore(); }
+      else { a.fillStyle = C(0); a.fillRect(x0, y0, winW, winH); if (p.face === 'logo') { logoPath(a, L); a.fillStyle = C(1); a.fill('evenodd'); } }
+      // face arrière : le logo en réserve sur la couleur d'accent
+      b.fillStyle = C(1); b.fillRect(x0, y0, winW, winH); logoPath(b, L * 1.15); b.fillStyle = C(0); b.fill('evenodd');
+      if (p.face !== 'logo') { b.fillStyle = C(2); b.globalAlpha = 0.9; logoPath(b, L * 0.7); b.fill('evenodd'); b.globalAlpha = 1; }
+      S.fA = A; S.fB = B;
+    }
+    function sky(dpr) {
+      const { w, h, x0, y0, winW, winH } = S, key = [w, h, dpr, p.ciel.join(), p.soleil, x0, winW, p.lumiere].join('|'); if (key === skyKey) return; skyKey = key;
+      const c = document.createElement('canvas'); c.width = Math.round(w * dpr); c.height = Math.round(h * dpr); const x = c.getContext('2d'); x.scale(dpr, dpr);
+      const g = x.createLinearGradient(0, y0, 0, y0 + winH); g.addColorStop(0, K(0)); g.addColorStop(0.65, K(1)); g.addColorStop(1, K(2)); x.fillStyle = g; x.fillRect(x0, y0, winW, winH);
+      if (p.soleil > 0) {
+        const sx = x0 + winW * 0.68, sy = y0 + winH * 0.62, r = Math.min(winW, winH) * (0.06 + 0.16 * p.soleil), sc = mix(K(1), '#ffffff', 0.75);
+        const gg = x.createRadialGradient(sx, sy, r * 0.8, sx, sy, r * 4); gg.addColorStop(0, rgba(sc, 0.55 * p.lumiere + 0.15)); gg.addColorStop(1, rgba(sc, 0)); x.fillStyle = gg; x.fillRect(x0, y0, winW, winH);
+        x.fillStyle = sc; x.beginPath(); x.arc(sx, sy, r, 0, TAU); x.fill();
+      }
+      // horizon : une ligne de toits très simple
+      x.save(); x.beginPath(); x.rect(x0, y0, winW, winH); x.clip(); x.fillStyle = rgba(mix(K(2), '#000000', 0.45), 0.55); x.beginPath(); x.moveTo(x0, y0 + winH); const R = rng(app.seed * 3 + 1); let xx = x0;
+      while (xx < x0 + winW) { const bw = winW * (0.04 + R() * 0.09), bh = winH * (0.06 + R() * 0.16); x.lineTo(xx, y0 + winH - bh); x.lineTo(xx + bw, y0 + winH - bh); xx += bw; }
+      x.lineTo(x0 + winW, y0 + winH); x.closePath(); x.fill(); x.restore();
+      S.sky = c;
+    }
+
+    // ——— angles ———
+    function update(dt) {
+      const { n } = S, t = simT * p.vitesse, a = p.amplitude, b0 = thetaBase();
+      S.base += (b0 - S.base) * Math.min(1, dt * 4);
+      S.lift += (p.remontee - S.lift) * Math.min(1, dt * 3);
+      for (let i = 0; i < n; i++) {
+        const u = i / Math.max(1, n - 1); let th = S.base;
+        switch (p.mouvement) {
+          case 'vague': th += a * 0.95 * Math.sin(t * 2.2 - i * 0.32); break;
+          case 'respiration': th += a * 0.9 * Math.sin(t * 1.3 - u * 1.2) * 0.8; break;
+          case 'vent': { const g = Math.max(0, vnoise(t * 0.5, 7) - 0.35) * 1.6; th += a * (vnoise(t * 2.4 + i * 0.22, 3) - 0.5) * 1.4 * (0.4 + g) + a * g * 0.5 * Math.sin(t * 7 + i * 0.6); break; }
+          case 'cascade': { const P = 7, cyc = Math.floor(t / P), loc = t - cyc * P, f = sstep((loc - 0.6 - u * 2.6) / 0.7), on = cyc % 2 ? 1 - f : f; th = S.base + (Math.PI - 2 * S.base) * on + a * 0.12 * Math.sin(t * 2 - i * 0.4); break; }
+        }
+        // regard : les lames sous la main s'ouvrent
+        if (p.regard && hov && simT - hov.t < 1.6 && hov.x > S.x0 - 20 && hov.x < S.x0 + S.winW + 20) {
+          const y = slatY(i), k = Math.exp(-Math.pow((y - hov.y) / (S.s * 3.6), 2)) * Math.max(0, 1 - (simT - hov.t) / 1.6) * 0.95;
+          const open = Math.cos(th) >= 0 ? Math.PI / 2 : Math.PI / 2; th += (open - th) * k;
+        }
+        S.th[i] += (th - S.th[i]) * Math.min(1, dt * 10);
+      }
+    }
+    // position des lames (la barre du bas remonte en ramassant les lames)
+    function slatY(i) { const { y0, s, n, winH } = S, rail = y0 + winH * (1 - S.lift), g = Math.max(2, s * 0.14); return Math.min(y0 + (i + 0.5) * s, rail - (n - i - 0.5) * g); }
+    function stacked(i) { const { y0, s } = S; return Math.max(0, Math.min(1, (y0 + (i + 0.5) * s - slatY(i)) / (s * 0.8))); }
+
+    function drawSlat(x, i, dpr) {
+      const { x0, winW, d } = S, y = slatY(i), st = stacked(i), th = S.th[i] * (1 - st) + (Math.PI / 2) * st, c = Math.cos(th), ac = Math.abs(c), thick = Math.max(1.2, d * 0.07);
+      const hh = d * ac, src = c >= 0 ? S.fA : S.fB, sy = (Math.min(y, S.y0 + (i + 0.5) * S.s) - d / 2);
+      const yTop = y - hh / 2 - thick / 2;
+      if (hh > 0.3) x.drawImage(src, x0 * dpr, Math.max(0, (S.y0 + (i + 0.5) * S.s - d / 2) * dpr), winW * dpr, d * dpr, x0, y - hh / 2, winW, hh);
+      // modelé : la lame est bombée, éclairée par la pièce et par la fenêtre
+      const sn = Math.sin(th), light = p.courbure;
+      const g = x.createLinearGradient(0, y - hh / 2, 0, y + hh / 2);
+      g.addColorStop(0, `rgba(255,255,255,${(0.18 * light * (0.5 + 0.5 * sn)).toFixed(3)})`); g.addColorStop(0.45, 'rgba(255,255,255,0)'); g.addColorStop(1, `rgba(0,0,0,${(0.28 * light * (0.6 - 0.4 * sn)).toFixed(3)})`);
+      x.fillStyle = g; x.fillRect(x0, y - hh / 2, winW, hh);
+      x.fillStyle = `rgba(0,0,0,${(0.12 + 0.35 * (1 - ac) * light).toFixed(3)})`; x.fillRect(x0, y - hh / 2, winW, hh);
+      // tranche
+      x.fillStyle = mix(C(0), '#000000', 0.25 + 0.2 * (1 - ac)); x.fillRect(x0, yTop + (sn >= 0 ? hh : 0), winW, thick);
+      // filet de lumière sur le bord tourné vers la fenêtre
+      if (p.lumiere > 0 && ac < 0.98) { x.fillStyle = rgba(mix(K(1), '#ffffff', 0.5), (0.5 * p.lumiere * (1 - ac * 0.7)).toFixed(3)); x.fillRect(x0, sn >= 0 ? y - hh / 2 - 0.5 : y + hh / 2 - 0.5, winW, Math.max(1, thick * 0.6)); }
+    }
+
+    app.loop((t, dt) => {
+      dt = Math.min(1 / 20, dt || 0);
+      const { w, h, dpr } = app.size; buildLogo();
+      const key = [w, h, p.lames, p.largeur, app.seed, logoKey].join('|'); if (!S || key !== gKey) { gKey = key; build(w, h); }
+      faces(dpr); sky(dpr);
+      if (app.thumbnail) { if (!S.th0) { S.th0 = true; simT = 2.2; for (let k = 0; k < 120; k++) update(1 / 60); } }
+      else { simT += dt; update(dt); }
+      const { x0, y0, winW, winH, n } = S;
+      ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.fillStyle = p.fond; ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      // lumière de la fenêtre sur le mur
+      const cx = x0 + winW / 2, cy = y0 + winH / 2, gw = ctx.createRadialGradient(cx, cy, Math.min(winW, winH) * 0.3, cx, cy, Math.max(w, h) * 0.75);
+      gw.addColorStop(0, rgba(mix(K(1), '#ffffff', 0.4), 0.22 * p.lumiere)); gw.addColorStop(1, rgba(K(1), 0)); ctx.fillStyle = gw; ctx.fillRect(0, 0, w, h);
+      // embrasure et ciel
+      const fr = Math.max(8, Math.min(w, h) * 0.022), dk = lum(p.fond) > 0.5 ? mix(p.fond, '#000000', 0.18) : mix(p.fond, '#ffffff', 0.1);
+      ctx.fillStyle = dk; ctx.fillRect(x0 - fr, y0 - fr - S.rail, winW + fr * 2, winH + fr * 2 + S.rail);
+      ctx.drawImage(S.sky, 0, 0, w, h);
+      // nuages
+      ctx.save(); ctx.beginPath(); ctx.rect(x0, y0, winW, winH); ctx.clip();
+      for (const c of S.clouds) { const xx = x0 + (((c.x + simT * c.v) % 1.4) - 0.2) * winW, yy = y0 + c.y * winH, r = c.r * winW; ctx.fillStyle = rgba('#ffffff', 0.16); for (let k = 0; k < 4; k++) { ctx.beginPath(); ctx.ellipse(xx + (k - 1.5) * r * 0.55, yy - Math.sin(k * 1.7) * r * 0.12, r * 0.5, r * 0.22, 0, 0, TAU); ctx.fill(); } }
+      // lames : ordre de recouvrement selon le sens d'inclinaison
+      const fwd = Math.sin(S.base) >= 0;
+      for (let k = 0; k < n; k++) drawSlat(ctx, fwd ? k : n - 1 - k, dpr);
+      ctx.restore();
+      // barre de tête et barre du bas
+      const railC = mix(C(0), '#000000', 0.12);
+      ctx.fillStyle = railC; ctx.fillRect(x0 - fr * 0.4, y0 - S.rail, winW + fr * 0.8, S.rail);
+      ctx.fillStyle = rgba('#000000', 0.18); ctx.fillRect(x0 - fr * 0.4, y0 - S.rail * 0.25, winW + fr * 0.8, S.rail * 0.25);
+      const ry = y0 + winH * (1 - S.lift); ctx.fillStyle = railC; ctx.fillRect(x0 - 2, ry - S.rail * 0.45, winW + 4, S.rail * 0.45);
+      // cordons d'échelle et cordon de tirage
+      if (p.cordons) {
+        ctx.strokeStyle = rgba(mix(C(0), '#000000', 0.35), 0.7); ctx.lineWidth = Math.max(1, S.s * 0.06);
+        for (const fx of [0.18, 0.82]) { const xx = x0 + winW * fx; ctx.beginPath(); ctx.moveTo(xx, y0); ctx.lineTo(xx, ry); ctx.stroke(); }
+        const px = x0 + winW + fr * 0.15, py = y0 + winH * (0.55 + S.lift * 0.4); ctx.beginPath(); ctx.moveTo(px, y0 - S.rail * 0.5); ctx.lineTo(px + Math.sin(simT * 1.3) * 2, py); ctx.stroke();
+        ctx.fillStyle = mix(C(0), '#000000', 0.3); ctx.beginPath(); ctx.ellipse(px + Math.sin(simT * 1.3) * 2, py + fr * 0.6, fr * 0.22, fr * 0.6, 0, 0, TAU); ctx.fill();
+      }
+      app.finish(ctx);
+    });
+
+    // ——— SVG ———
+    function toSVG() {
+      const { w, h } = app.size, f = (v) => +v.toFixed(2); const { x0, y0, winW, winH, n, d } = S, L = Math.min(winW, winH) * 0.62, cx = x0 + winW / 2, cy = y0 + winH / 2;
+      const lp = (sc) => { let o = ''; if (!logoM) return o; for (const P of logoM) { const st = Math.max(1, Math.floor(P.length / 220)); o += 'M' + f(cx + P[0][0] * sc) + ' ' + f(cy + P[0][1] * sc); for (let k = st; k < P.length; k += st) o += 'L' + f(cx + P[k][0] * sc) + ' ' + f(cy + P[k][1] * sc); o += 'Z'; } return o; };
+      let defs = `<linearGradient id="sk" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="${K(0)}"/><stop offset="0.65" stop-color="${K(1)}"/><stop offset="1" stop-color="${K(2)}"/></linearGradient>`;
+      let fa = '';
+      if (p.face === 'degrade') { defs += `<linearGradient id="fg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="${C(0)}"/><stop offset="0.55" stop-color="${C(1)}"/><stop offset="1" stop-color="${C(2)}"/></linearGradient>`; fa = `<rect x="${f(x0)}" y="${f(y0)}" width="${f(winW)}" height="${f(winH)}" fill="url(#fg)"/>`; }
+      else { fa = `<rect x="${f(x0)}" y="${f(y0)}" width="${f(winW)}" height="${f(winH)}" fill="${C(0)}"/>`; if (p.face === 'logo') fa += `<path d="${lp(L)}" fill="${C(1)}" fill-rule="evenodd"/>`; if (p.face === 'rayures') { const st = winH / 7; let dd = ''; for (let k = -12; k < 24; k++) { const a = x0 + k * st * 1.6; dd += `M${f(a)} ${f(y0 + winH)}L${f(a + st * 0.7)} ${f(y0 + winH)}L${f(a + st * 0.7 + winH)} ${f(y0)}L${f(a + winH)} ${f(y0)}Z`; } fa += `<path d="${dd}" fill="${C(1)}"/>`; } }
+      let fb = `<rect x="${f(x0)}" y="${f(y0)}" width="${f(winW)}" height="${f(winH)}" fill="${C(1)}"/><path d="${lp(L * 1.15)}" fill="${C(0)}" fill-rule="evenodd"/>`;
+      if (p.face !== 'logo') fb += `<path d="${lp(L * 0.7)}" fill="${C(2)}" fill-rule="evenodd"/>`;
+      defs += `<clipPath id="win"><rect x="${f(x0)}" y="${f(y0)}" width="${f(winW)}" height="${f(winH)}"/></clipPath><g id="fa">${fa}</g><g id="fb">${fb}</g>`;
+      let body = `<rect width="100%" height="100%" fill="${p.fond}"/>`;
+      const fr = Math.max(8, Math.min(w, h) * 0.022), dk = lum(p.fond) > 0.5 ? mix(p.fond, '#000000', 0.18) : mix(p.fond, '#ffffff', 0.1);
+      body += `<rect x="${f(x0 - fr)}" y="${f(y0 - fr - S.rail)}" width="${f(winW + fr * 2)}" height="${f(winH + fr * 2 + S.rail)}" fill="${dk}"/><rect x="${f(x0)}" y="${f(y0)}" width="${f(winW)}" height="${f(winH)}" fill="url(#sk)"/>`;
+      if (p.soleil > 0) body += `<circle cx="${f(x0 + winW * 0.68)}" cy="${f(y0 + winH * 0.62)}" r="${f(Math.min(winW, winH) * (0.06 + 0.16 * p.soleil))}" fill="${mix(K(1), '#ffffff', 0.75)}"/>`;
+      body += '<g clip-path="url(#win)">';
+      const fwd = Math.sin(S.base) >= 0;
+      for (let q = 0; q < n; q++) {
+        const i = fwd ? q : n - 1 - q, y = slatY(i), st = stacked(i), th = S.th[i] * (1 - st) + (Math.PI / 2) * st, c = Math.cos(th), ac = Math.abs(c), hh = d * ac, yc = S.y0 + (i + 0.5) * S.s, thick = Math.max(1.2, d * 0.07), sn = Math.sin(th);
+        defs += `<clipPath id="c${i}"><rect x="${f(x0)}" y="${f(yc - d / 2)}" width="${f(winW)}" height="${f(d)}"/></clipPath>`;
+        if (hh > 0.3) body += `<g transform="translate(0 ${f(y)}) scale(1 ${f(ac)}) translate(0 ${f(-yc)})"><g clip-path="url(#c${i})"><use href="#${c >= 0 ? 'fa' : 'fb'}"/></g></g>`;
+        body += `<rect x="${f(x0)}" y="${f(y - hh / 2)}" width="${f(winW)}" height="${f(hh)}" fill="#000000" fill-opacity="${f(0.12 + 0.35 * (1 - ac) * p.courbure)}"/>`;
+        body += `<rect x="${f(x0)}" y="${f(y - hh / 2 - thick / 2 + (sn >= 0 ? hh : 0))}" width="${f(winW)}" height="${f(thick)}" fill="${mix(C(0), '#000000', 0.25 + 0.2 * (1 - ac))}"/>`;
+      }
+      body += '</g>';
+      const railC = mix(C(0), '#000000', 0.12), ry = y0 + winH * (1 - S.lift);
+      body += `<rect x="${f(x0 - fr * 0.4)}" y="${f(y0 - S.rail)}" width="${f(winW + fr * 0.8)}" height="${f(S.rail)}" fill="${railC}"/><rect x="${f(x0 - 2)}" y="${f(ry - S.rail * 0.45)}" width="${f(winW + 4)}" height="${f(S.rail * 0.45)}" fill="${railC}"/>`;
+      if (p.cordons) for (const fx of [0.18, 0.82]) body += `<line x1="${f(x0 + winW * fx)}" y1="${f(y0)}" x2="${f(x0 + winW * fx)}" y2="${f(ry)}" stroke="${mix(C(0), '#000000', 0.35)}" stroke-width="${f(Math.max(1, S.s * 0.06))}"/>`;
+      return `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><defs>${defs}</defs>${body}</svg>`;
+    }
+  </script>
+</body>
+</html>
