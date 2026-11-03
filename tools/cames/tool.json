@@ -1,0 +1,15 @@
+{
+  "slug": "cames",
+  "title": "Cames",
+  "type": "motion",
+  "description": "Un automate à arbre à cames : chaque came est taillée pour rejouer un programme, vague, silhouette du logo, pyramide, et les poussoirs dessinent la figure en tournant.",
+  "tags": ["mecanique", "automate", "animation", "interaction", "logo", "svg"],
+  "inspiration": [
+    "Les automates de bois à manivelle et leurs arbres à cames",
+    "Les profils de cames calculés à partir du mouvement voulu",
+    "Les sculptures cinétiques en vagues de Reuben Margolin"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}
