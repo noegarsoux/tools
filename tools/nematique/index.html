@@ -1,0 +1,331 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Nématique</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Nématique : les molécules d'un cristal liquide s'alignent localement le long d'un « directeur », une direction
+    // sans sens (θ et θ + π sont la même chose). Le champ relaxe (énergie élastique de Frank, à une constante, via le
+    // tenseur Q = (cos 2θ, sin 2θ)), et il reste des défauts de charge ±1/2 qui errent et s'annihilent par paires.
+    // Entre polariseurs croisés, la lumière s'éteint là où le directeur est parallèle à l'un d'eux : des pinceaux
+    // sombres partent de chaque défaut. Ailleurs, la biréfringence colore selon l'échelle de Michel-Lévy.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const KB = PAL('kegelbahn'), BIEN = PAL('biennale'), THERM = PAL('thermique'), LUZ = PAL('luzern'), MENTHE = PAL('menthe');
+
+    let W = 0, H = 0, Qx = null, Qy = null, Rt = null, fix = null, simKey = '', frozen = false, rng = Math.random, buf = null, img = null, maskKey = null, mask = null, hiMask = null, hiTint = null, tintKey = '';
+    let pol = 0, held = null, sinceQuench = 0, wave = null, LUT = null, lutKey = '';
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.06, vignette: 0.25 },
+      hint: 'Glissez pour peigner les molécules · touchez pour fondre un point · molette : tourner les polariseurs',
+      notes: 'Dans un cristal liquide nématique, les molécules en bâtonnets s’alignent avec leurs voisines sans former de réseau. Là où l’alignement ne peut pas se raccorder, il reste des défauts autour desquels la direction tourne d’un demi-tour. Au microscope, entre deux polariseurs croisés, la lumière s’éteint partout où les molécules sont parallèles à l’un des polariseurs : de chaque défaut partent deux ou quatre pinceaux sombres, qui tournent quand on tourne les polariseurs. Ailleurs, la double réfraction colore le cristal selon son épaisseur, de l’échelle de Michel-Lévy.',
+      params: {
+        'Cristal': {
+          depart: { type: 'select', label: 'Départ', options: { trempe: 'Trempe (désordre)', tourbillon: 'Défauts en réseau', logo: 'Ancré au logo' }, value: 'trempe' },
+          image: { type: 'file', label: 'Logo', accept: 'image/*', show: (q) => q.depart === 'logo' },
+          finesse: { type: 'range', label: 'Finesse', min: 120, max: 420, step: 4, value: 260 },
+          echelle: { type: 'range', label: 'Taille des domaines', min: 0.5, max: 4, step: 0.05, value: 1.6 },
+          vitesse: { type: 'range', label: 'Vitesse de relaxation', min: 0, max: 1, step: 0.01, value: 0.4 },
+          agitation: { type: 'range', label: 'Agitation thermique', min: 0, max: 1, step: 0.01, value: 0.06 },
+          trempe: { type: 'range', label: 'Nouvelle trempe toutes les (s)', min: 0, max: 60, step: 1, value: 30 },
+        },
+        'Lumière': {
+          mode: { type: 'segmented', label: 'Polariseurs', options: { croises: 'Croisés', paralleles: 'Parallèles', directeur: 'Directeur' }, value: 'croises' },
+          polariseur: { type: 'range', label: 'Angle des polariseurs', min: 0, max: 180, step: 1, value: 0 },
+          rotation: { type: 'range', label: 'Rotation (tours/min)', min: -6, max: 6, step: 0.1, value: 1.2 },
+          epaisseur: { type: 'range', label: 'Retard (nm)', min: 100, max: 1800, step: 10, value: 820 },
+          exposition: { type: 'range', label: 'Exposition', min: 0.5, max: 3, step: 0.05, value: 1.6 },
+          relief: { type: 'range', label: 'Variation d’épaisseur', min: 0, max: 1, step: 0.01, value: 0.55 },
+        },
+        'Couleurs': {
+          teinte: { type: 'segmented', label: 'Teintes', options: { michel: 'Michel-Lévy', palette: 'Palette' }, value: 'michel' },
+          couleurs: { type: 'palette', label: 'Palette', value: ['#2b1b5e', '#d6453b', '#f2c06a', '#7fd3c7'] },
+          fond: { type: 'color', label: 'Fond (éteint)', value: '#08080a' },
+        },
+      },
+      presets: {
+        'Schlieren': {},
+        'Premier ordre': { epaisseur: 300, relief: 0.3 },
+        'Ordres élevés': { epaisseur: 1500, relief: 0.8, echelle: 1.1 },
+        'Réseau de défauts': { depart: 'tourbillon', trempe: 0, agitation: 0.05 },
+        'Logo ancré': { depart: 'logo', trempe: 0, agitation: 0.08 },
+        'Parallèles': { mode: 'paralleles', fond: '#f4f1ea' },
+        'Directeur': { mode: 'directeur', fond: '#f4f1ea', couleurs: ['#151515', '#e5452a'], teinte: 'palette' },
+        'Fin': { finesse: 380, echelle: 0.7, epaisseur: 560 },
+        'Kegelbahn': { teinte: 'palette', couleurs: [KB[2], KB[1], KB[3], KB[5]], fond: KB[0] },
+        'Biennale': { teinte: 'palette', couleurs: [BIEN[2], BIEN[3], BIEN[4], BIEN[0]], fond: BIEN[1] },
+        'Thermique': { teinte: 'palette', couleurs: [THERM[1], THERM[4], THERM[2], THERM[3], THERM[5]], fond: '#0c0c14' },
+      },
+      brand(colors) {
+        const lum = (x) => { const c = hex(x); return c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114; };
+        const all = colors.slice().sort((a, b) => lum(a) - lum(b));
+        return { teinte: 'palette', fond: all[0], couleurs: all.length > 1 ? all.slice(1) : all };
+      },
+      pointer: {
+        down: (q) => { held = { x: q.x, y: q.y, x0: q.x, y0: q.y, moved: false }; },
+        drag: (q) => { if (!held) return; const dx = q.x - held.x, dy = q.y - held.y; if (Math.hypot(q.x - held.x0, q.y - held.y0) > 5) held.moved = true; if (Math.hypot(dx, dy) > 2) { comb(q.x, q.y, Math.atan2(dy, dx)); held.x = q.x; held.y = q.y; } },
+        up: () => { if (held && !held.moved) melt(held.x0, held.y0); held = null; },
+        wheel: (q, dy) => app.set('polariseur', ((p.polariseur + (dy > 0 ? -4 : 4)) % 180 + 180) % 180),
+      },
+      onChange(k) { if (k === 'image') maskKey = null; if (k === '*' || ['depart', 'finesse', 'echelle', 'image'].includes(k)) simKey = ''; if (k === 'polariseur') pol = 0; frozen = false; },
+      onSeed() { simKey = ''; frozen = false; },
+      export: { name: 'nematique', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    const hex = (x) => { const n = parseInt(x.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; };
+    const mix = (a, b, t) => { const A = hex(a), B = hex(b); return '#' + A.map((v, i) => Math.round(v + (B[i] - v) * t).toString(16).padStart(2, '0')).join(''); };
+    function mulberry(a) { return () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+
+    // ——— Échelle de Michel-Lévy : spectre blanc filtré par sin²(πR/λ), vu par l'œil (fonctions CIE, ajustement de Wyman) ———
+    const g = (l, m, s1, s2) => { const t = (l - m) / (l < m ? s1 : s2); return Math.exp(-0.5 * t * t); };
+    const cmf = (l) => [1.056 * g(l, 599.8, 37.9, 31.0) + 0.362 * g(l, 442.0, 16.0, 26.7) - 0.065 * g(l, 501.1, 20.4, 26.2), 0.821 * g(l, 568.8, 46.9, 40.5) + 0.286 * g(l, 530.9, 16.3, 31.1), 1.217 * g(l, 437.0, 11.8, 36.0) + 0.681 * g(l, 459.0, 26.0, 13.8)];
+    const gam = (v) => { v = Math.max(0, v); return 255 * (v <= 0.0031308 ? 12.92 * v : 1.055 * Math.pow(v, 1 / 2.4) - 0.055); };
+    function michel(R, parallel) {
+      let X = 0, Y = 0, Z = 0, Xw = 0, Yw = 0, Zw = 0;
+      for (let l = 380; l <= 720; l += 5) { const c = cmf(l), s = Math.sin(Math.PI * R / l) ** 2, t = parallel ? 1 - s : s; X += c[0] * t; Y += c[1] * t; Z += c[2] * t; Xw += c[0]; Yw += c[1]; Zw += c[2]; }
+      X /= Yw; Y /= Yw; Z /= Yw;
+      const r = 3.2406 * X - 1.5372 * Y - 0.4986 * Z, gg = -0.9689 * X + 1.8758 * Y + 0.0415 * Z, b = 0.0557 * X - 0.2040 * Y + 1.0570 * Z;
+      return [Math.min(255, gam(r * 1.15)), Math.min(255, gam(gg * 1.15)), Math.min(255, gam(b * 1.15))];
+    }
+    function buildLUT() {
+      // 512 retards de 0 à 2400 nm ; en mode palette, la palette est parcourue selon le retard
+      LUT = new Float32Array(512 * 3);
+      const C = p.couleurs.map(hex), n = C.length;
+      for (let i = 0; i < 512; i++) {
+        const R = i / 511 * 2400; let c;
+        if (p.teinte === 'michel') c = michel(R, p.mode === 'paralleles');
+        else { const u = (R / 2400 * 2.4) % 2, x = (u < 1 ? u : 2 - u) * (n - 1), k = Math.min(n - 2, Math.floor(x)), f = x - k; c = n === 1 ? C[0] : [C[k][0] + (C[k + 1][0] - C[k][0]) * f, C[k][1] + (C[k + 1][1] - C[k][1]) * f, C[k][2] + (C[k + 1][2] - C[k][2]) * f]; }
+        LUT[i * 3] = c[0]; LUT[i * 3 + 1] = c[1]; LUT[i * 3 + 2] = c[2];
+      }
+    }
+
+    // ——— Bruit lisse pour l'épaisseur ———
+    function smoothNoise(sc, oct) {
+      const a = new Float32Array(W * H); let f = sc, amp = 1, tot = 0;
+      for (let o = 0; o < oct; o++) {
+        const gw = Math.ceil(W / f) + 2, gh = Math.ceil(H / f) + 2, G = new Float32Array(gw * gh); for (let i = 0; i < G.length; i++) G[i] = rng();
+        for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+          const fx = x / f, fy = y / f, ix = fx | 0, iy = fy | 0, tx = fx - ix, ty = fy - iy, sx = tx * tx * (3 - 2 * tx), sy = ty * ty * (3 - 2 * ty);
+          const v = G[iy * gw + ix] * (1 - sx) * (1 - sy) + G[iy * gw + ix + 1] * sx * (1 - sy) + G[(iy + 1) * gw + ix] * (1 - sx) * sy + G[(iy + 1) * gw + ix + 1] * sx * sy;
+          a[y * W + x] += v * amp;
+        }
+        tot += amp; amp *= 0.5; f /= 2;
+      }
+      for (let i = 0; i < a.length; i++) a[i] /= tot; return a;
+    }
+
+    // ——— Logo : zone isotrope, ancrage tangentiel sur son bord ———
+    function logoMask() {
+      const img0 = p.image || app.logoImg, key = (img0 ? (img0.src || 'c') : 'demo') + W + 'x' + H;
+      if (key === maskKey && mask) return mask; maskKey = key;
+      const c = document.createElement('canvas'); c.width = W; c.height = H; const x = c.getContext('2d', { willReadFrequently: true });
+      const L = Math.min(W, H) * 0.72, cx = W / 2, cy = H / 2;
+      if (img0) { const iw = img0.naturalWidth || img0.width, ih = img0.naturalHeight || img0.height, k = L / Math.max(iw, ih); x.drawImage(img0, cx - iw * k / 2, cy - ih * k / 2, iw * k, ih * k); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(cx, cy, L * 0.48, 0, TAU); x.arc(cx, cy, L * 0.26, 0, TAU, true); x.fill('evenodd'); x.fillRect(cx - L * 0.06, cy - L * 0.5, L * 0.12, L); }
+      const d = x.getImageData(0, 0, W, H).data, a = new Uint8Array(W * H); let transp = 0; for (let i = 3; i < d.length; i += 4) if (d[i] < 128) transp++;
+      const useA = transp > W * H * 0.05;
+      for (let i = 0; i < W * H; i++) { const l = (d[i * 4] * 0.2126 + d[i * 4 + 1] * 0.7152 + d[i * 4 + 2] * 0.0722) / 255; a[i] = (useA ? d[i * 4 + 3] > 128 : d[i * 4 + 3] > 128 && l < 0.5) ? 1 : 0; }
+      // même silhouette en haute définition, pour un bord net à l'écran
+      const k2 = Math.min(6, 1600 / W), HW = Math.round(W * k2), HH = Math.round(H * k2), c2 = document.createElement('canvas'); c2.width = HW; c2.height = HH; const x2 = c2.getContext('2d', { willReadFrequently: true });
+      x2.scale(k2, k2);
+      if (img0) { const iw = img0.naturalWidth || img0.width, ih = img0.naturalHeight || img0.height, k = L / Math.max(iw, ih); x2.drawImage(img0, cx - iw * k / 2, cy - ih * k / 2, iw * k, ih * k); }
+      else { x2.fillStyle = '#000'; x2.beginPath(); x2.arc(cx, cy, L * 0.48, 0, TAU); x2.arc(cx, cy, L * 0.26, 0, TAU, true); x2.fill('evenodd'); x2.fillRect(cx - L * 0.06, cy - L * 0.5, L * 0.12, L); }
+      const id = x2.getImageData(0, 0, HW, HH), e = id.data;
+      for (let i = 0; i < e.length; i += 4) { const l = (e[i] * 0.2126 + e[i + 1] * 0.7152 + e[i + 2] * 0.0722) / 255, al = useA ? e[i + 3] : (l < 0.5 ? e[i + 3] : 0); e[i] = e[i + 1] = e[i + 2] = 255; e[i + 3] = al; }
+      x2.setTransform(1, 0, 0, 1, 0, 0); x2.putImageData(id, 0, 0); hiMask = c2;
+      mask = a; return a;
+    }
+
+    function quench(region) {
+      // trempe : on part d'un désordre lissé à l'échelle choisie (taille des domaines initiaux)
+      const n1 = smoothNoise(Math.max(2, W / 22 * p.echelle), 2), n2 = smoothNoise(Math.max(2, W / 22 * p.echelle), 2);
+      for (let i = 0; i < W * H; i++) { if (region && !region(i)) continue; const a = Math.atan2(n2[i] - 0.5, n1[i] - 0.5) * 2; Qx[i] = Math.cos(a); Qy[i] = Math.sin(a); }
+    }
+    function reset() {
+      const { w, h } = app.size; W = Math.round(p.finesse); H = Math.max(20, Math.round(W * h / w));
+      rng = mulberry(app.seed * 7703 + 1);
+      Qx = new Float32Array(W * H); Qy = new Float32Array(W * H); fix = new Int8Array(W * H);
+      Rt = smoothNoise(Math.max(4, W / 5), 4);
+      if (p.depart === 'tourbillon') {
+        // réseau de défauts ±1/2 en damier : le directeur tourne d'un demi-tour autour de chacun
+        const s = W / (3 + 2 * p.echelle) * 1.4;
+        const pts = []; for (let y = s / 2; y < H; y += s) for (let x = s / 2; x < W; x += s) pts.push([x + (rng() - 0.5) * s * 0.3, y + (rng() - 0.5) * s * 0.3, ((Math.round(x / s) + Math.round(y / s)) & 1) ? 0.5 : -0.5]);
+        for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { let a = 0; for (const [px, py, q] of pts) a += q * Math.atan2(y - py, x - px); Qx[y * W + x] = Math.cos(2 * a); Qy[y * W + x] = Math.sin(2 * a); }
+      } else quench(null);
+      if (p.depart === 'logo') {
+        const m = logoMask();
+        for (let y = 1; y < H - 1; y++) for (let x = 1; x < W - 1; x++) {
+          const i = y * W + x; if (m[i]) { fix[i] = 2; continue; }
+          if (m[i - 1] || m[i + 1] || m[i - W] || m[i + W]) {
+            // bord : molécules couchées le long du contour (normale = gradient du masque)
+            const gx = m[i + 1] - m[i - 1] + 0.5 * (m[i + 1 - W] + m[i + 1 + W] - m[i - 1 - W] - m[i - 1 + W]), gy = m[i + W] - m[i - W] + 0.5 * (m[i + W + 1] + m[i + W - 1] - m[i - W + 1] - m[i - W - 1]);
+            const t = Math.atan2(gy, gx) + Math.PI / 2; fix[i] = 1; Qx[i] = Math.cos(2 * t); Qy[i] = Math.sin(2 * t);
+          }
+        }
+      }
+      sinceQuench = 0; wave = null;
+    }
+
+    // ——— Relaxation : diffusion du tenseur Q puis renormalisation ———
+    let Tx = null, Ty = null, NZ = null, dirC = null, dirN = 0;
+    function relax(n) {
+      if (!Tx || Tx.length !== W * H) { Tx = new Float32Array(W * H); Ty = new Float32Array(W * H); }
+      const k = 0.22, noise = p.agitation * 0.35;
+      if (!NZ) { NZ = new Float32Array(8192); for (let i = 0; i < 8192; i++) NZ[i] = Math.random() - 0.5; }
+      for (let s = 0; s < n; s++) {
+        let o1 = (rng() * 8192) | 0, o2 = (rng() * 8192) | 0;
+        for (let y = 0; y < H; y++) {
+          const ym = y > 0 ? -W : 0, yp = y < H - 1 ? W : 0;
+          for (let x = 0; x < W; x++) {
+            const i = y * W + x; if (fix[i]) { Tx[i] = Qx[i]; Ty[i] = Qy[i]; continue; }
+            const xm = x > 0 ? -1 : 0, xp = x < W - 1 ? 1 : 0;
+            let ax = Qx[i] + k * (Qx[i + xm] + Qx[i + xp] + Qx[i + ym] + Qx[i + yp] - 4 * Qx[i]);
+            let ay = Qy[i] + k * (Qy[i + xm] + Qy[i + xp] + Qy[i + ym] + Qy[i + yp] - 4 * Qy[i]);
+            if (noise > 0) { ax += NZ[(i * 13 + o1) & 8191] * noise; ay += NZ[(i * 29 + o2) & 8191] * noise; }
+            const l = 1 / (Math.sqrt(ax * ax + ay * ay) || 1); Tx[i] = ax * l; Ty[i] = ay * l;
+          }
+        }
+        let t = Qx; Qx = Tx; Tx = t; t = Qy; Qy = Ty; Ty = t;
+      }
+    }
+    // peigner : le directeur s'aligne sur le geste ; fondre : désordre local
+    const toGrid = (x, y) => [x / app.size.w * W, y / app.size.h * H];
+    function comb(x, y, ang) {
+      const [gx, gy] = toGrid(x, y), r = W * 0.05, c2 = Math.cos(2 * ang), s2 = Math.sin(2 * ang);
+      for (let yy = Math.max(0, Math.floor(gy - r)); yy < Math.min(H, gy + r); yy++) for (let xx = Math.max(0, Math.floor(gx - r)); xx < Math.min(W, gx + r); xx++) {
+        const i = yy * W + xx, d = Math.hypot(xx - gx, yy - gy) / r; if (d >= 1 || fix[i]) continue; const f = (1 - d) * 0.7;
+        const ax = Qx[i] + (c2 - Qx[i]) * f, ay = Qy[i] + (s2 - Qy[i]) * f, l = Math.hypot(ax, ay) || 1; Qx[i] = ax / l; Qy[i] = ay / l;
+      }
+    }
+    function melt(x, y) {
+      const [gx, gy] = toGrid(x, y), r = W * 0.09;
+      for (let yy = Math.max(0, Math.floor(gy - r)); yy < Math.min(H, gy + r); yy++) for (let xx = Math.max(0, Math.floor(gx - r)); xx < Math.min(W, gx + r); xx++) {
+        const i = yy * W + xx; if (Math.hypot(xx - gx, yy - gy) < r && !fix[i]) { const a = rng() * TAU; Qx[i] = Math.cos(a); Qy[i] = Math.sin(a); }
+      }
+    }
+
+    // ——— Rendu ———
+    function render() {
+      if (!buf || buf.width !== W || buf.height !== H) { buf = document.createElement('canvas'); buf.width = W; buf.height = H; img = buf.getContext('2d').createImageData(W, H); }
+      const d = img.data, F = hex(p.fond), a2 = 2 * (p.polariseur * Math.PI / 180 + pol), ca = Math.cos(2 * a2), sa = Math.sin(2 * a2);
+      const base = p.epaisseur, rel = p.relief, par = p.mode === 'paralleles', IC = isoColor(), ex = p.exposition, TL = new Float32Array(1025);
+      for (let j = 0; j <= 1024; j++) TL[j] = 1 - Math.pow(j / 1024, ex);
+      const rk = 511 / 2400 * base, r0 = 1 - rel * 0.6, r1 = rel * 1.2;
+      for (let i = 0; i < W * H; i++) {
+        const o = i * 4;
+        if (fix[i] === 2) { d[o] = IC[0]; d[o + 1] = IC[1]; d[o + 2] = IC[2]; d[o + 3] = 255; continue; }
+        // sin²(2(θ−α)) = (1 − cos(4θ − 4α))/2, avec cos 4θ et sin 4θ tirés de Q
+        const c4 = Qx[i] * Qx[i] - Qy[i] * Qy[i], s4 = 2 * Qx[i] * Qy[i];
+        const T = TL[(512 * (1 + (c4 * ca + s4 * sa)) + 0.5) | 0];
+        const li = Math.max(0, Math.min(511, (rk * (r0 + r1 * Rt[i]) + 0.5) | 0)) * 3;
+        let r, g2, b;
+        if (par) { const t = 1 - T; r = 255 * t + LUT[li] * T; g2 = 255 * t + LUT[li + 1] * T; b = 255 * t + LUT[li + 2] * T; r = F[0] + (r - F[0]) * 0.92; g2 = F[1] + (g2 - F[1]) * 0.92; b = F[2] + (b - F[2]) * 0.92; }
+        else { r = F[0] + (LUT[li] - F[0]) * T; g2 = F[1] + (LUT[li + 1] - F[1]) * T; b = F[2] + (LUT[li + 2] - F[2]) * T; }
+        d[o] = r; d[o + 1] = g2; d[o + 2] = b; d[o + 3] = 255;
+      }
+      buf.getContext('2d').putImageData(img, 0, 0);
+    }
+    // zone isotrope : noire entre polariseurs croisés, claire entre polariseurs parallèles
+    function isoColor() { const F = hex(p.fond); return p.mode === 'paralleles' ? F.map((v) => v + (255 - v) * 0.92) : F.map((v) => v * 0.6); }
+    function drawLogo(w, h) {
+      if (p.depart !== 'logo' || !hiMask) return;
+      const IC = isoColor(), k = IC.join() + hiMask.width;
+      if (k !== tintKey) { hiTint = document.createElement('canvas'); hiTint.width = hiMask.width; hiTint.height = hiMask.height; const x = hiTint.getContext('2d'); x.drawImage(hiMask, 0, 0); x.globalCompositeOperation = 'source-in'; x.fillStyle = `rgb(${IC.map(Math.round).join()})`; x.fillRect(0, 0, hiTint.width, hiTint.height); tintKey = k; }
+      ctx.drawImage(hiTint, 0, 0, w, h);
+    }
+    // directeur : petits traits orientés, comme au crayon
+    // chaque trait suit le directeur sur une courte distance (ligne de champ), départs légèrement décalés
+    function directorSegments(step) {
+      const { w, h } = app.size, sx = w / W, sy = h / H, out = [], jr = mulberry(app.seed * 31 + 5), hs = step * 0.16, ns = 4;
+      const dirAt = (x, y) => { const i = Math.min(H - 1, Math.max(0, y | 0)) * W + Math.min(W - 1, Math.max(0, x | 0)); return [i, 0.5 * Math.atan2(Qy[i], Qx[i])]; };
+      for (let y0 = step / 2; y0 < H; y0 += step) for (let x0 = step / 2; x0 < W; x0 += step) {
+        const x = x0 + (jr() - 0.5) * step * 0.7, y = y0 + (jr() - 0.5) * step * 0.7, [i, t0] = dirAt(x, y); if (fix[i] === 2) continue;
+        const pts = [[x, y]];
+        for (const sg of [1, -1]) {
+          let px = x, py = y, dx = Math.cos(t0) * sg, dy = Math.sin(t0) * sg;
+          for (let k = 0; k < ns; k++) {
+            const [j, t] = dirAt(px, py); if (fix[j] === 2) break; let ux = Math.cos(t), uy = Math.sin(t); if (ux * dx + uy * dy < 0) { ux = -ux; uy = -uy; }
+            px += ux * hs; py += uy * hs; dx = ux; dy = uy; if (sg > 0) pts.push([px, py]); else pts.unshift([px, py]);
+          }
+        }
+        out.push([pts.map(([a, b]) => [a * sx, b * sy]), i]);
+      }
+      return out;
+    }
+
+    app.loop((tt, dt) => {
+      dt = Math.min(0.05, dt || 0);
+      const { w, h, dpr } = app.size;
+      const key = [p.depart, p.finesse, p.echelle, w, h, app.seed, maskKey].join();
+      if (key !== simKey) { reset(); simKey = [p.depart, p.finesse, p.echelle, w, h, app.seed, maskKey].join(); relax(app.thumbnail ? 160 : 70); }
+      const lk = [p.teinte, p.couleurs.join(), p.mode].join(); if (lk !== lutKey) { buildLUT(); lutKey = lk; }
+      if (!app.thumbnail) {
+        relax(Math.round(1 + p.vitesse * 6 + p.vitesse * p.vitesse * 10));
+        pol += p.rotation / 60 * TAU / 2 * dt;
+        sinceQuench += dt;
+        if (p.trempe > 0 && sinceQuench > p.trempe && p.depart === 'trempe' && !wave) {
+          // nouvelle trempe : un front de fusion part d'un point et balaie le cristal
+          wave = { x: rng() * W, y: rng() * H, r: 0, n1: smoothNoise(Math.max(2, W / 22 * p.echelle), 2), n2: smoothNoise(Math.max(2, W / 22 * p.echelle), 2) }; sinceQuench = 0;
+        }
+        if (wave) {
+          const r0 = wave.r; wave.r += Math.hypot(W, H) * 0.45 * dt; const R2 = wave.r * wave.r, Q2 = r0 * r0;
+          for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { const d = (x - wave.x) ** 2 + (y - wave.y) ** 2, i = y * W + x; if (d < Q2 || d >= R2 || fix[i]) continue; const a = Math.atan2(wave.n2[i] - 0.5, wave.n1[i] - 0.5) * 2; Qx[i] = Math.cos(a); Qy[i] = Math.sin(a); }
+          if (wave.r > Math.hypot(W, H)) wave = null;
+        }
+      }
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      if (p.mode === 'directeur') {
+        // le champ bouge lentement : on ne retrace les traits qu'une image sur trois
+        const W2 = Math.round(w * dpr), H2 = Math.round(h * dpr);
+        if (!dirC || dirC.width !== W2 || dirC.height !== H2) { dirC = document.createElement('canvas'); dirC.width = W2; dirC.height = H2; dirN = 0; }
+        if (dirN++ % 3 === 0 || app.thumbnail || !(dt > 0)) {
+          const c = dirC.getContext('2d'); c.setTransform(dpr, 0, 0, dpr, 0, 0);
+          c.fillStyle = p.fond; c.fillRect(0, 0, w, h);
+          const step = Math.max(2, W / 70), segs = directorSegments(step), C = p.couleurs;
+          c.lineCap = 'round'; c.lineJoin = 'round'; c.lineWidth = Math.max(1, Math.min(w, h) * 0.0026);
+          // un tracé par couleur, découpé en paquets (les très longs tracés sont lents)
+          const bins = C.map(() => [new Path2D()]), cnt = C.map(() => 0);
+          for (const [pts, i] of segs) {
+            const t = 0.5 * Math.atan2(Qy[i], Qx[i]), k = Math.min(C.length - 1, Math.floor(((t / Math.PI) + 1) % 1 * C.length));
+            if (++cnt[k] % 400 === 0) bins[k].push(new Path2D()); const P = bins[k][bins[k].length - 1];
+            P.moveTo(pts[0][0], pts[0][1]); for (let m = 1; m < pts.length; m++) P.lineTo(pts[m][0], pts[m][1]);
+          }
+          bins.forEach((L, k) => { c.strokeStyle = C[k]; for (const P of L) c.stroke(P); });
+        }
+        ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.drawImage(dirC, 0, 0); ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      } else {
+        render();
+        ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high'; ctx.drawImage(buf, 0, 0, w, h);
+      }
+      drawLogo(w, h);
+      app.finish(ctx);
+    });
+
+    // ——— Export SVG : le champ du directeur en traits, colorés comme à l'écran ———
+    function toSVG() {
+      const { w, h } = app.size, out = [`<rect width="100%" height="100%" fill="${p.fond}"/>`], step = Math.max(2, W / 70);
+      const a2 = 2 * (p.polariseur * Math.PI / 180 + pol), ca = Math.cos(2 * a2), sa = Math.sin(2 * a2), C = p.couleurs;
+      for (const [pts, i] of directorSegments(step)) {
+        let col;
+        if (p.mode === 'directeur') { const t = 0.5 * Math.atan2(Qy[i], Qx[i]); col = C[Math.min(C.length - 1, Math.floor(((t / Math.PI) + 1) % 1 * C.length))]; }
+        else { const c4 = Qx[i] * Qx[i] - Qy[i] * Qy[i], s4 = 2 * Qx[i] * Qy[i], T = 1 - Math.pow(0.5 * (1 + (c4 * ca + s4 * sa)), p.exposition), R = p.epaisseur * (1 - p.relief * 0.6 + p.relief * 1.2 * Rt[i]), li = Math.max(0, Math.min(511, Math.round(R / 2400 * 511))) * 3; col = mix(p.fond, '#' + [LUT[li], LUT[li + 1], LUT[li + 2]].map((v) => Math.round(v).toString(16).padStart(2, '0')).join(''), Math.max(0.15, T)); }
+        out.push(`<polyline points="${pts.map(([a, b]) => a.toFixed(1) + ',' + b.toFixed(1)).join(' ')}" fill="none" stroke="${col}" stroke-linejoin="round" stroke-width="${Math.max(1, Math.min(w, h) * 0.0026).toFixed(2)}" stroke-linecap="round"/>`);
+      }
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">${out.join('')}</svg>`;
+    }
+  </script>
+</body>
+</html>

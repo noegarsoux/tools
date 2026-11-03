@@ -1,0 +1,15 @@
+{
+  "slug": "nematique",
+  "title": "Nématique",
+  "type": "motion",
+  "description": "Un cristal liquide entre polariseurs croisés : des pinceaux sombres tournent autour des défauts, les couleurs d'interférence chatoient, les défauts s'annihilent.",
+  "tags": ["cristal-liquide", "polarisation", "physique", "couleur", "logo", "svg"],
+  "inspiration": [
+    "Textures de Schlieren des nématiques au microscope polarisant",
+    "Échelle des teintes de Michel-Lévy (1888)",
+    "Pierre-Gilles de Gennes, The Physics of Liquid Crystals (1974)"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}
