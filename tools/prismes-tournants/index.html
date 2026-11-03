@@ -1,0 +1,301 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Prismes tournants</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Prismes tournants : le panneau est une rangée de prismes à section triangulaire (côté s, rayon s/√3).
+    // La face k regarde dans la direction α = θ + k·2π/3 ; elle est visible si cos α > 0, et ses deux arêtes
+    // se projettent en u = R·sin(α ∓ π/3). Chaque face montre sa tranche de l'un des trois visuels, étirée
+    // à la largeur projetée et ombrée selon l'angle à la lumière. Les visuels sont peints une fois dans des calques.
+    // Tout le panneau est calculé dans un repère local (u : à travers les prismes, v : le long) ; en mode horizontal,
+    // ce repère est simplement transposé.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2, STEP = TAU / 3;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const BIEN = PAL('biennale'), MEN = PAL('menthe'), KB = PAL('kegelbahn');
+    const FACES = { formes: 'Formes', rayures: 'Rayures', cercles: 'Cercles', damier: 'Damier', bandes: 'Bandes', logo: 'Logo' };
+
+    let simT = 0, tOff = 0, V = null, vKey = '', logoM = null, logoKey = '', ptr = null, off = [], offV = [], offT = [], lastCycle = 0;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.03, vignette: 0.1 },
+      hint: 'Clic : visuel suivant · glissez sur les prismes pour les faire tourner · molette : nombre de prismes',
+      notes: 'Dans les années 1980, les panneaux d\'affichage ont appris à tourner : une rangée de prismes à trois faces, chacune portant une bande d\'affiche, pivotait d\'un tiers de tour pour passer d\'un visuel au suivant. L\'effet tient à ce petit décalage d\'un prisme à l\'autre, qui fait passer une vague sur l\'image. Ici, chaque face est réellement projetée : sa largeur se resserre quand elle se détourne, et elle s\'assombrit en quittant la lumière. Choisissez les trois visuels parmi des compositions géométriques aux couleurs de la marque et le logo, réglez l\'ordre de la vague et le rebond, ou attrapez les prismes au pointeur pour les retourner un à un.',
+      params: {
+        'Panneau': {
+          prismes: { type: 'range', label: 'Prismes', min: 4, max: 90, step: 1, value: 28 },
+          sens: { type: 'select', label: 'Sens', options: { vertical: 'Verticaux', horizontal: 'Horizontaux' }, value: 'vertical' },
+          jeu: { type: 'range', label: 'Jeu entre prismes', min: 0, max: 0.3, step: 0.005, value: 0.04 },
+          cadre: { type: 'range', label: 'Cadre', min: 0, max: 0.1, step: 0.002, value: 0.03 },
+          lumiere: { type: 'range', label: 'Ombrage', min: 0, max: 1, step: 0.01, value: 0.55 },
+        },
+        'Visuels': {
+          face1: { type: 'select', label: 'Face 1', options: FACES, value: 'formes' },
+          face2: { type: 'select', label: 'Face 2', options: FACES, value: 'rayures' },
+          face3: { type: 'select', label: 'Face 3', options: FACES, value: 'logo' },
+          tailleLogo: { type: 'range', label: 'Taille du logo', min: 0.2, max: 0.95, step: 0.01, value: 0.6 },
+          image: { type: 'file', label: 'Logo', accept: 'image/*' },
+        },
+        'Rotation': {
+          pause: { type: 'range', label: 'Pause sur chaque visuel (s)', min: 0.5, max: 12, step: 0.1, value: 3 },
+          duree: { type: 'range', label: 'Durée d\'un pivot (s)', min: 0.2, max: 4, step: 0.05, value: 0.9 },
+          decalage: { type: 'range', label: 'Décalage de la vague (s)', min: 0, max: 4, step: 0.05, value: 1.2 },
+          ordre: { type: 'select', label: 'Ordre', options: { gauche: 'D\'un bord à l\'autre', centre: 'Depuis le centre', bords: 'Depuis les bords', hasard: 'Au hasard', onde: 'Onde' }, value: 'gauche' },
+          rebond: { type: 'range', label: 'Rebond', min: 0, max: 1, step: 0.01, value: 0.35 },
+        },
+        'Couleurs': {
+          fond: { type: 'color', label: 'Cadre et fentes', value: '#16161a' },
+          couleurs: { type: 'palette', label: 'Visuels', value: ['#f4f1ea', '#e5452a', '#2f5fd0', '#f2c230', '#16161a'] },
+          accent: { type: 'color', label: 'Logo', value: '#e5452a' },
+        },
+      },
+      presets: {
+        'Affiche': {},
+        'Vague lente': { decalage: 3, duree: 1.4, rebond: 0.1, pause: 2.5, ordre: 'onde' },
+        'Depuis le centre': { ordre: 'centre', decalage: 1, face1: 'cercles', face2: 'damier', face3: 'logo' },
+        'Horizontaux': { sens: 'horizontal', prismes: 18, face1: 'bandes', face2: 'formes', face3: 'logo' },
+        'Lamelles': { prismes: 72, jeu: 0.02, decalage: 1.6, ordre: 'hasard', duree: 0.6 },
+        'Larges': { prismes: 8, jeu: 0.06, rebond: 0.6, decalage: 0.8, face2: 'cercles' },
+        'Logo': { face1: 'logo', face2: 'formes', face3: 'cercles', tailleLogo: 0.75, couleurs: ['#16161a', '#f4f1ea', '#5b5b66'], accent: '#ef5a2f', fond: '#000000' },
+        'Biennale': { fond: BIEN[1], couleurs: [BIEN[0], BIEN[2], BIEN[3], BIEN[4], BIEN[1]], accent: BIEN[2], face2: 'damier' },
+        'Menthe': { fond: MEN[1], couleurs: [MEN[0], MEN[3], MEN[2], MEN[1]], accent: MEN[3], face1: 'bandes', face2: 'cercles', ordre: 'bords' },
+        'Kegelbahn': { fond: KB[0], couleurs: [KB[0], KB[1], KB[2], KB[3], KB[5]], accent: KB[3], face1: 'rayures', face2: 'formes', prismes: 36 },
+      },
+      brand(colors) {
+        const s = colors.slice().sort((a, b) => lum(a) - lum(b)), L = s[s.length - 1], D = s[0], mid = s.slice(1, -1);
+        return { fond: D, couleurs: [L].concat(mid.length ? mid : [mix(L, D, 0.5)], [D]), accent: mid.length ? mid[0] : D };
+      },
+      pointer: {
+        down: (q) => { ptr = { x: q.x, y: q.y, moved: 0 }; },
+        drag: (q) => { if (!ptr) return; const dx = q.x - ptr.x, dy = q.y - ptr.y; ptr.moved += Math.hypot(dx, dy); spin(q.x, q.y, dx, dy); ptr.x = q.x; ptr.y = q.y; },
+        up: () => { if (ptr && ptr.moved < 6) nextNow(); ptr = null; },
+        wheel: (q, dy) => app.set('prismes', Math.max(4, Math.min(90, p.prismes + (dy > 0 ? -1 : 1)))),
+      },
+      onChange(k) { if (['*', 'image'].includes(k)) logoKey = ''; },
+      export: { name: 'prismes-tournants', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    function hex(x) { const n = parseInt(x.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
+    function lum(x) { const c = hex(x); return (c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114) / 255; }
+    function mix(a, b, t) { const A = hex(a), C = hex(b); return '#' + A.map((v, i) => Math.round(v + (C[i] - v) * t).toString(16).padStart(2, '0')).join(''); }
+    function rng(s) { let a = s >>> 0; return () => { a = (a + 0x6d2b79f5) >>> 0; let t = a; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+
+    // ——— Logo : masque puis contours vectoriels ———
+    function buildLogo() {
+      const img0 = p.image || app.logoImg, key = img0 ? (img0.src || 'c') : 'demo'; if (key === logoKey) return; logoKey = key; vKey = '';
+      const M = 200, c = document.createElement('canvas'); c.width = c.height = M; const x = c.getContext('2d', { willReadFrequently: true }), L = M * 0.94, cx = M / 2;
+      if (img0) { const iw = img0.naturalWidth || img0.width, ih = img0.naturalHeight || img0.height, s = L / Math.max(iw, ih); x.drawImage(img0, cx - iw * s / 2, cx - ih * s / 2, iw * s, ih * s); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(cx, cx, L * 0.48, 0, TAU); x.arc(cx, cx, L * 0.27, 0, TAU, true); x.fill('evenodd'); x.fillRect(cx - L * 0.07, cx - L * 0.5, L * 0.14, L); }
+      const d = x.getImageData(0, 0, M, M).data; let transp = 0; for (let i = 3; i < d.length; i += 4) if (d[i] < 128) transp++; const useA = transp > M * M * 0.05;
+      const F = new Float64Array(M * M); for (let i = 0; i < M * M; i++) { const o = i * 4, l = (d[o] * 0.2126 + d[o + 1] * 0.7152 + d[o + 2] * 0.0722) / 255; F[i] = useA ? d[o + 3] / 255 : (d[o + 3] / 255) * Math.min(1, Math.max(0, (0.75 - l) * 2)); }
+      { const G2 = new Float64Array(M * M); for (let j = 1; j < M - 1; j++) for (let i = 1; i < M - 1; i++) { let a = 0; for (let b = -1; b <= 1; b++) for (let c = -1; c <= 1; c++) a += F[(j + b) * M + i + c] * (b || c ? (b && c ? 1 : 2) : 4); G2[j * M + i] = a / 16; } F.set(G2); }
+      for (let k = 0; k < M; k++) F[k] = F[(M - 1) * M + k] = F[k * M] = F[k * M + M - 1] = 0;
+      logoM = contours(F, M, M, 0.5, 0, 0, 1).filter((c) => c.closed && c.pts.length > 6).map((c) => chaikin(chaikin(c.pts, true), true).map((q) => [q[0] / M - 0.5, q[1] / M - 0.5]));
+    }
+    // carrés marchants + chaînage
+    function contours(F, nx, ny, lev, ox, oy, cs) {
+      const pt = new Map(), adj = new Map();
+      const P = (id) => { let q = pt.get(id); if (q) return q; const cell = id >> 1, i = cell % nx, j = (cell - i) / nx; let a, b, ax, ay, bx, by; if (id & 1) { a = F[j * nx + i]; b = F[(j + 1) * nx + i]; ax = bx = i; ay = j; by = j + 1; } else { a = F[j * nx + i]; b = F[j * nx + i + 1]; ay = by = j; ax = i; bx = i + 1; } const t = (lev - a) / (b - a || 1e-9); q = [ox + (ax + (bx - ax) * t) * cs, oy + (ay + (by - ay) * t) * cs]; pt.set(id, q); return q; };
+      const link = (a, b) => { (adj.get(a) || adj.set(a, []).get(a)).push(b); (adj.get(b) || adj.set(b, []).get(b)).push(a); };
+      for (let j = 0; j < ny - 1; j++) for (let i = 0; i < nx - 1; i++) {
+        const A = F[j * nx + i] > lev, B = F[j * nx + i + 1] > lev, C = F[(j + 1) * nx + i + 1] > lev, D = F[(j + 1) * nx + i] > lev, idx = A | (B << 1) | (C << 2) | (D << 3);
+        if (idx === 0 || idx === 15) continue;
+        const T = (j * nx + i) * 2, R = (j * nx + i + 1) * 2 + 1, Bo = ((j + 1) * nx + i) * 2, Le = (j * nx + i) * 2 + 1;
+        const ctr = (F[j * nx + i] + F[j * nx + i + 1] + F[(j + 1) * nx + i + 1] + F[(j + 1) * nx + i]) / 4 > lev;
+        switch (idx) {
+          case 1: case 14: link(Le, T); break; case 2: case 13: link(T, R); break; case 3: case 12: link(Le, R); break;
+          case 4: case 11: link(R, Bo); break; case 6: case 9: link(T, Bo); break; case 7: case 8: link(Le, Bo); break;
+          case 5: if (ctr) { link(Le, Bo); link(T, R); } else { link(Le, T); link(R, Bo); } break;
+          case 10: if (ctr) { link(Le, T); link(R, Bo); } else { link(Le, Bo); link(T, R); } break;
+        }
+      }
+      const seen = new Set(), out = [];
+      const walk = (s) => { const L = [s]; seen.add(s); let cur = s; for (;;) { const nb = (adj.get(cur) || []).find((x) => !seen.has(x)); if (nb === undefined) break; seen.add(nb); L.push(nb); cur = nb; } return L; };
+      for (const [id, nb] of adj) if (nb.length === 1 && !seen.has(id)) out.push({ pts: walk(id).map(P), closed: false });
+      for (const [id] of adj) if (!seen.has(id)) out.push({ pts: walk(id).map(P), closed: true });
+      return out;
+    }
+    function chaikin(pts, closed) {
+      const o = []; const n = pts.length; for (let k = 0; k < (closed ? n : n - 1); k++) { const a = pts[k], b = pts[(k + 1) % n]; o.push([a[0] * 0.75 + b[0] * 0.25, a[1] * 0.75 + b[1] * 0.25], [a[0] * 0.25 + b[0] * 0.75, a[1] * 0.25 + b[1] * 0.75]); }
+      if (!closed) { o.unshift(pts[0]); o.push(pts[n - 1]); } return o;
+    }
+
+    // ——— Les visuels (dans le repère du panneau, W × H) ———
+    function compose(pen, kind, W, H, k) {
+      const R = rng(app.seed * 4111 + k * 977 + 13), Cs = p.couleurs.length ? p.couleurs : ['#ffffff', '#000000'], C = (i) => Cs[((i % Cs.length) + Cs.length) % Cs.length], m = Math.min(W, H);
+      const pick = (not) => { let c; for (let t = 0; t < 8; t++) { c = C(1 + Math.floor(R() * Math.max(1, Cs.length - 1))); if (c !== not) break; } return c; };
+      pen.rect(0, 0, W, H, C(0));
+      if (kind === 'formes') {
+        const c1 = pick(C(0)); pen.circ(W * (0.25 + R() * 0.5), H * (0.3 + R() * 0.4), m * (0.28 + R() * 0.12), c1);
+        const bx = W * (0.05 + R() * 0.3), bw = W * (0.12 + R() * 0.12); pen.rect(bx, 0, bw, H * (0.55 + R() * 0.45), pick(c1));
+        const hr = m * (0.18 + R() * 0.1), hx = W * (0.55 + R() * 0.35), hy = H; pen.poly(Array.from({ length: 33 }, (_, i) => [hx + Math.cos(Math.PI + i / 32 * Math.PI) * hr, hy + Math.sin(Math.PI + i / 32 * Math.PI) * hr]), pick(c1));
+        pen.rect(0, H * (0.12 + R() * 0.2), W, m * 0.035, pick(C(0)));
+        const tx = W * (0.6 + R() * 0.3), ty = H * (0.08 + R() * 0.3), ts = m * (0.12 + R() * 0.1); pen.poly([[tx, ty], [tx + ts, ty + ts * 1.7], [tx - ts, ty + ts * 1.7]], pick(c1));
+        pen.circ(W * (0.1 + R() * 0.8), H * (0.1 + R() * 0.8), m * 0.05, pick(C(0)));
+      } else if (kind === 'rayures') {
+        const sw = m * (0.07 + R() * 0.05), n = Math.ceil((W + H) / sw) + 2, c1 = pick(C(0)), c2 = pick(c1);
+        for (let i = 0; i < n; i += 2) { const x0 = i * sw; pen.poly([[x0, 0], [x0 + sw, 0], [x0 + sw - H, H], [x0 - H, H]], (i / 2) % 3 === 2 ? c2 : c1); }
+        pen.circ(W * (0.3 + R() * 0.4), H * 0.5, m * 0.22, C(0)); pen.circ(W * 0.5 + (R() - 0.5) * W * 0.4, H * 0.5, m * 0.1, c2);
+      } else if (kind === 'cercles') {
+        const cx = W * (0.3 + R() * 0.4), cy = H * (0.3 + R() * 0.4), rw = m * (0.06 + R() * 0.03), rmax = Math.hypot(Math.max(cx, W - cx), Math.max(cy, H - cy)), n = Math.ceil(rmax / rw);
+        for (let i = n; i >= 1; i--) pen.circ(cx, cy, i * rw, i % 2 ? C(1 + Math.floor(i / 2) % Math.max(1, Cs.length - 1)) : C(0));
+      } else if (kind === 'damier') {
+        const cs = m * (0.14 + R() * 0.06), nx = Math.ceil(W / cs), ny = Math.ceil(H / cs), ox = (W - nx * cs) / 2, oy = (H - ny * cs) / 2, c1 = pick(C(0));
+        for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+          const x = ox + i * cs, y = oy + j * cs, r = R();
+          if ((i + j) % 2) pen.rect(x, y, cs, cs, c1);
+          if (r < 0.22) pen.circ(x + cs / 2, y + cs / 2, cs * 0.36, pick(c1));
+          else if (r < 0.34) { const a0 = Math.floor(R() * 4) * Math.PI / 2, ax = x + (a0 < 1 || a0 > 4 ? 0 : cs), ay = y + (a0 < 2 ? 0 : cs); pen.poly([[ax, ay]].concat(Array.from({ length: 17 }, (_, t) => { const a = a0 + t / 16 * Math.PI / 2; return [ax + Math.cos(a) * cs, ay + Math.sin(a) * cs]; })), pick((i + j) % 2 ? c1 : C(0))); }
+        }
+      } else if (kind === 'bandes') {
+        let y = 0, i = 0; while (y < H) { const bh = H * (0.06 + R() * 0.16); pen.rect(0, y, W, bh + 1, C(i)); y += bh; i++; }
+        pen.circ(W * (0.3 + R() * 0.4), H * 0.5, m * 0.3, C(i)); pen.rect(W * (0.1 + R() * 0.2), H * 0.2, m * 0.06, H * 0.6, C(i + 1));
+      } else {
+        const S = m * p.tailleLogo, cx = W / 2, cy = H / 2; pen.path(logoM.map((L) => L.map((q) => [cx + q[0] * S, cy + q[1] * S])), p.accent);
+      }
+    }
+
+    function view(w, h) {
+      buildLogo();
+      const key = [p.sens, p.cadre, p.face1, p.face2, p.face3, p.tailleLogo, logoKey, p.couleurs.join(), p.accent, app.seed, w, h, app.size.dpr].join();
+      if (key === vKey && V) return V; vKey = key;
+      const m = Math.min(w, h), f = m * p.cadre, px = f, py = f, pw = w - 2 * f, ph = h - 2 * f, hor = p.sens === 'horizontal', PU = hor ? ph : pw, PV = hor ? pw : ph, dpr = app.size.dpr;
+      const layers = [p.face1, p.face2, p.face3].map((kind, k) => {
+        const c = document.createElement('canvas'); c.width = Math.ceil(PU * dpr); c.height = Math.ceil(PV * dpr); const g = c.getContext('2d');
+        g.setTransform(dpr, 0, 0, dpr, 0, 0); if (hor) g.transform(0, 1, 1, 0, 0, 0);
+        compose(canvasPen(g), kind, pw, ph, k); return c;
+      });
+      V = { px, py, pw, ph, PU, PV, hor, layers, dpr };
+      return V;
+    }
+    function canvasPen(g) {
+      return {
+        rect(x, y, w, h, c) { g.fillStyle = c; g.fillRect(x, y, w, h); },
+        circ(x, y, r, c) { g.fillStyle = c; g.beginPath(); g.arc(x, y, r, 0, TAU); g.fill(); },
+        poly(pts, c) { g.fillStyle = c; g.beginPath(); pts.forEach((q, i) => (i ? g.lineTo(q[0], q[1]) : g.moveTo(q[0], q[1]))); g.closePath(); g.fill(); },
+        path(loops, c) { g.fillStyle = c; g.beginPath(); for (const L of loops) { L.forEach((q, i) => (i ? g.lineTo(q[0], q[1]) : g.moveTo(q[0], q[1]))); g.closePath(); } g.fill('evenodd'); },
+      };
+    }
+
+    // ——— Rotation ———
+    function ease(x) { // sortie avec rebond amorti
+      if (x <= 0) return 0; if (x >= 1) return 1;
+      const b = p.rebond; const base = 1 - Math.pow(1 - x, 3); if (b <= 0) return base;
+      return base + b * 0.35 * Math.sin(x * Math.PI * 2.5) * Math.pow(1 - x, 1.5) * Math.min(1, x * 6);
+    }
+    function orderOf(i, n) {
+      const u = n > 1 ? i / (n - 1) : 0;
+      if (p.ordre === 'centre') return Math.abs(u - 0.5) * 2;
+      if (p.ordre === 'bords') return 1 - Math.abs(u - 0.5) * 2;
+      if (p.ordre === 'hasard') return rng(app.seed * 31 + i * 7919 + 1)();
+      if (p.ordre === 'onde') return 0.5 + 0.5 * Math.sin(u * TAU * 1.25 - Math.PI / 2) * (0.6 + 0.4 * u);
+      return u;
+    }
+    function cycleLen() { return p.pause + p.decalage + p.duree; }
+    function angles(t) {
+      const n = p.prismes, T = cycleLen(), tt = t - tOff, cyc = Math.floor(tt / T), tc = tt - cyc * T, out = new Float64Array(n);
+      for (let i = 0; i < n; i++) { const d = orderOf(i, n) * p.decalage, pr = ease((tc - p.pause - d) / p.duree); out[i] = -STEP * (cyc + pr) + (off[i] || 0); }
+      return { a: out, cyc };
+    }
+    function nextNow() { const T = cycleLen(), tt = simT - tOff, tc = tt - Math.floor(tt / T) * T; if (tc < p.pause) tOff -= p.pause - tc; else tOff -= T - tc + p.pause; }
+    function spin(x, y, dx, dy) {
+      if (!V) return; const n = p.prismes, u = V.hor ? y - V.py : x - V.px, du = V.hor ? dy : dx, dv = V.hor ? dx : dy, s = V.PU / n, i0 = Math.floor(u / s);
+      for (let i = i0 - 1; i <= i0 + 1; i++) { if (i < 0 || i >= n) continue; const wgt = 1 - Math.min(1, Math.abs((i + 0.5) * s - u) / (s * 1.5)); offV[i] = (offV[i] || 0) + (dv + du * 0.3) / s * 0.9 * wgt; }
+    }
+    function physics(dt, cyc) {
+      const n = p.prismes; if (off.length !== n) { off = new Array(n).fill(0); offV = new Array(n).fill(0); offT = new Array(n).fill(0); }
+      if (cyc !== lastCycle) { lastCycle = cyc; offT.fill(0); }
+      for (let i = 0; i < n; i++) {
+        if (Math.abs(offV[i]) > 0.5) offT[i] = Math.round((off[i] + offV[i] * 0.25) / STEP) * STEP; // un coup franc : on vise la face la plus proche
+        const k = 60, c = 9; offV[i] += (-(off[i] - offT[i]) * k - offV[i] * c) * dt; off[i] += offV[i] * dt;
+      }
+    }
+
+    // ——— Dessin du panneau ———
+    function faces(a, s) {
+      // renvoie, pour un prisme d'angle a, les faces visibles : [u0, u1, k, lumière]
+      const R = s / Math.sqrt(3), out = [], L = -0.55;
+      for (let k = 0; k < 3; k++) {
+        const al = a + k * STEP; if (Math.cos(al) <= 1e-3) continue;
+        const u0 = R * Math.sin(al - Math.PI / 3), u1 = R * Math.sin(al + Math.PI / 3);
+        const lit = 0.5 + 0.5 * Math.cos(al - L); out.push([Math.min(u0, u1), Math.max(u0, u1), ((k % 3) + 3) % 3, lit, Math.cos(al)]);
+      }
+      return out;
+    }
+    function render(pen) {
+      const { PU, PV } = V, n = p.prismes, s = PU / n, sw = s * (1 - p.jeu), { a } = angles(simT);
+      pen.bg();
+      for (let i = 0; i < n; i++) {
+        const uc = (i + 0.5) * s, faceList = faces(a[i], sw);
+        for (const [u0, u1, k, lit, fc] of faceList) {
+          const src0 = uc - sw / 2, d0 = uc + u0, d1 = uc + u1; if (d1 - d0 < 0.05) continue;
+          pen.face(k, src0, sw, d0, d1, PV);
+          const sh = Math.min(0.85, ((1 - lit) * 0.95 + (1 - fc) * 0.5) * p.lumiere); if (sh > 0.004) pen.shade(d0, d1, PV, '#000000', sh);
+          const hi = Math.max(0, lit - 0.8) * p.lumiere * 1.6 * fc; if (hi > 0.004) pen.shade(d0, d1, PV, '#ffffff', hi);
+          if (fc < 0.995 && d1 - d0 > 1.5) pen.shade(d0, d0 + Math.min(1.2, (d1 - d0) * 0.3), PV, '#ffffff', 0.35 * p.lumiere); // arête
+        }
+      }
+    }
+
+    app.loop((t, dt) => {
+      dt = Math.min(1 / 20, dt || 0);
+      const { w, h, dpr } = app.size; view(w, h);
+      if (app.thumbnail) { tOff = 0; off = []; simT = p.pause + p.decalage * 0.5 + p.duree * 0.5; }
+      else { simT += dt; physics(dt, angles(simT).cyc); }
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = p.fond; ctx.fillRect(0, 0, w, h);
+      ctx.save(); ctx.translate(V.px, V.py); if (V.hor) ctx.transform(0, 1, 1, 0, 0, 0);
+      render({
+        bg() { ctx.fillStyle = mix(p.fond, '#000000', 0.4); ctx.fillRect(0, 0, V.PU, V.PV); },
+        face(k, src0, sw, d0, d1, PV) { const L = V.layers[k], sx = Math.max(0, src0 * V.dpr), sW = Math.min(L.width - sx, sw * V.dpr); if (sW <= 0) return; ctx.drawImage(L, sx, 0, sW, L.height, d0, 0, d1 - d0, PV); },
+        shade(d0, d1, PV, c, a) { ctx.globalAlpha = a; ctx.fillStyle = c; ctx.fillRect(d0, 0, d1 - d0, PV); ctx.globalAlpha = 1; },
+      });
+      ctx.restore();
+      app.finish(ctx);
+    });
+
+    function toSVG() {
+      const { w, h } = app.size, f = (v) => +v.toFixed(2); view(w, h);
+      let s = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><rect width="100%" height="100%" fill="${p.fond}"/><defs>`;
+      const kinds = [p.face1, p.face2, p.face3];
+      kinds.forEach((kind, k) => {
+        s += `<g id="v${k}">`;
+        compose({
+          rect(x, y, W, H, c) { s += `<rect x="${f(x)}" y="${f(y)}" width="${f(W)}" height="${f(H)}" fill="${c}"/>`; },
+          circ(x, y, r, c) { s += `<circle cx="${f(x)}" cy="${f(y)}" r="${f(r)}" fill="${c}"/>`; },
+          poly(pts, c) { s += `<path d="M${pts.map((q) => f(q[0]) + ' ' + f(q[1])).join('L')}Z" fill="${c}"/>`; },
+          path(loops, c) { s += `<path d="${loops.map((L) => 'M' + L.map((q) => f(q[0]) + ' ' + f(q[1])).join('L') + 'Z').join('')}" fill="${c}" fill-rule="evenodd"/>`; },
+        }, kind, V.pw, V.ph, k);
+        s += '</g>';
+      });
+      s += '</defs>';
+      let clips = '', body = '', ci = 0;
+      // un rectangle local (u0..u1 × 0..PV) exprimé dans le repère du panneau
+      const box = (u0, u1, PV) => (V.hor ? [0, u0, PV, u1 - u0] : [u0, 0, u1 - u0, PV]);
+      render({
+        bg() { body += `<rect x="0" y="0" width="${f(V.pw)}" height="${f(V.ph)}" fill="${mix(p.fond, '#000000', 0.4)}"/>`; },
+        face(k, src0, sw, d0, d1, PV) {
+          const sc = (d1 - d0) / sw, tr = d0 - src0 * sc, b = box(d0, d1, PV), id = 'c' + ci++;
+          clips += `<clipPath id="${id}"><rect x="${f(b[0])}" y="${f(b[1])}" width="${f(b[2])}" height="${f(b[3])}"/></clipPath>`;
+          const M = V.hor ? `matrix(1 0 0 ${+sc.toFixed(5)} 0 ${f(tr)})` : `matrix(${+sc.toFixed(5)} 0 0 1 ${f(tr)} 0)`;
+          body += `<g clip-path="url(#${id})"><use xlink:href="#v${k}" href="#v${k}" transform="${M}"/></g>`;
+        },
+        shade(d0, d1, PV, c, a) { const b = box(d0, d1, PV); body += `<rect x="${f(b[0])}" y="${f(b[1])}" width="${f(b[2])}" height="${f(b[3])}" fill="${c}" fill-opacity="${+a.toFixed(3)}"/>`; },
+      });
+      return s + `<defs>${clips}</defs><g transform="translate(${f(V.px)} ${f(V.py)})">${body}</g></svg>`;
+    }
+  </script>
+</body>
+</html>
