@@ -1,0 +1,240 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Arbre de Pythagore</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Arbre de Pythagore : un carré, un triangle rectangle posé dessus, et un carré sur chaque côté du triangle,
+    // puis on recommence. Avec un angle de 45°, l'arbre est symétrique ; en s'écartant, il penche et s'enroule.
+    // Le vent fait varier l'angle de chaque nœud selon sa profondeur ; le logo peut servir de gabarit de taille :
+    // les branches qui en sortent ne poussent plus, et la ramure prend sa forme.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const BIEN = PAL('biennale'), MEN = PAL('menthe'), LU = PAL('luzern'), KB = PAL('kegelbahn'), TH = PAL('thermique'), PY = PAL('pyramides');
+
+    let lastT = 0, gust = 0, grab = null, fit = null, fitKey = '', maskKey = '', mask = null, mw = 0, mh = 0, quads = [];
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.03, vignette: 0.12 },
+      hint: 'Glissez pour changer l’angle · touchez pour une rafale · molette : profondeur',
+      notes: 'Sur un carré, on pose un triangle rectangle ; sur chacun de ses deux petits côtés, un nouveau carré, et ainsi de suite. Par le théorème de Pythagore, l’aire des deux carrés enfants égale celle du parent : chaque génération a la même surface totale. À 45°, l’arbre est symétrique ; plus l’angle s’écarte, plus il penche et s’enroule en spirale. Le vent fait osciller l’angle, plus fort aux extrémités.',
+      params: {
+        'Arbre': {
+          profondeur: { type: 'range', label: 'Profondeur', min: 3, max: 14, step: 1, value: 11 },
+          angle: { type: 'range', label: 'Angle (°)', min: 15, max: 75, step: 0.5, value: 45 },
+          alternance: { type: 'range', label: 'Alternance gauche-droite (°)', min: 0, max: 25, step: 0.5, value: 0 },
+          hasard: { type: 'range', label: 'Irrégularité', min: 0, max: 1, step: 0.01, value: 0.15 },
+          echelle: { type: 'range', label: 'Taille', min: 0.4, max: 1.2, step: 0.01, value: 0.9 },
+        },
+        'Vent': {
+          vent: { type: 'range', label: 'Force (°)', min: 0, max: 20, step: 0.1, value: 4 },
+          vitesse: { type: 'range', label: 'Vitesse', min: 0, max: 3, step: 0.01, value: 0.8 },
+          houle: { type: 'range', label: 'Décalage entre les étages', min: 0, max: 2, step: 0.01, value: 0.6 },
+        },
+        'Rendu': {
+          rendu: { type: 'segmented', label: 'Rendu', options: { plein: 'Carrés pleins', contour: 'Contours', feuillage: 'Tronc et feuilles' }, value: 'plein' },
+          arrondi: { type: 'range', label: 'Arrondi des carrés', min: 0, max: 0.5, step: 0.01, value: 0 },
+          marge: { type: 'range', label: 'Écart entre carrés', min: 0, max: 0.3, step: 0.01, value: 0.04 },
+          triangles: { type: 'toggle', label: 'Montrer les triangles', value: false },
+          trait: { type: 'range', label: 'Épaisseur du trait', min: 0.3, max: 3, step: 0.05, value: 1, show: (q) => q.rendu === 'contour' },
+        },
+        'Logo dans l’arbre': {
+          logo: { type: 'toggle', label: 'Révéler le logo dans la ramure', value: false },
+          image: { type: 'file', label: 'Logo', accept: 'image/*', show: (q) => q.logo },
+        },
+        'Couleurs': {
+          fond: { type: 'color', label: 'Fond', value: '#f2efe8' },
+          couleurs: { type: 'palette', label: 'Du tronc aux feuilles', value: ['#1f1d1a', '#3a6fd0', '#e5452a', '#f2c230'] },
+          accent: { type: 'color', label: 'Triangles et feuilles', value: '#e5452a' },
+        },
+      },
+      presets: {
+        'Pythagore': {},
+        'Penché': { angle: 32, vent: 3, couleurs: ['#1f1d1a', '#2f7a4d', '#9cc46b', '#f2c230'], profondeur: 12 },
+        'Spirale': { angle: 22, profondeur: 13, alternance: 0, couleurs: [LU[3], LU[1], LU[2]], fond: LU[0], echelle: 0.75 },
+        'Contours': { rendu: 'contour', fond: '#111114', couleurs: ['#f4f1ea', '#486cfc'], trait: 0.8, marge: 0 },
+        'Feuillage': { rendu: 'feuillage', angle: 40, alternance: 9, hasard: 0.35, couleurs: [MEN[1], MEN[3]], accent: MEN[2], fond: MEN[0], vent: 6 },
+        'Pastilles': { arrondi: 0.5, marge: 0.1, couleurs: [BIEN[1], BIEN[2], BIEN[3], BIEN[4]], fond: BIEN[0] },
+        'Triangles': { triangles: true, marge: 0.06, couleurs: ['#111111', '#3a3a3e'], accent: '#e5452a', fond: '#f2efe8' },
+        'Logo': { logo: true, profondeur: 14, angle: 45, alternance: 0, hasard: 0.1, couleurs: ['#1f1d1a', '#5a5650', '#bdb8ae'], accent: '#e5452a', vent: 2.5, marge: 0.08 },
+        'Kegelbahn': { fond: KB[0], couleurs: KB.slice(1, 5), alternance: 14, angle: 50, profondeur: 12 },
+        'Thermique': { fond: '#0c0c14', couleurs: TH.slice(1), rendu: 'contour', marge: 0.02, trait: 1.2 },
+      },
+      brand(colors) {
+        const lum = (x) => { const c = hex(x); return c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114; };
+        const s = colors.slice().sort((a, b) => lum(b) - lum(a)), rest = s.slice(1);
+        return { fond: s[0], couleurs: rest.length ? rest.reverse() : ['#000000'], accent: rest.length ? rest[Math.floor(rest.length / 2)] : '#000000' };
+      },
+      pointer: {
+        down: (q) => { grab = { x0: q.x, a0: p.angle, moved: false }; },
+        drag: (q) => {
+          if (!grab) return; const dx = q.x - grab.x0; if (Math.abs(dx) > 5) grab.moved = true;
+          if (grab.moved) app.set('angle', Math.max(15, Math.min(75, +(grab.a0 + dx / app.size.w * 60).toFixed(1))));
+        },
+        up: () => { if (grab && !grab.moved) gust = 1; grab = null; },
+        wheel: (q, dy) => { app.set('profondeur', Math.max(3, Math.min(14, p.profondeur + (dy > 0 ? -1 : 1)))); },
+      },
+      onChange(k) { if (k === 'image') maskKey = ''; },
+      export: { name: 'arbre-pythagore', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    const hex = (x) => { const n = parseInt(x.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; };
+    const toHex = (c) => '#' + c.map((v) => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, '0')).join('');
+    // dégradé à travers la palette
+    function ramp(t) {
+      const C = p.couleurs.map(hex); if (C.length === 1) return toHex(C[0]);
+      const f = Math.max(0, Math.min(1, t)) * (C.length - 1), i = Math.min(C.length - 2, Math.floor(f)), u = f - i;
+      return toHex(C[i].map((v, k) => v + (C[i + 1][k] - v) * u));
+    }
+
+    // ——— Logo : gabarit dans lequel la ramure doit tenir ———
+    function logoMask(w, h) {
+      const img0 = p.image || app.logoImg, key = (img0 ? (img0.src || 'c') : 'demo') + w + 'x' + h + fitKey;
+      if (key === maskKey && mask) return mask; maskKey = key;
+      mw = Math.max(8, Math.round(w / 4)); mh = Math.max(8, Math.round(h / 4));
+      const c = document.createElement('canvas'); c.width = mw; c.height = mh; const x = c.getContext('2d', { willReadFrequently: true });
+      // posé au-dessus du tronc, dans la partie haute du cadre
+      const B = fit.box, L = Math.min(B[2] - B[0], B[3] - B[1]) / 4 * 0.8, cx = (B[0] + B[2]) / 8, cy = (B[1] * 0.6 + B[3] * 0.4) / 4;
+      if (img0) { const iw = img0.naturalWidth || img0.width, ih = img0.naturalHeight || img0.height, k = L / Math.max(iw, ih); x.drawImage(img0, cx - iw * k / 2, cy - ih * k / 2, iw * k, ih * k); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(cx, cy, L * 0.48, 0, TAU); x.arc(cx, cy, L * 0.28, 0, TAU, true); x.fill('evenodd'); x.fillRect(cx - L * 0.07, cy - L * 0.5, L * 0.14, L); }
+      const d = x.getImageData(0, 0, mw, mh).data; let transp = 0; for (let i = 3; i < d.length; i += 4) if (d[i] < 128) transp++;
+      const useA = transp > mw * mh * 0.05; mask = new Uint8Array(mw * mh);
+      for (let i = 0; i < mw * mh; i++) { const l = (d[i * 4] * 0.2126 + d[i * 4 + 1] * 0.7152 + d[i * 4 + 2] * 0.0722) / 255; mask[i] = (useA ? d[i * 4 + 3] > 128 : d[i * 4 + 3] > 128 && l < 0.5) ? 1 : 0; }
+      return mask;
+    }
+    const inMask = (x, y, w, h) => { const i = (x / w * mw) | 0, j = (y / h * mh) | 0; return i >= 0 && j >= 0 && i < mw && j < mh && mask[j * mw + i] === 1; };
+
+    // ——— Construction : chaque carré est (A, B) = sa base, de gauche à droite ———
+    // irrégularité : un petit écart d'angle propre à chaque nœud, tiré d'un hachage de son chemin
+    const hash = (n) => { n = Math.imul(n ^ (n >>> 15), 2246822519); n = Math.imul(n ^ (n >>> 13), 3266489917); return ((n ^ (n >>> 16)) >>> 0) / 4294967296; };
+    function build(t, w, h, F, prune) {
+      const D = p.profondeur, a0 = p.angle * Math.PI / 180, alt = p.alternance * Math.PI / 180, out = [], seed = app.seed | 0;
+      const windA = (p.vent + gust * 9) * Math.PI / 180;
+      const lg = prune && p.logo; if (lg) logoMask(w, h);
+      const ox = F.ox, oy = F.oy, s = F.s;
+      (function rec(ax, ay, bx, by, d, path) {
+        const dx = bx - ax, dy = by - ay, nx = dy, ny = -dx;
+        const cx = ax + nx, cy = ay + ny, ex = bx + nx, ey = by + ny;
+        const len = Math.hypot(dx, dy) * s;
+        // taille au logo : au-delà de quelques étages, un carré dont le centre sort du logo ne pousse plus
+        const leaf = d === D - 1 || len < 0.6;
+        // le logo se révèle dans la ramure : les carrés dont le centre y tombe prennent la couleur d'accent
+        let inL = false;
+        if (lg && d >= Math.min(5, D - 3)) { const mx = ox + (ax + bx + nx) / 2 * s, my = oy + (ay + by + ny) / 2 * s; inL = inMask(mx, my, w, h); }
+        out.push({ q: [ax, ay, bx, by, ex, ey, cx, cy], d, leaf, inL });
+        if (leaf) return;
+        const r = hash(path * 2654435761 + seed) - 0.5;
+        let a = a0 + (d % 2 ? alt : -alt) + r * p.hasard * 0.5;
+        a += windA * Math.sin(t * p.vitesse * 1.7 + d * p.houle + r * 2) * (0.3 + d / D);
+        a = Math.max(0.12, Math.min(Math.PI / 2 - 0.12, a));
+        const ca = Math.cos(a), sa = Math.sin(a), ux = dx * ca + dy * sa, uy = -dx * sa + dy * ca;
+        const px = cx + ux * ca, py = cy + uy * ca;
+        out.push({ tri: [cx, cy, px, py, ex, ey], d });
+        rec(cx, cy, px, py, d + 1, path * 2 + 1);
+        rec(px, py, ex, ey, d + 1, path * 2 + 2);
+      })(-0.5, 0, 0.5, 0, 0, 1);
+      return out;
+    }
+    // cadrage : l'arbre au repos est mesuré une fois, puis posé sur le bas du cadre
+    function framing(w, h) {
+      const key = [w, h, p.profondeur, p.angle, p.alternance, p.hasard, p.echelle, app.seed].join();
+      if (key === fitKey && fit) return fit; fitKey = key;
+      const Q = build(0, w, h, { ox: 0, oy: 0, s: 1e6 }, false); let x0 = 1e9, x1 = -1e9, y0 = 1e9, y1 = -1e9;
+      for (const o of Q) if (o.q) for (let i = 0; i < 8; i += 2) { x0 = Math.min(x0, o.q[i]); x1 = Math.max(x1, o.q[i]); y0 = Math.min(y0, o.q[i + 1]); y1 = Math.max(y1, o.q[i + 1]); }
+      const bw = x1 - x0, bh = y1 - y0, s = Math.min(w * 0.92 / bw, h * 0.9 / bh) * p.echelle;
+      fit = { s, ox: w / 2 - (x0 + x1) / 2 * s, oy: h - (h - bh * s) / 2 - y1 * s };
+      // la ramure (sans le tronc) en coordonnées d'écran : c'est là que le logo se pose
+      fit.box = [fit.ox + x0 * s, fit.oy + y0 * s, fit.ox + x1 * s, fit.oy + (y0 + (y1 - y0) * 0.78) * s];
+      maskKey = '';
+      return fit;
+    }
+
+    function shapes(t, w, h) {
+      const F = framing(w, h), Q = build(t, w, h, F, true), D = p.profondeur, s = F.s, ox = F.ox, oy = F.oy, g = p.marge, rr = p.arrondi;
+      const items = [];
+      for (const o of Q) {
+        if (o.tri) { if (p.triangles) items.push({ kind: 'tri', d: o.d, pts: o.tri.map((v, i) => i % 2 ? oy + v * s : ox + v * s) }); continue; }
+        const [ax, ay, bx, by, ex, ey, cx, cy] = o.q.map((v, i) => i % 2 ? oy + v * s : ox + v * s);
+        // marge : le carré est réduit vers son centre
+        const mx = (ax + ex) / 2, my = (ay + ey) / 2, k = 1 - g, pts = [ax, ay, bx, by, ex, ey, cx, cy].map((v, i) => (i % 2 ? my + (v - my) * k : mx + (v - mx) * k));
+        const side = Math.hypot(bx - ax, by - ay) * k;
+        items.push({ kind: 'sq', d: o.d, leaf: o.leaf, inL: o.inL, pts, r: rr * side, ang: Math.atan2(by - ay, bx - ax), cx: mx, cy: my, side });
+      }
+      // ordre de dessin : par étage, puis par couleur (les lots restent longs)
+      const byD = Array.from({ length: D + 1 }, () => []);
+      for (const it of items) byD[it.d].push(it);
+      const sorted = []; for (const L of byD) { L.sort((a, b) => (a.kind === b.kind ? (a.inL === b.inL ? 0 : a.inL ? 1 : -1) : a.kind === 'tri' ? 1 : -1)); sorted.push(...L); }
+      return { items: sorted, D };
+    }
+    // couleurs par profondeur, calculées une fois par image
+    let colD = [], colKey = '';
+    function colorOf(it, D) {
+      const key = D + p.couleurs.join() + p.rendu;
+      if (key !== colKey) { colKey = key; colD = []; for (let d = 0; d <= D; d++) colD.push([ramp(d / Math.max(1, D - 1)), ramp(0.6 + 0.4 * ((d * 7) % 5) / 4)]); }
+      if (p.rendu === 'feuillage') return it.leaf ? (it.d % 3 === 0 ? p.accent : colD[it.d][1]) : colD[0][0];
+      if (it.kind === 'tri' || it.inL) return p.accent;
+      return colD[it.d][0];
+    }
+    function sqPath(P, it) {
+      if (it.r > 0.4 && it.side > 2.5) {
+        // carré arrondi : tourné dans son repère
+        const c = Math.cos(it.ang), sn = Math.sin(it.ang), h2 = it.side / 2, r = Math.min(it.r, h2);
+        const pt = (x, y) => [it.cx + x * c - y * sn, it.cy + x * sn + y * c];
+        let [x, y] = pt(-h2 + r, h2); P.moveTo(x, y);
+        const corners = [[h2, h2], [h2, -h2], [-h2, -h2], [-h2, h2]];
+        for (let i = 0; i < 4; i++) {
+          const [qx, qy] = corners[i], [nx2, ny2] = corners[(i + 1) % 4];
+          const [x1, y1] = pt(qx, qy), [x2, y2] = pt(qx + (nx2 - qx) * (r / it.side), qy + (ny2 - qy) * (r / it.side));
+          P.arcTo(x1, y1, x2, y2, r);
+        }
+        P.closePath();
+      } else { const q = it.pts; P.moveTo(q[0], q[1]); P.lineTo(q[2], q[3]); P.lineTo(q[4], q[5]); P.lineTo(q[6], q[7]); P.closePath(); }
+    }
+
+    app.loop((t, dt) => {
+      dt = Math.min(0.1, dt || 0);
+      gust *= Math.pow(0.35, dt); lastT = app.thumbnail ? 0 : t;
+      const { w, h, dpr } = app.size;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = p.fond; ctx.fillRect(0, 0, w, h);
+      const { items, D } = shapes(app.thumbnail ? 0 : t, w, h);
+      // dessin par lots courts, dans l'ordre (le tronc d'abord) : un long chemin de milliers de contours est lent à remplir
+      ctx.lineJoin = 'round'; ctx.lineWidth = p.trait;
+      let P = null, cur = null, n = 0;
+      const flush = () => { if (!P) return; if (p.rendu === 'contour') { ctx.strokeStyle = cur; ctx.stroke(P); } else { ctx.fillStyle = cur; ctx.fill(P); } P = null; n = 0; };
+      for (const it of items) {
+        const c = colorOf(it, D); if (c !== cur || n >= 60) { flush(); cur = c; P = new Path2D(); }
+        if (it.kind === 'tri') { const q = it.pts; P.moveTo(q[0], q[1]); P.lineTo(q[2], q[3]); P.lineTo(q[4], q[5]); P.closePath(); }
+        else sqPath(P, it);
+        n++;
+      }
+      flush();
+      app.finish(ctx);
+    });
+
+    function toSVG() {
+      const { w, h } = app.size, { items, D } = shapes(lastT, w, h), f = (v) => +v.toFixed(2), bins = new Map();
+      for (const it of items) {
+        const c = colorOf(it, D); let L = bins.get(c); if (!L) bins.set(c, L = []);
+        if (it.kind === 'sq' && it.r > 0.4) L.push(`<rect x="${f(it.cx - it.side / 2)}" y="${f(it.cy - it.side / 2)}" width="${f(it.side)}" height="${f(it.side)}" rx="${f(Math.min(it.r, it.side / 2))}" transform="rotate(${f(it.ang * 180 / Math.PI)} ${f(it.cx)} ${f(it.cy)})"/>`);
+        else { const q = it.pts; let d = `M${f(q[0])} ${f(q[1])}`; for (let i = 2; i < q.length; i += 2) d += `L${f(q[i])} ${f(q[i + 1])}`; L.push(`<path d="${d}Z"/>`); }
+      }
+      const out = [`<rect width="100%" height="100%" fill="${p.fond}"/>`];
+      for (const [c, L] of bins) out.push(p.rendu === 'contour' ? `<g fill="none" stroke="${c}" stroke-width="${p.trait}" stroke-linejoin="round">${L.join('')}</g>` : `<g fill="${c}">${L.join('')}</g>`);
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">${out.join('')}</svg>`;
+    }
+  </script>
+</body>
+</html>
