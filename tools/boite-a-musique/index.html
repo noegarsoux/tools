@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Boîte à musique</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Boîte à musique : un cylindre vu de face, dont l'axe est horizontal. Un picot est repéré par sa colonne (la lame
+    // qu'il pince) et son angle autour de l'axe ; θ = 0 en haut, θ = π/2 face à nous. À l'écran, y = cy − R·cos θ et le
+    // picot n'est visible que si sin θ > 0. Les lames du peigne descendent jusqu'à la ligne de pincement θp ; quand un
+    // picot la franchit, la lame part en oscillation amortie, d'autant plus lente qu'elle est longue (les graves à gauche).
+    // On peut tourner la manivelle à la main en glissant, et pincer une lame d'un clic.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2, TP = Math.PI * 0.2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const BIEN = PAL('biennale'), MEN = PAL('menthe'), KB = PAL('kegelbahn');
+
+    let simT = 0, rot = 0, spin = 0, manual = -9, B = null, bKey = '', teeth = [], rings = [], drag = null, logoM = null, logoKey = '';
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.03, vignette: 0.14 },
+      hint: 'Glissez de haut en bas pour tourner la manivelle · clic sur une lame : la pincer · molette : nombre de lames',
+      notes: 'Dans une boîte à musique, la mélodie est écrite en relief : de petits picots plantés sur un cylindre de laiton. En tournant, chaque picot soulève une lame du peigne d\'acier puis la lâche ; la lame vibre, longue et grave à gauche, courte et aiguë à droite. Ici le cylindre est vu de face : on voit les picots monter vers le peigne et les lames frémir quand ils passent. Le cylindre peut porter une mélodie inventée, des arpèges, une gamme qui monte et descend, une pluie de notes au hasard, ou le logo, dessiné point par point en picots. Glissez pour tourner la manivelle vous-même, et cliquez sur une lame pour la pincer.',
+      params: {
+        'Mécanisme': {
+          dents: { type: 'range', label: 'Lames du peigne', min: 8, max: 60, step: 1, value: 28 },
+          mesures: { type: 'range', label: 'Picots par tour', min: 16, max: 128, step: 4, value: 64 },
+          rayon: { type: 'range', label: 'Rayon du cylindre', min: 0.1, max: 0.32, step: 0.005, value: 0.2 },
+          effile: { type: 'range', label: 'Peigne effilé', min: 0, max: 1, step: 0.01, value: 0.7 },
+          picot: { type: 'range', label: 'Taille des picots', min: 0.2, max: 1, step: 0.01, value: 0.5 },
+        },
+        'Musique': {
+          motif: { type: 'select', label: 'Partition', options: { melodie: 'Mélodie', arpeges: 'Arpèges', gamme: 'Gamme', pluie: 'Pluie de notes' }, value: 'melodie' },
+          densite: { type: 'range', label: 'Densité de notes', min: 0.1, max: 1, step: 0.01, value: 0.8 },
+          vitesse: { type: 'range', label: 'Vitesse (tours par minute)', min: 0, max: 12, step: 0.1, value: 3 },
+          resonance: { type: 'range', label: 'Résonance', min: 0.2, max: 4, step: 0.05, value: 1.4 },
+          ondes: { type: 'range', label: 'Ondes sonores', min: 0, max: 1, step: 0.01, value: 0.6 },
+        },
+        'Logo en picots': {
+          logo: { type: 'toggle', label: 'Inclure le logo', value: false },
+          tailleLogo: { type: 'range', label: 'Taille du logo', min: 0.3, max: 1, step: 0.01, value: 0.85, show: (q) => q.logo },
+          image: { type: 'file', label: 'Logo', accept: 'image/*', show: (q) => q.logo },
+        },
+        'Couleurs': {
+          fond: { type: 'color', label: 'Fond', value: '#2a211b' },
+          cylindre: { type: 'color', label: 'Cylindre', value: '#c9a24a' },
+          picots: { type: 'color', label: 'Picots', value: '#f4ecd8' },
+          peigne: { type: 'color', label: 'Peigne', value: '#b9bec4' },
+          accent: { type: 'color', label: 'Notes et logo', value: '#ef5a2f' },
+        },
+      },
+      presets: {
+        'Boîte': {},
+        'Arpèges': { motif: 'arpeges', dents: 32, mesures: 96, vitesse: 2.5 },
+        'Gamme': { motif: 'gamme', dents: 24, mesures: 64, densite: 1, vitesse: 4 },
+        'Pluie': { motif: 'pluie', dents: 44, mesures: 112, densite: 0.35, vitesse: 2, picot: 0.45 },
+        'Grand cylindre': { rayon: 0.3, dents: 18, mesures: 48, picot: 0.7, effile: 0.9 },
+        'Peigne droit': { effile: 0, dents: 36, fond: '#101317', cylindre: '#7f8c99', picots: '#ffffff', peigne: '#d9dde2', accent: '#5c7cfa' },
+        'Logo': { logo: true, dents: 44, mesures: 120, densite: 0.25, vitesse: 2.5, picot: 0.6 },
+        'Biennale': { fond: BIEN[0], cylindre: BIEN[4], picots: BIEN[1], peigne: '#9a9a9a', accent: BIEN[2] },
+        'Menthe': { fond: MEN[1], cylindre: MEN[3], picots: MEN[0], peigne: MEN[2], accent: MEN[0], motif: 'arpeges' },
+        'Kegelbahn': { fond: KB[0], cylindre: KB[2], picots: KB[3], peigne: '#c8c8d0', accent: KB[1], motif: 'pluie', densite: 0.5 },
+      },
+      brand(colors) {
+        const s = colors.slice().sort((a, b) => lum(a) - lum(b)), L = s[s.length - 1], D = s[0];
+        return { fond: D, cylindre: s[Math.max(1, s.length - 2)] || mix(L, D, 0.4), picots: L, peigne: mix(L, D, 0.25), accent: s[Math.floor(s.length / 2)] };
+      },
+      pointer: {
+        down: (q) => { drag = { y: q.y, x: q.x, moved: 0, t: simT, v: 0 }; },
+        drag: (q) => {
+          if (!drag || !B) return; const dy = q.y - drag.y, dt = Math.max(1e-3, simT - drag.t); drag.moved += Math.hypot(q.x - drag.x, dy);
+          if (drag.moved > 6) { const d = -dy / B.R; advance(d); drag.v = d / dt; manual = simT; }
+          drag.x = q.x; drag.y = q.y; drag.t = simT;
+        },
+        up: () => { if (drag && drag.moved < 6) pluckAt(drag.x, drag.y); else if (drag) spin = drag.v; drag = null; },
+        wheel: (q, dy) => app.set('dents', Math.max(8, Math.min(60, p.dents + (dy > 0 ? 2 : -2)))),
+      },
+      onChange(k) { if (['*', 'logo', 'image'].includes(k)) logoKey = ''; },
+      export: { name: 'boite-a-musique', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    function hex(x) { const n = parseInt(x.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
+    function lum(x) { const c = hex(x); return (c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114) / 255; }
+    function mix(a, b, t) { const A = hex(a), C = hex(b); return '#' + A.map((v, i) => Math.round(v + (C[i] - v) * t).toString(16).padStart(2, '0')).join(''); }
+    function rng(s) { let a = s >>> 0; return () => { a = (a + 0x6d2b79f5) >>> 0; let t = a; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+
+    // ——— Logo ———
+    function buildLogo() {
+      const img0 = p.image || app.logoImg, key = [p.logo, img0 ? (img0.src || 'c') : 'demo'].join(); if (key === logoKey) return; logoKey = key; bKey = '';
+      const M = 200, c = document.createElement('canvas'); c.width = c.height = M; const x = c.getContext('2d', { willReadFrequently: true }), L = M * 0.94, cx = M / 2;
+      if (img0) { const iw = img0.naturalWidth || img0.width, ih = img0.naturalHeight || img0.height, s = L / Math.max(iw, ih); x.drawImage(img0, cx - iw * s / 2, cx - ih * s / 2, iw * s, ih * s); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(cx, cx, L * 0.48, 0, TAU); x.arc(cx, cx, L * 0.27, 0, TAU, true); x.fill('evenodd'); x.fillRect(cx - L * 0.07, cx - L * 0.5, L * 0.14, L); }
+      const d = x.getImageData(0, 0, M, M).data; let transp = 0; for (let i = 3; i < d.length; i += 4) if (d[i] < 128) transp++; const useA = transp > M * M * 0.05;
+      const m = new Uint8Array(M * M); for (let i = 0; i < M * M; i++) { const o = i * 4, l = (d[o] * 0.2126 + d[o + 1] * 0.7152 + d[o + 2] * 0.0722) / 255; m[i] = (useA ? d[o + 3] > 128 : d[o + 3] > 128 && l < 0.5) ? 1 : 0; }
+      logoM = { m, M };
+    }
+
+    // ——— Géométrie et partition ———
+    function build(w, h) {
+      buildLogo();
+      const key = [p.dents, p.mesures, p.rayon, p.effile, p.motif, p.densite, p.logo, p.tailleLogo, logoKey, app.seed, w, h].join(); if (key === bKey && B) return B; bKey = key;
+      const D = p.dents, Rn = p.mesures, m = Math.min(w, h), R = h * p.rayon, x0 = w * 0.07, x1 = w * 0.93, cy = h * 0.66 - R * 0.2, cw = (x1 - x0) / D, tipY = cy - R * Math.cos(TP), baseTop = h * 0.06;
+      const Lmax = tipY - baseTop - h * 0.08, Lmin = Lmax * (1 - 0.65 * p.effile), lens = [];
+      for (let i = 0; i < D; i++) lens.push(Lmax + (Lmin - Lmax) * (D > 1 ? i / (D - 1) : 0));
+      // partition : pins[k * D + i] = 1 (note) ou 2 (logo)
+      const pins = new Uint8Array(Rn * D), R0 = rng(app.seed * 31 + 7), dens = p.densite, set = (k, i, v = 1) => { if (i >= 0 && i < D) pins[((k % Rn) + Rn) % Rn * D + i] = v; };
+      const scale = [0, 2, 4, 5, 7, 9, 11], note = (deg) => { const o = Math.floor(deg / 7), s = ((deg % 7) + 7) % 7; return Math.round(((o * 12 + scale[s]) / 12) * (D / 4)); };
+      if (p.motif === 'melodie') {
+        let n = Math.floor(D * 0.55), deg = 7;
+        for (let k = 0; k < Rn; k++) {
+          if (k % 2 === 0 && R0() < dens) { deg += Math.round((R0() - 0.5) * 4 + (8 - deg) * 0.2); deg = Math.max(0, Math.min(16, deg)); n = Math.min(D - 1, Math.round(D * 0.3 + deg * D / 24)); set(k, n); if (k % 8 === 0 && R0() < dens) set(k, Math.min(D - 1, n + Math.round(D / 10))); }
+          if (k % 8 === 0) { const r = Math.floor(R0() * D * 0.25); set(k, r); set(k, r + Math.round(D * 0.12)); if (R0() < dens) set(k + 4, r + Math.round(D * 0.07)); }
+        }
+      } else if (p.motif === 'arpeges') {
+        const prog = [0, 5, 3, 4]; let step = 0;
+        for (let k = 0; k < Rn; k += 2) {
+          const ch = prog[Math.floor(k / 16) % 4], seq = [0, 2, 4, 7, 4, 2, 0, 2], deg = ch + seq[step++ % 8];
+          set(k, Math.min(D - 1, Math.floor(D * 0.25) + Math.round(deg * D / 22))); if (k % 16 === 0) set(k, Math.round(ch * D / 22) % Math.max(1, Math.floor(D * 0.25)));
+          if (R0() < dens * 0.4) set(k + 1, Math.min(D - 1, Math.floor(D * 0.5) + Math.round((deg + 7) * D / 30)));
+        }
+      } else if (p.motif === 'gamme') {
+        const per = Math.max(2, Math.round(Rn / 2));
+        for (let k = 0; k < Rn; k++) { const u = (k % per) / per, tri = 1 - Math.abs(2 * u - 1); if (k % Math.max(1, Math.round(2 / dens)) === 0) { set(k, Math.round(tri * (D - 1))); set(k, Math.round((1 - tri) * (D - 1))); } }
+      } else {
+        for (let k = 0; k < Rn; k++) for (let i = 0; i < D; i++) if (R0() < dens * 0.12) set(k, i);
+      }
+      // logo : dessiné sur une bande du cylindre, à l'échelle de l'écran (pas angulaire ↔ pas des lames)
+      if (p.logo && logoM) {
+        const rowPx = R * TAU / Rn, S = Math.min(x1 - x0, R * 2.4) * p.tailleLogo, cols = S / cw, rows = Math.min(Rn * 0.45, S / rowPx), c0 = (D - cols) / 2, k0 = Math.round(Rn * 0.25 - rows / 2);
+        // deux fois par tour, pour qu'il repasse souvent devant
+        for (const kk of [k0, k0 + Math.round(Rn / 2)]) for (let k = 0; k < Math.ceil(rows); k++) for (let i = 0; i < D; i++) {
+          const u = (i + 0.5 - c0) / cols, v = (k + 0.5) / rows; if (u < 0 || u >= 1) { set(kk + k, i, 0); continue; }
+          set(kk + k, i, logoM.m[Math.floor(v * logoM.M) * logoM.M + Math.floor(u * logoM.M)] ? 2 : 0);
+        }
+      }
+      if (teeth.length !== D) teeth = Array.from({ length: D }, () => ({ a: 0, t0: -9 }));
+      B = { D, Rn, R, x0, x1, cy, cw, tipY, baseTop, lens, pins, m };
+      return B;
+    }
+
+    function pluck(i, f = 1) { const T = teeth[i]; if (!T) return; T.a = Math.min(1.3, T.a * Math.exp(-(simT - T.t0) * p.resonance) + f); T.t0 = simT; if (p.ondes > 0 && rings.length < 80) rings.push({ x: B.x0 + (i + 0.5) * B.cw, y: B.tipY, t0: simT, i }); }
+    function pluckAt(x, y) { if (!B) return; const i = Math.floor((x - B.x0) / B.cw); if (i >= 0 && i < B.D && y < B.tipY + B.R * 0.3) pluck(i, 1); }
+    // la rotation avance ; chaque picot qui franchit la ligne de pincement fait chanter sa lame
+    function advance(d) {
+      if (!B || !d) return; const { D, Rn, pins } = B;
+      for (let k = 0; k < Rn; k++) {
+        const ph = (k / Rn) * TAU, a0 = (((ph - rot) % TAU) + TAU) % TAU, a1 = (((ph - rot - d) % TAU) + TAU) % TAU;
+        // θ diminue quand le cylindre tourne vers le peigne (d > 0)
+        const cross = d > 0 ? a0 >= TP && a1 < TP && a0 - a1 < Math.PI : a0 < TP && a1 >= TP && a1 - a0 < Math.PI;
+        if (cross) for (let i = 0; i < D; i++) if (pins[k * D + i]) pluck(i, d > 0 ? 1 : 0.5);
+      }
+      rot += d;
+    }
+
+    // ——— Dessin ———
+    function render(pen, w, h, t) {
+      const { D, Rn, R, x0, x1, cy, cw, tipY, baseTop, lens, pins } = B;
+      pen.rect(0, 0, w, h, p.fond);
+      // ombre portée sous le cylindre
+      pen.ellipse((x0 + x1) / 2, cy + R * 1.12, (x1 - x0) * 0.52, R * 0.12, mix(p.fond, '#000000', 0.35));
+      // cylindre : bandes ombrées de haut en bas
+      const NB = 30;
+      for (let j = 0; j < NB; j++) {
+        const a = (j / NB) * Math.PI, b = ((j + 1) / NB) * Math.PI, ya = cy - R * Math.cos(a), yb = cy - R * Math.cos(b), lit = Math.sin((a + b) / 2) * 0.8 + Math.cos((a + b) / 2) * 0.35;
+        pen.rect(x0, ya - 0.3, x1 - x0, yb - ya + 0.6, lit > 0.5 ? mix(p.cylindre, '#ffffff', (lit - 0.5) * 0.5) : mix(p.cylindre, '#000000', (0.5 - lit) * 0.7));
+      }
+      // fines rainures, une par lame
+      pen.lines(Array.from({ length: D + 1 }, (_, i) => [x0 + i * cw, cy - R, x0 + i * cw, cy + R]), Math.max(0.5, cw * 0.02), mix(p.cylindre, '#000000', 0.25), 0.5);
+      pen.ellipse(x0, cy, R * 0.12, R, mix(p.cylindre, '#000000', 0.35)); pen.ellipse(x1, cy, R * 0.12, R, mix(p.cylindre, '#000000', 0.2));
+      // picots (face avant seulement)
+      const pr = Math.min(cw * 0.42, R * TAU / Rn * 0.45) * p.picot * 3.2, P1 = [], P2 = [], HL = [];
+      for (let k = 0; k < Rn; k++) {
+        const th = ((((k / Rn) * TAU - rot) % TAU) + TAU) % TAU, s = Math.sin(th); if (s <= 0.05) continue; const y = cy - R * Math.cos(th);
+        for (let i = 0; i < D; i++) { const v = pins[k * D + i]; if (!v) continue; const x = x0 + (i + 0.5) * cw; (v === 2 ? P2 : P1).push([x, y, pr * 0.5, pr * 0.5 * (0.35 + 0.65 * s)]); HL.push([x - pr * 0.12, y - pr * 0.14 * s, pr * 0.16, pr * 0.16 * s]); }
+      }
+      pen.dots(P1, p.picots); pen.dots(P2, p.accent); pen.dots(HL, 'rgba(255,255,255,0.55)');
+      // peigne : plaque, puis lames (qui vibrent latéralement)
+      const plate = [[x0 - cw * 0.4, baseTop]]; for (let i = 0; i < D; i++) { plate.push([x0 + i * cw, tipY - lens[i]]); plate.push([x0 + (i + 1) * cw, tipY - lens[i]]); } plate.push([x1 + cw * 0.4, baseTop]);
+      pen.poly(plate, mix(p.peigne, '#000000', 0.18));
+      pen.rect(x0 - cw * 0.4, baseTop, x1 - x0 + cw * 0.8, (tipY - lens[0] - baseTop) * 0.25, mix(p.peigne, '#ffffff', 0.15));
+      const tw = cw * 0.72;
+      for (let i = 0; i < D; i++) {
+        const T = teeth[i], age = t - T.t0, amp = T.a * Math.exp(-age * p.resonance), freq = 3 + 7 * (1 - lens[i] / lens[0]) + 2, dx = amp * Math.sin(age * freq * TAU) * cw * 0.35, xb = x0 + (i + 0.5) * cw, yb = tipY - lens[i];
+        const col = amp > 0.02 ? mix(p.peigne, p.accent, Math.min(0.85, amp)) : p.peigne;
+        pen.poly([[xb - tw / 2, yb], [xb + tw / 2, yb], [xb + tw / 2 + dx, tipY], [xb - tw / 2 + dx, tipY]], col);
+        pen.poly([[xb - tw / 2, yb], [xb - tw * 0.2, yb], [xb - tw * 0.2 + dx, tipY], [xb - tw / 2 + dx, tipY]], mix(col, '#ffffff', 0.3));
+      }
+      // ondes : cercles qui s'éloignent du bout des lames
+      if (p.ondes > 0) {
+        const C = []; for (const r of rings) { const a = t - r.t0; if (a > 1.6) continue; C.push([r.x, r.y, B.m * (0.01 + a * 0.12), (1 - a / 1.6) * p.ondes]); }
+        pen.rings(C, p.accent, Math.max(1, B.m * 0.003));
+      }
+    }
+
+    app.loop((t, dt) => {
+      dt = Math.min(0.05, dt || 0);
+      const { w, h, dpr } = app.size; build(w, h);
+      if (app.thumbnail) { simT = 5; rot = p.logo ? -0.25 : TAU * 0.02; for (let i = 0; i < B.D; i++) { teeth[i].a = 0; } for (let i = 0; i < B.D; i += 3) { teeth[i].a = 0.8; teeth[i].t0 = 4.9 - i * 0.02; } rings = []; }
+      else {
+        simT += dt; const motor = p.vitesse * TAU / 60;
+        if (!drag) { spin += (motor - spin) * Math.min(1, dt * (simT - manual < 1.5 ? 0.8 : 2.5)); advance(spin * dt); }
+        rings = rings.filter((r) => simT - r.t0 < 1.6);
+      }
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      render({
+        rect(x, y, W, H, c) { ctx.fillStyle = c; ctx.fillRect(x, y, W, H); },
+        ellipse(x, y, rx, ry, c) { ctx.fillStyle = c; ctx.beginPath(); ctx.ellipse(x, y, rx, ry, 0, 0, TAU); ctx.fill(); },
+        lines(L, lw, c, a) { const P = new Path2D(); for (const l of L) { P.moveTo(l[0], l[1]); P.lineTo(l[2], l[3]); } ctx.globalAlpha = a; ctx.strokeStyle = c; ctx.lineWidth = lw; ctx.stroke(P); ctx.globalAlpha = 1; },
+        dots(L, c) { if (!L.length) return; const P = new Path2D(); for (const d of L) { P.moveTo(d[0] + d[2], d[1]); P.ellipse(d[0], d[1], d[2], d[3], 0, 0, TAU); } ctx.fillStyle = c; ctx.fill(P); },
+        poly(pts, c) { ctx.fillStyle = c; ctx.beginPath(); pts.forEach((q, k) => (k ? ctx.lineTo(q[0], q[1]) : ctx.moveTo(q[0], q[1]))); ctx.closePath(); ctx.fill(); },
+        rings(C, c, lw) { ctx.strokeStyle = c; ctx.lineWidth = lw; for (const r of C) { ctx.globalAlpha = r[3]; ctx.beginPath(); ctx.arc(r[0], r[1], r[2], Math.PI * 1.05, Math.PI * 1.95); ctx.stroke(); } ctx.globalAlpha = 1; },
+      }, w, h, simT);
+      app.finish(ctx);
+    });
+
+    function toSVG() {
+      const { w, h } = app.size, f = (v) => +v.toFixed(2); build(w, h);
+      let s = `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">`;
+      const fill = (c) => { const m = /^rgba\((\d+),(\d+),(\d+),([\d.]+)\)$/.exec(c); return m ? `fill="rgb(${m[1]},${m[2]},${m[3]})" fill-opacity="${m[4]}"` : `fill="${c}"`; };
+      render({
+        rect(x, y, W, H, c) { s += `<rect x="${f(x)}" y="${f(y)}" width="${f(W)}" height="${f(H)}" ${fill(c)}/>`; },
+        ellipse(x, y, rx, ry, c) { s += `<ellipse cx="${f(x)}" cy="${f(y)}" rx="${f(rx)}" ry="${f(ry)}" ${fill(c)}/>`; },
+        lines(L, lw, c, a) { s += `<path d="${L.map((l) => `M${f(l[0])} ${f(l[1])}L${f(l[2])} ${f(l[3])}`).join('')}" stroke="${c}" stroke-opacity="${a}" stroke-width="${f(lw)}" fill="none"/>`; },
+        dots(L, c) { if (L.length) s += `<g ${fill(c)}>` + L.map((d) => `<ellipse cx="${f(d[0])}" cy="${f(d[1])}" rx="${f(d[2])}" ry="${f(d[3])}"/>`).join('') + '</g>'; },
+        poly(pts, c) { s += `<path d="M${pts.map((q) => f(q[0]) + ' ' + f(q[1])).join('L')}Z" ${fill(c)}/>`; },
+        rings(C, c, lw) { for (const r of C) { const a0 = Math.PI * 1.05, a1 = Math.PI * 1.95; s += `<path d="M${f(r[0] + Math.cos(a0) * r[2])} ${f(r[1] + Math.sin(a0) * r[2])}A${f(r[2])} ${f(r[2])} 0 0 1 ${f(r[0] + Math.cos(a1) * r[2])} ${f(r[1] + Math.sin(a1) * r[2])}" stroke="${c}" stroke-opacity="${f(r[3])}" stroke-width="${f(lw)}" fill="none"/>`; } },
+      }, w, h, simT);
+      return s + '</svg>';
+    }
+  </script>
+</body>
+</html>

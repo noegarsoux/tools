@@ -1,0 +1,15 @@
+{
+  "slug": "boite-a-musique",
+  "title": "Boîte à musique",
+  "type": "motion",
+  "description": "Un cylindre à picots tourne sous un peigne d'acier : chaque picot pince une lame qui vibre. Mélodies, arpèges, gammes, ou le logo écrit en picots.",
+  "tags": ["cinetique", "mecanique", "rythme", "cylindre", "logo", "svg"],
+  "inspiration": [
+    "Les boîtes à musique suisses à cylindre et peigne du XIXe siècle",
+    "Les rouleaux perforés des pianos mécaniques",
+    "La machine à billes Wintergatan"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}
