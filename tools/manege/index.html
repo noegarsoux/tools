@@ -1,0 +1,266 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Manège</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Manège : un carrousel vu de trois quarts. Tout est placé sur des cercles (angle a, rayon r, hauteur Y) et
+    // projeté en x = cx + r·cos a, y = sol − Y + r·sin a·vue ; sin a sert aussi de profondeur pour l'ordre de
+    // dessin. Les montures montent et descendent sur leurs barres (manivelles déphasées), le toit tourne avec
+    // le plateau, les ampoules jouent des chenillards.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const BIE = PAL('biennale'), LUZ = PAL('luzern'), MEN = PAL('menthe');
+    const MODES = ['chenillard', 'alternance', 'scintillement', 'fixe'];
+
+    let vKey = '', logoM = null, logoKey = '', ptr = null, S = null, gKey = '', simT = 0, logoP = null, logoPK = '';
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.04, vignette: 0.35 },
+      hint: 'Glisser : lancer ou freiner le manège · clic : jeu de lumières · molette : vitesse',
+      notes: 'Un manège vu de trois quarts : le plateau tourne, les montures montent et descendent sur leurs barres torsadées, le toit à rayures tourne avec elles et les ampoules du lambrequin jouent des chenillards. Les montures peuvent être des billes, des cubes, des étoiles ou des plaques au logo qui se présentent de face puis de profil.',
+      params: {
+        'Manège': {
+          barres: { type: 'range', label: 'Montures', min: 4, max: 24, step: 1, value: 12 },
+          rangs: { type: 'range', label: 'Rangs', min: 1, max: 2, step: 1, value: 2 },
+          montures: { type: 'select', label: 'Montures', options: { logo: 'Plaques au logo', boules: 'Billes', cubes: 'Cubes', etoiles: 'Étoiles' }, value: 'logo' },
+          vitesse: { type: 'range', label: 'Vitesse', min: -1, max: 1, step: 0.01, value: 0.25 },
+          montee: { type: 'range', label: 'Montée', min: 0, max: 1, step: 0.01, value: 0.6 },
+          toit: { type: 'range', label: 'Pans du toit', min: 6, max: 32, step: 1, value: 16 },
+          vue: { type: 'range', label: 'Hauteur de vue', min: 0.12, max: 0.5, step: 0.01, value: 0.3 },
+          image: { type: 'file', label: 'Image du logo', accept: 'image/*' },
+        },
+        'Couleurs': {
+          couleurs: { type: 'palette', label: 'Manège', value: ['#e5452a', '#f4f3f0', '#2f5fd0', '#f2e640'] },
+          lumieres: { type: 'range', label: 'Ampoules', min: 0, max: 1, step: 0.01, value: 0.8 },
+          or: { type: 'color', label: 'Laiton', value: '#d9b45a' },
+          fond: { type: 'color', label: 'Ciel', value: '#121426' },
+          sol: { type: 'color', label: 'Sol', value: '#1d1b22' },
+        },
+      },
+      presets: {
+        'Fête foraine': {},
+        'Billes': { montures: 'boules', couleurs: ['#f2b0c8', '#9dd3f0', '#f2e640', '#f4f3f0'], fond: '#1a1430' },
+        'Cubes': { montures: 'cubes', couleurs: ['#16161a', '#f4f3f0', '#e5452a'], fond: '#e9e4da', sol: '#cfc8ba', lumieres: 0.3, or: '#8a6a3c' },
+        'Étoiles': { montures: 'etoiles', couleurs: ['#f2e640', '#2f5fd0', '#f4f3f0'], fond: '#0b1030', barres: 16 },
+        'Grand manège': { barres: 22, rangs: 2, toit: 28, vitesse: 0.18, vue: 0.22 },
+        'Petit manège': { barres: 6, rangs: 1, toit: 8, vitesse: 0.35, montee: 0.9 },
+        'Vu d’en haut': { vue: 0.48, barres: 14 },
+        'Rapide': { vitesse: 0.85, montee: 1, lumieres: 1 },
+        'Biennale': { couleurs: [BIE[2], BIE[0], BIE[3], BIE[4]], fond: BIE[1], sol: '#1c1210', or: BIE[4] },
+        'Luzern': { couleurs: [LUZ[0], LUZ[4], LUZ[1], LUZ[2]], fond: LUZ[3], sol: '#120c08', or: LUZ[2], montures: 'boules' },
+        'Menthe': { couleurs: [MEN[2], MEN[0], MEN[3]], fond: MEN[1], sol: '#121614', or: MEN[0], montures: 'cubes' },
+      },
+      brand(colors) {
+        const s = colors.slice().sort((a, b) => lum(a) - lum(b)), D = s[0], L = s[s.length - 1], mid = s.length > 2 ? s.slice(1) : [L, D];
+        return { couleurs: mid, fond: mix(D, '#000000', 0.35), sol: mix(D, '#000000', 0.55), or: mix(L, '#d9b45a', 0.5), montures: 'logo' };
+      },
+      pointer: {
+        down: (q) => { ptr = { x: q.x, y: q.y, moved: 0, lx: q.x, t: performance.now() }; if (S) S.grab = true; },
+        drag: (q) => { if (!ptr || !S) return; ptr.moved = Math.max(ptr.moved, Math.hypot(q.x - ptr.x, q.y - ptr.y)); const now = performance.now(), d = (q.x - ptr.lx) / S.R * 0.9; S.rot += d; S.om = d / Math.max(0.008, (now - ptr.t) / 1000); ptr.lx = q.x; ptr.t = now; },
+        up: () => { if (!S) return; S.grab = false; if (ptr && ptr.moved <= 6) S.mode = (S.mode + 1) % MODES.length; ptr = null; },
+        wheel: (q, dy) => app.set('vitesse', Math.max(-1, Math.min(1, +(p.vitesse + (dy > 0 ? -0.05 : 0.05)).toFixed(2)))),
+      },
+      onChange(k) { if (['*', 'image'].includes(k)) logoKey = ''; },
+      export: { name: 'manege', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    function hex(x) { const n = parseInt(x.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
+    function lum(x) { const c = hex(x); return (c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114) / 255; }
+    function mix(a, b, t) { const A = hex(a), C = hex(b); return '#' + A.map((v, i) => Math.round(v + (C[i] - v) * t).toString(16).padStart(2, '0')).join(''); }
+    function rgba(c, a) { const h = hex(c); return `rgba(${h[0]},${h[1]},${h[2]},${a})`; }
+    function rng(s) { let a = s >>> 0; return () => { a = (a + 0x6d2b79f5) >>> 0; let t = a; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+    const col = (i) => { const c = p.couleurs; return c.length ? c[((i % c.length) + c.length) % c.length] : '#e5452a'; };
+
+    function buildLogo() {
+      const img0 = p.image || app.logoImg, key = img0 ? (img0.src || 'c') : 'demo'; if (key === logoKey) return; logoKey = key; vKey = '';
+      const M = 200, c = document.createElement('canvas'); c.width = c.height = M; const x = c.getContext('2d', { willReadFrequently: true }), L = M * 0.94, cx = M / 2;
+      if (img0) { const iw = img0.naturalWidth || img0.width, ih = img0.naturalHeight || img0.height, s = L / Math.max(iw, ih); x.drawImage(img0, cx - iw * s / 2, cx - ih * s / 2, iw * s, ih * s); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(cx, cx, L * 0.48, 0, TAU); x.arc(cx, cx, L * 0.27, 0, TAU, true); x.fill('evenodd'); x.fillRect(cx - L * 0.07, cx - L * 0.5, L * 0.14, L); }
+      const d = x.getImageData(0, 0, M, M).data; let transp = 0; for (let i = 3; i < d.length; i += 4) if (d[i] < 128) transp++; const useA = transp > M * M * 0.05;
+      const F = new Float64Array(M * M); for (let i = 0; i < M * M; i++) { const o = i * 4, l = (d[o] * 0.2126 + d[o + 1] * 0.7152 + d[o + 2] * 0.0722) / 255; F[i] = useA ? d[o + 3] / 255 : (d[o + 3] / 255) * Math.min(1, Math.max(0, (0.75 - l) * 2)); }
+      { const G2 = new Float64Array(M * M); for (let j = 1; j < M - 1; j++) for (let i = 1; i < M - 1; i++) { let a = 0; for (let b = -1; b <= 1; b++) for (let c = -1; c <= 1; c++) a += F[(j + b) * M + i + c] * (b || c ? (b && c ? 1 : 2) : 4); G2[j * M + i] = a / 16; } F.set(G2); }
+      for (let k = 0; k < M; k++) F[k] = F[(M - 1) * M + k] = F[k * M] = F[k * M + M - 1] = 0;
+      logoM = contours(F, M, M, 0.5, 0, 0, 1).filter((c) => c.closed && c.pts.length > 6).map((c) => chaikin(chaikin(c.pts, true), true).map((q) => [q[0] / M - 0.5, q[1] / M - 0.5]));
+    }
+    // carrés marchants + chaînage
+    function contours(F, nx, ny, lev, ox, oy, cs) {
+      const pt = new Map(), adj = new Map();
+      const P = (id) => { let q = pt.get(id); if (q) return q; const cell = id >> 1, i = cell % nx, j = (cell - i) / nx; let a, b, ax, ay, bx, by; if (id & 1) { a = F[j * nx + i]; b = F[(j + 1) * nx + i]; ax = bx = i; ay = j; by = j + 1; } else { a = F[j * nx + i]; b = F[j * nx + i + 1]; ay = by = j; ax = i; bx = i + 1; } const t = (lev - a) / (b - a || 1e-9); q = [ox + (ax + (bx - ax) * t) * cs, oy + (ay + (by - ay) * t) * cs]; pt.set(id, q); return q; };
+      const link = (a, b) => { (adj.get(a) || adj.set(a, []).get(a)).push(b); (adj.get(b) || adj.set(b, []).get(b)).push(a); };
+      for (let j = 0; j < ny - 1; j++) for (let i = 0; i < nx - 1; i++) {
+        const A = F[j * nx + i] > lev, B = F[j * nx + i + 1] > lev, C = F[(j + 1) * nx + i + 1] > lev, D = F[(j + 1) * nx + i] > lev, idx = A | (B << 1) | (C << 2) | (D << 3);
+        if (idx === 0 || idx === 15) continue;
+        const T = (j * nx + i) * 2, R = (j * nx + i + 1) * 2 + 1, Bo = ((j + 1) * nx + i) * 2, Le = (j * nx + i) * 2 + 1;
+        const ctr = (F[j * nx + i] + F[j * nx + i + 1] + F[(j + 1) * nx + i + 1] + F[(j + 1) * nx + i]) / 4 > lev;
+        switch (idx) {
+          case 1: case 14: link(Le, T); break; case 2: case 13: link(T, R); break; case 3: case 12: link(Le, R); break;
+          case 4: case 11: link(R, Bo); break; case 6: case 9: link(T, Bo); break; case 7: case 8: link(Le, Bo); break;
+          case 5: if (ctr) { link(Le, Bo); link(T, R); } else { link(Le, T); link(R, Bo); } break;
+          case 10: if (ctr) { link(Le, T); link(R, Bo); } else { link(Le, Bo); link(T, R); } break;
+        }
+      }
+      const seen = new Set(), out = [];
+      const walk = (s) => { const L = [s]; seen.add(s); let cur = s; for (;;) { const nb = (adj.get(cur) || []).find((x) => !seen.has(x)); if (nb === undefined) break; seen.add(nb); L.push(nb); cur = nb; } return L; };
+      for (const [id, nb] of adj) if (nb.length === 1 && !seen.has(id)) out.push({ pts: walk(id).map(P), closed: false });
+      for (const [id] of adj) if (!seen.has(id)) out.push({ pts: walk(id).map(P), closed: true });
+      return out;
+    }
+    function chaikin(pts, closed) {
+      const o = []; const n = pts.length; for (let k = 0; k < (closed ? n : n - 1); k++) { const a = pts[k], b = pts[(k + 1) % n]; o.push([a[0] * 0.75 + b[0] * 0.25, a[1] * 0.75 + b[1] * 0.25], [a[0] * 0.25 + b[0] * 0.75, a[1] * 0.25 + b[1] * 0.75]); }
+      if (!closed) { o.unshift(pts[0]); o.push(pts[n - 1]); } return o;
+    }
+
+    function build(w, h) {
+      const R = Math.min(w * 0.36, h * 0.42);
+      S = { w, h, R, cx: w / 2, gy: h * 0.8, Hc: R * 0.95, rot: S ? S.rot : 0, om: S ? S.om : 0, grab: false, mode: S ? S.mode : 0, R0: rng(app.seed * 19 + 7), tw: Array.from({ length: 200 }, (_, k) => rng(app.seed * 3 + k)()) };
+    }
+    // projection : angle a, rayon r, hauteur Y
+    const P = (a, r, Y) => [S.cx + r * Math.cos(a), S.gy - Y + r * Math.sin(a) * p.vue];
+    function bulbOn(k, n) {
+      const t = simT, m = MODES[S.mode];
+      if (m === 'chenillard') return ((k + Math.floor(t * 9)) % 4) < 2 ? 1 : 0.15;
+      if (m === 'alternance') return (k + Math.floor(t * 2)) % 2 ? 1 : 0.15;
+      if (m === 'scintillement') return 0.25 + 0.75 * (0.5 + 0.5 * Math.sin(t * (3 + S.tw[k % 200] * 5) + S.tw[(k * 7) % 200] * 20));
+      return 1;
+    }
+    function logoPath() {
+      if (!logoM) return null; if (logoP && logoPK === logoKey) return logoP; logoPK = logoKey; logoP = new Path2D();
+      for (const L of logoM) { logoP.moveTo(L[0][0], L[0][1]); for (let k = 1; k < L.length; k++) logoP.lineTo(L[k][0], L[k][1]); logoP.closePath(); }
+      return logoP;
+    }
+    // montures (barres) : angle, rayon, hauteur
+    function riders() {
+      const n = Math.round(p.barres), rings = Math.round(p.rangs), out = [], { R, Hc } = S;
+      for (let g = 0; g < rings; g++) {
+        const m = g === 0 ? n : Math.max(3, Math.round(n * 0.6)), r = g === 0 ? R * 0.8 : R * 0.52, off = g * Math.PI / m;
+        for (let k = 0; k < m; k++) {
+          const a = S.rot + off + k / m * TAU, ph = k * 2.1 + g * 1.3, bob = Math.sin(S.crank + ph);
+          out.push({ a, r, Y: Hc * (0.42 + 0.14 * p.montee * bob) + (g ? Hc * 0.06 : 0), k: k + g * 3, g, d: Math.sin(a) });
+        }
+      }
+      return out;
+    }
+
+    // ——— dessin (canvas) ———
+    function drawRider(x, e) {
+      const { R } = S, s = R * (e.g ? 0.085 : 0.1), [px, py] = P(e.a, e.r, e.Y), c = col(e.k), hi = mix(c, '#ffffff', 0.4), lo = mix(c, '#000000', 0.4), sh = 0.65 + 0.35 * e.d;
+      x.save(); x.translate(px, py);
+      if (p.montures === 'boules') { const g = x.createRadialGradient(-s * 0.35, -s * 0.4, s * 0.1, 0, 0, s); g.addColorStop(0, hi); g.addColorStop(1, mix(lo, '#000000', 0.3 * (1 - sh))); x.fillStyle = g; x.beginPath(); x.arc(0, 0, s, 0, TAU); x.fill(); }
+      else if (p.montures === 'cubes') { const sw = Math.cos(e.a * 2) * 0.3; x.fillStyle = mix(c, '#000000', 0.2 * (1 - sh)); x.fillRect(-s * 0.9, -s * 0.9, s * 1.8, s * 1.8); x.fillStyle = hi; x.beginPath(); x.moveTo(-s * 0.9, -s * 0.9); x.lineTo(-s * 0.9 + s * (0.4 + sw), -s * 1.3); x.lineTo(s * 0.9 + s * (0.4 + sw), -s * 1.3); x.lineTo(s * 0.9, -s * 0.9); x.closePath(); x.fill(); x.fillStyle = lo; x.beginPath(); x.moveTo(s * 0.9, -s * 0.9); x.lineTo(s * 0.9 + s * (0.4 + sw), -s * 1.3); x.lineTo(s * 0.9 + s * (0.4 + sw), s * 0.5); x.lineTo(s * 0.9, s * 0.9); x.closePath(); x.fill(); }
+      else {
+        // plaque : normale radiale, vue de face devant et derrière, de profil sur les côtés
+        const wf = Math.max(0.08, Math.abs(Math.sin(e.a))); x.scale(wf, 1);
+        if (p.montures === 'etoiles') { x.fillStyle = c; x.beginPath(); for (let k = 0; k < 10; k++) { const a = -Math.PI / 2 + k / 10 * TAU, r = k % 2 ? s * 0.5 : s * 1.25; x.lineTo(Math.cos(a) * r, Math.sin(a) * r); } x.closePath(); x.fill(); x.strokeStyle = p.or; x.lineWidth = s * 0.08 / wf; x.stroke(); }
+        else { x.fillStyle = c; x.beginPath(); x.arc(0, 0, s * 1.15, 0, TAU); x.fill(); x.strokeStyle = p.or; x.lineWidth = s * 0.14; x.stroke(); const lp = logoPath(); if (lp) { x.save(); x.scale(s * 1.6, s * 1.6); x.fillStyle = lum(c) > 0.6 ? mix(c, '#000000', 0.6) : mix(c, '#ffffff', 0.8); x.fill(lp, 'evenodd'); x.restore(); } }
+      }
+      x.restore();
+      if (sh < 0.999) { /* légère pénombre vers l'arrière */ }
+    }
+    function pole(x, e) {
+      const { Hc, R } = S, [x0, y0] = P(e.a, e.r, 0), [x1, y1] = P(e.a, e.r, Hc), wdt = Math.max(1.5, R * 0.018);
+      const g = x.createLinearGradient(x0 - wdt, 0, x0 + wdt, 0); g.addColorStop(0, mix(p.or, '#000000', 0.35)); g.addColorStop(0.45, mix(p.or, '#ffffff', 0.45)); g.addColorStop(1, mix(p.or, '#000000', 0.4));
+      x.fillStyle = g; x.fillRect(x0 - wdt, y1, wdt * 2, y0 - y1);
+      // torsade
+      x.strokeStyle = rgba('#000000', 0.18); x.lineWidth = Math.max(1, wdt * 0.5); const st = wdt * 3; x.beginPath(); for (let y = y1 + ((S.crank * 6) % st); y < y0; y += st) { x.moveTo(x0 - wdt, y); x.lineTo(x0 + wdt, y + st * 0.5); } x.stroke();
+    }
+    function draw(x) {
+      const { w, h, R, Hc, cx, gy } = S, v = p.vue, nT = Math.round(p.toit), L = p.lumieres;
+      // ombre au sol
+      const sg = x.createRadialGradient(cx, gy, R * 0.3, cx, gy, R * 1.35); sg.addColorStop(0, rgba('#000000', 0.45)); sg.addColorStop(1, rgba('#000000', 0)); x.fillStyle = sg; x.save(); x.translate(cx, gy); x.scale(1, v); x.beginPath(); x.arc(0, 0, R * 1.35, 0, TAU); x.restore(); x.fill();
+      // halo lumineux
+      if (L > 0) { const hg = x.createRadialGradient(cx, gy - Hc * 0.8, R * 0.2, cx, gy - Hc * 0.8, R * 1.8); hg.addColorStop(0, rgba(mix(col(3), '#ffffff', 0.6), 0.16 * L)); hg.addColorStop(1, rgba(col(3), 0)); x.fillStyle = hg; x.fillRect(0, 0, w, h); }
+      // plateau : flanc puis dessus
+      const th = R * 0.09, plat = (Y) => { x.beginPath(); x.ellipse(cx, gy - Y, R, R * v, 0, 0, TAU); };
+      x.fillStyle = mix(col(0), '#000000', 0.35); x.beginPath(); x.ellipse(cx, gy, R, R * v, 0, 0, Math.PI); x.lineTo(cx - R, gy - th); x.ellipse(cx, gy - th, R, R * v, 0, Math.PI, 0, true); x.closePath(); x.fill();
+      for (let k = 0; k < nT * 2; k++) { const a0 = S.rot + k / (nT * 2) * TAU, a1 = a0 + TAU / (nT * 2); if (Math.sin((a0 + a1) / 2) < 0 || k % 2) continue; x.fillStyle = mix(col(1), '#000000', 0.3); x.beginPath(); for (let j = 0; j <= 6; j++) { const a = a0 + (a1 - a0) * j / 6; const q = P(a, R, 0); x.lineTo(q[0], q[1]); } for (let j = 6; j >= 0; j--) { const a = a0 + (a1 - a0) * j / 6; const q = P(a, R, th); x.lineTo(q[0], q[1]); } x.closePath(); x.fill(); }
+      plat(th); x.fillStyle = mix(p.sol, col(1), 0.25); x.fill();
+      // plancher rayonnant
+      x.strokeStyle = rgba('#000000', 0.15); x.lineWidth = 1; for (let k = 0; k < nT; k++) { const a = S.rot + k / nT * TAU, q0 = P(a, R * 0.2, th), q1 = P(a, R, th); x.beginPath(); x.moveTo(q0[0], q0[1]); x.lineTo(q1[0], q1[1]); x.stroke(); }
+      // dessous du toit
+      x.fillStyle = mix(col(0), '#000000', 0.6); x.beginPath(); x.ellipse(cx, gy - Hc, R * 1.04, R * 1.04 * v, 0, 0, TAU); x.fill();
+      x.strokeStyle = rgba(p.or, 0.4); x.lineWidth = 1; for (let k = 0; k < nT; k++) { const a = S.rot + k / nT * TAU, q0 = P(a, R * 0.15, Hc), q1 = P(a, R * 1.04, Hc); x.beginPath(); x.moveTo(q0[0], q0[1]); x.lineTo(q1[0], q1[1]); x.stroke(); }
+      const E = riders().sort((a, b) => a.d - b.d), back = E.filter((e) => e.d < 0), front = E.filter((e) => e.d >= 0);
+      for (const e of back) { pole(x, e); drawRider(x, e); }
+      // colonne centrale à miroirs
+      const rc = R * 0.17, [c0x, c0y] = P(0, 0, th), [, c1y] = P(0, 0, Hc);
+      x.fillStyle = mix(col(2), '#000000', 0.3); x.fillRect(cx - rc, c1y, rc * 2, c0y - c1y);
+      for (let k = 0; k < 12; k++) { const a0 = S.rot * 0.5 + k / 12 * TAU, a1 = a0 + TAU / 12; if (Math.sin((a0 + a1) / 2) < 0) continue; const xa = cx + rc * Math.cos(a0), xb = cx + rc * Math.cos(a1); x.fillStyle = k % 2 ? mix(col(2), '#ffffff', 0.35 * Math.sin((a0 + a1) / 2)) : mix(p.or, '#ffffff', 0.2 * Math.sin((a0 + a1) / 2)); x.fillRect(Math.min(xa, xb), c1y + R * 0.06, Math.abs(xb - xa), c0y - c1y - R * 0.12); }
+      for (const e of front) { pole(x, e); drawRider(x, e); }
+      // toit conique à pans
+      const apex = P(0, 0, Hc + R * 0.5), segs = [];
+      for (let k = 0; k < nT; k++) { const a0 = S.rot + k / nT * TAU, a1 = a0 + TAU / nT; segs.push({ a0, a1, k, d: Math.sin((a0 + a1) / 2) }); }
+      segs.sort((a, b) => a.d - b.d);
+      for (const sgm of segs) { const sh = 0.75 + 0.25 * sgm.d; x.fillStyle = mix(col(sgm.k % 2 ? 1 : 0), '#000000', 0.45 * (1 - sh)); x.beginPath(); x.moveTo(apex[0], apex[1]); for (let j = 0; j <= 6; j++) { const q = P(sgm.a0 + (sgm.a1 - sgm.a0) * j / 6, R * 1.06, Hc + R * 0.02); x.lineTo(q[0], q[1]); } x.closePath(); x.fill(); }
+      // lambrequin festonné et ampoules (moitié avant)
+      const nf = nT * 2;
+      for (let k = 0; k < nf; k++) { const a0 = S.rot + k / nf * TAU, a1 = a0 + TAU / nf, am = (a0 + a1) / 2; if (Math.sin(am) < -0.05) continue; const q0 = P(a0, R * 1.06, Hc + R * 0.02), q1 = P(a1, R * 1.06, Hc + R * 0.02), qm = P(am, R * 1.06, Hc - R * 0.1); x.fillStyle = col(k % 2 ? 2 : 0); x.beginPath(); x.moveTo(q0[0], q0[1]); x.lineTo(q1[0], q1[1]); x.quadraticCurveTo(qm[0] + (q1[0] - q0[0]) * 0.1, qm[1] + R * 0.06, q0[0], q0[1]); x.fill(); }
+      x.strokeStyle = p.or; x.lineWidth = Math.max(1.5, R * 0.02); x.beginPath(); for (let j = 0; j <= 64; j++) { const q = P(j / 64 * Math.PI, R * 1.06, Hc + R * 0.02); if (j) x.lineTo(q[0], q[1]); else x.moveTo(q[0], q[1]); } x.stroke();
+      if (L > 0) {
+        const nb = nT * 3, br = Math.max(1.5, R * 0.018);
+        for (let k = 0; k < nb; k++) { const a = S.rot + k / nb * TAU; if (Math.sin(a) < -0.02) continue; const q = P(a, R * 1.06, Hc + R * 0.035), on = bulbOn(k, nb) * L; x.fillStyle = rgba('#fff3c4', 0.35 * on); x.beginPath(); x.arc(q[0], q[1], br * 3.2, 0, TAU); x.fill(); x.fillStyle = mix('#5a4a2a', '#fff6d8', on); x.beginPath(); x.arc(q[0], q[1], br, 0, TAU); x.fill(); }
+        // ampoules sur les arêtes du toit
+        for (const sgm of segs) { if (sgm.d < -0.2) continue; for (let j = 1; j < 5; j++) { const f = j / 5, q = P(sgm.a0, R * 1.06 * f, Hc + R * 0.02 + R * 0.48 * (1 - f)), on = bulbOn(sgm.k * 5 + j, nT * 5) * L; x.fillStyle = mix('#5a4a2a', '#fff6d8', on); x.beginPath(); x.arc(q[0], q[1], br * 0.8, 0, TAU); x.fill(); } }
+      }
+      // fanion au sommet avec le logo
+      const [ax, ay] = apex, ps = R * 0.16; x.strokeStyle = p.or; x.lineWidth = Math.max(1.5, R * 0.015); x.beginPath(); x.moveTo(ax, ay); x.lineTo(ax, ay - ps * 1.4); x.stroke();
+      x.save(); x.translate(ax, ay - ps * 1.4 - ps * 0.7); x.scale(Math.max(0.1, Math.abs(Math.cos(S.rot))), 1); x.fillStyle = col(0); x.beginPath(); x.arc(0, 0, ps * 0.7, 0, TAU); x.fill(); const lp = logoPath(); if (lp) { x.scale(ps * 1.1, ps * 1.1); x.fillStyle = col(1); x.fill(lp, 'evenodd'); } x.restore();
+    }
+
+    app.loop((t, dt) => {
+      dt = Math.min(1 / 20, dt || 0);
+      const { w, h, dpr } = app.size; buildLogo();
+      const key = [w, h, app.seed].join('|'); if (!S || key !== gKey) { gKey = key; build(w, h); S.crank = 0; }
+      if (app.thumbnail) { S.rot = 0.35; S.crank = 1.1; simT = 0.4; }
+      else {
+        simT += dt;
+        if (!S.grab) { const base = p.vitesse * 0.9; S.om += (base - S.om) * Math.min(1, dt * 0.7); S.rot += S.om * dt; }
+        S.crank += Math.abs(S.om) * dt * 2.2 + 0.02 * dt;
+      }
+      ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.fillStyle = p.fond; ctx.fillRect(0, 0, canvas.width, canvas.height); ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = p.sol; ctx.fillRect(0, S.gy - S.R * p.vue * 1.2, w, h); const gg = ctx.createLinearGradient(0, S.gy - S.R * p.vue * 1.6, 0, S.gy - S.R * p.vue * 0.8); gg.addColorStop(0, rgba(p.fond, 1)); gg.addColorStop(1, rgba(p.fond, 0)); ctx.fillStyle = gg; ctx.fillRect(0, S.gy - S.R * p.vue * 1.6, w, S.R * p.vue * 0.8);
+      draw(ctx);
+      app.finish(ctx);
+    });
+
+    // ——— SVG ———
+    function toSVG() {
+      const { w, h } = app.size, f = (v) => +v.toFixed(2), { R, Hc, cx, gy } = S, v = p.vue, nT = Math.round(p.toit), th = R * 0.09;
+      const poly = (pts) => pts.map((q, k) => (k ? 'L' : 'M') + f(q[0]) + ' ' + f(q[1])).join('') + 'Z';
+      let o = `<rect width="100%" height="100%" fill="${p.fond}"/><rect x="0" y="${f(gy - R * v * 1.2)}" width="${w}" height="${f(h)}" fill="${p.sol}"/>`;
+      o += `<ellipse cx="${f(cx)}" cy="${f(gy)}" rx="${f(R)}" ry="${f(R * v)}" fill="${mix(col(0), '#000000', 0.35)}"/><ellipse cx="${f(cx)}" cy="${f(gy - th)}" rx="${f(R)}" ry="${f(R * v)}" fill="${mix(p.sol, col(1), 0.25)}"/>`;
+      o += `<ellipse cx="${f(cx)}" cy="${f(gy - Hc)}" rx="${f(R * 1.04)}" ry="${f(R * 1.04 * v)}" fill="${mix(col(0), '#000000', 0.6)}"/>`;
+      let lp = ''; if (logoM) for (const L of logoM) { const st = Math.max(1, Math.floor(L.length / 120)); lp += 'M' + f(L[0][0] * 100) + ' ' + f(L[0][1] * 100); for (let k = st; k < L.length; k += st) lp += 'L' + f(L[k][0] * 100) + ' ' + f(L[k][1] * 100); lp += 'Z'; }
+      const rid = (e) => {
+        const s = R * (e.g ? 0.085 : 0.1), [px, py] = P(e.a, e.r, e.Y), [x0, y0] = P(e.a, e.r, 0), [, y1] = P(e.a, e.r, Hc), c = col(e.k), wdt = Math.max(1.5, R * 0.018);
+        let q = `<rect x="${f(x0 - wdt)}" y="${f(y1)}" width="${f(wdt * 2)}" height="${f(y0 - y1)}" fill="${p.or}"/>`;
+        if (p.montures === 'boules') q += `<circle cx="${f(px)}" cy="${f(py)}" r="${f(s)}" fill="${c}"/>`;
+        else if (p.montures === 'cubes') q += `<rect x="${f(px - s * 0.9)}" y="${f(py - s * 0.9)}" width="${f(s * 1.8)}" height="${f(s * 1.8)}" fill="${c}"/>`;
+        else { const wf = Math.max(0.08, Math.abs(Math.sin(e.a))); if (p.montures === 'etoiles') { let d = ''; for (let k = 0; k < 10; k++) { const a = -Math.PI / 2 + k / 10 * TAU, r = k % 2 ? s * 0.5 : s * 1.25; d += (k ? 'L' : 'M') + f(px + Math.cos(a) * r * wf) + ' ' + f(py + Math.sin(a) * r); } q += `<path d="${d}Z" fill="${c}"/>`; } else { q += `<ellipse cx="${f(px)}" cy="${f(py)}" rx="${f(s * 1.15 * wf)}" ry="${f(s * 1.15)}" fill="${c}" stroke="${p.or}" stroke-width="${f(s * 0.14)}"/>`; if (lp) q += `<path d="${lp}" transform="translate(${f(px)} ${f(py)}) scale(${f(s * 1.6 * wf / 100)} ${f(s * 1.6 / 100)})" fill="${lum(c) > 0.6 ? mix(c, '#000000', 0.6) : mix(c, '#ffffff', 0.8)}" fill-rule="evenodd"/>`; } }
+        return q;
+      };
+      const E = riders().sort((a, b) => a.d - b.d);
+      for (const e of E.filter((e) => e.d < 0)) o += rid(e);
+      const rc = R * 0.17, [, c0y] = P(0, 0, th), [, c1y] = P(0, 0, Hc); o += `<rect x="${f(cx - rc)}" y="${f(c1y)}" width="${f(rc * 2)}" height="${f(c0y - c1y)}" fill="${mix(col(2), '#000000', 0.3)}"/>`;
+      for (const e of E.filter((e) => e.d >= 0)) o += rid(e);
+      const apex = P(0, 0, Hc + R * 0.5), segs = []; for (let k = 0; k < nT; k++) { const a0 = S.rot + k / nT * TAU, a1 = a0 + TAU / nT; segs.push({ a0, a1, k, d: Math.sin((a0 + a1) / 2) }); } segs.sort((a, b) => a.d - b.d);
+      for (const sg of segs) { const pts = [apex]; for (let j = 0; j <= 6; j++) pts.push(P(sg.a0 + (sg.a1 - sg.a0) * j / 6, R * 1.06, Hc + R * 0.02)); const sh = 0.75 + 0.25 * sg.d; o += `<path d="${poly(pts)}" fill="${mix(col(sg.k % 2 ? 1 : 0), '#000000', 0.45 * (1 - sh))}"/>`; }
+      { const nf = nT * 2; for (let k = 0; k < nf; k++) { const a0 = S.rot + k / nf * TAU, a1 = a0 + TAU / nf, am = (a0 + a1) / 2; if (Math.sin(am) < -0.05) continue; const q0 = P(a0, R * 1.06, Hc + R * 0.02), q1 = P(a1, R * 1.06, Hc + R * 0.02), qm = P(am, R * 1.06, Hc - R * 0.1); o += `<path d="M${f(q0[0])} ${f(q0[1])}L${f(q1[0])} ${f(q1[1])}Q${f(qm[0] + (q1[0] - q0[0]) * 0.1)} ${f(qm[1] + R * 0.06)} ${f(q0[0])} ${f(q0[1])}Z" fill="${col(k % 2 ? 2 : 0)}"/>`; } }
+      if (p.lumieres > 0) { const nb = nT * 3, br = Math.max(1.5, R * 0.018); for (let k = 0; k < nb; k++) { const a = S.rot + k / nb * TAU; if (Math.sin(a) < -0.02) continue; const q = P(a, R * 1.06, Hc + R * 0.035), on = bulbOn(k, nb) * p.lumieres; o += `<circle cx="${f(q[0])}" cy="${f(q[1])}" r="${f(br)}" fill="${mix('#5a4a2a', '#fff6d8', on)}"/>`; } }
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">${o}</svg>`;
+    }
+  </script>
+</body>
+</html>

@@ -1,0 +1,15 @@
+{
+  "slug": "manege",
+  "title": "Manège",
+  "type": "motion",
+  "description": "Un manège vu de trois quarts : plateau et toit à rayures tournent, les montures au logo montent et descendent, les ampoules du lambrequin jouent des chenillards.",
+  "tags": ["animation", "3d", "lumiere", "interaction", "logo", "svg"],
+  "inspiration": [
+    "Les carrousels de fête foraine et leurs barres torsadées en laiton",
+    "Les lambrequins festonnés bordés d’ampoules",
+    "Les jeux de lumière en chenillard des attractions"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}
