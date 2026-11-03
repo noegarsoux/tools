@@ -1,0 +1,15 @@
+{
+  "slug": "fanions",
+  "title": "Fanions",
+  "type": "motion",
+  "description": "Des guirlandes de fanions aux couleurs de la marque, tendues en profondeur : le vent les soulève, les fait battre et retourner, le logo imprimé sur certains.",
+  "tags": ["physique", "vent", "3d", "interaction", "logo", "svg"],
+  "inspiration": [
+    "Les guirlandes de fanions des fêtes de village et des kermesses",
+    "Le battement d’un tissu léger sous les rafales",
+    "Les envers plus sombres qui apparaissent quand un fanion se retourne"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}
