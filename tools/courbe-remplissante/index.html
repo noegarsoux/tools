@@ -1,0 +1,286 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Courbe remplissante</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Courbe remplissante : un seul trait, sans jamais se croiser, qui passe par toutes les cases d'une grille.
+    // Les courbes sont produites par des systèmes de Lindenmayer (réécriture de lettres puis tortue). D'un ordre au
+    // suivant, chaque case se divise et le trait s'y replie : on passe de l'un à l'autre en suivant le même
+    // paramètre le long du trait (la position à 37 % du chemin glisse vers la position à 37 % du chemin suivant).
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const KB = PAL('kegelbahn'), BIEN = PAL('biennale'), PYR = PAL('pyramides'), SAL = PAL('salon'), LUZ = PAL('luzern'), GLY = PAL('glyphes');
+
+    const SYS = {
+      hilbert: { axiom: 'A', rules: { A: '+BF-AFA-FB+', B: '-AF+BFB+FA-' }, angle: 90, draw: 'F', max: 8, iter: (n) => n },
+      moore: { axiom: 'LFL+F+LFL', rules: { L: '-RF+LFL+FR-', R: '+LF-RFR-FL+' }, angle: 90, draw: 'F', max: 8, iter: (n) => n - 1 },
+      peano: { axiom: 'X', rules: { X: 'XFYFX+F+YFXFY-F-XFYFX', Y: 'YFXFY-F-XFYFX+F+YFXFY' }, angle: 90, draw: 'F', max: 5, iter: (n) => n },
+      gosper: { axiom: 'A', rules: { A: 'A-B--B+A++AA+B-', B: '+A-BB--B-A++A+B' }, angle: 60, draw: 'AB', max: 5, iter: (n) => n },
+      sierpinski: { axiom: 'F--XF--F--XF', rules: { X: 'XF+G+XF--F--XF+G+X' }, angle: 45, draw: 'FG', max: 6, iter: (n) => n - 1 },
+    };
+    const cache = new Map();
+    let held = null, lens = { x: 0, y: 0, k: 0 }, maskKey = null, mask = null, mw = 0, mh = 0, tAnim = 0;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: false,
+      finish: { grain: 0.03, vignette: 0.08 },
+      hint: 'Glissez pour gonfler la courbe sous le doigt · touchez pour changer d’ordre · molette : épaisseur',
+      notes: 'Une courbe remplissante est un seul trait qui passe par toutes les cases d’une grille sans jamais se croiser. À chaque ordre, chaque case se divise et le trait s’y replie de la même façon : à la limite, la ligne remplit tout le plan. Hilbert et Moore divisent par quatre, Peano par neuf, la courbe de Gosper pave le plan d’hexagones. L’animation fait glisser chaque point du trait vers la position qu’il occupe dans l’ordre suivant.',
+      params: {
+        'Courbe': {
+          type: { type: 'select', label: 'Courbe', options: { hilbert: 'Hilbert', moore: 'Moore (fermée)', peano: 'Peano', gosper: 'Gosper (flocon)', sierpinski: 'Sierpiński (fermée)' }, value: 'hilbert' },
+          ordre: { type: 'range', label: 'Ordre', min: 1, max: 8, step: 1, value: 5 },
+          arrondi: { type: 'range', label: 'Arrondi des coins', min: 0, max: 1, step: 0.01, value: 0.5 },
+          cadre: { type: 'toggle', label: 'Étirer au cadre', value: true },
+          marge: { type: 'range', label: 'Marge', min: 0, max: 0.2, step: 0.005, value: 0.04 },
+        },
+        'Mouvement': {
+          animation: { type: 'segmented', label: 'Animation', options: { morphose: 'Ordres', trace: 'Tracé', flux: 'Flux' }, value: 'morphose' },
+          vitesse: { type: 'range', label: 'Vitesse', min: 0, max: 2, step: 0.01, value: 0.6 },
+          descente: { type: 'range', label: 'Ordres parcourus', min: 1, max: 4, step: 1, value: 2, show: (q) => q.animation === 'morphose' },
+          repetitions: { type: 'range', label: 'Tours du dégradé', min: 0, max: 12, step: 0.5, value: 2 },
+        },
+        'Trait': {
+          epaisseur: { type: 'range', label: 'Épaisseur (part de la case)', min: 0.04, max: 0.95, step: 0.01, value: 0.32 },
+          logo: { type: 'segmented', label: 'Logo', options: { non: 'Non', epais: 'Épais', couleur: 'Couleur', seul: 'Seul' }, value: 'non' },
+          image: { type: 'file', label: 'Logo', accept: 'image/*', show: (q) => q.logo !== 'non' },
+          contraste: { type: 'range', label: 'Épaisseur dans le logo', min: 1, max: 6, step: 0.1, value: 2.6, show: (q) => q.logo === 'epais' },
+        },
+        'Couleurs': {
+          fond: { type: 'color', label: 'Fond', value: '#f2efe8' },
+          couleurs: { type: 'palette', label: 'Dégradé le long du trait', value: ['#111111', '#2f4fa8', '#e5452a'] },
+          accent: { type: 'color', label: 'Couleur dans le logo', value: '#e5452a', show: (q) => q.logo === 'couleur' },
+        },
+      },
+      presets: {
+        'Hilbert': {},
+        'Moore': { type: 'moore', ordre: 5, couleurs: ['#111111', '#111111'], fond: '#f2c230', arrondi: 1 },
+        'Peano': { type: 'peano', ordre: 3, epaisseur: 0.5, couleurs: GLY.slice(2, 7), fond: '#0a0a0a', repetitions: 1, arrondi: 0.3 },
+        'Flocon de Gosper': { type: 'gosper', ordre: 4, cadre: false, epaisseur: 0.45, couleurs: [KB[1], KB[2], KB[3]], fond: KB[0], arrondi: 0.7 },
+        'Sierpiński': { type: 'sierpinski', ordre: 4, cadre: false, couleurs: ['#e5452a', '#f2b0c8'], fond: '#111111', epaisseur: 0.4 },
+        'Tracé': { animation: 'trace', ordre: 6, epaisseur: 0.5, couleurs: ['#111111', '#4b6cf0'], arrondi: 1 },
+        'Logo épais': { logo: 'epais', ordre: 6, epaisseur: 0.14, contraste: 5, couleurs: ['#111111'], animation: 'flux', arrondi: 0.6 },
+        'Logo couleur': { logo: 'couleur', ordre: 6, epaisseur: 0.5, couleurs: ['#d6d2c8'], accent: '#e5452a', animation: 'flux' },
+        'Pleine': { ordre: 4, epaisseur: 0.92, arrondi: 0, couleurs: SAL.slice(1), fond: SAL[0], repetitions: 4, animation: 'flux' },
+        'Pyramides': { type: 'moore', ordre: 4, couleurs: [PYR[2], PYR[4], PYR[1], PYR[5]], fond: PYR[0], epaisseur: 0.6, arrondi: 0.8 },
+        'Luzern': { type: 'gosper', ordre: 3, cadre: false, couleurs: [LUZ[0], LUZ[1], LUZ[2]], fond: LUZ[3], epaisseur: 0.6 },
+      },
+      brand(colors) {
+        const lum = (x) => { const c = hex(x); return c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114; };
+        const s = colors.slice().sort((a, b) => lum(b) - lum(a));
+        return { fond: s[0], couleurs: s.length > 1 ? s.slice(1).reverse() : ['#111111'], accent: s.length > 2 ? s[s.length - 2] : s[s.length - 1] };
+      },
+      pointer: {
+        down: (q) => { held = { x0: q.x, y0: q.y, moved: false }; },
+        drag: (q) => { if (!held) return; if (Math.hypot(q.x - held.x0, q.y - held.y0) > 6) held.moved = true; if (held.moved) { lens.x = q.x; lens.y = q.y; lens.on = true; } },
+        up: () => { if (held && !held.moved) app.set('ordre', Math.round(p.ordre) >= SYS[p.type].max ? 1 : Math.round(p.ordre) + 1); lens.on = false; held = null; },
+        wheel: (q, dy) => app.set('epaisseur', Math.max(0.04, Math.min(0.95, +(p.epaisseur + (dy > 0 ? -0.02 : 0.02)).toFixed(2)))),
+      },
+      onChange(k) { if (k === 'image') maskKey = null; if (k === 'ordre' || k === 'type' || k === 'descente' || k === '*') tAnim = 0; },
+      export: { name: 'courbe-remplissante', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    const hex = (x) => { const n = parseInt(x.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; };
+    const toHex = (c) => '#' + c.map((v) => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, '0')).join('');
+
+    // ——— Système de Lindenmayer → points normalisés dans [0, 1]² ———
+    function curve(type, order) {
+      const key = type + order; if (cache.has(key)) return cache.get(key);
+      const S = SYS[type]; let s = S.axiom;
+      for (let i = 0; i < Math.max(0, S.iter(order)); i++) { let o = ''; for (const ch of s) o += S.rules[ch] || ch; s = o; }
+      const da = S.angle * Math.PI / 180, pts = [0, 0]; let x = 0, y = 0, a = 0;
+      for (const ch of s) {
+        if (ch === '+') a += da; else if (ch === '-') a -= da;
+        else if (S.draw.includes(ch)) { x += Math.cos(a); y += Math.sin(a); pts.push(Math.round(x * 1e6) / 1e6, Math.round(y * 1e6) / 1e6); }
+      }
+      let P = new Float32Array(pts), n = P.length / 2;
+      if (type === 'gosper') {
+        // le flocon tourne d'un ordre à l'autre : on aligne le départ et l'arrivée à l'horizontale
+        const ang = Math.atan2(P[n * 2 - 1] - P[1], P[n * 2 - 2] - P[0]), c = Math.cos(-ang), sn = Math.sin(-ang);
+        for (let i = 0; i < n; i++) { const X = P[i * 2], Y = P[i * 2 + 1]; P[i * 2] = X * c - Y * sn; P[i * 2 + 1] = X * sn + Y * c; }
+      }
+      let x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
+      for (let i = 0; i < n; i++) { x0 = Math.min(x0, P[i * 2]); x1 = Math.max(x1, P[i * 2]); y0 = Math.min(y0, P[i * 2 + 1]); y1 = Math.max(y1, P[i * 2 + 1]); }
+      // une demi-case de marge de chaque côté : les ordres successifs se superposent exactement
+      const sz = Math.max(x1 - x0, y1 - y0) + 1, ox = (sz - (x1 - x0)) / 2, oy = (sz - (y1 - y0)) / 2;
+      for (let i = 0; i < n; i++) { P[i * 2] = (P[i * 2] - x0 + ox) / sz; P[i * 2 + 1] = (P[i * 2 + 1] - y0 + oy) / sz; }
+      const res = { P, n, cell: 1 / sz };
+      cache.set(key, res); return res;
+    }
+    const ease = (t) => t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+
+    // ——— Masque du logo (en pixels de l'écran, au quart) ———
+    function logoMask(w, h) {
+      const img0 = p.image || app.logoImg, key = (img0 ? (img0.src || 'c') : 'demo') + w + 'x' + h;
+      if (key === maskKey && mask) return mask; maskKey = key;
+      mw = Math.max(8, Math.round(w / 3)); mh = Math.max(8, Math.round(h / 3));
+      const c = document.createElement('canvas'); c.width = mw; c.height = mh; const x = c.getContext('2d', { willReadFrequently: true });
+      const L = Math.min(mw, mh) * 0.66, cx = mw / 2, cy = mh / 2;
+      if (img0) { const iw = img0.naturalWidth || img0.width, ih = img0.naturalHeight || img0.height, k = L / Math.max(iw, ih); x.drawImage(img0, cx - iw * k / 2, cy - ih * k / 2, iw * k, ih * k); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(cx, cy, L * 0.48, 0, TAU); x.arc(cx, cy, L * 0.26, 0, TAU, true); x.fill('evenodd'); x.fillRect(cx - L * 0.06, cy - L * 0.5, L * 0.12, L); }
+      const d = x.getImageData(0, 0, mw, mh).data, a = new Uint8Array(mw * mh); let transp = 0; for (let i = 3; i < d.length; i += 4) if (d[i] < 128) transp++;
+      const useA = transp > mw * mh * 0.05;
+      for (let i = 0; i < mw * mh; i++) { const l = (d[i * 4] * 0.2126 + d[i * 4 + 1] * 0.7152 + d[i * 4 + 2] * 0.0722) / 255; a[i] = (useA ? d[i * 4 + 3] > 128 : d[i * 4 + 3] > 128 && l < 0.5) ? 1 : 0; }
+      mask = a; return a;
+    }
+
+    // ——— Géométrie de l'image courante ———
+    function frame() {
+      const { w, h } = app.size, S = SYS[p.type], top = Math.max(1, Math.min(S.max, Math.round(p.ordre)));
+      let A, s = 0, lo = top;
+      if (p.animation === 'morphose') {
+        // aller-retour entre l'ordre choisi et quelques ordres plus bas ; pause sur chaque ordre
+        lo = Math.max(1, top - Math.round(p.descente)); const steps = top - lo;
+        if (steps > 0) {
+          const per = 2.6, tot = steps * 2 * per, u = ((tAnim % tot) / per + steps) % (2 * steps), k = Math.floor(u), f = u - k;
+          const o = k < steps ? lo + k : top - (k - steps), dir = k < steps ? 1 : -1, g = ease(Math.max(0, Math.min(1, (f - 0.3) / 0.7)));
+          A = { a: dir > 0 ? o : o - 1, s: dir > 0 ? g : 1 - g };
+        }
+      }
+      if (!A) A = { a: top, s: 0 };
+      const ca = curve(p.type, A.a), cb = A.s > 0 ? curve(p.type, A.a + 1) : null;
+      let M = cb ? cb.n : ca.n, pts = new Float32Array(M * 2); const mg = p.marge;
+      let sx, sy, ox, oy;
+      if (p.cadre) { sx = w * (1 - 2 * mg); sy = h * (1 - 2 * mg); ox = w * mg; oy = h * mg; }
+      else { const u = Math.min(w, h) * (1 - 2 * mg); sx = sy = u; ox = (w - u) / 2; oy = (h - u) / 2; }
+      if (cb) {
+        const r = A.s;
+        for (let j = 0; j < M; j++) {
+          const t = j / (M - 1) * (ca.n - 1), i0 = Math.min(ca.n - 2, Math.floor(t)), f = t - i0;
+          const ax = ca.P[i0 * 2] + (ca.P[i0 * 2 + 2] - ca.P[i0 * 2]) * f, ay = ca.P[i0 * 2 + 1] + (ca.P[i0 * 2 + 3] - ca.P[i0 * 2 + 1]) * f;
+          pts[j * 2] = ox + (ax + (cb.P[j * 2] - ax) * r) * sx; pts[j * 2 + 1] = oy + (ay + (cb.P[j * 2 + 1] - ay) * r) * sy;
+        }
+      } else for (let j = 0; j < M; j++) { pts[j * 2] = ox + ca.P[j * 2] * sx; pts[j * 2 + 1] = oy + ca.P[j * 2 + 1] * sy; }
+      const cell = (cb ? ca.cell + (cb.cell - ca.cell) * A.s : ca.cell) * Math.min(sx, sy);
+      // coins arrondis : chaque coin est remplacé par une courbe (approchée par quelques points)
+      const r = p.arrondi * cell * 0.5;
+      if (r > 0.3 && M < 20000) {
+        const o = [pts[0], pts[1]];
+        for (let j = 1; j < M - 1; j++) {
+          const px = pts[j * 2], py = pts[j * 2 + 1], ax = pts[j * 2 - 2] - px, ay = pts[j * 2 - 1] - py, bx = pts[j * 2 + 2] - px, by = pts[j * 2 + 3] - py, la = Math.hypot(ax, ay) || 1, lb = Math.hypot(bx, by) || 1;
+          if (Math.abs(ax * by - ay * bx) < 1e-6 * la * lb) { o.push(px, py); continue; }
+          const rr = Math.min(r, la / 2, lb / 2), x0 = px + ax / la * rr, y0 = py + ay / la * rr, x1 = px + bx / lb * rr, y1 = py + by / lb * rr;
+          const ns = r > 6 ? 4 : 2; for (let k = 0; k <= ns; k++) { const t = k / ns, u = 1 - t; o.push(u * u * x0 + 2 * u * t * px + t * t * x1, u * u * y0 + 2 * u * t * py + t * t * y1); }
+        }
+        o.push(pts[M * 2 - 2], pts[M * 2 - 1]); pts = new Float32Array(o); M = o.length / 2;
+      }
+      // aux petits ordres, on redécoupe les segments pour que le dégradé reste continu
+      if (M < 3000) {
+        const sub = Math.ceil(3000 / M), M2 = (M - 1) * sub + 1, q = new Float32Array(M2 * 2);
+        for (let j = 0; j < M - 1; j++) for (let k = 0; k < sub; k++) { const f = k / sub, o = (j * sub + k) * 2; q[o] = pts[j * 2] + (pts[j * 2 + 2] - pts[j * 2]) * f; q[o + 1] = pts[j * 2 + 1] + (pts[j * 2 + 3] - pts[j * 2 + 1]) * f; }
+        q[M2 * 2 - 2] = pts[M * 2 - 2]; q[M2 * 2 - 1] = pts[M * 2 - 1]; pts = q; M = M2;
+      }
+      // loupe : la courbe gonfle sous le doigt
+      if (lens.k > 0.001) {
+        const R = Math.min(w, h) * 0.2, R2 = R * R;
+        for (let j = 0; j < M; j++) { const dx = pts[j * 2] - lens.x, dy = pts[j * 2 + 1] - lens.y, d2 = dx * dx + dy * dy; if (d2 > R2 * 9) continue; const f = lens.k * 0.9 * Math.exp(-d2 / R2); pts[j * 2] += dx * f; pts[j * 2 + 1] += dy * f; }
+      }
+      return { pts, M, cell };
+    }
+    // portion visible (animation « tracé »)
+    function visible(M) {
+      if (p.animation !== 'trace') return [0, M - 1];
+      const u = (tAnim * 0.09) % 2.4;
+      if (u < 1) return [0, Math.max(1, Math.round(ease(u) * (M - 1)))];
+      if (u < 1.2) return [0, M - 1];
+      if (u < 2.2) return [Math.round(ease(u - 1.2) * (M - 1)), M - 1];
+      return [M - 1, M - 1];
+    }
+    // courses : morceaux consécutifs de même couleur et même épaisseur. Chaque course commence et finit au milieu
+    // d'un segment (jamais dans un coin) : des bouts plats s'y raccordent sans couture.
+    function runs(F) {
+      const { w, h } = app.size, { pts, M } = F, C = p.couleurs, NB = C.length > 1 ? 96 : 1, out = new Map();
+      const lg = p.logo !== 'non', mk = lg ? logoMask(w, h) : null, rep = p.repetitions, ph = tAnim * 0.05 * (p.animation === 'flux' ? 2 : 1);
+      const [i0, i1] = visible(M); out.ends = []; out.joints = []; if (i1 <= i0) return out;
+      const keyOf = (j) => {
+        const t = j / (M - 1), b = NB > 1 ? Math.floor((((t * rep - ph) % 1) + 1) % 1 * NB) % NB : 0;
+        let ins = 0; if (lg) { const mx = Math.min(mw - 1, Math.max(0, (pts[j * 2] / w * mw) | 0)), my = Math.min(mh - 1, Math.max(0, (pts[j * 2 + 1] / h * mh) | 0)); ins = mk[my * mw + mx]; }
+        return b * 2 + ins;
+      };
+      const mid = (j) => [(pts[j * 2] + pts[j * 2 + 2]) / 2, (pts[j * 2 + 1] + pts[j * 2 + 3]) / 2];
+      let j = i0;
+      while (j <= i1) {
+        const k = keyOf(j); let e = j; while (e + 1 <= i1 && keyOf(e + 1) === k) e++;
+        const first = j === i0, L = [first ? [pts[j * 2], pts[j * 2 + 1]] : mid(j - 1)];
+        for (let q = first ? j + 1 : j; q <= e; q++) L.push([pts[q * 2], pts[q * 2 + 1]]);
+        if (e !== i1) { L.push([pts[e * 2 + 2], pts[e * 2 + 3]]); if (e + 1 < i1) L.push(mid(e + 1)); } // recouvrement d'un segment le long de la courbe : pas de couture
+        let arr = out.get(k); if (!arr) out.set(k, arr = []); arr.push(L);
+        if (first) out.ends.push([L[0], k]); else out.joints.push([L[0], k]); if (e === i1) out.ends.push([L[L.length - 1], k]);
+        j = e + 1;
+      }
+      return out;
+    }
+    function colourOf(key) {
+      const C = p.couleurs.map(hex), nc = C.length, NB = nc > 1 ? 96 : 1, b = key >> 1, ins = key & 1;
+      if (ins && p.logo === 'couleur') return p.accent;
+      if (nc === 1) return p.couleurs[0];
+      // dégradé cyclique : le dernier ton rejoint le premier
+      const t = b / NB * nc, i = Math.floor(t) % nc, f = t - Math.floor(t), A = C[i], B = C[(i + 1) % nc];
+      return toHex([A[0] + (B[0] - A[0]) * f, A[1] + (B[1] - A[1]) * f, A[2] + (B[2] - A[2]) * f]);
+    }
+    function widthOf(key, cell) {
+      const ins = key & 1, base = cell * p.epaisseur;
+      if (p.logo === 'epais') return ins ? Math.min(cell * 0.97, base * p.contraste) : base;
+      if (p.logo === 'seul') return ins ? Math.max(base, cell * 0.3) : Math.max(0.6, base * 0.18);
+      return base;
+    }
+    // un trait aux coins arrondis : on coupe chaque coin d'une longueur r et on le remplace par une courbe
+    function corners(L, r, mv, ln, qd) {
+      const n = L.length; if (n < 2) return; mv(L[0][0], L[0][1]);
+      if (r <= 0.01 || n < 3) { for (let j = 1; j < n; j++) ln(L[j][0], L[j][1]); return; }
+      for (let j = 1; j < n - 1; j++) {
+        const [px, py] = L[j], ax = L[j - 1][0] - px, ay = L[j - 1][1] - py, bx = L[j + 1][0] - px, by = L[j + 1][1] - py, la = Math.hypot(ax, ay) || 1, lb = Math.hypot(bx, by) || 1, rr = Math.min(r, la * (j === 1 ? 1 : 0.5), lb * (j === n - 2 ? 1 : 0.5));
+        ln(px + ax / la * rr, py + ay / la * rr); qd(px, py, px + bx / lb * rr, py + by / lb * rr);
+      }
+      ln(L[n - 1][0], L[n - 1][1]);
+    }
+
+    app.loop((t, dt) => {
+      dt = Math.min(0.05, dt || 0);
+      const { w, h, dpr } = app.size;
+      tAnim += dt * p.vitesse * (app.thumbnail ? 0 : 1);
+      lens.k += ((lens.on ? 1 : 0) - lens.k) * Math.min(1, dt * 6);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = p.fond; ctx.fillRect(0, 0, w, h);
+      const F = frame(), R = runs(F), r = 0;
+      ctx.lineCap = 'butt'; ctx.lineJoin = 'round';
+      // les traits fins d'abord, les épais du logo par-dessus ; les deux bouts de la courbe sont ronds
+      const keys = [...R.keys()].sort((a, b) => (a & 1) - (b & 1));
+      // pastilles sous les raccords : bouchent les petites fentes dans les virages serrés
+      const J = new Map(); for (const [[x, y], k] of R.joints) { let P = J.get(k); if (!P) J.set(k, P = new Path2D()); const rr = Math.max(0.25, widthOf(k, F.cell) / 2) * 0.98; P.moveTo(x + rr, y); P.arc(x, y, rr, 0, TAU); }
+      for (const [k, P] of J) { ctx.fillStyle = colourOf(k); ctx.fill(P); }
+      for (const k of keys) {
+        const P = new Path2D(); for (const L of R.get(k)) corners(L, r, (x, y) => P.moveTo(x, y), (x, y) => P.lineTo(x, y), (a, b, c, d) => P.quadraticCurveTo(a, b, c, d));
+        ctx.strokeStyle = colourOf(k); ctx.lineWidth = Math.max(0.5, widthOf(k, F.cell)); ctx.stroke(P);
+      }
+      for (const [[x, y], k] of R.ends) { ctx.fillStyle = colourOf(k); ctx.beginPath(); ctx.arc(x, y, Math.max(0.25, widthOf(k, F.cell) / 2), 0, TAU); ctx.fill(); }
+      app.finish(ctx);
+    });
+
+    // ——— Export SVG : mêmes courses, en chemins ———
+    function toSVG() {
+      const { w, h } = app.size, F = frame(), R = runs(F), r = 0, f = (v) => +v.toFixed(2), out = [`<rect width="100%" height="100%" fill="${p.fond}"/>`];
+      const keys = [...R.keys()].sort((a, b) => (a & 1) - (b & 1));
+      for (const k of keys) {
+        let d = '';
+        for (const L of R.get(k)) corners(L, r, (x, y) => { d += `M${f(x)} ${f(y)}`; }, (x, y) => { d += `L${f(x)} ${f(y)}`; }, (a, b, c, e) => { d += `Q${f(a)} ${f(b)} ${f(c)} ${f(e)}`; });
+        out.push(`<path d="${d}" fill="none" stroke="${colourOf(k)}" stroke-width="${f(Math.max(0.5, widthOf(k, F.cell)))}" stroke-linejoin="round"/>`);
+      }
+      for (const [[x, y], k] of R.ends) out.push(`<circle cx="${f(x)}" cy="${f(y)}" r="${f(Math.max(0.25, widthOf(k, F.cell) / 2))}" fill="${colourOf(k)}"/>`);
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">${out.join('')}</svg>`;
+    }
+  </script>
+</body>
+</html>
