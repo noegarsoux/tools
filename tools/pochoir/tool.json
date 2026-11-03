@@ -1,0 +1,15 @@
+{
+  "slug": "pochoir",
+  "title": "Pochoir",
+  "type": "motion",
+  "description": "Une bombe de peinture passe sur un pochoir découpé au logo, couche après couche : brouillard de points, débords, coulures, puis le carton se lève et le mur se remplit.",
+  "tags": ["peinture", "rue", "texture", "couches", "logo", "svg"],
+  "inspiration": [
+    "Les pochoirs peints à la bombe sur les murs des villes",
+    "Les affiches sérigraphiées en plusieurs passages",
+    "Les coulures de peinture fraîche"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}
