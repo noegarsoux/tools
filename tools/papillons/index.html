@@ -1,0 +1,293 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Papillons</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Papillons : chaque papillon a une demi-image (aile antérieure + aile postérieure, côté droit) peinte une fois :
+    // fond en dégradé, nervures, bordure sombre ponctuée, tache, ocelles, logo selon la robe. On la dessine deux fois
+    // (droite, et en miroir à gauche), écrasée horizontalement par le battement : vue de dessus, une aile qui se relève
+    // se raccourcit. Vol : cap erratique (bruit), élan à chaque coup d'aile, attirance vers une fleur où il se pose
+    // et ouvre lentement les ailes au soleil ; fuite quand le pointeur passe vite. L'ombre au sol s'écarte avec l'altitude.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const GLY = PAL('glyphes'), PYR = PAL('pyramides'), MEN = PAL('menthe'), TRN = PAL('trame-nuit');
+    const ROBES = ['monarque', 'morpho', 'citron', 'paon', 'machaon'];
+
+    let simT = 0, vKey = '', logoM = null, logoKey = '', ptr = null, B = null, bKey = '', GR = null, grKey = '';
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.04, vignette: 0.14 },
+      hint: 'Passez vite pour les faire fuir · clic : planter une fleur · molette : taille',
+      notes: 'Vu d\'en haut, un papillon qui bat des ailes ne fait que s\'élargir et se rétrécir : l\'aile relevée se raccourcit. Ici, chaque papillon porte une robe (orange nervurée de noir, bleu métallique, jaune citron, ocelles du paon, queues du machaon, ou les couleurs de la palette), avec le logo peint sur les ailes antérieures. Ils volettent au hasard, se posent sur les fleurs et y ouvrent lentement les ailes. Passez vite avec le pointeur pour les faire fuir ; cliquez pour planter une fleur où ils viendront se poser.',
+      params: {
+        'Papillons': {
+          nombre: { type: 'range', label: 'Nombre', min: 1, max: 60, step: 1, value: 14 },
+          taille: { type: 'range', label: 'Envergure', min: 0.05, max: 0.4, step: 0.005, value: 0.13 },
+          ecart: { type: 'range', label: 'Écart de taille', min: 0, max: 0.5, step: 0.01, value: 0.2 },
+          robe: { type: 'select', label: 'Robe', options: { mixte: 'Toutes les robes', monarque: 'Monarque', morpho: 'Morpho bleu', citron: 'Citron', paon: 'Paon du jour', machaon: 'Machaon', palette: 'Couleurs de la palette' }, value: 'mixte' },
+          logo: { type: 'range', label: 'Part d\'ailes au logo', min: 0, max: 1, step: 0.01, value: 0.4 },
+          image: { type: 'file', label: 'Logo', accept: 'image/*' },
+        },
+        'Vol': {
+          battement: { type: 'range', label: 'Battements par seconde', min: 1, max: 12, step: 0.1, value: 5 },
+          erratique: { type: 'range', label: 'Vol erratique', min: 0, max: 1, step: 0.01, value: 0.55 },
+          vitesse: { type: 'range', label: 'Vitesse', min: 0.2, max: 2.5, step: 0.01, value: 1 },
+          pose: { type: 'range', label: 'Envie de se poser', min: 0, max: 1, step: 0.01, value: 0.5 },
+        },
+        'Prairie': {
+          fleurs: { type: 'range', label: 'Fleurs', min: 0, max: 40, step: 1, value: 12 },
+          sol: { type: 'segmented', label: 'Sol', options: { herbe: 'Herbe', uni: 'Uni', planche: 'Planche' }, value: 'herbe' },
+          fond: { type: 'color', label: 'Fond', value: '#6f9a4e' },
+          couleurs: { type: 'palette', label: 'Couleurs (robe palette, fleurs)', value: ['#e5452a', '#16161a', '#f2c230', '#f4f1ea', '#2f5fd0'] },
+        },
+      },
+      presets: {
+        'Prairie': {},
+        'Monarques': { robe: 'monarque', nombre: 26, taille: 0.1, fleurs: 18 },
+        'Morphos': { robe: 'morpho', fond: '#1f3b2c', nombre: 10, taille: 0.17, logo: 0.2 },
+        'Planche': { sol: 'planche', fond: '#efe9dc', nombre: 18, vitesse: 0.35, pose: 1, fleurs: 0, robe: 'mixte', taille: 0.12 },
+        'Un seul': { nombre: 1, taille: 0.38, robe: 'paon', battement: 2.5, vitesse: 0.4, fleurs: 4 },
+        'Nuée': { nombre: 60, taille: 0.06, ecart: 0.4, robe: 'citron', erratique: 0.8, fleurs: 30 },
+        'Logos': { logo: 1, robe: 'palette', couleurs: [GLY[4], GLY[0], GLY[5], GLY[1], GLY[6]], sol: 'uni', fond: '#efe6d6' },
+        'Machaons': { robe: 'machaon', nombre: 12, taille: 0.15, fond: '#8aa863' },
+        'Menthe': { robe: 'palette', sol: 'uni', fond: MEN[0], couleurs: [MEN[3], MEN[1], MEN[2], '#ffffff'], fleurs: 8 },
+        'Nuit': { robe: 'palette', sol: 'uni', fond: TRN[0], couleurs: [TRN[1], TRN[2], '#e5502a', '#f2c230'], battement: 3, fleurs: 0 },
+      },
+      brand(colors) {
+        const s = colors.slice().sort((a, b) => lum(a) - lum(b)), L = s[s.length - 1];
+        return { sol: 'uni', fond: L, robe: 'palette', couleurs: s.length > 1 ? s.slice(0, -1).concat([L]) : ['#16161a', L] };
+      },
+      pointer: {
+        down: (q) => { ptr = { x: q.x, y: q.y, moved: 0, t: simT, v: 0 }; },
+        drag: (q) => { if (!ptr) return; ptr.moved += Math.hypot(q.x - ptr.x, q.y - ptr.y); },
+        move: (q) => { const now = simT; if (ptr && ptr.mx !== undefined) { const d = Math.hypot(q.x - ptr.mx, q.y - ptr.my), dt = Math.max(1 / 120, now - ptr.mt); ptr.v = d / dt; } ptr = Object.assign(ptr || { moved: 0 }, { mx: q.x, my: q.y, mt: now, x: q.x, y: q.y }); },
+        up: (q) => { if (ptr && ptr.moved < 6 && B) plant(q.x, q.y); if (ptr) ptr.moved = 0; },
+        wheel: (q, dy) => app.set('taille', Math.max(0.05, Math.min(0.4, +(p.taille * (dy > 0 ? 0.93 : 1.07)).toFixed(3)))),
+      },
+      onChange(k) { if (['*', 'image'].includes(k)) logoKey = ''; },
+      export: { name: 'papillons', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    function hex(x) { const n = parseInt(x.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
+    function lum(x) { const c = hex(x); return (c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114) / 255; }
+    function mix(a, b, t) { const A = hex(a), C = hex(b); return '#' + A.map((v, i) => Math.round(v + (C[i] - v) * t).toString(16).padStart(2, '0')).join(''); }
+    function rng(s) { let a = s >>> 0; return () => { a = (a + 0x6d2b79f5) >>> 0; let t = a; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+
+    function buildLogo() {
+      const img0 = p.image || app.logoImg, key = img0 ? (img0.src || 'c') : 'demo'; if (key === logoKey) return; logoKey = key; vKey = '';
+      const M = 200, c = document.createElement('canvas'); c.width = c.height = M; const x = c.getContext('2d', { willReadFrequently: true }), L = M * 0.94, cx = M / 2;
+      if (img0) { const iw = img0.naturalWidth || img0.width, ih = img0.naturalHeight || img0.height, s = L / Math.max(iw, ih); x.drawImage(img0, cx - iw * s / 2, cx - ih * s / 2, iw * s, ih * s); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(cx, cx, L * 0.48, 0, TAU); x.arc(cx, cx, L * 0.27, 0, TAU, true); x.fill('evenodd'); x.fillRect(cx - L * 0.07, cx - L * 0.5, L * 0.14, L); }
+      const d = x.getImageData(0, 0, M, M).data; let transp = 0; for (let i = 3; i < d.length; i += 4) if (d[i] < 128) transp++; const useA = transp > M * M * 0.05;
+      const F = new Float64Array(M * M); for (let i = 0; i < M * M; i++) { const o = i * 4, l = (d[o] * 0.2126 + d[o + 1] * 0.7152 + d[o + 2] * 0.0722) / 255; F[i] = useA ? d[o + 3] / 255 : (d[o + 3] / 255) * Math.min(1, Math.max(0, (0.75 - l) * 2)); }
+      { const G2 = new Float64Array(M * M); for (let j = 1; j < M - 1; j++) for (let i = 1; i < M - 1; i++) { let a = 0; for (let b = -1; b <= 1; b++) for (let c = -1; c <= 1; c++) a += F[(j + b) * M + i + c] * (b || c ? (b && c ? 1 : 2) : 4); G2[j * M + i] = a / 16; } F.set(G2); }
+      for (let k = 0; k < M; k++) F[k] = F[(M - 1) * M + k] = F[k * M] = F[k * M + M - 1] = 0;
+      logoM = contours(F, M, M, 0.5, 0, 0, 1).filter((c) => c.closed && c.pts.length > 6).map((c) => chaikin(chaikin(c.pts, true), true).map((q) => [q[0] / M - 0.5, q[1] / M - 0.5]));
+    }
+    // carrés marchants + chaînage
+    function contours(F, nx, ny, lev, ox, oy, cs) {
+      const pt = new Map(), adj = new Map();
+      const P = (id) => { let q = pt.get(id); if (q) return q; const cell = id >> 1, i = cell % nx, j = (cell - i) / nx; let a, b, ax, ay, bx, by; if (id & 1) { a = F[j * nx + i]; b = F[(j + 1) * nx + i]; ax = bx = i; ay = j; by = j + 1; } else { a = F[j * nx + i]; b = F[j * nx + i + 1]; ay = by = j; ax = i; bx = i + 1; } const t = (lev - a) / (b - a || 1e-9); q = [ox + (ax + (bx - ax) * t) * cs, oy + (ay + (by - ay) * t) * cs]; pt.set(id, q); return q; };
+      const link = (a, b) => { (adj.get(a) || adj.set(a, []).get(a)).push(b); (adj.get(b) || adj.set(b, []).get(b)).push(a); };
+      for (let j = 0; j < ny - 1; j++) for (let i = 0; i < nx - 1; i++) {
+        const A = F[j * nx + i] > lev, B = F[j * nx + i + 1] > lev, C = F[(j + 1) * nx + i + 1] > lev, D = F[(j + 1) * nx + i] > lev, idx = A | (B << 1) | (C << 2) | (D << 3);
+        if (idx === 0 || idx === 15) continue;
+        const T = (j * nx + i) * 2, R = (j * nx + i + 1) * 2 + 1, Bo = ((j + 1) * nx + i) * 2, Le = (j * nx + i) * 2 + 1;
+        const ctr = (F[j * nx + i] + F[j * nx + i + 1] + F[(j + 1) * nx + i + 1] + F[(j + 1) * nx + i]) / 4 > lev;
+        switch (idx) {
+          case 1: case 14: link(Le, T); break; case 2: case 13: link(T, R); break; case 3: case 12: link(Le, R); break;
+          case 4: case 11: link(R, Bo); break; case 6: case 9: link(T, Bo); break; case 7: case 8: link(Le, Bo); break;
+          case 5: if (ctr) { link(Le, Bo); link(T, R); } else { link(Le, T); link(R, Bo); } break;
+          case 10: if (ctr) { link(Le, T); link(R, Bo); } else { link(Le, Bo); link(T, R); } break;
+        }
+      }
+      const seen = new Set(), out = [];
+      const walk = (s) => { const L = [s]; seen.add(s); let cur = s; for (;;) { const nb = (adj.get(cur) || []).find((x) => !seen.has(x)); if (nb === undefined) break; seen.add(nb); L.push(nb); cur = nb; } return L; };
+      for (const [id, nb] of adj) if (nb.length === 1 && !seen.has(id)) out.push({ pts: walk(id).map(P), closed: false });
+      for (const [id] of adj) if (!seen.has(id)) out.push({ pts: walk(id).map(P), closed: true });
+      return out;
+    }
+    function chaikin(pts, closed) {
+      const o = []; const n = pts.length; for (let k = 0; k < (closed ? n : n - 1); k++) { const a = pts[k], b = pts[(k + 1) % n]; o.push([a[0] * 0.75 + b[0] * 0.25, a[1] * 0.75 + b[1] * 0.25], [a[0] * 0.25 + b[0] * 0.75, a[1] * 0.25 + b[1] * 0.75]); }
+      if (!closed) { o.unshift(pts[0]); o.push(pts[n - 1]); } return o;
+    }
+
+
+    // ——— Ailes (côté droit, envergure d'une aile = 1, y vers l'arrière) ———
+    function smooth(P, it = 3) { let Q = P; for (let k = 0; k < it; k++) { const o = []; for (let i = 0; i < Q.length; i++) { const a = Q[i], b = Q[(i + 1) % Q.length]; o.push([a[0] * 0.75 + b[0] * 0.25, a[1] * 0.75 + b[1] * 0.25], [a[0] * 0.25 + b[0] * 0.75, a[1] * 0.25 + b[1] * 0.75]); } Q = o; } return Q; }
+    function wings(kind, R) {
+      const j = () => (R() - 0.5) * 0.08;
+      const fore = smooth([[0.06, -0.06], [0.35, -0.42 + j()], [0.78 + j(), -0.66], [0.98, -0.6 + j()], [0.9 + j(), -0.28], [0.68, 0.0 + j()], [0.3, 0.04], [0.07, 0.03]]);
+      let hind = [[0.06, 0.02], [0.42, 0.02], [0.72 + j(), 0.12], [0.76, 0.36 + j()], [0.6, 0.6], [0.36 + j(), 0.7], [0.16, 0.55], [0.05, 0.2]];
+      if (kind === 'machaon') hind = [[0.06, 0.02], [0.42, 0.02], [0.72, 0.12], [0.74, 0.36], [0.56, 0.56], [0.5, 0.62], [0.47, 0.95], [0.42, 0.97], [0.4, 0.66], [0.26, 0.68], [0.12, 0.52], [0.05, 0.2]];
+      return { fore, hind: smooth(hind, kind === 'machaon' ? 2 : 3) };
+    }
+    function robeOf(kind, R) {
+      const C = p.couleurs.length ? p.couleurs : ['#e5452a', '#16161a'], pk = () => C[Math.floor(R() * C.length)];
+      if (kind === 'monarque') return { base: '#e9781f', base2: '#f3a03a', band: '#141414', vein: '#141414', dots: '#f6f1e6', spot: null, eye: null };
+      if (kind === 'morpho') return { base: '#2f7fe0', base2: '#6fd3ff', band: '#0d1220', vein: '#1a3c86', dots: '#cfe6ff', spot: null, eye: null, metal: true };
+      if (kind === 'citron') return { base: '#f2e04a', base2: '#f7ee8a', band: null, vein: '#c6b42a', dots: null, spot: '#e58a2a', eye: null };
+      if (kind === 'paon') return { base: '#a9322a', base2: '#c8503a', band: '#3a2522', vein: '#5a201a', dots: null, spot: null, eye: ['#2a2a2e', '#5aa0d8', '#f2d27a', '#2a1a18'] };
+      if (kind === 'machaon') return { base: '#f2d75a', base2: '#f7e9a2', band: '#16161a', vein: '#16161a', dots: '#f2d75a', spot: '#e5452a', eye: null, stripes: true, blue: '#3d6fd0' };
+      let b = pk(), c = pk(); if (c === b && C.length > 1) c = C[(C.indexOf(b) + 1) % C.length]; let d = pk();
+      return { base: b, base2: mix(b, '#ffffff', 0.25), band: c, vein: mix(b, '#000000', 0.35), dots: d !== c ? d : mix(c, '#ffffff', 0.7), spot: null, eye: R() < 0.4 ? [c, d, b, c] : null };
+    }
+    function wingPath(g, P) { g.beginPath(); P.forEach((q, i) => (i ? g.lineTo(q[0], q[1]) : g.moveTo(q[0], q[1]))); g.closePath(); }
+    function paintWing(g, P, r, hindwing, b) {
+      g.save(); wingPath(g, P); g.clip();
+      const gr = g.createRadialGradient(0, 0, 0, 0, 0, 1); gr.addColorStop(0, mix(r.base, '#000000', 0.25)); gr.addColorStop(0.35, r.base); gr.addColorStop(1, r.base2); g.fillStyle = gr; g.fillRect(-0.1, -1, 1.2, 2.1);
+      if (r.metal) { const g2 = g.createLinearGradient(0, -0.6, 0.9, 0.5); g2.addColorStop(0, 'rgba(255,255,255,0)'); g2.addColorStop(0.5, 'rgba(255,255,255,0.35)'); g2.addColorStop(1, 'rgba(255,255,255,0)'); g.fillStyle = g2; g.fillRect(-0.1, -1, 1.2, 2.1); }
+      if (r.stripes) { g.fillStyle = r.band; for (const [x, wd] of (hindwing ? [[0.1, 0.12]] : [[0.12, 0.08], [0.3, 0.07], [0.5, 0.1]])) { g.save(); g.rotate(hindwing ? 0.3 : -0.35); g.fillRect(x, -1.2, wd, 2.4); g.restore(); } }
+      // nervures
+      const base = [0.06, hindwing ? 0.04 : -0.02]; g.strokeStyle = r.vein; g.lineWidth = r.vein === '#141414' ? 0.022 : 0.012; g.globalAlpha = 0.85;
+      for (let k = 1; k < P.length; k += Math.max(1, Math.floor(P.length / 9))) { const q = P[k]; if (Math.hypot(q[0] - base[0], q[1] - base[1]) < 0.3) continue; g.beginPath(); g.moveTo(base[0], base[1]); g.quadraticCurveTo((base[0] + q[0]) / 2 + 0.05, (base[1] + q[1]) / 2, q[0], q[1]); g.stroke(); }
+      g.globalAlpha = 1;
+      // tache, ocelle, logo
+      if (r.spot && !hindwing) { g.fillStyle = r.spot; g.beginPath(); g.arc(0.5, -0.32, 0.06, 0, TAU); g.fill(); }
+      if (r.spot && hindwing && r.stripes) { g.fillStyle = r.spot; g.beginPath(); g.arc(0.16, 0.58, 0.05, 0, TAU); g.fill(); }
+      if (r.eye) { const [cx, cy, rr] = hindwing ? [0.45, 0.42, 0.13] : [0.7, -0.45, 0.12]; r.eye.forEach((c, i) => { g.fillStyle = c; g.beginPath(); g.arc(cx, cy, rr * (1 - i * 0.24), 0, TAU); g.fill(); }); }
+      if (b.logo && logoM && !hindwing) { g.save(); g.translate(0.5, -0.3); g.rotate(-0.25); g.scale(0.42, 0.42); g.beginPath(); for (const L of logoM) { L.forEach((q, i) => (i ? g.lineTo(q[0], q[1]) : g.moveTo(q[0], q[1]))); g.closePath(); } g.fillStyle = r.band || mix(r.base, '#000000', 0.6); g.globalAlpha = 0.92; g.fill('evenodd'); g.restore(); g.globalAlpha = 1; }
+      // bordure sombre ponctuée
+      if (r.band) { wingPath(g, P); g.lineWidth = hindwing ? 0.2 : 0.17; g.strokeStyle = r.band; g.stroke(); if (r.dots) { g.fillStyle = r.dots; for (let k = 0; k < P.length; k += 3) { const q = P[k], c = [0.4, hindwing ? 0.3 : -0.3], dx = c[0] - q[0], dy = c[1] - q[1], d = Math.hypot(dx, dy) || 1; if (Math.hypot(q[0], q[1]) < 0.45) continue; g.beginPath(); g.arc(q[0] + dx / d * 0.05, q[1] + dy / d * 0.05, 0.018, 0, TAU); g.fill(); } } }
+      if (r.blue && hindwing) { g.fillStyle = r.blue; for (let k = 0; k < 4; k++) { g.beginPath(); g.arc(0.3 + k * 0.1, 0.5 - k * 0.04, 0.03, 0, TAU); g.fill(); } }
+      g.restore();
+      wingPath(g, P); g.lineWidth = 0.01; g.strokeStyle = 'rgba(0,0,0,0.35)'; g.stroke();
+    }
+    function sprite(b) {
+      const dpr = app.size.dpr, S = Math.ceil(b.span * 0.5 * dpr * 1.05) + 2, c = document.createElement('canvas'); c.width = S; c.height = S * 2; const g = c.getContext('2d');
+      g.setTransform(S / 1.05, 0, 0, S / 1.05, 0, S); paintWing(g, b.w.hind, b.r, true, b); paintWing(g, b.w.fore, b.r, false, b);
+      const sh = document.createElement('canvas'); sh.width = S; sh.height = S * 2; const h = sh.getContext('2d'); h.drawImage(c, 0, 0); h.globalCompositeOperation = 'source-in'; h.fillStyle = '#000'; h.fillRect(0, 0, S, S * 2);
+      b.spr = c; b.shd = sh; b.S = S / dpr;
+    }
+
+    // ——— Prairie ———
+    function meadow(w, h) {
+      buildLogo();
+      const key = [p.nombre, p.taille, p.ecart, p.robe, p.logo, p.fleurs, p.couleurs.join(), logoKey, app.seed, w, h, app.size.dpr].join();
+      if (key === bKey && B) return B; bKey = key;
+      const R = rng(app.seed * 7919 + 3), m = Math.min(w, h), L = [], F = [];
+      const C = p.couleurs.length ? p.couleurs : ['#f4f1ea'];
+      for (let k = 0; k < p.fleurs; k++) F.push(flower(R() * w, R() * h, R, m));
+      for (let k = 0; k < p.nombre; k++) {
+        const kind = p.robe === 'mixte' ? ROBES[Math.floor(R() * ROBES.length)] : p.robe, span = m * p.taille * (1 + p.ecart * (R() * 2 - 1));
+        const b = { x: R() * w, y: R() * h, z: 0.5 + R() * 0.5, a: R() * TAU, v: 0, ph: R() * TAU, span, kind, w: wings(kind, R), r: robeOf(kind, R), logo: R() < p.logo, st: 'vol', tm: 0, n0: R() * 100, fr: 0.8 + R() * 0.4, tgt: null };
+        sprite(b); L.push(b);
+      }
+      // quelques-uns sont déjà posés
+      L.forEach((b, i) => { if (F.length && i % 3 === 0) { const f = F[i % F.length]; b.x = f.x; b.y = f.y; b.st = 'pose'; b.z = 0; b.tm = 2 + R() * 4; b.tgt = f; } });
+      B = { L, F, R, w, h }; return B;
+    }
+    function flower(x, y, R, m) { const C = p.couleurs.length ? p.couleurs : ['#f4f1ea']; const c = R() < 0.5 ? '#f6f3ea' : C[Math.floor(R() * C.length)]; return { x, y, r: m * (0.018 + R() * 0.02), n: 7 + Math.floor(R() * 7), c, a: R() * TAU, k: R() < 0.5 ? '#f2c230' : '#7a4a20' }; }
+    function plant(x, y) { const m = Math.min(B.w, B.h), f = flower(x, y, B.R, m); f.r *= 1.3; f.grow = 0; B.F.push(f); if (B.F.length > p.fleurs + 20) B.F.shift(); let best = null, bd = Infinity; for (const b of B.L) { if (b.st === 'pose') continue; const d = Math.hypot(b.x - x, b.y - y); if (d < bd) { bd = d; best = b; } } if (best) best.tgt = f; }
+
+    function step(dt) {
+      const { L, F, w, h, R } = B, m = Math.min(w, h);
+      for (const f of F) if (f.grow !== undefined && f.grow < 1) f.grow = Math.min(1, f.grow + dt * 3);
+      for (const b of L) {
+        b.ph += dt * TAU * p.battement * b.fr * (b.st === 'pose' ? 0.12 : 1);
+        if (b.st === 'pose') {
+          b.tm -= dt; b.z = Math.max(0, b.z - dt * 2);
+          const scared = ptr && ptr.v > m * 1.2 && simT - ptr.mt < 0.2 && Math.hypot(ptr.x - b.x, ptr.y - b.y) < m * 0.18;
+          if (b.tm <= 0 || scared) { b.st = 'vol'; b.tgt = null; b.v = m * 0.2; if (scared) { b.a = Math.atan2(b.y - ptr.y, b.x - ptr.x); b.flee = 1.2; } }
+          continue;
+        }
+        b.z += ((b.flee ? 1 : 0.75) - b.z) * Math.min(1, dt * 2);
+        // cap : bruit, cible, bords, pointeur
+        const er = p.erratique, n = Math.sin(simT * 2.3 + b.n0) + Math.sin(simT * 3.7 + b.n0 * 1.3) * 0.6; let da = n * er * 3 * dt;
+        if (!b.tgt && F.length && R() < dt * 0.15 * p.pose) b.tgt = F[Math.floor(R() * F.length)];
+        else if (!F.length && !b.flee && R() < dt * 0.12 * p.pose) { b.st = 'pose'; b.tm = 2 + R() * 6 * p.pose; continue; } // sans fleurs, il se pose où il est
+        if (b.tgt && !b.flee) { const ta = Math.atan2(b.tgt.y - b.y, b.tgt.x - b.x), d = Math.hypot(b.tgt.y - b.y, b.tgt.x - b.x); da += (((ta - b.a + Math.PI * 3) % TAU) - Math.PI) * Math.min(1, dt * (2 + 3 * (1 - er))); if (d < b.span * 0.12) { b.st = 'pose'; b.tm = 2 + R() * 6 * p.pose; b.x = b.tgt.x; b.y = b.tgt.y; continue; } }
+        const mg = b.span; let bx = 0, by = 0; if (b.x < mg) bx = 1; if (b.x > w - mg) bx = -1; if (b.y < mg) by = 1; if (b.y > h - mg) by = -1;
+        if (bx || by) { const ta = Math.atan2(by, bx); da += (((ta - b.a + Math.PI * 3) % TAU) - Math.PI) * dt * 3; }
+        if (ptr && ptr.v > m * 1.2 && simT - ptr.mt < 0.2) { const d = Math.hypot(ptr.x - b.x, ptr.y - b.y); if (d < m * 0.18) { b.a = Math.atan2(b.y - ptr.y, b.x - ptr.x); b.flee = 1.2; b.tgt = null; } }
+        b.a += da; if (b.flee) b.flee = Math.max(0, b.flee - dt);
+        // élan au coup d'aile
+        const stroke = Math.max(0, Math.sin(b.ph)), vt = m * 0.09 * p.vitesse * (0.5 + stroke) * (b.flee ? 2.6 : 1); b.v += (vt - b.v) * Math.min(1, dt * 6);
+        b.x += Math.cos(b.a) * b.v * dt; b.y += Math.sin(b.a) * b.v * dt;
+      }
+    }
+
+    // ——— Dessin ———
+    function open(b) { if (b.st === 'pose') return 0.45 + 0.55 * (0.5 + 0.5 * Math.sin(b.ph)); const c = 0.5 + 0.5 * Math.cos(b.ph); return 0.1 + 0.9 * Math.pow(c, 0.7); }
+    function drawBody(g, b) {
+      const s = b.span * 0.5; g.fillStyle = b.kind === 'citron' ? '#4a4020' : '#1c1814';
+      g.beginPath(); g.ellipse(0, s * 0.18, s * 0.045, s * 0.32, 0, 0, TAU); g.fill();
+      g.beginPath(); g.ellipse(0, -s * 0.06, s * 0.06, s * 0.1, 0, 0, TAU); g.fill();
+      g.beginPath(); g.arc(0, -s * 0.18, s * 0.045, 0, TAU); g.fill();
+      g.strokeStyle = g.fillStyle; g.lineWidth = Math.max(0.6, s * 0.012); g.lineCap = 'round';
+      for (const sx of [1, -1]) { g.beginPath(); g.moveTo(0, -s * 0.2); g.quadraticCurveTo(sx * s * 0.05, -s * 0.4, sx * s * 0.14, -s * 0.5); g.stroke(); g.beginPath(); g.arc(sx * s * 0.14, -s * 0.5, s * 0.018, 0, TAU); g.fill(); }
+    }
+    function drawFly(g, b, shadow) {
+      const o = open(b), S = b.S;
+      g.save(); g.translate(b.x, b.y); g.rotate(b.a + Math.PI / 2);
+      const im = shadow ? b.shd : b.spr;
+      g.save(); g.scale(o, 1); g.drawImage(im, 0, -S, S, S * 2); g.restore();
+      g.save(); g.scale(-o, 1); g.drawImage(im, 0, -S, S, S * 2); g.restore();
+      if (!shadow) drawBody(g, b);
+      g.restore();
+    }
+    function drawFlower(g, f) {
+      const s = f.grow === undefined ? 1 : f.grow; if (s <= 0) return; g.save(); g.translate(f.x, f.y); g.rotate(f.a); g.scale(s, s);
+      g.fillStyle = 'rgba(0,0,0,0.16)'; g.beginPath(); g.arc(f.r * 0.15, f.r * 0.22, f.r * 1.05, 0, TAU); g.fill();
+      g.fillStyle = f.c; for (let k = 0; k < f.n; k++) { g.save(); g.rotate(k / f.n * TAU); g.beginPath(); g.ellipse(f.r * 0.55, 0, f.r * 0.48, f.r * 0.17, 0, 0, TAU); g.fill(); g.restore(); }
+      g.fillStyle = f.k; g.beginPath(); g.arc(0, 0, f.r * 0.3, 0, TAU); g.fill(); g.restore();
+    }
+    function ground(w, h, dpr) {
+      const key = [w, h, dpr, p.sol, p.fond, app.seed].join(); if (GR && grKey === key) return GR; grKey = key;
+      GR = document.createElement('canvas'); GR.width = Math.ceil(w * dpr); GR.height = Math.ceil(h * dpr); const g = GR.getContext('2d'), R = rng(app.seed * 17 + 2); g.setTransform(dpr, 0, 0, dpr, 0, 0);
+      g.fillStyle = p.fond; g.fillRect(0, 0, w, h); const m = Math.min(w, h);
+      if (p.sol === 'herbe') { g.lineCap = 'round'; for (let k = 0; k < w * h / 60; k++) { const x = R() * w, y = R() * h, l = m * (0.008 + R() * 0.018), a = -Math.PI / 2 + (R() - 0.5) * 1.4; g.strokeStyle = mix(p.fond, R() < 0.5 ? '#000000' : '#d8e8a0', R() * 0.3); g.lineWidth = Math.max(0.6, m * 0.0016); g.beginPath(); g.moveTo(x, y); g.lineTo(x + Math.cos(a) * l, y + Math.sin(a) * l); g.stroke(); } }
+      else if (p.sol === 'planche') { g.strokeStyle = mix(p.fond, '#000000', 0.15); g.lineWidth = 1; const st = m * 0.1; for (let x = st / 2; x < w; x += st) for (let y = st / 2; y < h; y += st) { g.beginPath(); g.moveTo(x - 4, y); g.lineTo(x + 4, y); g.moveTo(x, y - 4); g.lineTo(x, y + 4); g.stroke(); } }
+      else for (let k = 0; k < w * h / 400; k++) { g.fillStyle = R() < 0.5 ? 'rgba(0,0,0,0.05)' : 'rgba(255,255,255,0.05)'; g.fillRect(R() * w, R() * h, 1.5, 1.5); }
+      return GR;
+    }
+
+    app.loop((t, dt) => {
+      dt = Math.min(1 / 20, dt || 0);
+      const { w, h, dpr } = app.size; meadow(w, h);
+      if (app.thumbnail) { if (!B.th) { B.th = true; for (let k = 0; k < 40; k++) { simT += 1 / 30; step(1 / 30); } B.L.forEach((b, i) => { b.ph = i * 1.3; }); } }
+      else { simT += dt; step(dt); }
+      ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.drawImage(ground(w, h, dpr), 0, 0); ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      for (const f of B.F) drawFlower(ctx, f);
+      const order = B.L.slice().sort((a, b) => a.z - b.z);
+      for (const b of order) { const off = b.span * (0.04 + b.z * 0.35); ctx.save(); ctx.globalAlpha = 0.22 * (1 - b.z * 0.4); ctx.translate(off * 0.6, off); drawFly(ctx, b, true); ctx.restore(); }
+      for (const b of order) drawFly(ctx, b, false);
+      app.finish(ctx);
+    });
+
+    function toSVG() {
+      const { w, h } = app.size, f2 = (v) => +v.toFixed(2); meadow(w, h);
+      let s = `<rect width="100%" height="100%" fill="${p.fond}"/>`, defs = '';
+      for (const f of B.F) { let g = `<g transform="translate(${f2(f.x)} ${f2(f.y)}) rotate(${f2(f.a * 180 / Math.PI)})"><circle cx="${f2(f.r * 0.15)}" cy="${f2(f.r * 0.22)}" r="${f2(f.r * 1.05)}" fill="#000" opacity="0.16"/><g fill="${f.c}">`; for (let k = 0; k < f.n; k++) g += `<ellipse transform="rotate(${f2(k / f.n * 360)})" cx="${f2(f.r * 0.55)}" rx="${f2(f.r * 0.48)}" ry="${f2(f.r * 0.17)}"/>`; s += g + `</g><circle r="${f2(f.r * 0.3)}" fill="${f.k}"/></g>`; }
+      const pathOf = (P) => 'M' + P.map((q) => q[0].toFixed(3) + ' ' + q[1].toFixed(3)).join('L') + 'Z';
+      B.L.slice().sort((a, b) => a.z - b.z).forEach((b, bi) => {
+        const o = open(b), sc = b.span * 0.5 / 1.0, r = b.r; let half = '';
+        for (const [P, hw] of [[b.w.hind, true], [b.w.fore, false]]) {
+          const id = `w${bi}${hw ? 'h' : 'f'}`; defs += `<clipPath id="${id}"><path d="${pathOf(P)}"/></clipPath>`;
+          half += `<g clip-path="url(#${id})"><path d="${pathOf(P)}" fill="${r.base}"/>`;
+          if (r.eye) { const [cx, cy, rr] = hw ? [0.45, 0.42, 0.13] : [0.7, -0.45, 0.12]; r.eye.forEach((c, i) => { half += `<circle cx="${cx}" cy="${cy}" r="${(rr * (1 - i * 0.24)).toFixed(3)}" fill="${c}"/>`; }); }
+          if (b.logo && logoM && !hw) half += `<path transform="translate(0.5 -0.3) rotate(-14.3) scale(0.42)" fill-rule="evenodd" fill="${r.band || mix(r.base, '#000000', 0.6)}" d="${logoM.map((L) => 'M' + L.map((q) => q[0].toFixed(3) + ' ' + q[1].toFixed(3)).join('L') + 'Z').join('')}"/>`;
+          if (r.band) half += `<path d="${pathOf(P)}" fill="none" stroke="${r.band}" stroke-width="${hw ? 0.2 : 0.17}"/>`;
+          half += '</g>';
+        }
+        const hid = 'b' + bi; defs += `<g id="${hid}">${half}</g>`;
+        s += `<g transform="translate(${f2(b.x)} ${f2(b.y)}) rotate(${f2((b.a + Math.PI / 2) * 180 / Math.PI)})"><use href="#${hid}" transform="scale(${f2(sc * o)} ${f2(sc)})"/><use href="#${hid}" transform="scale(${f2(-sc * o)} ${f2(sc)})"/><ellipse cy="${f2(sc * 0.18)}" rx="${f2(sc * 0.045)}" ry="${f2(sc * 0.32)}" fill="#1c1814"/><ellipse cy="${f2(-sc * 0.06)}" rx="${f2(sc * 0.06)}" ry="${f2(sc * 0.1)}" fill="#1c1814"/></g>`;
+      });
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><defs>${defs}</defs>${s}</svg>`;
+    }
+  </script>
+</body>
+</html>

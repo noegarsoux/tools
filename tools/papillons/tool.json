@@ -1,0 +1,22 @@
+{
+  "slug": "papillons",
+  "title": "Papillons",
+  "type": "motion",
+  "description": "Des papillons aux ailes ornées d'ocelles, de nervures et du logo volettent au-dessus d'une prairie, se posent sur les fleurs et fuient le pointeur.",
+  "tags": [
+    "animaux",
+    "vol",
+    "motif",
+    "symetrie",
+    "logo",
+    "svg"
+  ],
+  "inspiration": [
+    "Les planches entomologiques des cabinets de curiosités",
+    "Les ocelles des ailes de paon du jour",
+    "Les prairies fleuries en été"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}
