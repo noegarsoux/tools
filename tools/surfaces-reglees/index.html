@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Surfaces réglées</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Surfaces réglées : des surfaces courbes engendrées par une droite qui se déplace. Deux cercles reliés par des
+    // fils, puis tordus l'un par rapport à l'autre : le cylindre devient hyperboloïde, puis cône. La selle (paraboloïde
+    // hyperbolique) porte deux familles de droites, l'hélicoïde est un escalier de droites autour d'un axe, le ruban de
+    // Möbius une droite qui tourne d'un demi-tour en faisant le tour du cercle. Projection en perspective, sans WebGL.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const BIEN = PAL('biennale'), GLY = PAL('glyphes'), SAL = PAL('salon'), MEN = PAL('menthe'), KB = PAL('kegelbahn');
+
+    let yawU = 0, tiltU = 0, held = null, simT = 0, mask = null, mW = 0, mH = 0, maskKey = '';
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: false,
+      finish: { grain: 0.03, vignette: 0.12 },
+      hint: 'Glissez pour tourner la surface · molette : nombre de fils',
+      notes: 'Une surface réglée est faite de droites : par chacun de ses points passe au moins une droite entièrement contenue dans la surface. Tendez des fils entre deux cercles, puis faites tourner un cercle : le cylindre se pince en hyperboloïde, la forme des tours de Choukhov et des cheminées de centrales, faite uniquement de poutres droites. Avec deux familles de fils croisés, la surface devient rigide. La selle, ou paraboloïde hyperbolique, couvre les toits de Félix Candela ; l\'hélicoïde est un escalier à vis ; le ruban de Möbius n\'a qu\'une face et qu\'un bord. La torsion respire lentement, et la surface tourne sur elle-même.',
+      params: {
+        'Surface': {
+          surface: { type: 'select', label: 'Surface', options: { hyperboloide: 'Hyperboloïde', selle: 'Selle', helicoide: 'Hélicoïde', mobius: 'Ruban de Möbius', cone: 'Double cône' }, value: 'hyperboloide' },
+          fils: { type: 'range', label: 'Fils', min: 8, max: 400, step: 1, value: 90 },
+          torsion: { type: 'range', label: 'Torsion', min: 0, max: 1, step: 0.01, value: 0.62 },
+          double: { type: 'toggle', label: 'Deux familles de fils', value: true, show: (q) => q.surface !== 'mobius' && q.surface !== 'helicoide' },
+          hauteur: { type: 'range', label: 'Hauteur', min: 0.3, max: 2, step: 0.01, value: 1.1 },
+          ecartement: { type: 'range', label: 'Largeur', min: 0.3, max: 1.4, step: 0.01, value: 1 },
+        },
+        'Mouvement': {
+          rotation: { type: 'range', label: 'Rotation (°/s)', min: -60, max: 60, step: 0.5, value: 12 },
+          respiration: { type: 'range', label: 'Respiration de la torsion', min: 0, max: 1, step: 0.01, value: 0.35 },
+          rythme: { type: 'range', label: 'Durée d\'une respiration (s)', min: 2, max: 30, step: 0.5, value: 9 },
+          inclinaison: { type: 'range', label: 'Inclinaison', min: -80, max: 80, step: 1, value: 18 },
+          perspective: { type: 'range', label: 'Perspective', min: 0, max: 1, step: 0.01, value: 0.35 },
+        },
+        'Logo dans les fils': {
+          logo: { type: 'toggle', label: 'Fils colorés dans le logo', value: false },
+          image: { type: 'file', label: 'Logo', accept: 'image/*', show: (q) => q.logo },
+        },
+        'Trait': {
+          epaisseur: { type: 'range', label: 'Épaisseur', min: 0.3, max: 4, step: 0.05, value: 1 },
+          intensite: { type: 'range', label: 'Opacité', min: 0.1, max: 1, step: 0.01, value: 0.85 },
+          profondeur: { type: 'range', label: 'Effacement au fond', min: 0, max: 1, step: 0.01, value: 0.65 },
+          teinte: { type: 'segmented', label: 'Couleur selon', options: { fil: 'Fil', famille: 'Famille', profondeur: 'Profondeur' }, value: 'fil' },
+        },
+        'Couleurs': {
+          fond: { type: 'color', label: 'Fond', value: '#0f0f13' },
+          couleurs: { type: 'palette', label: 'Fils', value: ['#486cfc', '#f272ba', '#ef5a2f', '#edd14b'] },
+          accent: { type: 'color', label: 'Logo', value: '#f4f1ea' },
+        },
+      },
+      presets: {
+        'Hyperboloïde': {},
+        'Tour': { surface: 'hyperboloide', fils: 70, torsion: 0.5, hauteur: 1.7, ecartement: 0.7, double: true, teinte: 'famille', couleurs: ['#f4f1ea', '#ef5a2f'], rotation: 8, inclinaison: 8, epaisseur: 1.2 },
+        'Selle': { surface: 'selle', fils: 40, torsion: 0.7, double: true, teinte: 'famille', couleurs: ['#486cfc', '#edd14b'], inclinaison: 28, hauteur: 1, rotation: 10, epaisseur: 1.1 },
+        'Hélicoïde': { surface: 'helicoide', fils: 160, torsion: 0.45, hauteur: 1.6, ecartement: 0.9, teinte: 'fil', couleurs: ['#7fe0c2', '#486cfc', '#f272ba'], inclinaison: 14, rotation: 14 },
+        'Möbius': { surface: 'mobius', fils: 220, torsion: 0, ecartement: 1, hauteur: 1, teinte: 'fil', couleurs: ['#edd14b', '#ef5a2f', '#f272ba', '#486cfc', '#edd14b'], inclinaison: 32, rotation: 10, respiration: 0.5, epaisseur: 0.9 },
+        'Sablier': { surface: 'cone', fils: 120, torsion: 0.3, double: false, hauteur: 1.4, teinte: 'profondeur', couleurs: ['#3a3a44', '#f4f1ea'], inclinaison: 22, rotation: 18 },
+        'Fil de soie': { surface: 'hyperboloide', fils: 360, torsion: 0.78, double: false, epaisseur: 0.4, intensite: 0.6, profondeur: 0.8, couleurs: ['#f4f1ea', '#edd14b'], rotation: 6 },
+        'Logo': { logo: true, surface: 'hyperboloide', fils: 260, torsion: 0.55, double: true, hauteur: 1.2, ecartement: 1.25, couleurs: ['#3a3a44', '#4a4a56'], accent: '#ef5a2f', epaisseur: 0.9, profondeur: 0.3, inclinaison: 10 },
+        'Biennale': { surface: 'selle', fils: 44, fond: BIEN[0], couleurs: [BIEN[1], BIEN[2], BIEN[3]], teinte: 'fil', epaisseur: 2, intensite: 1, profondeur: 0.4, double: true, inclinaison: 30 },
+        'Menthe': { surface: 'helicoide', fils: 120, fond: MEN[1], couleurs: [MEN[2], MEN[3], MEN[0]], hauteur: 1.4, torsion: 0.6 },
+        'Kegelbahn': { surface: 'hyperboloide', fils: 60, fond: KB[0], couleurs: [KB[1], KB[2]], teinte: 'famille', epaisseur: 1.6, hauteur: 1.3, torsion: 0.7 },
+      },
+      brand(colors) {
+        const s = colors.slice().sort((a, b) => lum(a) - lum(b)), rest = s.slice(1);
+        return { fond: s[0], couleurs: rest.length ? rest : ['#ffffff'], accent: s[s.length - 1] };
+      },
+      pointer: {
+        down: (q) => { held = { x: q.x, y: q.y, yaw: yawU, tilt: tiltU }; },
+        drag: (q) => { if (!held) return; yawU = held.yaw + (q.x - held.x) / app.size.w * TAU * 0.8; tiltU = Math.max(-1.3, Math.min(1.3, held.tilt + (q.y - held.y) / app.size.h * Math.PI * 0.8)); },
+        up: () => { held = null; },
+        wheel: (q, dy) => app.set('fils', Math.max(8, Math.min(400, p.fils + (dy > 0 ? -4 : 4)))),
+      },
+      onChange(k) { if (k === 'image' || k === 'logo' || k === '*') maskKey = ''; if (k === '*') { yawU = 0; tiltU = 0; } },
+      export: { name: 'surfaces-reglees', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    function hex(x) { const n = parseInt(x.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
+    function lum(x) { const c = hex(x); return (c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114) / 255; }
+    function mix(a, b, t) { const A = hex(a), B = hex(b); return '#' + A.map((v, i) => Math.round(v + (B[i] - v) * t).toString(16).padStart(2, '0')).join(''); }
+
+    // ——— Les fils : segments 3D (x, y vers le bas, z), avec leur rang et leur famille ———
+    function lines(tw, ph) {
+      const n = p.fils, H = p.hauteur, Wd = p.ecartement, L = [];
+      const push = (ax, ay, az, bx, by, bz, t, fam) => L.push({ ax, ay, az, bx, by, bz, t, fam });
+      if (p.surface === 'hyperboloide' || p.surface === 'cone') {
+        // cône : la torsion part d'un demi-tour (tous les fils passent par le centre) ; hyperboloïde : de zéro (cylindre)
+        const tau = p.surface === 'cone' ? Math.PI * (1 - tw * 0.6) : tw * Math.PI * 0.94;
+        const fams = p.double ? [1, -1] : [1];
+        fams.forEach((sg, fi) => { for (let i = 0; i < n; i++) { const a = i / n * TAU + ph * 0.15; push(Math.cos(a) * Wd, -H, Math.sin(a) * Wd, Math.cos(a + sg * tau) * Wd, H, Math.sin(a + sg * tau) * Wd, i / n, fi); } });
+      } else if (p.surface === 'selle') {
+        // paraboloïde hyperbolique y = k·u·v sur le carré : droites u = cste et v = cste
+        const k = (tw * 2 - 0.15) * H, m = Math.max(2, Math.round(n / (p.double ? 2 : 1)));
+        for (let i = 0; i < m; i++) { const u = (i / (m - 1)) * 2 - 1; push(u * Wd, -k * u * -1, -Wd, u * Wd, -k * u, Wd, i / (m - 1), 0); }
+        if (p.double) for (let i = 0; i < m; i++) { const v = (i / (m - 1)) * 2 - 1; push(-Wd, -k * -1 * v, v * Wd, Wd, -k * v, v * Wd, i / (m - 1), 1); }
+      } else if (p.surface === 'helicoide') {
+        const turns = 0.25 + tw * 2.2;
+        for (let i = 0; i < n; i++) { const y = (i / (n - 1)) * 2 - 1, a = y * turns * Math.PI + ph * 0.3; push(-Math.cos(a) * Wd, y * H, -Math.sin(a) * Wd, Math.cos(a) * Wd, y * H, Math.sin(a) * Wd, i / (n - 1), 0); }
+      } else {
+        // Möbius : un nombre impair de demi-tours ; le ruban glisse le long de lui-même
+        const half = 2 * Math.floor(Math.min(0.999, tw) * 3) + 1, w = 0.42 * Wd;
+        for (let i = 0; i < n; i++) {
+          const u = i / n * TAU, a = u * half / 2 + ph * 0.5, cx = Math.cos(u), cz = Math.sin(u), dr = Math.cos(a) * w, dy = Math.sin(a) * w * H;
+          push((1 + dr) * cx, dy, (1 + dr) * cz, (1 - dr) * cx, -dy, (1 - dr) * cz, i / n, 0);
+        }
+      }
+      return L;
+    }
+
+    // ——— Projection ———
+    function camera(w, h, t) {
+      const yaw = t * p.rotation * Math.PI / 180 + yawU, tilt = p.inclinaison * Math.PI / 180 + tiltU, D = 2.2 + (1 - p.perspective) * 30;
+      const ext = Math.max(1.45 * Math.max(p.ecartement, 0.75), p.hauteur * 1.1 + 0.3), R = Math.min(w, h) * 0.52 / ext * (D / (D - 0.0)) * (1 - p.perspective * 0.18);
+      const cy = Math.cos(yaw), sy = Math.sin(yaw), ct = Math.cos(tilt), st = Math.sin(tilt);
+      return (x, y, z) => {
+        const x1 = x * cy - z * sy, z1 = x * sy + z * cy; const y2 = y * ct - z1 * st, z2 = y * st + z1 * ct;
+        const s = D / (D + z2); return [w / 2 + x1 * R * s, h / 2 + y2 * R * s, z2];
+      };
+    }
+
+    function buildMask(w, h) {
+      const img0 = p.image || app.logoImg, key = [w, h, img0 ? (img0.src || 'c') : 'demo'].join();
+      if (key === maskKey) return; maskKey = key;
+      const k = 0.5; mW = Math.ceil(w * k); mH = Math.ceil(h * k);
+      const c = document.createElement('canvas'); c.width = mW; c.height = mH; const x = c.getContext('2d', { willReadFrequently: true });
+      const L = Math.min(mW, mH) * 0.5, cx = mW / 2, cy = mH / 2;
+      if (img0) { const iw = img0.naturalWidth || img0.width, ih = img0.naturalHeight || img0.height, s = L / Math.max(iw, ih); x.drawImage(img0, cx - iw * s / 2, cy - ih * s / 2, iw * s, ih * s); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(cx, cy, L * 0.48, 0, TAU); x.arc(cx, cy, L * 0.27, 0, TAU, true); x.fill('evenodd'); x.fillRect(cx - L * 0.07, cy - L * 0.5, L * 0.14, L); }
+      const N = mW * mH, d = x.getImageData(0, 0, mW, mH).data; let transp = 0; for (let i = 3; i < d.length; i += 4) if (d[i] < 128) transp++;
+      const useA = transp > N * 0.05; mask = new Uint8Array(N);
+      for (let i = 0; i < N; i++) { const l = (d[i * 4] * 0.2126 + d[i * 4 + 1] * 0.7152 + d[i * 4 + 2] * 0.0722) / 255; mask[i] = (useA ? d[i * 4 + 3] > 128 : d[i * 4 + 3] > 128 && l < 0.5) ? 1 : 0; }
+    }
+    const inMask = (x, y) => { const i = (x * 0.5) | 0, j = (y * 0.5) | 0; return i >= 0 && j >= 0 && i < mW && j < mH && mask[j * mW + i] === 1; };
+
+    // ——— Segments écran regroupés par couleur et par opacité (profondeur) ———
+    const QC = 14, QA = 8;
+    function twistAt(t) { const b = p.respiration * 0.5 * Math.sin(t / p.rythme * TAU); return Math.max(0, Math.min(1, p.torsion + b)); }
+    function bins(w, h, t) {
+      const L = lines(twistAt(t), t), P = camera(w, h, t), out = new Map(), logo = p.logo && mask;
+      // surfaces fermées : le dégradé fait l'aller-retour, sans couture
+      const closed = p.surface === 'hyperboloide' || p.surface === 'cone' || p.surface === 'mobius';
+      const proj = L.map((l) => [P(l.ax, l.ay, l.az), P(l.bx, l.by, l.bz), l]);
+      let z0 = Infinity, z1 = -Infinity; for (const [a, b] of proj) { z0 = Math.min(z0, a[2], b[2]); z1 = Math.max(z1, a[2], b[2]); }
+      const add = (key, x0, y0, x1, y1) => { let A = out.get(key); if (!A) out.set(key, (A = [])); A.push(x0, y0, x1, y1); };
+      for (const [a, b, l] of proj) {
+        // la profondeur varie le long du fil : on le coupe en quelques tronçons
+        const segs = Math.max(1, Math.min(10, Math.round(Math.abs(a[2] - b[2]) / Math.max(1e-6, z1 - z0) * 10)));
+        for (let s = 0; s < segs; s++) {
+          const u0 = s / segs, u1 = (s + 1) / segs, zm = a[2] + (b[2] - a[2]) * (u0 + u1) / 2, dn = z1 > z0 ? (zm - z0) / (z1 - z0) : 0.5;
+          const aq = Math.max(0, Math.min(QA - 1, Math.round((1 - p.profondeur * dn) * (QA - 1))));
+          let cq;
+          if (p.teinte === 'fil') cq = Math.round((closed ? 1 - Math.abs(2 * l.t - 1) : l.t) * (QC - 1));
+          else if (p.teinte === 'famille') cq = l.fam ? QC - 1 : 0;
+          else cq = Math.round((1 - dn) * (QC - 1));
+          const x0 = a[0] + (b[0] - a[0]) * u0, y0 = a[1] + (b[1] - a[1]) * u0, x1 = a[0] + (b[0] - a[0]) * u1, y1 = a[1] + (b[1] - a[1]) * u1;
+          if (!logo) { add(cq * QA + aq, x0, y0, x1, y1); continue; }
+          const len = Math.hypot(x1 - x0, y1 - y0), st = Math.max(1, Math.ceil(len / 3)); let prev = inMask(x0, y0), sx = x0, sy = y0;
+          for (let k = 1; k <= st; k++) {
+            const ex = x0 + (x1 - x0) * k / st, ey = y0 + (y1 - y0) * k / st, cur = k === st ? prev : inMask(ex, ey);
+            if (cur !== prev || k === st) { add(prev ? -1 - aq : cq * QA + aq, sx, sy, ex, ey); sx = ex; sy = ey; prev = cur; }
+          }
+        }
+      }
+      return out;
+    }
+    function colorOfKey(key) {
+      if (key < 0) return p.accent;
+      const C = p.couleurs.length ? p.couleurs : ['#ffffff'], t = Math.floor(key / QA) / (QC - 1);
+      if (C.length === 1) return C[0];
+      if (p.teinte === 'famille') return t > 0.5 ? C[C.length - 1] : C[0];
+      const u = t * (C.length - 1), i = Math.min(C.length - 2, Math.floor(u)); return mix(C[i], C[i + 1], u - i);
+    }
+    const alphaOfKey = (key) => { const aq = key < 0 ? -1 - key : key % QA; return p.intensite * (0.12 + 0.88 * aq / (QA - 1)); };
+    const orderKeys = (out) => [...out.keys()].sort((a, b) => alphaOfKey(a) - alphaOfKey(b) || (a < 0) - (b < 0));
+
+    app.loop((t, dt) => {
+      dt = Math.min(0.1, dt || 0);
+      if (!app.thumbnail && !held) simT += dt;
+      const { w, h, dpr } = app.size;
+      if (p.logo) buildMask(w, h);
+      const out = bins(w, h, simT);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = p.fond; ctx.fillRect(0, 0, w, h);
+      ctx.lineCap = 'round'; ctx.lineWidth = p.epaisseur;
+      for (const key of orderKeys(out)) {
+        const A = out.get(key), P2 = new Path2D(); for (let i = 0; i < A.length; i += 4) { P2.moveTo(A[i], A[i + 1]); P2.lineTo(A[i + 2], A[i + 3]); }
+        ctx.globalAlpha = alphaOfKey(key); ctx.strokeStyle = colorOfKey(key); ctx.stroke(P2);
+      }
+      ctx.globalAlpha = 1;
+      app.finish(ctx);
+    });
+
+    function toSVG() {
+      const { w, h } = app.size, f = (v) => +v.toFixed(2);
+      if (p.logo) buildMask(w, h);
+      const out = bins(w, h, simT); let body = '';
+      for (const key of orderKeys(out)) {
+        const A = out.get(key); let d = ''; for (let i = 0; i < A.length; i += 4) d += `M${f(A[i])} ${f(A[i + 1])}L${f(A[i + 2])} ${f(A[i + 3])}`;
+        body += `<path d="${d}" stroke="${colorOfKey(key)}" stroke-opacity="${f(alphaOfKey(key))}"/>`;
+      }
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><rect width="100%" height="100%" fill="${p.fond}"/><g fill="none" stroke-width="${f(p.epaisseur)}" stroke-linecap="round">${body}</g></svg>`;
+    }
+  </script>
+</body>
+</html>
