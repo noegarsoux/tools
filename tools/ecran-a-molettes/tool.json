@@ -1,0 +1,15 @@
+{
+  "slug": "ecran-a-molettes",
+  "title": "Écran à molettes",
+  "type": "motion",
+  "description": "Le jouet à dessin à deux molettes : la pointe trace le logo d’un seul trait, puis des spirales, des Lissajous ou des escaliers, et l’écran se secoue pour tout effacer.",
+  "tags": ["animation", "jouet", "trace", "interaction", "logo", "svg"],
+  "inspiration": [
+    "Les écrans à dessin à poudre d’aluminium et leurs deux molettes",
+    "Le dessin d’un seul trait, sans lever le crayon",
+    "Les courbes de Lissajous des oscilloscopes"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}
