@@ -1,0 +1,15 @@
+{
+  "slug": "bassin-carpes",
+  "title": "Bassin aux carpes",
+  "type": "motion",
+  "description": "Des carpes koï nagent en ondulant dans un bassin vu d'en haut, sous les nénuphars, au-dessus du logo posé au fond ; on leur jette du grain pour les attirer.",
+  "tags": ["eau", "animaux", "nage", "simulation", "logo", "svg"],
+  "inspiration": [
+    "Les bassins à koï des jardins japonais",
+    "Les Nymphéas de Monet",
+    "Les reflets de lumière au fond des piscines"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}

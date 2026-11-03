@@ -1,0 +1,316 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Bassin aux carpes</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Bassin aux carpes : chaque carpe est une colonne vertébrale de points qui suivent la tête à distance fixe.
+    // La tête avance en zigzaguant légèrement (oscillation latérale) : le corps reprend ce tracé et ondule tout seul.
+    // Le corps est un contour bâti sur cette colonne avec un profil de largeur ; les taches de la robe sont des
+    // disques découpés dans ce contour. Cap : errance + séparation entre voisines + évitement des bords,
+    // + attirance du grain le plus proche, + fuite devant le pointeur qui remue l'eau.
+    // Au fond : le logo, ondulé par bandes, et un réseau de caustiques (deux couches de lignes iso d'un bruit, qui glissent).
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const MEN = PAL('menthe'), THE = PAL('thermique'), GLY = PAL('glyphes'), CODE = PAL('code');
+    const KOI = { blanc: '#f3eee4', rouge: '#d9442a', noir: '#17171a', or: '#e4a83c', orange: '#ef7a2a', creme: '#f6e2b8' };
+
+    let simT = 0, vKey = '', logoM = null, logoKey = '', ptr = null, P = null, pKey = '', CA = null, LG = null, lgKey = '';
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.04, vignette: 0.22 },
+      hint: 'Clic : jeter du grain · glissez pour remuer l\'eau · molette : taille des carpes',
+      notes: 'Vues d\'en haut, les carpes koï ne font qu\'onduler : la tête oscille un peu de part et d\'autre et le corps reprend ce tracé, comme un ruban. Ici, chacune porte sa robe (kohaku blanc et rouge, showa noir, tancho au point rouge, ogon doré, ou les couleurs de la palette), glisse sous les nénuphars et au-dessus du logo posé au fond, que la lumière du soleil couvre de caustiques. Cliquez pour jeter du grain : elles accourent. Glissez pour remuer l\'eau.',
+      params: {
+        'Carpes': {
+          nombre: { type: 'range', label: 'Nombre', min: 1, max: 60, step: 1, value: 14 },
+          taille: { type: 'range', label: 'Taille', min: 0.08, max: 0.5, step: 0.005, value: 0.2 },
+          vitesse: { type: 'range', label: 'Vitesse', min: 0, max: 2.5, step: 0.01, value: 1 },
+          banc: { type: 'range', label: 'Envie de nager ensemble', min: 0, max: 1, step: 0.01, value: 0.3 },
+          robe: { type: 'select', label: 'Robe', options: { mixte: 'Toutes les robes', kohaku: 'Kohaku (blanc et rouge)', showa: 'Showa (noir, rouge, blanc)', tancho: 'Tancho (point rouge)', ogon: 'Ogon (dorée)', palette: 'Couleurs de la palette' }, value: 'mixte' },
+          profondeur: { type: 'range', label: 'Profondeur', min: 0, max: 1, step: 0.01, value: 0.5 },
+        },
+        'Bassin': {
+          nenuphars: { type: 'range', label: 'Nénuphars', min: 0, max: 30, step: 1, value: 7 },
+          caustiques: { type: 'range', label: 'Caustiques', min: 0, max: 1, step: 0.01, value: 0.55 },
+          tailleLogo: { type: 'range', label: 'Logo au fond', min: 0, max: 0.9, step: 0.01, value: 0.5 },
+          image: { type: 'file', label: 'Logo', accept: 'image/*' },
+        },
+        'Couleurs': {
+          eau: { type: 'color', label: 'Eau', value: '#1d4a4f' },
+          feuilles: { type: 'color', label: 'Nénuphars', value: '#4f8a3e' },
+          couleurs: { type: 'palette', label: 'Robes (palette)', value: ['#f3eee4', '#d9442a', '#17171a', '#e4a83c'] },
+        },
+      },
+      presets: {
+        'Jardin': {},
+        'Grand banc': { nombre: 40, taille: 0.11, banc: 0.8, nenuphars: 3, robe: 'kohaku' },
+        'Trois carpes': { nombre: 3, taille: 0.42, vitesse: 0.6, nenuphars: 4, tailleLogo: 0.7 },
+        'Showa': { robe: 'showa', eau: '#16343a', nombre: 10 },
+        'Ogon': { robe: 'ogon', eau: '#122a3a', caustiques: 0.8, nombre: 18, taille: 0.16 },
+        'Nymphéas': { nenuphars: 26, nombre: 9, eau: '#24453a', feuilles: '#5f9446', tailleLogo: 0.35 },
+        'Menthe': { robe: 'palette', eau: MEN[1], couleurs: [MEN[0], MEN[3], MEN[2]], feuilles: MEN[3], caustiques: 0.35 },
+        'Thermique': { robe: 'palette', eau: THE[1], couleurs: [THE[2], THE[3], THE[5], THE[0]], feuilles: THE[0], nombre: 20 },
+        'Eau claire': { eau: '#5f9fa6', profondeur: 0.2, caustiques: 0.9, nombre: 12 },
+        'Nuit': { eau: '#0c1a22', caustiques: 0.2, robe: 'tancho', feuilles: '#2f5a33', nombre: 16 },
+      },
+      brand(colors) {
+        const s = colors.slice().sort((a, b) => lum(a) - lum(b));
+        return { eau: mix(s[0], '#1d4a4f', 0.35), robe: 'palette', couleurs: s.length > 1 ? s.slice(1) : ['#f3eee4', s[0]] };
+      },
+      pointer: {
+        down: (q) => { ptr = { x: q.x, y: q.y, down: true, moved: 0, t: simT, vx: 0, vy: 0 }; },
+        drag: (q) => { if (!ptr) return; const dx = q.x - ptr.x, dy = q.y - ptr.y; ptr.moved += Math.hypot(dx, dy); ptr.x = q.x; ptr.y = q.y; ptr.t = simT; if (P && Math.random() < 0.25) P.rip.push({ x: q.x, y: q.y, t: simT, s: 0.6 }); },
+        up: () => { if (ptr && ptr.moved < 6) feed(ptr.x, ptr.y); if (ptr) ptr.down = false; },
+        wheel: (q, dy) => app.set('taille', Math.max(0.08, Math.min(0.5, +(p.taille * (dy > 0 ? 0.93 : 1.07)).toFixed(3)))),
+      },
+      onChange(k) { if (['*', 'image'].includes(k)) logoKey = ''; },
+      export: { name: 'bassin-carpes', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    function hex(x) { const n = parseInt(x.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
+    function lum(x) { const c = hex(x); return (c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114) / 255; }
+    function mix(a, b, t) { const A = hex(a), C = hex(b); return '#' + A.map((v, i) => Math.round(v + (C[i] - v) * t).toString(16).padStart(2, '0')).join(''); }
+    function rng(s) { let a = s >>> 0; return () => { a = (a + 0x6d2b79f5) >>> 0; let t = a; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+
+    function buildLogo() {
+      const img0 = p.image || app.logoImg, key = img0 ? (img0.src || 'c') : 'demo'; if (key === logoKey) return; logoKey = key; vKey = '';
+      const M = 200, c = document.createElement('canvas'); c.width = c.height = M; const x = c.getContext('2d', { willReadFrequently: true }), L = M * 0.94, cx = M / 2;
+      if (img0) { const iw = img0.naturalWidth || img0.width, ih = img0.naturalHeight || img0.height, s = L / Math.max(iw, ih); x.drawImage(img0, cx - iw * s / 2, cx - ih * s / 2, iw * s, ih * s); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(cx, cx, L * 0.48, 0, TAU); x.arc(cx, cx, L * 0.27, 0, TAU, true); x.fill('evenodd'); x.fillRect(cx - L * 0.07, cx - L * 0.5, L * 0.14, L); }
+      const d = x.getImageData(0, 0, M, M).data; let transp = 0; for (let i = 3; i < d.length; i += 4) if (d[i] < 128) transp++; const useA = transp > M * M * 0.05;
+      const F = new Float64Array(M * M); for (let i = 0; i < M * M; i++) { const o = i * 4, l = (d[o] * 0.2126 + d[o + 1] * 0.7152 + d[o + 2] * 0.0722) / 255; F[i] = useA ? d[o + 3] / 255 : (d[o + 3] / 255) * Math.min(1, Math.max(0, (0.75 - l) * 2)); }
+      { const G2 = new Float64Array(M * M); for (let j = 1; j < M - 1; j++) for (let i = 1; i < M - 1; i++) { let a = 0; for (let b = -1; b <= 1; b++) for (let c = -1; c <= 1; c++) a += F[(j + b) * M + i + c] * (b || c ? (b && c ? 1 : 2) : 4); G2[j * M + i] = a / 16; } F.set(G2); }
+      for (let k = 0; k < M; k++) F[k] = F[(M - 1) * M + k] = F[k * M] = F[k * M + M - 1] = 0;
+      logoM = contours(F, M, M, 0.5, 0, 0, 1).filter((c) => c.closed && c.pts.length > 6).map((c) => chaikin(chaikin(c.pts, true), true).map((q) => [q[0] / M - 0.5, q[1] / M - 0.5]));
+    }
+    // carrés marchants + chaînage
+    function contours(F, nx, ny, lev, ox, oy, cs) {
+      const pt = new Map(), adj = new Map();
+      const P = (id) => { let q = pt.get(id); if (q) return q; const cell = id >> 1, i = cell % nx, j = (cell - i) / nx; let a, b, ax, ay, bx, by; if (id & 1) { a = F[j * nx + i]; b = F[(j + 1) * nx + i]; ax = bx = i; ay = j; by = j + 1; } else { a = F[j * nx + i]; b = F[j * nx + i + 1]; ay = by = j; ax = i; bx = i + 1; } const t = (lev - a) / (b - a || 1e-9); q = [ox + (ax + (bx - ax) * t) * cs, oy + (ay + (by - ay) * t) * cs]; pt.set(id, q); return q; };
+      const link = (a, b) => { (adj.get(a) || adj.set(a, []).get(a)).push(b); (adj.get(b) || adj.set(b, []).get(b)).push(a); };
+      for (let j = 0; j < ny - 1; j++) for (let i = 0; i < nx - 1; i++) {
+        const A = F[j * nx + i] > lev, B = F[j * nx + i + 1] > lev, C = F[(j + 1) * nx + i + 1] > lev, D = F[(j + 1) * nx + i] > lev, idx = A | (B << 1) | (C << 2) | (D << 3);
+        if (idx === 0 || idx === 15) continue;
+        const T = (j * nx + i) * 2, R = (j * nx + i + 1) * 2 + 1, Bo = ((j + 1) * nx + i) * 2, Le = (j * nx + i) * 2 + 1;
+        const ctr = (F[j * nx + i] + F[j * nx + i + 1] + F[(j + 1) * nx + i + 1] + F[(j + 1) * nx + i]) / 4 > lev;
+        switch (idx) {
+          case 1: case 14: link(Le, T); break; case 2: case 13: link(T, R); break; case 3: case 12: link(Le, R); break;
+          case 4: case 11: link(R, Bo); break; case 6: case 9: link(T, Bo); break; case 7: case 8: link(Le, Bo); break;
+          case 5: if (ctr) { link(Le, Bo); link(T, R); } else { link(Le, T); link(R, Bo); } break;
+          case 10: if (ctr) { link(Le, T); link(R, Bo); } else { link(Le, Bo); link(T, R); } break;
+        }
+      }
+      const seen = new Set(), out = [];
+      const walk = (s) => { const L = [s]; seen.add(s); let cur = s; for (;;) { const nb = (adj.get(cur) || []).find((x) => !seen.has(x)); if (nb === undefined) break; seen.add(nb); L.push(nb); cur = nb; } return L; };
+      for (const [id, nb] of adj) if (nb.length === 1 && !seen.has(id)) out.push({ pts: walk(id).map(P), closed: false });
+      for (const [id] of adj) if (!seen.has(id)) out.push({ pts: walk(id).map(P), closed: true });
+      return out;
+    }
+    function chaikin(pts, closed) {
+      const o = []; const n = pts.length; for (let k = 0; k < (closed ? n : n - 1); k++) { const a = pts[k], b = pts[(k + 1) % n]; o.push([a[0] * 0.75 + b[0] * 0.25, a[1] * 0.75 + b[1] * 0.25], [a[0] * 0.25 + b[0] * 0.75, a[1] * 0.25 + b[1] * 0.75]); }
+      if (!closed) { o.unshift(pts[0]); o.push(pts[n - 1]); } return o;
+    }
+
+
+    // ——— Caustiques : lignes iso de deux bruits flous périodiques ———
+    function caustics() {
+      if (CA) return CA; const N = 256, M = N - 1, R = rng(4242), tmp = new Float32Array(N * N);
+      const field = (r) => { const A = new Float32Array(N * N); for (let i = 0; i < A.length; i++) A[i] = R(); for (let pass = 0; pass < 3; pass++) { for (let y = 0; y < N; y++) { let s = 0; for (let k = -r; k <= r; k++) s += A[y * N + (k & M)]; for (let x = 0; x < N; x++) { tmp[y * N + x] = s; s += A[y * N + ((x + r + 1) & M)] - A[y * N + ((x - r) & M)]; } } for (let x = 0; x < N; x++) { let s = 0; for (let k = -r; k <= r; k++) s += tmp[(k & M) * N + x]; for (let y = 0; y < N; y++) { A[y * N + x] = s / ((2 * r + 1) ** 2); s += tmp[((y + r + 1) & M) * N + x] - tmp[((y - r) & M) * N + x]; } } } let lo = 1, hi = 0; for (const v of A) { lo = Math.min(lo, v); hi = Math.max(hi, v); } for (let i = 0; i < A.length; i++) A[i] = (A[i] - lo) / (hi - lo); return A; };
+      const make = (A, f) => { const c = document.createElement('canvas'); c.width = c.height = N; const g = c.getContext('2d'), D = g.createImageData(N, N); for (let i = 0; i < N * N; i++) { const v = A[i] * f, l = Math.abs(v - Math.round(v)), a = Math.max(0, 1 - l * 9) ** 2; D.data[i * 4] = D.data[i * 4 + 1] = D.data[i * 4 + 2] = 255; D.data[i * 4 + 3] = a * 255; } g.putImageData(D, 0, 0); return c; };
+      CA = [make(field(9), 3), make(field(12), 2.5)]; return CA;
+    }
+
+    // ——— Robes ———
+    function robe(R, kind) {
+      const C = p.couleurs.length ? p.couleurs : [KOI.blanc, KOI.rouge], pick = (a) => a[Math.floor(R() * a.length)];
+      const k = kind === 'mixte' ? pick(['kohaku', 'kohaku', 'showa', 'tancho', 'ogon', 'sanke']) : kind, sp = [];
+      const blob = (col, n, side = 1) => { for (let i = 0; i < n; i++) sp.push({ t: 0.08 + R() * 0.62, o: (R() * 2 - 1) * 0.6 * side, r: 0.7 + R() * 0.9, col }); };
+      if (k === 'kohaku') { blob(KOI.rouge, 2 + Math.floor(R() * 3)); return { base: KOI.blanc, sp, fin: '#f6f1e8' }; }
+      if (k === 'sanke') { blob(KOI.rouge, 2 + Math.floor(R() * 2)); for (let i = 0; i < 4; i++) sp.push({ t: 0.2 + R() * 0.5, o: (R() * 2 - 1) * 0.7, r: 0.3 + R() * 0.3, col: KOI.noir }); return { base: KOI.blanc, sp, fin: '#f6f1e8' }; }
+      if (k === 'showa') { blob(KOI.rouge, 2 + Math.floor(R() * 2)); blob(KOI.blanc, 2); return { base: KOI.noir, sp, fin: '#2a2a2e' }; }
+      if (k === 'tancho') { sp.push({ t: 0.07, o: 0, r: 0.75, col: KOI.rouge }); return { base: KOI.blanc, sp, fin: '#f6f1e8' }; }
+      if (k === 'ogon') { const b = R() < 0.6 ? KOI.or : R() < 0.5 ? KOI.orange : KOI.creme; return { base: b, sp, fin: mix(b, '#ffffff', 0.3), metal: true }; }
+      const b = C[Math.floor(R() * C.length)]; let c2 = C[Math.floor(R() * C.length)]; if (c2 === b && C.length > 1) c2 = C[(C.indexOf(b) + 1) % C.length];
+      blob(c2, 2 + Math.floor(R() * 3)); return { base: b, sp, fin: mix(b, '#ffffff', 0.25) };
+    }
+
+    // ——— Bassin ———
+    const NS = 18;
+    function pond(w, h) {
+      buildLogo();
+      const key = [p.nombre, p.taille, p.robe, p.profondeur, p.nenuphars, p.couleurs.join(), app.seed, w, h].join();
+      if (key === pKey && P) return P; pKey = key;
+      const R = rng(app.seed * 977 + 13), m = Math.min(w, h), F = [];
+      for (let k = 0; k < p.nombre; k++) {
+        const L = m * p.taille * (0.7 + R() * 0.5), x = w * (0.1 + R() * 0.8), y = h * (0.1 + R() * 0.8), a = R() * TAU, pts = [];
+        for (let i = 0; i < NS; i++) pts.push([x - Math.cos(a) * L / NS * i, y - Math.sin(a) * L / NS * i]);
+        F.push({ pts, L, dir: a, ph: R() * TAU, v: 0.7 + R() * 0.6, wn: R() * 100, depth: R() * p.profondeur, robe: robe(R, p.robe), sp: 0 });
+      }
+      F.sort((a, b) => b.depth - a.depth);
+      const pads = [];
+      for (let k = 0; k < p.nenuphars; k++) { let x, y, r, ok = false; for (let t = 0; t < 30 && !ok; t++) { r = m * (0.04 + R() * 0.06); x = R() * w; y = R() * h; ok = pads.every((q) => Math.hypot(q.x - x, q.y - y) > (q.r + r) * 0.9); } pads.push({ x, y, r, a: R() * TAU, n: 0.35 + R() * 0.25, fl: R() < 0.25, dx: (R() - 0.5) * 2, sh: R() * 0.12 }); }
+      P = { F, pads, food: [], rip: [], R, w, h }; return P;
+    }
+    function feed(x, y) { if (!P) return; const R = P.R, m = Math.min(P.w, P.h); for (let k = 0; k < 6; k++) P.food.push({ x: x + (R() - 0.5) * m * 0.06, y: y + (R() - 0.5) * m * 0.06, t: simT }); P.rip.push({ x, y, t: simT, s: 1.4 }); }
+
+    function step(dt) {
+      const { F, w, h } = P, m = Math.min(w, h);
+      for (const f of F) {
+        const hd = f.pts[0], base = m * 0.07 * p.vitesse * f.v;
+        let dx = Math.cos(f.dir), dy = Math.sin(f.dir), want = base;
+        // errance
+        const wa = Math.sin(simT * 0.37 + f.wn) + Math.sin(simT * 0.23 + f.wn * 1.7); const ang = f.dir + wa * 0.5 * dt * 2; dx = Math.cos(ang); dy = Math.sin(ang);
+        // bords : on tourne vers l'intérieur
+        const mg = f.L * 0.8; if (hd[0] < mg) dx += (mg - hd[0]) / mg * 2; if (hd[0] > w - mg) dx -= (hd[0] - w + mg) / mg * 2; if (hd[1] < mg) dy += (mg - hd[1]) / mg * 2; if (hd[1] > h - mg) dy -= (hd[1] - h + mg) / mg * 2;
+        // voisines : séparation, alignement, cohésion
+        let ax = 0, ay = 0, cx = 0, cy = 0, n = 0;
+        for (const o of F) { if (o === f) continue; const q = o.pts[0], ex = q[0] - hd[0], ey = q[1] - hd[1], d = Math.hypot(ex, ey); if (d < f.L * 0.7 && d > 0) { dx -= ex / d * (f.L * 0.7 - d) / f.L * 2.5; dy -= ey / d * (f.L * 0.7 - d) / f.L * 2.5; } if (d < f.L * 2.5) { ax += Math.cos(o.dir); ay += Math.sin(o.dir); cx += q[0]; cy += q[1]; n++; } }
+        if (n && p.banc > 0) { const al = Math.hypot(ax, ay) || 1; dx += ax / al * p.banc * 0.8; dy += ay / al * p.banc * 0.8; const tx = cx / n - hd[0], ty = cy / n - hd[1], tl = Math.hypot(tx, ty) || 1; dx += tx / tl * p.banc * 0.4; dy += ty / tl * p.banc * 0.4; }
+        // grain
+        let best = null, bd = m * 0.45; for (const g of P.food) { const d = Math.hypot(g.x - hd[0], g.y - hd[1]); if (d < bd) { bd = d; best = g; } }
+        if (best) { dx += (best.x - hd[0]) / bd * 3; dy += (best.y - hd[1]) / bd * 3; want = base * 1.8 + m * 0.04; if (bd < f.L * 0.12) { P.food.splice(P.food.indexOf(best), 1); P.rip.push({ x: best.x, y: best.y, t: simT, s: 0.8 }); } }
+        // l'eau remuée fait fuir
+        if (ptr && simT - ptr.t < 0.6) { const ex = hd[0] - ptr.x, ey = hd[1] - ptr.y, d = Math.hypot(ex, ey) || 1, Rr = f.L * 1.6 + m * 0.08; if (d < Rr) { dx += ex / d * 4; dy += ey / d * 4; want = base * 2.6 + m * 0.08; } }
+        const ta = Math.atan2(dy, dx); let da = ((ta - f.dir + Math.PI * 3) % TAU) - Math.PI; const turn = 2.4 * dt; f.dir += Math.max(-turn, Math.min(turn, da));
+        f.sp += (want - f.sp) * Math.min(1, dt * 2);
+        // la tête avance en oscillant : le corps ondule en suivant
+        f.ph += dt * (2 + f.sp / f.L * 9); const osc = Math.sin(f.ph) * 0.42, mv = f.dir + osc;
+        hd[0] += Math.cos(mv) * f.sp * dt; hd[1] += Math.sin(mv) * f.sp * dt;
+        const sg = f.L / NS, MAXB = 0.3; // courbure bornée : le corps ne se replie pas sur lui-même
+        for (let i = 1; i < NS; i++) { const a = f.pts[i - 1], b = f.pts[i]; let an = Math.atan2(b[1] - a[1], b[0] - a[0]); if (i > 1) { const z = f.pts[i - 2], pa = Math.atan2(a[1] - z[1], a[0] - z[0]), dd = ((an - pa + Math.PI * 3) % TAU) - Math.PI; an = pa + Math.max(-MAXB, Math.min(MAXB, dd)); } else { const ba = f.dir + Math.PI, dd = ((an - ba + Math.PI * 3) % TAU) - Math.PI; an = ba + Math.max(-0.6, Math.min(0.6, dd)); } b[0] = a[0] + Math.cos(an) * sg; b[1] = a[1] + Math.sin(an) * sg; }
+      }
+      for (const q of P.pads) { q.x += q.dx * m * 0.002 * dt; q.a += q.dx * 0.01 * dt; }
+      P.food = P.food.filter((g) => simT - g.t < 14); P.rip = P.rip.filter((r) => simT - r.t < 1.6);
+      if (P.R() < dt * 0.25 * F.length / 10) { const f = F[Math.floor(P.R() * F.length)]; if (f.depth < 0.2) P.rip.push({ x: f.pts[0][0], y: f.pts[0][1], t: simT, s: 0.7 }); }
+    }
+
+    // ——— Géométrie d'une carpe ———
+    function width(t) { const head = Math.sin(Math.min(1, t / 0.28) * Math.PI / 2), tail = Math.pow(Math.max(0, (t - 0.3) / 0.7), 1.25); return 0.135 * (0.6 + 0.4 * head) * (1 - tail * 0.88); }
+    function outline(f) {
+      const P0 = f.pts, n = P0.length, Lft = [], Rgt = [], nr = [];
+      for (let i = 0; i < n; i++) { const a = P0[Math.max(0, i - 1)], b = P0[Math.min(n - 1, i + 1)], tx = a[0] - b[0], ty = a[1] - b[1], tl = Math.hypot(tx, ty) || 1, nx = -ty / tl, ny = tx / tl, wd = width(i / (n - 1)) * f.L; nr.push([nx, ny, tx / tl, ty / tl]); Lft.push([P0[i][0] + nx * wd, P0[i][1] + ny * wd]); Rgt.push([P0[i][0] - nx * wd, P0[i][1] - ny * wd]); }
+      const hd = P0[0], t0 = nr[0], wd0 = width(0.02) * f.L, nose = [hd[0] + t0[2] * wd0 * 1.1, hd[1] + t0[3] * wd0 * 1.1];
+      return { Lft, Rgt, nr, nose };
+    }
+    function bodyPath(g, O) {
+      const { Lft, Rgt, nose } = O; g.beginPath(); g.moveTo(Lft[0][0], Lft[0][1]);
+      for (let i = 1; i < Lft.length; i++) { const a = Lft[i - 1], b = Lft[i]; g.quadraticCurveTo(a[0], a[1], (a[0] + b[0]) / 2, (a[1] + b[1]) / 2); }
+      g.lineTo(Lft[Lft.length - 1][0], Lft[Lft.length - 1][1]); g.lineTo(Rgt[Rgt.length - 1][0], Rgt[Rgt.length - 1][1]);
+      for (let i = Rgt.length - 2; i >= 0; i--) { const a = Rgt[i + 1], b = Rgt[i]; g.quadraticCurveTo(a[0], a[1], (a[0] + b[0]) / 2, (a[1] + b[1]) / 2); }
+      g.lineTo(Rgt[0][0], Rgt[0][1]); g.quadraticCurveTo(nose[0], nose[1], Lft[0][0], Lft[0][1]); g.closePath();
+    }
+    function finShapes(f, O) {
+      const P0 = f.pts, n = P0.length, out = [], fl = Math.sin(f.ph * 0.5) * 0.35, L = f.L;
+      // nageoires pectorales
+      const k = Math.round(n * 0.2), q = P0[k], [nx, ny, tx, ty] = O.nr[k], wd = width(0.2) * L;
+      for (const s of [1, -1]) { const bx = q[0] + nx * wd * s * 0.8, by = q[1] + ny * wd * s * 0.8, a = Math.atan2(ny * s, nx * s) - s * (1.0 + fl * s) - Math.PI * 0, dirx = Math.cos(a) * 0.4 - tx * 0.9, diry = Math.sin(a) * 0.4 - ty * 0.9, dl = Math.hypot(dirx, diry); out.push({ x: bx + dirx / dl * L * 0.08, y: by + diry / dl * L * 0.08, rx: L * 0.105, ry: L * 0.055, a: Math.atan2(diry, dirx) }); }
+      // queue : deux lobes souples
+      const e = P0[n - 1], e2 = P0[n - 3], ex = e[0] - e2[0], ey = e[1] - e2[1], el = Math.hypot(ex, ey) || 1, ux = ex / el, uy = ey / el, cu = Math.sin(f.ph - 1.4) * 0.35;
+      // deux lobes souples, en ellipses écartées de part et d'autre de l'axe de la queue
+      out.tail = [1, -1].map((s) => { const a = Math.atan2(uy, ux) + s * (0.38 + 0.08 * Math.sin(f.ph)) + cu; return { x: e[0] + Math.cos(a) * L * 0.11, y: e[1] + Math.sin(a) * L * 0.11, rx: L * 0.13, ry: L * 0.05, a }; });
+      return out;
+    }
+
+    function drawFish(g, f, water) {
+      const O = f.O || outline(f), fins = finShapes(f, O), dk = f.depth, wa = 0.55 * dk, col = (c) => mix(c, water, wa);
+      // nageoires translucides
+      g.globalAlpha = 0.55 * (1 - dk * 0.4); g.fillStyle = col(f.robe.fin);
+      for (const q of fins) { g.beginPath(); g.ellipse(q.x, q.y, q.rx, q.ry, q.a, 0, TAU); g.fill(); }
+      for (const q of fins.tail) { g.beginPath(); g.ellipse(q.x, q.y, q.rx, q.ry, q.a, 0, TAU); g.fill(); }
+      g.globalAlpha = 1 - dk * 0.25;
+      bodyPath(g, O); g.fillStyle = col(f.robe.base); g.fill();
+      g.save(); bodyPath(g, O); g.clip();
+      for (const s of f.robe.sp) { const i = Math.min(NS - 1, Math.round(s.t * (NS - 1))), q = f.pts[i], [nx, ny] = O.nr[i], wd = width(s.t) * f.L; g.beginPath(); g.arc(q[0] + nx * wd * s.o, q[1] + ny * wd * s.o, wd * s.r, 0, TAU); g.fillStyle = col(s.col); g.fill(); }
+      // modelé : l'échine éclairée, les flancs plus sombres
+      g.lineCap = 'round'; g.lineJoin = 'round';
+      g.beginPath(); f.pts.forEach((q, i) => (i ? g.lineTo(q[0], q[1]) : g.moveTo(q[0], q[1]))); g.strokeStyle = f.robe.metal ? 'rgba(255,255,240,0.4)' : 'rgba(255,255,255,0.1)'; g.lineWidth = f.L * 0.07; g.stroke();
+      g.globalAlpha *= 0.5; bodyPath(g, O); g.strokeStyle = 'rgba(0,0,0,0.35)'; g.lineWidth = f.L * 0.05; g.stroke();
+      g.restore(); g.globalAlpha = 1;
+      // yeux
+      const hd = f.pts[0], [nx, ny, tx, ty] = O.nr[1], wd = width(0.06) * f.L; g.fillStyle = mix('#111111', water, wa);
+      for (const s of [1, -1]) { g.beginPath(); g.arc(hd[0] + nx * wd * 0.55 * s + tx * f.L * 0.015, hd[1] + ny * wd * 0.55 * s + ty * f.L * 0.015, f.L * 0.012, 0, TAU); g.fill(); }
+    }
+    function drawPad(g, q) {
+      const c = p.feuilles, sh = q.sh; g.save(); g.translate(q.x, q.y); g.rotate(q.a);
+      g.fillStyle = 'rgba(0,0,0,0.22)'; g.beginPath(); g.moveTo(q.r * 0.06 + 3, q.r * 0.1 + 4); g.arc(q.r * 0.06 + 3, q.r * 0.1 + 4, q.r, q.n / 2, TAU - q.n / 2); g.closePath(); g.fill();
+      g.beginPath(); g.moveTo(0, 0); g.arc(0, 0, q.r, q.n / 2, TAU - q.n / 2); g.closePath(); g.fillStyle = mix(c, '#000000', 0.12 + sh); g.fill();
+      g.beginPath(); g.moveTo(0, 0); g.arc(0, 0, q.r * 0.93, q.n / 2 + 0.03, TAU - q.n / 2 - 0.03); g.closePath(); g.fillStyle = mix(c, '#ffffff', 0.08 - sh * 0.5); g.fill();
+      g.strokeStyle = mix(c, '#ffffff', 0.28); g.lineWidth = Math.max(0.6, q.r * 0.025); g.beginPath(); for (let k = 1; k < 12; k++) { const a = q.n / 2 + (TAU - q.n) * k / 12; g.moveTo(0, 0); g.lineTo(Math.cos(a) * q.r * 0.88, Math.sin(a) * q.r * 0.88); } g.stroke();
+      if (q.fl) { g.rotate(-q.a); const fr = q.r * 0.42; for (let ring = 0; ring < 2; ring++) for (let k = 0; k < 8; k++) { const a = k / 8 * TAU + ring * 0.4; g.save(); g.rotate(a); g.beginPath(); g.ellipse(fr * (0.45 - ring * 0.2), 0, fr * (0.5 - ring * 0.12), fr * 0.2, 0, 0, TAU); g.fillStyle = ring ? '#fbe3ea' : '#f0a9bd'; g.fill(); g.restore(); } g.beginPath(); g.arc(0, 0, fr * 0.16, 0, TAU); g.fillStyle = '#f2c230'; g.fill(); }
+      g.restore();
+    }
+    function logoLayer(w, h, dpr) {
+      const key = [logoKey, p.tailleLogo, p.eau, w, h, dpr].join(); if (LG && lgKey === key) return LG; lgKey = key;
+      if (!logoM || p.tailleLogo <= 0) { LG = null; return null; }
+      const c = document.createElement('canvas'); c.width = Math.ceil(w * dpr); c.height = Math.ceil(h * dpr); const g = c.getContext('2d'), s = Math.min(w, h) * p.tailleLogo;
+      g.setTransform(dpr * s, 0, 0, dpr * s, dpr * w / 2, dpr * h / 2); g.beginPath(); for (const L of logoM) { L.forEach((q, i) => (i ? g.lineTo(q[0], q[1]) : g.moveTo(q[0], q[1]))); g.closePath(); }
+      g.fillStyle = mix(p.eau, lum(p.eau) > 0.45 ? '#000000' : '#ffffff', 0.11); g.fill('evenodd'); LG = c; return c;
+    }
+
+    app.loop((t, dt) => {
+      dt = Math.min(1 / 20, dt || 0);
+      const { w, h, dpr } = app.size; pond(w, h);
+      if (app.thumbnail) { if (!P.th) { P.th = true; for (let k = 0; k < 120; k++) { simT += 1 / 30; step(1 / 30); } } }
+      else { simT += dt; step(dt); }
+      const m = Math.min(w, h), water = p.eau;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      const bk = [water, w, h, dpr].join(); if (P.bk !== bk) { P.bk = bk; P.bg = document.createElement('canvas'); P.bg.width = Math.ceil(w * dpr); P.bg.height = Math.ceil(h * dpr); const g = P.bg.getContext('2d'); g.setTransform(dpr, 0, 0, dpr, 0, 0); const gr = g.createRadialGradient(w / 2, h / 2, 0, w / 2, h / 2, Math.hypot(w, h) / 2); gr.addColorStop(0, mix(water, '#ffffff', 0.07)); gr.addColorStop(1, mix(water, '#000000', 0.3)); g.fillStyle = gr; g.fillRect(0, 0, w, h); }
+      ctx.drawImage(P.bg, 0, 0, w, h);
+      // logo au fond, ondulé par bandes
+      const LGc = logoLayer(w, h, dpr);
+      if (LGc) { ctx.setTransform(1, 0, 0, 1, 0, 0); const bh = Math.max(2, Math.round(4 * dpr)), half = m * p.tailleLogo * 0.55 * dpr, x0 = Math.max(0, Math.floor(w * dpr / 2 - half)), x1 = Math.min(LGc.width, Math.ceil(w * dpr / 2 + half)), y0 = Math.max(0, Math.floor(h * dpr / 2 - half)), y1 = Math.min(LGc.height, Math.ceil(h * dpr / 2 + half)); for (let y = y0; y < y1; y += bh) { const ox = Math.sin(y / dpr * 0.035 + simT * 1.3) * m * 0.004 * dpr, hh = Math.min(bh, y1 - y); ctx.drawImage(LGc, x0, y, x1 - x0, hh, x0 + ox, y, x1 - x0, hh); } ctx.setTransform(dpr, 0, 0, dpr, 0, 0); }
+      // caustiques
+      if (p.caustiques > 0) { // calculées dans un tampon réduit, puis étirées : la lumière sous l'eau est douce de toute façon
+        const C = caustics(), k0 = 0.4, bw = Math.ceil(w * k0), bh = Math.ceil(h * k0); if (!P.cb || P.cb.width !== bw || P.cb.height !== bh) { P.cb = document.createElement('canvas'); P.cb.width = bw; P.cb.height = bh; }
+        const g = P.cb.getContext('2d'); g.setTransform(1, 0, 0, 1, 0, 0); g.globalCompositeOperation = 'source-over'; g.clearRect(0, 0, bw, bh); g.globalCompositeOperation = 'lighter';
+        [[C[0], 0.018, 0.011, m * 0.5], [C[1], -0.013, 0.016, m * 0.62]].forEach(([c, vx, vy, sz], i) => { const pat = g.createPattern(c, 'repeat'), k = sz / 256 * k0; pat.setTransform(new DOMMatrix([k, 0, 0, k, simT * vx * m * k0, simT * vy * m * k0])); g.globalAlpha = i ? 0.75 : 1; g.fillStyle = pat; g.fillRect(0, 0, bw, bh); });
+        ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.globalAlpha = p.caustiques * 0.14; ctx.drawImage(P.cb, 0, 0, w, h); ctx.restore(); }
+      // ombres des carpes sur le fond, puis les carpes, des plus profondes aux plus hautes
+      ctx.fillStyle = '#000000'; for (const f of P.F) { f.O = outline(f); const off = f.L * (0.12 + (1 - f.depth) * 0.22); ctx.translate(off * 0.5, off); ctx.globalAlpha = 0.22 * (1 - f.depth * 0.6); bodyPath(ctx, f.O); ctx.fill(); ctx.translate(-off * 0.5, -off); } ctx.globalAlpha = 1;
+      for (const f of P.F) drawFish(ctx, f, water);
+      // grain qui flotte
+      for (const g of P.food) { const a = Math.min(1, (14 - (simT - g.t)) / 2); ctx.globalAlpha = a; ctx.fillStyle = '#7a5a34'; ctx.beginPath(); ctx.arc(g.x, g.y, m * 0.0045, 0, TAU); ctx.fill(); ctx.fillStyle = '#b48a55'; ctx.beginPath(); ctx.arc(g.x - m * 0.001, g.y - m * 0.001, m * 0.0022, 0, TAU); ctx.fill(); }
+      ctx.globalAlpha = 1;
+      for (const q of P.pads) drawPad(ctx, q);
+      // ronds dans l'eau
+      ctx.lineWidth = Math.max(0.7, m * 0.0018);
+      for (const r of P.rip) { const e = (simT - r.t) / 1.6; for (let k = 0; k < 2; k++) { const ee = e - k * 0.12; if (ee <= 0) continue; ctx.strokeStyle = `rgba(255,255,255,${0.35 * (1 - e) * (k ? 0.6 : 1)})`; ctx.beginPath(); ctx.arc(r.x, r.y, m * 0.06 * r.s * ee, 0, TAU); ctx.stroke(); } }
+      app.finish(ctx);
+    });
+
+    function toSVG() {
+      const { w, h } = app.size, f2 = (v) => +v.toFixed(2); pond(w, h);
+      const m = Math.min(w, h), water = p.eau; let defs = `<radialGradient id="eau" cx="0.5" cy="0.5" r="0.7"><stop offset="0" stop-color="${mix(water, '#ffffff', 0.07)}"/><stop offset="1" stop-color="${mix(water, '#000000', 0.3)}"/></radialGradient>`, s = `<rect width="100%" height="100%" fill="url(#eau)"/>`;
+      if (logoM && p.tailleLogo > 0) { const sc = m * p.tailleLogo; s += `<path transform="translate(${f2(w / 2)} ${f2(h / 2)}) scale(${f2(sc)})" fill-rule="evenodd" fill="${mix(water, lum(water) > 0.45 ? '#000000' : '#ffffff', 0.11)}" d="${logoM.map((L) => 'M' + L.map((q) => q[0].toFixed(4) + ' ' + q[1].toFixed(4)).join('L') + 'Z').join('')}"/>`; }
+      const pathOf = (O) => { const { Lft, Rgt, nose } = O, pt = (q) => f2(q[0]) + ' ' + f2(q[1]); let d = 'M' + pt(Lft[0]); for (let i = 1; i < Lft.length; i++) { const a = Lft[i - 1], b = Lft[i]; d += 'Q' + pt(a) + ' ' + pt([(a[0] + b[0]) / 2, (a[1] + b[1]) / 2]); } d += 'L' + pt(Lft[Lft.length - 1]) + 'L' + pt(Rgt[Rgt.length - 1]); for (let i = Rgt.length - 2; i >= 0; i--) { const a = Rgt[i + 1], b = Rgt[i]; d += 'Q' + pt(a) + ' ' + pt([(a[0] + b[0]) / 2, (a[1] + b[1]) / 2]); } d += 'L' + pt(Rgt[0]) + 'Q' + pt(nose) + ' ' + pt(Lft[0]) + 'Z'; return d; };
+      P.F.forEach((f, fi) => { const O = outline(f), off = f.L * (0.12 + (1 - f.depth) * 0.22); s += `<path transform="translate(${f2(off * 0.5)} ${f2(off)})" d="${pathOf(O)}" fill="#000" opacity="${(0.22 * (1 - f.depth * 0.6)).toFixed(3)}"/>`; });
+      P.F.forEach((f, fi) => {
+        const O = outline(f), fins = finShapes(f, O), wa = 0.55 * f.depth, col = (c) => mix(c, water, wa), d = pathOf(O), T = fins.tail;
+        s += `<g fill="${col(f.robe.fin)}" opacity="${(0.55 * (1 - f.depth * 0.4)).toFixed(3)}">`; for (const q of fins.concat(T)) s += `<ellipse transform="translate(${f2(q.x)} ${f2(q.y)}) rotate(${f2(q.a * 180 / Math.PI)})" rx="${f2(q.rx)}" ry="${f2(q.ry)}"/>`; s += '</g>';
+        defs += `<clipPath id="k${fi}"><path d="${d}"/></clipPath>`;
+        s += `<g opacity="${(1 - f.depth * 0.25).toFixed(3)}"><path d="${d}" fill="${col(f.robe.base)}"/><g clip-path="url(#k${fi})">`;
+        for (const sp of f.robe.sp) { const i = Math.min(NS - 1, Math.round(sp.t * (NS - 1))), q = f.pts[i], [nx, ny] = O.nr[i], wd = width(sp.t) * f.L; s += `<circle cx="${f2(q[0] + nx * wd * sp.o)}" cy="${f2(q[1] + ny * wd * sp.o)}" r="${f2(wd * sp.r)}" fill="${col(sp.col)}"/>`; }
+        s += `<path d="${d}" fill="none" stroke="#000" stroke-opacity="0.17" stroke-width="${f2(f.L * 0.05)}"/></g></g>`;
+      });
+      for (const q of P.pads) {
+        const c = p.feuilles, a0 = q.a + q.n / 2, a1 = q.a + TAU - q.n / 2, arc = (r) => `M${f2(q.x)} ${f2(q.y)}L${f2(q.x + Math.cos(a0) * r)} ${f2(q.y + Math.sin(a0) * r)}A${f2(r)} ${f2(r)} 0 1 1 ${f2(q.x + Math.cos(a1) * r)} ${f2(q.y + Math.sin(a1) * r)}Z`;
+        s += `<path d="${arc(q.r)}" fill="${mix(c, '#000000', 0.12 + q.sh)}"/><path d="${arc(q.r * 0.93)}" fill="${mix(c, '#ffffff', 0.08 - q.sh * 0.5)}"/>`;
+      }
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><defs>${defs}</defs>${s}</svg>`;
+    }
+  </script>
+</body>
+</html>
