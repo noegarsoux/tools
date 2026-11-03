@@ -1,0 +1,15 @@
+{
+  "slug": "graphe-ressorts",
+  "title": "Graphe à ressorts",
+  "type": "motion",
+  "description": "Un réseau qui pousse nœud après nœud et se met en forme tout seul, liens en ressorts et nœuds qui se repoussent ; on tire les nœuds et le logo les attire.",
+  "tags": ["reseau", "physique", "graphe", "lignes", "logo", "svg"],
+  "inspiration": [
+    "Le dessin de graphes par forces de Fruchterman et Reingold (1991)",
+    "Les cartes de réseaux de Mark Lombardi",
+    "Les visualisations de réseaux sociaux de Gephi"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}
