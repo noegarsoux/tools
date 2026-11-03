@@ -1,0 +1,15 @@
+{
+  "slug": "spirographe",
+  "title": "Spirographe",
+  "type": "motion",
+  "description": "Le jeu de roues dentées : une roue au logo roule dans un anneau, le stylo trace des rosaces couche après couche, à la main ou tout seul, exportées en vectoriel.",
+  "tags": ["animation", "geometrie", "jouet", "interaction", "logo", "svg"],
+  "inspiration": [
+    "Le Spirograph de Denys Fisher, 1965",
+    "Les hypotrochoïdes et épitrochoïdes des géomètres",
+    "Les guillochis des billets de banque"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}
