@@ -1,0 +1,15 @@
+{
+  "slug": "mosaique-antique",
+  "title": "Mosaïque antique",
+  "type": "motion",
+  "description": "Des tesselles posées rang après rang le long des contours, à la manière de l'opus vermiculatum : le logo, des cercles ou des vagues guident les rangs.",
+  "tags": ["mosaique", "tesselles", "contours", "antique", "logo", "svg"],
+  "inspiration": [
+    "L'opus vermiculatum des mosaïques romaines",
+    "Les mosaïques byzantines de Ravenne",
+    "« Simulating Decorative Mosaics » d'Alejo Hausner (2001)"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}
