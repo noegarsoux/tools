@@ -1,0 +1,15 @@
+{
+  "slug": "rideau-de-perles",
+  "title": "Rideau de perles",
+  "type": "motion",
+  "description": "Un rideau de fils de perles qui ondule au vent et s'écarte sous la main ; au repos, les perles dessinent rayures, vagues, damier ou le logo.",
+  "tags": ["fils", "physique", "perles", "image", "logo", "svg"],
+  "inspiration": [
+    "Les rideaux de perles des portes méditerranéennes",
+    "Les rideaux de chaînettes en aluminium",
+    "Les tableaux de perles de verre"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}
