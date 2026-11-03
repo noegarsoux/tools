@@ -1,0 +1,274 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Herbier</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Herbier : des plantes en L-système. Une grammaire réécrit un axiome quelques fois (F → FF, X → F+[[X]-X]-F[-FX]+X…),
+    // puis une tortue lit la chaîne : F avance, + et − tournent, [ et ] empilent et dépilent une branche.
+    // Chaque segment connaît sa distance à la racine : la plante pousse en révélant les segments dans cet ordre.
+    // Le vent courbe un peu le cap à chaque pas, donc davantage vers les pointes. Les fleurs naissent aux extrémités ;
+    // celles qui tombent dans le logo s'ouvrent plus grandes et prennent sa couleur.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2, D2R = Math.PI / 180;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const BIEN = PAL('biennale'), MEN = PAL('menthe'), KB = PAL('kegelbahn');
+
+    const SPECIES = {
+      fougere: { ax: 'X', r: { X: 'F+[[X]-X]-F[-FX]+X', F: 'FF' }, d: 5, a: 25 },
+      buisson: { ax: 'F', r: { F: 'FF+[+F-F-F]-[-F+F+F]' }, d: 3, a: 22.5 },
+      algue: { ax: 'F', r: { F: 'F[+F]F[-F]F' }, d: 4, a: 25.7 },
+      herbe: { ax: 'X', r: { X: 'F[+X]F[-X]+X', F: 'FF' }, d: 6, a: 20 },
+      ombelle: { ax: 'X', r: { X: 'F[+X][-X]FX', F: 'FF' }, d: 6, a: 25.7 },
+    };
+    const SP_KEYS = Object.keys(SPECIES);
+
+    let simT = 0, plants = [], plantKey = '', compiled = new Map(), gust = { v: 0, x: 0 }, logoM = null, logoKey = '', lastX = null;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.03, vignette: 0.08 },
+      hint: 'Cliquez pour planter · glissez pour souffler · molette : vent',
+      notes: 'En 1968, le biologiste Aristid Lindenmayer invente une grammaire pour décrire la croissance des algues : un mot de départ, quelques règles de réécriture appliquées partout à la fois, génération après génération. Vingt ans plus tard, avec Przemysław Prusinkiewicz, il en tire « The Algorithmic Beauty of Plants » : lue par une tortue qui avance, tourne et retient ses embranchements, la chaîne dessine des fougères, des buissons, des ombelles d\'une ressemblance troublante. Cet herbier en fait pousser une prairie. Chaque plante s\'élève en suivant ses segments depuis la racine, se balance au vent, fleurit à ses pointes puis s\'efface pour laisser place à une autre. Les fleurs qui s\'ouvrent dans le logo prennent sa couleur.',
+      params: {
+        'Plantes': {
+          espece: { type: 'select', label: 'Espèce', options: { melange: 'Mélange', fougere: 'Fougère', buisson: 'Buisson', algue: 'Algue', herbe: 'Herbe', ombelle: 'Ombelle' }, value: 'melange' },
+          nombre: { type: 'range', label: 'Nombre de plantes', min: 2, max: 40, step: 1, value: 14 },
+          complexite: { type: 'range', label: 'Générations (±)', min: -1, max: 1, step: 1, value: 0 },
+          ouverture: { type: 'range', label: 'Ouverture des branches', min: 0.5, max: 1.7, step: 0.01, value: 1 },
+          variation: { type: 'range', label: 'Irrégularité', min: 0, max: 1, step: 0.01, value: 0.35 },
+          hauteur: { type: 'range', label: 'Hauteur', min: 0.2, max: 1.4, step: 0.01, value: 0.9 },
+        },
+        'Vie et vent': {
+          croissance: { type: 'range', label: 'Durée de pousse (s)', min: 1, max: 15, step: 0.1, value: 5 },
+          vie: { type: 'range', label: 'Durée de vie (s)', min: 2, max: 40, step: 0.5, value: 14 },
+          vent: { type: 'range', label: 'Vent', min: 0, max: 1, step: 0.01, value: 0.3 },
+          rafales: { type: 'range', label: 'Rafales', min: 0, max: 3, step: 0.01, value: 1 },
+        },
+        'Rendu': {
+          epaisseur: { type: 'range', label: 'Épaisseur des tiges', min: 0.3, max: 5, step: 0.05, value: 1.4 },
+          fleurs: { type: 'range', label: 'Fleurs', min: 0, max: 1, step: 0.01, value: 0.14 },
+          tailleFleurs: { type: 'range', label: 'Taille des fleurs', min: 0.2, max: 3, step: 0.01, value: 1 },
+          profondeur: { type: 'range', label: 'Brume des plans lointains', min: 0, max: 1, step: 0.01, value: 0.45 },
+        },
+        'Fleurs du logo': {
+          logo: { type: 'toggle', label: 'Fleurir le logo', value: false },
+          tailleLogo: { type: 'range', label: 'Taille du logo', min: 0.3, max: 1.8, step: 0.01, value: 1.1, show: (q) => q.logo },
+          image: { type: 'file', label: 'Logo', accept: 'image/*', show: (q) => q.logo },
+        },
+        'Couleurs': {
+          fond: { type: 'color', label: 'Fond', value: '#f1ece1' },
+          tige: { type: 'color', label: 'Tiges', value: '#2f3a2a' },
+          feuillage: { type: 'color', label: 'Pointes', value: '#6f9a5a' },
+          couleurs: { type: 'palette', label: 'Fleurs', value: ['#ef5a2f', '#f272ba', '#edd14b'] },
+          accent: { type: 'color', label: 'Logo', value: '#ef5a2f', show: (q) => q.logo },
+        },
+      },
+      presets: {
+        'Prairie': {},
+        'Fougères': { espece: 'fougere', nombre: 9, fleurs: 0, hauteur: 0.85, tige: '#1f3324', feuillage: '#5f8f4e', vent: 0.4 },
+        'Cyanotype': { espece: 'algue', nombre: 12, fond: '#1d3f8f', tige: '#f4f1ea', feuillage: '#c9d6f2', fleurs: 0, profondeur: 0.6, epaisseur: 1, hauteur: 0.9, vent: 0.5 },
+        'Ombelles': { espece: 'ombelle', nombre: 14, complexite: -1, fleurs: 0.8, tailleFleurs: 1.7, couleurs: ['#f4f1ea', '#f2e6c9'], fond: '#2c3566', tige: '#9fbf8a', feuillage: '#d7e6c2', hauteur: 1 },
+        'Buissons': { espece: 'buisson', nombre: 7, complexite: 1, fleurs: 0.04, hauteur: 0.8, tige: '#3b2a20', feuillage: '#7f9a46', couleurs: ['#ef5a2f'] },
+        'Herbes folles': { espece: 'herbe', nombre: 20, fleurs: 0.06, hauteur: 0.8, vent: 0.6, rafales: 1.8, tige: '#3c4a2c', feuillage: '#b9b46a', couleurs: ['#edd14b', '#f4f1ea'] },
+        'Logo': { logo: true, espece: 'ombelle', nombre: 26, fleurs: 0.08, tailleFleurs: 1.2, hauteur: 1.25, tailleLogo: 0.9, vent: 0.2, couleurs: ['#e2d9c4'], accent: '#ef5a2f', tige: '#3a4433', feuillage: '#8aa576', croissance: 3, vie: 22 },
+        'Biennale': { fond: BIEN[0], tige: BIEN[1], feuillage: BIEN[1], couleurs: [BIEN[2], BIEN[3], BIEN[4]], fleurs: 0.18, espece: 'herbe', nombre: 16 },
+        'Menthe': { fond: MEN[1], tige: MEN[0], feuillage: MEN[2], couleurs: [MEN[3], MEN[2]], espece: 'fougere', nombre: 10, fleurs: 0.1 },
+        'Kegelbahn': { fond: KB[0], tige: KB[1], feuillage: KB[2], couleurs: [KB[2], KB[1]], espece: 'melange', nombre: 14, fleurs: 0.12, profondeur: 0.6 },
+      },
+      brand(colors) {
+        const s = colors.slice().sort((a, b) => lum(a) - lum(b)), mid = s[Math.floor(s.length / 2)];
+        return { fond: s[s.length - 1], tige: s[0], feuillage: s.length > 2 ? s[1] : s[0], couleurs: s.length > 2 ? s.slice(1, -1) : [mid], accent: mid };
+      },
+      pointer: {
+        down: (q) => { lastX = q.x; plantAt(q.x); },
+        drag: (q) => { if (lastX != null) { gust.v = Math.max(-3, Math.min(3, gust.v + (q.x - lastX) * 0.012)); gust.x = q.x; } lastX = q.x; },
+        up: () => { lastX = null; },
+        wheel: (q, dy) => app.set('vent', Math.max(0, Math.min(1, +(p.vent + (dy > 0 ? -0.05 : 0.05)).toFixed(2)))),
+      },
+      onChange(k) { if (['*', 'logo', 'image'].includes(k)) logoKey = ''; },
+      export: { name: 'herbier', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    function hex(x) { const n = parseInt(x.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
+    function lum(x) { const c = hex(x); return (c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114) / 255; }
+    function mix(a, b, t) { const A = hex(a), B = hex(b); return '#' + A.map((v, i) => Math.round(v + (B[i] - v) * t).toString(16).padStart(2, '0')).join(''); }
+    const ease = (x) => x <= 0 ? 0 : x >= 1 ? 1 : 1 - (1 - x) ** 2.2;
+
+    // ——— Logo ———
+    function buildLogo() {
+      const img0 = p.image || app.logoImg, key = [p.logo, img0 ? (img0.src || 'c') : 'demo'].join(); if (key === logoKey) return; logoKey = key;
+      logoM = null; if (!p.logo) return;
+      const M = 200, c = document.createElement('canvas'); c.width = c.height = M; const x = c.getContext('2d', { willReadFrequently: true }), L = M * 0.94, cx = M / 2;
+      if (img0) { const iw = img0.naturalWidth || img0.width, ih = img0.naturalHeight || img0.height, s = L / Math.max(iw, ih); x.drawImage(img0, cx - iw * s / 2, cx - ih * s / 2, iw * s, ih * s); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(cx, cx, L * 0.48, 0, TAU); x.arc(cx, cx, L * 0.27, 0, TAU, true); x.fill('evenodd'); x.fillRect(cx - L * 0.07, cx - L * 0.5, L * 0.14, L); }
+      const d = x.getImageData(0, 0, M, M).data; let transp = 0; for (let i = 3; i < d.length; i += 4) if (d[i] < 128) transp++; const useA = transp > M * M * 0.05;
+      const m = new Uint8Array(M * M); for (let i = 0; i < M * M; i++) { const o = i * 4, l = (d[o] * 0.2126 + d[o + 1] * 0.7152 + d[o + 2] * 0.0722) / 255; m[i] = (useA ? d[o + 3] > 128 : d[o + 3] > 128 && l < 0.5) ? 1 : 0; }
+      logoM = { m, M };
+    }
+    function inLogo(X, Y, w, h) {
+      if (!logoM || !p.logo) return false; const S = Math.min(w, h) * 0.5 * p.tailleLogo, u = Math.floor(((X - w / 2) / S * 0.5 + 0.5) * logoM.M), v = Math.floor(((Y - h * 0.5) / S * 0.5 + 0.5) * logoM.M);
+      return u >= 0 && v >= 0 && u < logoM.M && v < logoM.M && logoM.m[v * logoM.M + u] === 1;
+    }
+
+    // ——— Grammaire compilée : opérations, distance à la racine, niveau d'embranchement, pointes ———
+    function compile(sp, depth) {
+      const key = sp + depth; if (compiled.has(key)) return compiled.get(key);
+      const S = SPECIES[sp]; let s = S.ax;
+      for (let n = 0; n < depth; n++) { let t = ''; for (const c of s) t += S.r[c] || c; s = t; if (s.length > 40000) break; }
+      const N = s.length, op = new Int8Array(N), dist = new Float32Array(N), lev = new Int8Array(N), jit = new Float32Array(N);
+      const st = []; let d = 0, l = 0, maxD = 0, maxL = 0, R = 12345;
+      for (let i = 0; i < N; i++) {
+        const c = s[i]; R = (R * 1103515245 + 12345) & 0x7fffffff; jit[i] = R / 0x7fffffff;
+        if (c === 'F') { op[i] = 1; d++; } else if (c === '+') op[i] = 2; else if (c === '-') op[i] = 3;
+        else if (c === '[') { op[i] = 4; st.push(d, l); l++; } else if (c === ']') { op[i] = 5; l = st.pop(); d = st.pop(); } else if (c === 'X') op[i] = 6;
+        dist[i] = d; lev[i] = l; if (d > maxD) maxD = d; if (l > maxL) maxL = l;
+      }
+      const C = { op, dist, lev, jit, maxD, maxL, tipX: S.ax === 'X' };
+      compiled.set(key, C); return C;
+    }
+
+    // ——— Prairie ———
+    function newPlant(x, born, z, R) {
+      R = R || Math.random;
+      const sp = p.espece === 'melange' ? SP_KEYS[Math.floor(R() * SP_KEYS.length)] : p.espece;
+      let depth = SPECIES[sp].d + p.complexite; if (sp === 'buisson') depth = Math.min(depth, 4);
+      const C = compile(sp, Math.max(1, depth));
+      const P = { x, born, z: z == null ? R() : z, sp, C, r: R(), lean: (R() - 0.5) * 0.5, ph: R() * TAU, life: p.vie * (0.7 + R() * 0.6), hf: 0.6 + R() * 0.65, op: 0.85 + R() * 0.3 };
+      // mesure à vide pour ramener la plante à la hauteur voulue
+      const g = turtle(P, 0, 1, 1, 0, 0, null); const ht = Math.max(1, -g.minY), wd = Math.max(1, g.maxX - g.minX);
+      P.ht = ht; P.wd = wd;
+      return P;
+    }
+    function rebuild(w, h) {
+      const key = [p.espece, p.nombre, p.complexite, app.seed, w, h].join(); if (key === plantKey) return; plantKey = key;
+      const R = app.rng(); plants = [];
+      // départs échelonnés : à l'ouverture la prairie est déjà en partie poussée
+      for (let i = 0; i < p.nombre; i++) { const G = p.croissance; plants.push(newPlant((i + 0.2 + R() * 0.6) / p.nombre * w, simT - R() * (G + p.vie * 0.8) - G * 0.5, null, R)); }
+    }
+    function plantAt(x) {
+      if (!plants.length) return; let k = 0; for (let i = 1; i < plants.length; i++) if (plants[i].born < plants[k].born) k = i;
+      plants[k] = newPlant(x, simT, 0.85 + Math.random() * 0.15);
+    }
+    function stage(P, t) {
+      // pousse → pleine vie → s'efface ; renvoie [part poussée, opacité]
+      if (app.thumbnail) return [1, 1];
+      const u = t - P.born, G = p.croissance;
+      if (u < G) return [ease(u / G), 1];
+      if (u < G + P.life) return [1, 1];
+      const f = (u - G - P.life) / (G * 0.6 + 1); return [1, Math.max(0, 1 - f)];
+    }
+
+    // lecture par la tortue : polylignes par niveau, pointes ; sc = longueur d'un pas
+    function turtle(P, bendTotal, grown, sc, x0, y0, out) {
+      const C = P.C, op = C.op, N = op.length, base = SPECIES[P.sp].a * D2R * p.ouverture * P.op, va = p.variation;
+      const bend = bendTotal / Math.max(1, C.maxD), lim = grown * C.maxD;
+      let x = x0, y = y0, hd = -Math.PI / 2 + P.lean, minX = 0, maxX = 0, minY = 0; const st = [];
+      const L = out ? out.L : null, tips = out ? out.tips : null, cur = out ? out.cur : null;
+      for (let i = 0; i < N; i++) {
+        const o = op[i];
+        if (o === 1) {
+          const d = C.dist[i]; if (d - 1 >= lim) continue;
+          const part = Math.min(1, lim - (d - 1)), lv = C.lev[i];
+          hd += bend * (1 + lv * 0.15);
+          const nx = x + Math.cos(hd) * sc * part, ny = y + Math.sin(hd) * sc * part;
+          if (out) { let pl = cur[lv]; if (!pl || pl[pl.length - 2] !== x || pl[pl.length - 1] !== y) { pl = [x, y]; (L[lv] || (L[lv] = [])).push(pl); cur[lv] = pl; } pl.push(nx, ny); }
+          x = nx; y = ny; if (x < minX) minX = x; if (x > maxX) maxX = x; if (y < minY) minY = y;
+          if (part < 1) { while (i + 1 < N && op[i + 1] === 1) i++; }
+        } else if (o === 2 || o === 3) {
+          const j = (C.jit[i] + P.r) % 1; hd += (o === 2 ? 1 : -1) * base * (1 + va * (j - 0.5) * 1.6);
+        } else if (o === 4) st.push(x, y, hd);
+        else if (o === 5) {
+          if (tips && !C.tipX && op[i - 1] === 1 && C.dist[i - 1] <= lim) tips.push(x, y, (C.jit[i] + P.r * 7) % 1);
+          hd = st.pop(); y = st.pop(); x = st.pop();
+        } else if (o === 6 && tips && C.dist[i] <= lim && (i === 0 || op[i - 1] !== 4)) tips.push(x, y, (C.jit[i] + P.r * 7) % 1);
+      }
+      return { minX, maxX, minY };
+    }
+
+    function scene(w, h, t) {
+      buildLogo(); rebuild(w, h);
+      // les plantes mortes repoussent ailleurs
+      for (let i = 0; i < plants.length; i++) { const P = plants[i]; if (!app.thumbnail && t - P.born > p.croissance * 1.6 + P.life + 1) plants[i] = newPlant(Math.random() * w, t); }
+      const m = Math.min(w, h), out = [], sorted = plants.slice().sort((a, b) => a.z - b.z);
+      for (const P of sorted) {
+        const [g, alpha] = stage(P, t); if (alpha <= 0 || g <= 0) continue;
+        const zf = 0.6 + 0.4 * P.z, target = Math.min(h * 0.9, p.hauteur * h * zf * P.hf);
+        let sc = target / P.ht; if (P.wd * sc > w * 0.55) sc = w * 0.55 / P.wd;
+        const gx = gust.v * Math.exp(-(((P.x - gust.x) / (w * 0.35)) ** 2));
+        const wind = p.vent * (0.25 + 0.75 * Math.sin(t * 0.9 * p.rafales + P.x / w * 4 + P.ph)) + p.vent * 0.25 * Math.sin(t * 2.3 * p.rafales + P.ph * 2) + gx;
+        const G = { L: [], tips: [], cur: [] }, y0 = h - (1 - P.z) * h * 0.07 + 2;
+        turtle(P, wind * 0.75, g, sc, P.x, y0, G);
+        out.push({ P, G, alpha, sc, zf, m });
+      }
+      return out;
+    }
+    function styleOf(S, occ) {
+      const C = S.P.C, fog = (1 - S.P.z) * p.profondeur * 0.7, n = Math.max(1, C.maxL), lv = [];
+      for (let l = 0; l <= n; l++) lv.push({ col: mix(mix(p.tige, p.feuillage, Math.min(1, l / n * 1.3)), p.fond, fog), w: Math.max(0.35, p.epaisseur * S.zf * (1.4 - l / n * 1.1)) });
+      const fl = []; const T = S.G.tips, w = app.size.w, h = app.size.h, base = S.m * 0.006 * p.tailleFleurs * S.zf, Cc = p.couleurs.length ? p.couleurs : ['#ffffff'];
+      for (let i = 0; i < T.length; i += 3) {
+        const inL = inLogo(T[i], T[i + 1], w, h);
+        if (!inL && T[i + 2] >= p.fleurs) continue;
+        // une seule fleur par case : les grappes serrées ne s'empilent pas inutilement
+        const cs = base * (inL ? 2 : 0.9), ck = Math.floor(T[i] / cs) * 100003 + Math.floor(T[i + 1] / cs); if (occ.has(ck)) continue; occ.add(ck);
+        if (inL) fl.push(T[i], T[i + 1], -base * 1.9, p.accent);
+        else if (T[i + 2] < p.fleurs) fl.push(T[i], T[i + 1], base, mix(Cc[Math.floor(T[i + 2] / Math.max(0.001, p.fleurs) * Cc.length) % Cc.length], p.fond, fog));
+      }
+      return { lv, fl };
+    }
+
+    app.loop((t, dt) => {
+      dt = Math.min(0.1, dt || 0);
+      if (!app.thumbnail) simT += dt; else simT = 4;
+      gust.v *= Math.exp(-dt * 0.8);
+      const { w, h, dpr } = app.size, Sc = scene(w, h, simT);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = p.fond; ctx.fillRect(0, 0, w, h);
+      ctx.lineCap = 'round'; ctx.lineJoin = 'round'; const occ = new Set();
+      for (const S of Sc) {
+        const st = styleOf(S, occ); ctx.globalAlpha = S.alpha;
+        S.G.L.forEach((pls, l) => {
+          if (!pls) return; const P2 = new Path2D();
+          for (const pl of pls) { P2.moveTo(pl[0], pl[1]); for (let k = 2; k < pl.length; k += 2) P2.lineTo(pl[k], pl[k + 1]); }
+          ctx.strokeStyle = st.lv[l].col; ctx.lineWidth = st.lv[l].w; ctx.stroke(P2);
+        });
+        // fleurs : une corolle de cinq pétales et un cœur plus sombre
+        const F = st.fl, byCol = new Map();
+        for (let i = 0; i < F.length; i += 4) { let P2 = byCol.get(F[i + 3]); if (!P2) byCol.set(F[i + 3], (P2 = new Path2D())); const r = F[i + 2]; if (r < 0) { P2.moveTo(F[i] - r, F[i + 1]); P2.arc(F[i], F[i + 1], -r, 0, TAU); continue; } for (let k = 0; k < 5; k++) { const a = k * TAU / 5 + S.P.ph, cx = F[i] + Math.cos(a) * r * 0.75, cy = F[i + 1] + Math.sin(a) * r * 0.75; P2.moveTo(cx + r * 0.62, cy); P2.arc(cx, cy, r * 0.62, 0, TAU); } }
+        for (const [col, P2] of byCol) { ctx.fillStyle = col; ctx.fill(P2); }
+        if (F.length) { const H2 = new Path2D(); for (let i = 0; i < F.length; i += 4) { const r = Math.abs(F[i + 2]) * 0.3; H2.moveTo(F[i] + r, F[i + 1]); H2.arc(F[i], F[i + 1], r, 0, TAU); } ctx.fillStyle = mix(p.tige, p.fond, 0.15); ctx.fill(H2); }
+      }
+      ctx.globalAlpha = 1;
+      app.finish(ctx);
+    });
+
+    function toSVG() {
+      const { w, h } = app.size, f = (v) => +v.toFixed(1), Sc = scene(w, h, simT);
+      let s = `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><rect width="100%" height="100%" fill="${p.fond}"/>`;
+      const occ = new Set();
+      for (const S of Sc) {
+        const st = styleOf(S, occ); s += `<g opacity="${+S.alpha.toFixed(3)}" fill="none" stroke-linecap="round" stroke-linejoin="round">`;
+        S.G.L.forEach((pls, l) => { if (!pls) return; s += `<path d="${pls.map((pl) => { let d = 'M' + f(pl[0]) + ' ' + f(pl[1]); for (let k = 2; k < pl.length; k += 2) d += 'L' + f(pl[k]) + ' ' + f(pl[k + 1]); return d; }).join('')}" stroke="${st.lv[l].col}" stroke-width="${f(st.lv[l].w * 10) / 10}"/>`; });
+        const F = st.fl;
+        for (let i = 0; i < F.length; i += 4) {
+          const r = Math.abs(F[i + 2]); if (F[i + 2] < 0) s += `<circle cx="${f(F[i])}" cy="${f(F[i + 1])}" r="${f(r)}" fill="${F[i + 3]}"/>`; else for (let k = 0; k < 5; k++) { const a = k * TAU / 5 + S.P.ph; s += `<circle cx="${f(F[i] + Math.cos(a) * r * 0.75)}" cy="${f(F[i + 1] + Math.sin(a) * r * 0.75)}" r="${f(r * 0.62)}" fill="${F[i + 3]}"/>`; }
+          s += `<circle cx="${f(F[i])}" cy="${f(F[i + 1])}" r="${f(r * 0.3)}" fill="${mix(p.tige, p.fond, 0.15)}"/>`;
+        }
+        s += '</g>';
+      }
+      return s + '</svg>';
+    }
+  </script>
+</body>
+</html>
