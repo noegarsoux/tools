@@ -1,0 +1,15 @@
+{
+  "slug": "mikado",
+  "title": "Mikado",
+  "type": "motion",
+  "description": "Un jeu de mikado aux couleurs de la marque : le faisceau de baguettes s'ouvre et tombe en tas, puis on retire une à une celles qui sont libres, sans faire trembler les autres.",
+  "tags": ["jeu", "physique", "ombres", "interaction", "logo", "svg"],
+  "inspiration": [
+    "Le mikado, ses baguettes peintes d'anneaux et sa spirale bleue",
+    "Les tas de baguettes croisées vus d'en haut, avec leurs ombres portées",
+    "Les jeux d'adresse où l'on retient son souffle"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}
