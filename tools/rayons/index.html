@@ -1,0 +1,281 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Rayons crépusculaires</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Rayons crépusculaires : la lumière est derrière les obstacles. On dessine chaque image les silhouettes (logo,
+    // nuages, persiennes, pales, horizon) dans un petit masque, puis, pour chaque source, on lance quelques centaines
+    // de rayons : chacun sort de la silhouette qui cache la source (s'il y en a une) et file jusqu'au prochain obstacle.
+    // Chaque rayon devient un mince secteur, rempli d'un dégradé radial qui s'éteint avec la distance ; un bruit
+    // angulaire fait alterner rayons longs et courts, clairs et pâles. Plusieurs sources se mêlent en lumière additive.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const BIEN = PAL('biennale'), GLY = PAL('glyphes'), SAL = PAL('salon'), MEN = PAL('menthe'), KB = PAL('kegelbahn');
+
+    let buf = null, bctx = null, simT = 0, logoS = null, logoKey = '', mask = null, mctx = null, userPos = [], grab = -1;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.04, vignette: 0.18 },
+      hint: 'Glissez pour déplacer la lumière · molette : portée des rayons',
+      notes: 'Au coucher du soleil, quand l\'astre se cache derrière un nuage, des faisceaux de lumière semblent jaillir en éventail de ses bords : ce sont les rayons crépusculaires. Ils sont en réalité parallèles ; c\'est la perspective qui les fait diverger, comme des rails qui s\'éloignent. Ce qu\'on voit, c\'est l\'air chargé de poussière ou de brume, éclairé dans les intervalles et laissé dans l\'ombre derrière chaque obstacle. Les affiches Art déco et les gloires baroques ont fait de cet éventail un motif à part entière. Ici chaque source lance des centaines de rayons qui partent du bord de la silhouette qui la cache et s\'arrêtent au premier obstacle ; déplacez la lumière au doigt pour faire tourner l\'éventail.',
+      params: {
+        'Lumière': {
+          sources: { type: 'range', label: 'Sources', min: 1, max: 3, step: 1, value: 1 },
+          intensite: { type: 'range', label: 'Intensité', min: 0.1, max: 1, step: 0.01, value: 0.75 },
+          portee: { type: 'range', label: 'Portée', min: 0.2, max: 1.5, step: 0.01, value: 0.9 },
+          rayures: { type: 'range', label: 'Rayures', min: 0, max: 1, step: 0.01, value: 0.55 },
+          rayons: { type: 'range', label: 'Rayons', min: 120, max: 1440, step: 10, value: 600 },
+          mouvement: { type: 'range', label: 'Mouvement', min: 0, max: 2, step: 0.01, value: 0.5 },
+        },
+        'Obstacles': {
+          obstacles: { type: 'select', label: 'Obstacles', options: { nuages: 'Nuages', persiennes: 'Persiennes', pales: 'Pales', horizon: 'Horizon', anneaux: 'Anneaux brisés', aucun: 'Aucun' }, value: 'nuages' },
+          nombre: { type: 'range', label: 'Nombre', min: 1, max: 24, step: 1, value: 7, show: (q) => q.obstacles !== 'aucun' && q.obstacles !== 'horizon' },
+          taille: { type: 'range', label: 'Taille', min: 0.2, max: 2, step: 0.01, value: 1, show: (q) => q.obstacles !== 'aucun' },
+          vitesse: { type: 'range', label: 'Vitesse des obstacles', min: 0, max: 2, step: 0.01, value: 0.4, show: (q) => q.obstacles !== 'aucun' },
+          silhouettes: { type: 'toggle', label: 'Montrer les silhouettes', value: true },
+        },
+        'Logo devant la lumière': {
+          logo: { type: 'toggle', label: 'Le logo cache la lumière', value: false },
+          tailleLogo: { type: 'range', label: 'Taille du logo', min: 0.2, max: 1.4, step: 0.01, value: 0.55, show: (q) => q.logo },
+          image: { type: 'file', label: 'Logo', accept: 'image/*', show: (q) => q.logo },
+        },
+        'Couleurs': {
+          fond: { type: 'color', label: 'Fond', value: '#0d0b14' },
+          couleurs: { type: 'palette', label: 'Sources', value: ['#f6d860', '#f07a3a', '#f272ba'] },
+          silhouette: { type: 'color', label: 'Silhouettes', value: '#0d0b14', show: (q) => q.silhouettes },
+        },
+      },
+      presets: {
+        'Nuages': {},
+        'Soleil levant': { obstacles: 'horizon', taille: 1, rayures: 0.8, portee: 1.2, couleurs: ['#f6d860', '#ef5a2f'], fond: '#1a0d1f', silhouette: '#1a0d1f', mouvement: 0.3 },
+        'Persiennes': { obstacles: 'persiennes', nombre: 11, taille: 0.8, rayures: 0.3, couleurs: ['#f4f1ea'], fond: '#14161c', silhouette: '#0b0c10', portee: 1.1 },
+        'Pales': { obstacles: 'pales', nombre: 5, taille: 1, vitesse: 0.6, couleurs: ['#7fe0c2', '#486cfc'], sources: 2, fond: '#0a0d14', silhouette: '#0a0d14' },
+        'Gloire': { obstacles: 'aucun', rayures: 0.8, rayons: 900, portee: 1.4, couleurs: ['#edd14b'], fond: '#2a1a12', intensite: 0.9 },
+        'Anneaux': { obstacles: 'anneaux', nombre: 6, taille: 1, vitesse: 0.5, couleurs: ['#f272ba', '#486cfc', '#edd14b'], sources: 3, intensite: 0.6, rayons: 380 },
+        'Logo': { logo: true, obstacles: 'nuages', nombre: 4, taille: 0.6, tailleLogo: 0.5, couleurs: ['#f6d860', '#ef5a2f'], rayures: 0.6, portee: 1.2, mouvement: 0.35 },
+        'Biennale': { fond: BIEN[0], couleurs: [BIEN[2], BIEN[4]], silhouette: BIEN[1], obstacles: 'pales', nombre: 7, rayures: 0.7 },
+        'Menthe': { fond: MEN[1], couleurs: [MEN[0], MEN[2]], silhouette: MEN[1], obstacles: 'persiennes', nombre: 9 },
+        'Kegelbahn': { fond: KB[0], couleurs: [KB[1], KB[2]], silhouette: KB[0], sources: 2, obstacles: 'anneaux', nombre: 5, rayons: 420 },
+      },
+      brand(colors) {
+        const s = colors.slice().sort((a, b) => lum(a) - lum(b));
+        return { fond: s[0], silhouette: s[0], couleurs: s.length > 1 ? s.slice(1).reverse() : ['#ffffff'] };
+      },
+      pointer: {
+        down: (q) => {
+          const { w, h } = app.size, S = sourcesAt(w, h, simT); let bi = 0, bd = Infinity;
+          S.forEach((s, i) => { const d = Math.hypot(s[0] - q.x, s[1] - q.y); if (d < bd) { bd = d; bi = i; } });
+          grab = bi; userPos[bi] = [q.x / w, q.y / h];
+        },
+        drag: (q) => { if (grab >= 0) { const { w, h } = app.size; userPos[grab] = [q.x / w, q.y / h]; } },
+        up: () => { grab = -1; },
+        wheel: (q, dy) => app.set('portee', Math.max(0.2, Math.min(1.5, +(p.portee + (dy > 0 ? -0.04 : 0.04)).toFixed(2)))),
+      },
+      onChange(k) { if (['*', 'logo', 'image'].includes(k)) logoKey = ''; if (k === '*') userPos = []; },
+      export: { name: 'rayons', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    function hex(x) { const n = parseInt(x.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
+    function lum(x) { const c = hex(x); return (c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114) / 255; }
+    function rgba(x, a) { const c = hex(x); return `rgba(${c[0]},${c[1]},${c[2]},${a})`; }
+
+    // ——— Logo : silhouette (canvas) et contour vectoriel (boucles chaînées) ———
+    function buildLogo() {
+      const img0 = p.image || app.logoImg, key = [p.logo, img0 ? (img0.src || 'c') : 'demo'].join(); if (key === logoKey) return; logoKey = key;
+      logoS = null; if (!p.logo) return;
+      const M = 180, c = document.createElement('canvas'); c.width = c.height = M; const x = c.getContext('2d', { willReadFrequently: true }), L = M * 0.94, cx = M / 2;
+      if (img0) { const iw = img0.naturalWidth || img0.width, ih = img0.naturalHeight || img0.height, s = L / Math.max(iw, ih); x.drawImage(img0, cx - iw * s / 2, cx - ih * s / 2, iw * s, ih * s); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(cx, cx, L * 0.48, 0, TAU); x.arc(cx, cx, L * 0.27, 0, TAU, true); x.fill('evenodd'); x.fillRect(cx - L * 0.07, cx - L * 0.5, L * 0.14, L); }
+      const d = x.getImageData(0, 0, M, M).data; let transp = 0; for (let i = 3; i < d.length; i += 4) if (d[i] < 128) transp++; const useA = transp > M * M * 0.05;
+      const m = new Uint8Array(M * M); for (let i = 0; i < M * M; i++) { const o = i * 4, l = (d[o] * 0.2126 + d[o + 1] * 0.7152 + d[o + 2] * 0.0722) / 255; m[i] = (useA ? d[o + 3] > 128 : d[o + 3] > 128 && l < 0.5) ? 1 : 0; }
+      // contour : marching squares sur le masque, segments chaînés en boucles fermées (coordonnées −1..1)
+      const segs = [], at = (i, j) => (i < 0 || j < 0 || i >= M || j >= M) ? 0 : m[j * M + i];
+      for (let j = -1; j < M; j++) for (let i = -1; i < M; i++) {
+        const a = at(i, j), b = at(i + 1, j), cc = at(i + 1, j + 1), dd = at(i, j + 1), idx = a * 8 + b * 4 + cc * 2 + dd; if (idx === 0 || idx === 15) continue;
+        const T = [i + 0.5, j], R = [i + 1, j + 0.5], B = [i + 0.5, j + 1], Lf = [i, j + 0.5], e = (u, v) => segs.push([u, v]);
+        switch (idx) { case 1: case 14: e(Lf, B); break; case 2: case 13: e(B, R); break; case 3: case 12: e(Lf, R); break; case 4: case 11: e(T, R); break; case 6: case 9: e(T, B); break; case 7: case 8: e(Lf, T); break; case 5: e(Lf, T); e(B, R); break; case 10: e(T, R); e(Lf, B); break; }
+      }
+      const key2 = (q) => q[0] * 2 + ',' + q[1] * 2, ends = new Map(), used = new Uint8Array(segs.length), loops = [];
+      segs.forEach((s, i) => { for (const q of s) { const k = key2(q); let Lx = ends.get(k); if (!Lx) ends.set(k, (Lx = [])); Lx.push(i); } });
+      for (let s0 = 0; s0 < segs.length; s0++) {
+        if (used[s0]) continue; used[s0] = 1; const loop = [segs[s0][0], segs[s0][1]];
+        for (;;) { const end = loop[loop.length - 1], Lx = ends.get(key2(end)); let nx = -1; if (Lx) for (const i of Lx) if (!used[i]) { nx = i; break; } if (nx < 0) break; used[nx] = 1; const s = segs[nx]; loop.push(key2(s[0]) === key2(end) ? s[1] : s[0]); }
+        if (loop.length > 3) loops.push(loop.filter((_, k) => k % 2 === 0).map((q) => [(q[0] + 0.5) / M * 2 - 1, (q[1] + 0.5) / M * 2 - 1]));
+      }
+      const sil = document.createElement('canvas'); sil.width = sil.height = M; const sx = sil.getContext('2d'), id = sx.createImageData(M, M);
+      for (let i = 0; i < M * M; i++) id.data[i * 4 + 3] = m[i] ? 255 : 0; sx.putImageData(id, 0, 0);
+      logoS = { loops, sil };
+    }
+
+    // ——— Obstacles du moment, en primitives : cercles, polygones, logo ———
+    function obstacles(w, h, t) {
+      const out = [], m = Math.min(w, h), R = app.rng(), n = p.nombre | 0, v = p.vitesse, sz = p.taille;
+      if (p.obstacles === 'nuages') {
+        for (let i = 0; i < n; i++) {
+          const y = h * (0.12 + 0.76 * R()), sp = (0.4 + R()) * v * m * 0.025, x0 = R() * (w + m * 0.6), x = ((x0 + t * sp) % (w + m * 0.6)) - m * 0.3, k = 3 + Math.floor(R() * 4), r = m * 0.05 * sz * (0.6 + R() * 0.8);
+          for (let j = 0; j < k; j++) out.push({ c: [x + (j - k / 2) * r * 0.9, y + Math.sin(j * 1.7 + i) * r * 0.35], r: r * (0.7 + 0.5 * Math.sin(j * 2.3 + i * 1.3) ** 2) });
+        }
+      } else if (p.obstacles === 'persiennes') {
+        const gap = h / n, th = gap * 0.42 * sz, off = (t * v * m * 0.02) % gap;
+        for (let i = -1; i <= n + 1; i++) { const y = i * gap + off - th / 2; out.push({ P: [[-10, y], [w + 10, y], [w + 10, y + th], [-10, y + th]] }); }
+      } else if (p.obstacles === 'pales') {
+        const cx = w / 2, cy = h / 2, a0 = t * v * 0.5, r0 = m * 0.06 * sz, r1 = m * 0.42 * sz, bw = m * 0.035 * sz;
+        for (let i = 0; i < n; i++) { const a = a0 + i / n * TAU, ca = Math.cos(a), sa = Math.sin(a), nx = -sa, ny = ca; out.push({ P: [[cx + ca * r0 + nx * bw * 0.4, cy + sa * r0 + ny * bw * 0.4], [cx + ca * r1 + nx * bw, cy + sa * r1 + ny * bw], [cx + ca * r1 - nx * bw, cy + sa * r1 - ny * bw], [cx + ca * r0 - nx * bw * 0.4, cy + sa * r0 - ny * bw * 0.4]] }); }
+      } else if (p.obstacles === 'horizon') {
+        const yb = h * (0.62 - (sz - 1) * 0.1), P = [[-10, h + 10]];
+        for (let i = 0; i <= 60; i++) { const x = i / 60 * (w + 20) - 10; P.push([x, yb + Math.sin(x * 0.011 + 1.3) * m * 0.03 + Math.sin(x * 0.027 + t * v * 0.1) * m * 0.012]); }
+        P.push([w + 10, h + 10]); out.push({ P });
+      } else if (p.obstacles === 'anneaux') {
+        const cx = w / 2, cy = h / 2;
+        for (let i = 0; i < n; i++) {
+          const r = m * (0.08 + i * 0.07) * sz, th = m * 0.018 * sz, a0 = t * v * (i % 2 ? 0.4 : -0.3) * (1 + i * 0.1) + R() * TAU, k = 2 + (i % 3);
+          for (let j = 0; j < k; j++) { const aa = a0 + j / k * TAU, span = TAU / k * 0.62, P = []; for (let s = 0; s <= 14; s++) { const a = aa + span * s / 14; P.push([cx + Math.cos(a) * (r + th), cy + Math.sin(a) * (r + th)]); } for (let s = 14; s >= 0; s--) { const a = aa + span * s / 14; P.push([cx + Math.cos(a) * (r - th), cy + Math.sin(a) * (r - th)]); } out.push({ P }); }
+        }
+      }
+      if (p.logo && logoS) out.push({ logo: true, cx: w / 2, cy: h / 2, s: m * p.tailleLogo * 0.5, rot: Math.sin(t * 0.3) * 0.04 });
+      return out;
+    }
+
+    // ——— Sources : derrière le centre (ou l'horizon), elles dérivent doucement ———
+    function sourcesAt(w, h, t) {
+      const S = [], n = p.sources | 0, m = Math.min(w, h);
+      for (let i = 0; i < n; i++) {
+        let bx = w / 2, by = p.obstacles === 'horizon' ? h * (0.64 - (p.taille - 1) * 0.1) : h / 2;
+        if (n > 1) { const a = i / n * TAU + 0.6; bx += Math.cos(a) * m * 0.06; by += Math.sin(a) * m * 0.06; }
+        if (userPos[i]) { bx = userPos[i][0] * w; by = userPos[i][1] * h; }
+        const mv = p.mouvement * m * 0.05;
+        S.push([bx + Math.sin(t * 0.37 + i * 2.1) * mv, by + Math.sin(t * 0.29 + i * 1.3) * mv * 0.6]);
+      }
+      return S;
+    }
+
+    function drawObstacles(c, list, col) {
+      c.fillStyle = col; const P2 = new Path2D();
+      for (const o of list) {
+        if (o.r) { P2.moveTo(o.c[0] + o.r, o.c[1]); P2.arc(o.c[0], o.c[1], o.r, 0, TAU); }
+        else if (o.P) { P2.moveTo(o.P[0][0], o.P[0][1]); for (let i = 1; i < o.P.length; i++) P2.lineTo(o.P[i][0], o.P[i][1]); P2.closePath(); }
+      }
+      c.fill(P2, 'nonzero');
+      for (const o of list) if (o.logo) { c.save(); c.translate(o.cx, o.cy); c.rotate(o.rot); c.globalCompositeOperation = 'source-over'; const tmp = tint(col); c.drawImage(tmp, -o.s, -o.s, o.s * 2, o.s * 2); c.restore(); }
+    }
+    let tintC = null, tintKey = '';
+    function tint(col) {
+      const k = col + (logoS ? logoKey : ''); if (k === tintKey && tintC) return tintC; tintKey = k;
+      const M = logoS.sil.width; tintC = document.createElement('canvas'); tintC.width = tintC.height = M; const x = tintC.getContext('2d');
+      x.drawImage(logoS.sil, 0, 0); x.globalCompositeOperation = 'source-in'; x.fillStyle = col; x.fillRect(0, 0, M, M); return tintC;
+    }
+
+    // ——— Lancer de rayons dans le masque ———
+    function beams(w, h, t) {
+      buildLogo();
+      const obs = obstacles(w, h, t), MW = 360, f = MW / Math.max(w, h), mw = Math.ceil(w * f), mh = Math.ceil(h * f);
+      if (!mask || mask.width !== mw || mask.height !== mh) { mask = document.createElement('canvas'); mask.width = mw; mask.height = mh; mctx = mask.getContext('2d', { willReadFrequently: true }); }
+      mctx.setTransform(1, 0, 0, 1, 0, 0); mctx.clearRect(0, 0, mw, mh); mctx.setTransform(f, 0, 0, f, 0, 0); drawObstacles(mctx, obs, '#000');
+      const A = mctx.getImageData(0, 0, mw, mh).data, occ = (x, y) => { const i = x | 0, j = y | 0; return i >= 0 && j >= 0 && i < mw && j < mh && A[(j * mw + i) * 4 + 3] > 110; };
+      const S = sourcesAt(w, h, t), N = p.rayons | 0, Rmax = Math.hypot(w, h) * p.portee, out = [];
+      S.forEach((L, si) => {
+        const lx = L[0] * f, ly = L[1] * f, steps = Math.ceil(Rmax * f), B = [];
+        for (let i = 0; i < N; i++) {
+          const a = (i + 0.5) / N * TAU, dx = Math.cos(a), dy = Math.sin(a);
+          // rayures : un bruit angulaire lent raccourcit certains rayons et en pâlit d'autres
+          const nz = Math.sin(a * 7 + t * 0.4 + si) * 0.5 + Math.sin(a * 17 - t * 0.7 + si * 2) * 0.3 + Math.sin(a * 43 + t * 0.23) * 0.2;
+          const lim = steps * (1 - p.rayures * 0.45 * (1 + nz)), pick = nz > 0.1 - p.rayures * 0.2 ? 1 : 0;
+          // la silhouette qui cache la source ne compte pas ; ensuite chaque obstacle traversé affaiblit le rayon
+          let r = 0; if (occ(lx, ly)) { while (r < lim && occ(lx + dx * r, ly + dy * r)) r += 1; }
+          let cross = 0;
+          while (r < lim && cross < 4) {
+            const r0 = r; while (r < lim && !occ(lx + dx * r, ly + dy * r)) r += 1;
+            if (r > r0) B.push([r0 / f, r / f, pick, cross, i]);
+            while (r < lim && occ(lx + dx * r, ly + dy * r)) r += 1; cross++;
+          }
+        }
+        out.push({ L, B, col: p.couleurs.length ? p.couleurs[si % p.couleurs.length] : '#ffffff' });
+      });
+      return { obs, out, Rmax, N };
+    }
+
+    const TR = [1, 0.5, 0.28, 0.16];
+    // un mince secteur par rayon (légèrement élargi pour recouvrir les joints)
+    function wedgePolys(L, B, N, pick, cross) {
+      const polys = [], da = TAU / N * 0.53;
+      for (const [r0, r1, k, cr, i] of B) {
+        if (k !== pick || cr !== cross || r1 - r0 < 1) continue; const a = (i + 0.5) / N * TAU, c0 = Math.cos(a - da), s0 = Math.sin(a - da), c1 = Math.cos(a + da), s1 = Math.sin(a + da);
+        polys.push([[L[0] + c0 * r0, L[1] + s0 * r0], [L[0] + c0 * r1, L[1] + s0 * r1], [L[0] + c1 * r1, L[1] + s1 * r1], [L[0] + c1 * r0, L[1] + s1 * r0]]);
+      }
+      return polys;
+    }
+    function wedgePath(L, B, N, pick, cross) {
+      const P2 = new Path2D();
+      for (const P of wedgePolys(L, B, N, pick, cross)) { P2.moveTo(P[0][0], P[0][1]); for (let i = 1; i < P.length; i++) P2.lineTo(P[i][0], P[i][1]); P2.closePath(); }
+      return P2;
+    }
+
+    app.loop((t, dt) => {
+      dt = Math.min(0.1, dt || 0);
+      if (!app.thumbnail) simT += dt; else simT = 4;
+      const { w, h, dpr } = app.size, { obs, out, Rmax, N } = beams(w, h, simT), light = lum(p.fond) < 0.5;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = p.fond; ctx.fillRect(0, 0, w, h);
+      // les faisceaux sont doux : on les peint à mi-résolution, puis on les agrandit d'un coup
+      const bw = Math.ceil(w / 2), bh = Math.ceil(h / 2);
+      if (!buf || buf.width !== bw || buf.height !== bh) { buf = document.createElement('canvas'); buf.width = bw; buf.height = bh; bctx = buf.getContext('2d'); }
+      const B2 = bctx; B2.setTransform(1, 0, 0, 1, 0, 0); B2.globalCompositeOperation = 'source-over'; B2.clearRect(0, 0, bw, bh); B2.setTransform(0.5, 0, 0, 0.5, 0, 0);
+      B2.globalCompositeOperation = light ? 'lighter' : 'source-over';
+      for (const { L, B, col } of out) {
+        for (const pick of [1, 0]) for (let cross = 0; cross < 4; cross++) {
+          const g = B2.createRadialGradient(L[0], L[1], 0, L[0], L[1], Rmax), a = p.intensite * (pick ? 1 : 0.45) * (light ? 0.85 : 0.7) * TR[cross];
+          g.addColorStop(0, rgba(col, a)); g.addColorStop(0.25, rgba(col, a * 0.38)); g.addColorStop(0.6, rgba(col, a * 0.07)); g.addColorStop(1, rgba(col, 0));
+          B2.fillStyle = g; B2.fill(wedgePath(L, B, N, pick, cross));
+        }
+        // halo de la source
+        const g2 = B2.createRadialGradient(L[0], L[1], 0, L[0], L[1], Math.min(w, h) * 0.18);
+        g2.addColorStop(0, rgba(col, p.intensite * 0.8)); g2.addColorStop(1, rgba(col, 0));
+        const hr = Math.min(w, h) * 0.18; B2.fillStyle = g2; B2.fillRect(L[0] - hr, L[1] - hr, hr * 2, hr * 2);
+      }
+      ctx.globalCompositeOperation = light ? 'lighter' : 'multiply'; ctx.imageSmoothingEnabled = true; ctx.drawImage(buf, 0, 0, w, h);
+      ctx.globalCompositeOperation = 'source-over';
+      if (p.silhouettes) drawObstacles(ctx, obs, p.silhouette);
+      app.finish(ctx);
+    });
+
+    function toSVG() {
+      const { w, h } = app.size, f = (v) => +v.toFixed(1), { obs, out, Rmax, N } = beams(w, h, simT), light = lum(p.fond) < 0.5, blend = light ? 'screen' : 'multiply';
+      let s = `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><defs>`, body = '';
+      out.forEach(({ L, B, col }, si) => {
+        for (const pick of [1, 0]) for (let cross = 0; cross < 4; cross++) {
+          const a = p.intensite * (pick ? 1 : 0.45) * (light ? 0.85 : 0.7) * TR[cross], id = `g${si}${pick}${cross}`;
+          s += `<radialGradient id="${id}" gradientUnits="userSpaceOnUse" cx="${f(L[0])}" cy="${f(L[1])}" r="${f(Rmax)}"><stop offset="0" stop-color="${col}" stop-opacity="${f(a * 100) / 100}"/><stop offset="0.25" stop-color="${col}" stop-opacity="${f(a * 38) / 100}"/><stop offset="0.6" stop-color="${col}" stop-opacity="${f(a * 7) / 100}"/><stop offset="1" stop-color="${col}" stop-opacity="0"/></radialGradient>`;
+          let d = ''; for (const P of wedgePolys(L, B, N, pick, cross)) d += 'M' + P.map((q) => f(q[0]) + ' ' + f(q[1])).join('L') + 'z';
+          if (d) body += `<path d="${d}" fill="url(#${id})" style="mix-blend-mode:${blend}"/>`;
+        }
+        s += `<radialGradient id="h${si}" gradientUnits="userSpaceOnUse" cx="${f(L[0])}" cy="${f(L[1])}" r="${f(Math.min(w, h) * 0.18)}"><stop offset="0" stop-color="${col}" stop-opacity="${f(p.intensite * 80) / 100}"/><stop offset="1" stop-color="${col}" stop-opacity="0"/></radialGradient>`;
+        body += `<circle cx="${f(L[0])}" cy="${f(L[1])}" r="${f(Math.min(w, h) * 0.18)}" fill="url(#h${si})" style="mix-blend-mode:${blend}"/>`;
+      });
+      s += `</defs><rect width="100%" height="100%" fill="${p.fond}"/><g style="isolation:isolate">${body}</g>`;
+      if (p.silhouettes) {
+        let d = '';
+        for (const o of obs) {
+          if (o.r) d += `M${f(o.c[0] + o.r)} ${f(o.c[1])}A${f(o.r)} ${f(o.r)} 0 1 0 ${f(o.c[0] - o.r)} ${f(o.c[1])}A${f(o.r)} ${f(o.r)} 0 1 0 ${f(o.c[0] + o.r)} ${f(o.c[1])}z`;
+          else if (o.P) d += 'M' + o.P.map((q) => f(q[0]) + ' ' + f(q[1])).join('L') + 'z';
+        }
+        if (d) s += `<path d="${d}" fill="${p.silhouette}"/>`;
+        for (const o of obs) if (o.logo) { const c = Math.cos(o.rot), sn = Math.sin(o.rot); let dl = ''; for (const loop of logoS.loops) dl += 'M' + loop.map(([u, v]) => f(o.cx + (u * c - v * sn) * o.s) + ' ' + f(o.cy + (u * sn + v * c) * o.s)).join('L') + 'z'; s += `<path d="${dl}" fill="${p.silhouette}" fill-rule="evenodd"/>`; }
+      }
+      return s + '</svg>';
+    }
+  </script>
+</body>
+</html>
