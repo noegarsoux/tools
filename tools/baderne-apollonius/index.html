@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Baderne d'Apollonius</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Baderne d'Apollonius : dans un cercle, trois cercles tangents deux à deux ; dans chaque interstice courbe,
+    // on loge le seul cercle tangent aux trois qui le bordent, et ainsi de suite à l'infini. Le théorème de Descartes
+    // donne chaque nouveau cercle d'un coup : courbure et centre (en nombres complexes) sont des combinaisons linéaires.
+    // Une transformation de Möbius qui préserve le disque fait couler toute la baderne sans jamais la casser :
+    // les cercles restent des cercles, et restent tangents.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const BIEN = PAL('biennale'), MEN = PAL('menthe'), LU = PAL('luzern'), KB = PAL('kegelbahn'), TH = PAL('thermique'), SAL = PAL('salon');
+
+    let held = null, aUser = [0, 0], aT = 0, maskKey = '', mask = null, mw = 0, mh = 0, lastT = 0;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: false,
+      finish: { grain: 0.03, vignette: 0.12 },
+      hint: 'Glissez pour faire couler la baderne · molette : finesse',
+      notes: 'Trois cercles tangents deux à deux, dans un grand cercle qui les touche tous. Dans chaque interstice, il existe un seul cercle tangent aux trois qui le bordent ; on le loge, ce qui crée trois nouveaux interstices, et ainsi de suite. Le théorème de Descartes donne la courbure du nouveau cercle, et sa version complexe donne son centre. Une transformation de Möbius qui préserve le disque déplace tout l’ensemble : les cercles restent des cercles et restent tangents, si bien que la baderne coule sans se défaire.',
+      params: {
+        'Baderne': {
+          equilibre: { type: 'range', label: 'Rapport des deux premiers cercles', min: 0.2, max: 0.5, step: 0.005, value: 0.5 },
+          finesse: { type: 'range', label: 'Plus petit cercle (px)', min: 0.6, max: 12, step: 0.1, value: 1.1 },
+          zoom: { type: 'range', label: 'Zoom', min: 0.6, max: 4, step: 0.01, value: 1 },
+        },
+        'Mouvement': {
+          derive: { type: 'range', label: 'Écoulement', min: 0, max: 0.85, step: 0.01, value: 0.45 },
+          vitesse: { type: 'range', label: 'Vitesse', min: 0, max: 1, step: 0.01, value: 0.18 },
+          rotation: { type: 'range', label: 'Rotation (°/s)', min: -30, max: 30, step: 0.5, value: 4 },
+        },
+        'Rendu': {
+          rendu: { type: 'segmented', label: 'Rendu', options: { plein: 'Disques', anneaux: 'Anneaux', cibles: 'Cibles' }, value: 'plein' },
+          ecart: { type: 'range', label: 'Écart entre cercles', min: 0, max: 0.4, step: 0.01, value: 0.06 },
+          couleur: { type: 'segmented', label: 'Couleur selon', options: { taille: 'Taille', generation: 'Génération', famille: 'Famille' }, value: 'taille' },
+          bandes: { type: 'range', label: 'Bandes de taille', min: 0.5, max: 4, step: 0.1, value: 1.5, show: (q) => q.couleur === 'taille' },
+          cadre: { type: 'toggle', label: 'Tracer le grand cercle', value: true },
+          trait: { type: 'range', label: 'Épaisseur des anneaux', min: 0.5, max: 4, step: 0.1, value: 1.2, show: (q) => q.rendu !== 'plein' },
+        },
+        'Marque': {
+          logo: { type: 'toggle', label: 'Cercles du logo en accent', value: false },
+          image: { type: 'file', label: 'Logo', accept: 'image/*', show: (q) => q.logo },
+        },
+        'Couleurs': {
+          fond: { type: 'color', label: 'Fond', value: '#111114' },
+          couleurs: { type: 'palette', label: 'Cercles', value: ['#f4f1ea', '#ef5a2f', '#486cfc', '#edd14b'] },
+          accent: { type: 'color', label: 'Accent (logo)', value: '#ef5a2f' },
+        },
+      },
+      presets: {
+        'Baderne': {},
+        'Asymétrique': { equilibre: 0.3, couleurs: ['#1f1d1a', '#3a6fd0', '#e5452a'], fond: '#f2efe8', couleur: 'generation' },
+        'Anneaux': { rendu: 'anneaux', ecart: 0.02, couleurs: ['#f4f1ea', '#486cfc'], trait: 1, finesse: 2.2 },
+        'Cibles': { rendu: 'cibles', ecart: 0.04, couleurs: [BIEN[1], BIEN[2], BIEN[3]], fond: BIEN[0], finesse: 3, trait: 1.6 },
+        'Familles': { couleur: 'famille', couleurs: [LU[1], LU[2], LU[3]], fond: LU[0], ecart: 0.1, equilibre: 0.42 },
+        'Plongée': { zoom: 2.6, derive: 0.7, vitesse: 0.12, couleurs: TH.slice(1), fond: '#0c0c14', bandes: 2.5 },
+        'Logo': { logo: true, couleurs: ['#2c2c31', '#3a3a40'], accent: '#ef5a2f', finesse: 1.2, ecart: 0.08, couleur: 'generation', derive: 0.3 },
+        'Menthe': { couleurs: [MEN[2], MEN[3], MEN[0]], fond: MEN[1], ecart: 0.14, equilibre: 0.36 },
+        'Salon': { couleurs: [SAL[1], SAL[2], SAL[3], SAL[4]], fond: SAL[0], couleur: 'famille', ecart: 0.08 },
+        'Kegelbahn': { couleurs: KB.slice(1, 5), fond: KB[0], rendu: 'cibles', finesse: 2.5 },
+      },
+      brand(colors) {
+        const lum = (x) => { const c = hex(x); return c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114; };
+        const s = colors.slice().sort((a, b) => lum(a) - lum(b)), rest = s.slice(1);
+        return { fond: s[0], couleurs: rest.length ? rest : ['#ffffff'], accent: s[s.length - 1] };
+      },
+      pointer: {
+        down: (q) => { held = { x: q.x, y: q.y, a0: aUser.slice() }; },
+        drag: (q) => {
+          if (!held) return; const R = radius();
+          const ax = held.a0[0] + (q.x - held.x) / R * 0.8, ay = held.a0[1] + (q.y - held.y) / R * 0.8, m = Math.hypot(ax, ay);
+          aUser = m > 0.85 ? [ax / m * 0.85, ay / m * 0.85] : [ax, ay];
+        },
+        up: () => { held = null; },
+        wheel: (q, dy) => { app.set('finesse', Math.max(0.6, Math.min(12, +(p.finesse * (dy > 0 ? 1.12 : 1 / 1.12)).toFixed(2)))); },
+      },
+      onChange(k) { if (k === 'image') maskKey = ''; if (k === '*') aUser = [0, 0]; },
+      export: { name: 'baderne-apollonius', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    const hex = (x) => { const n = parseInt(x.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; };
+    const radius = () => { const { w, h } = app.size; return Math.min(w, h) * 0.46 * p.zoom; };
+
+    // ——— Nombres complexes ———
+    const cmul = (a, b) => [a[0] * b[0] - a[1] * b[1], a[0] * b[1] + a[1] * b[0]];
+    const cdiv = (a, b) => { const d = b[0] * b[0] + b[1] * b[1]; return [(a[0] * b[0] + a[1] * b[1]) / d, (a[1] * b[0] - a[0] * b[1]) / d]; };
+    const csqrt = (a) => { const r = Math.hypot(a[0], a[1]), x = Math.sqrt(Math.max(0, (r + a[0]) / 2)), y = Math.sqrt(Math.max(0, (r - a[0]) / 2)); return [x, a[1] < 0 ? -y : y]; };
+
+    // Möbius du disque : z → e^{iθ} (z − a) / (1 − ā z) ; un cercle est transporté par trois de ses points
+    function mob(z, a, th) { const n = [z[0] - a[0], z[1] - a[1]], d = [1 - (a[0] * z[0] + a[1] * z[1]), -(a[0] * z[1] - a[1] * z[0])]; const q = cdiv(n, d); return [q[0] * Math.cos(th) - q[1] * Math.sin(th), q[0] * Math.sin(th) + q[1] * Math.cos(th)]; }
+    function circum(P) {
+      const [ax, ay] = P[0], [bx, by] = P[1], [cx, cy] = P[2], d = 2 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by));
+      const a2 = ax * ax + ay * ay, b2 = bx * bx + by * by, c2 = cx * cx + cy * cy;
+      const ux = (a2 * (by - cy) + b2 * (cy - ay) + c2 * (ay - by)) / d, uy = (a2 * (cx - bx) + b2 * (ax - cx) + c2 * (bx - ax)) / d;
+      return { x: ux, y: uy, r: Math.hypot(ax - ux, ay - uy) };
+    }
+    function mobCircle(c, a, th) { const P = [0, 2.1, 4.2].map((t) => mob([c.x + c.r * Math.cos(t), c.y + c.r * Math.sin(t)], a, th)); const o = circum(P); return { k: 1 / o.r, x: o.x, y: o.y }; }
+
+    // ——— Construction ———
+    // un cercle = courbure k (négative pour le cercle extérieur) et centre (x, y)
+    function gasket(t) {
+      const r1 = p.equilibre, r2 = 1 - r1;
+      const O = { k: -1, x: 0, y: 0 }, A = { k: 1 / r1, x: -1 + r1, y: 0 }, B = { k: 1 / r2, x: r1, y: 0 };
+      const kC = O.k + A.k + B.k + 2 * Math.sqrt(Math.max(0, O.k * A.k + A.k * B.k + B.k * O.k));
+      const s = csqrt(cmul([A.k * A.x, 0], [B.k * B.x, 0])), kz = [A.k * A.x + B.k * B.x + 2 * s[0], 2 * s[1]];
+      const C = { k: kC, x: kz[0] / kC, y: kz[1] / kC };
+      // le flux : un point a qui tourne lentement dans le disque, plus le geste
+      const am = p.derive, ph = aT;
+      let a = [am * 0.75 * Math.cos(ph) + aUser[0], am * 0.75 * Math.sin(ph * 0.73) + aUser[1]]; const m = Math.hypot(a[0], a[1]); if (m > 0.9) a = [a[0] / m * 0.9, a[1] / m * 0.9];
+      const th = t * p.rotation * Math.PI / 180;
+      const base = [A, B, C].map((c) => mobCircle({ x: c.x, y: c.y, r: 1 / c.k }, a, th));
+      const R = radius(), minK = R / Math.max(0.3, p.finesse), out = [];
+      base.forEach((c, i) => out.push({ ...c, g: 0, f: i }));
+      const [cA, cB, cC] = base;
+      // Descartes : le cercle opposé à c4 dans l'interstice (c1, c2, c3)
+      // pile explicite : près des points de contact, les chaînes de cercles sont très longues
+      const stack = [[O, cA, cB, cC, 1, 0], [O, cA, cC, cB, 1, 1], [O, cB, cC, cA, 1, 2], [cA, cB, cC, O, 1, 3]];
+      while (stack.length && out.length < 60000) {
+        const [c1, c2, c3, c4, g, f] = stack.pop();
+        const k = 2 * (c1.k + c2.k + c3.k) - c4.k; if (k > minK || k <= 0) continue;
+        const kx = 2 * (c1.k * c1.x + c2.k * c2.x + c3.k * c3.x) - c4.k * c4.x, ky = 2 * (c1.k * c1.y + c2.k * c2.y + c3.k * c3.y) - c4.k * c4.y;
+        const n = { k, x: kx / k, y: ky / k, g, f };
+        out.push(n);
+        stack.push([c1, c2, n, c3, g + 1, f], [c1, c3, n, c2, g + 1, f], [c2, c3, n, c1, g + 1, f]);
+      }
+      return out;
+    }
+
+    // ——— Logo ———
+    function logoMask(w, h) {
+      const img0 = p.image || app.logoImg, key = (img0 ? (img0.src || 'c') : 'demo') + w + 'x' + h;
+      if (key === maskKey && mask) return mask; maskKey = key;
+      mw = Math.max(8, Math.round(w / 3)); mh = Math.max(8, Math.round(h / 3));
+      const c = document.createElement('canvas'); c.width = mw; c.height = mh; const x = c.getContext('2d', { willReadFrequently: true });
+      const L = Math.min(mw, mh) * 0.62, cx = mw / 2, cy = mh / 2;
+      if (img0) { const iw = img0.naturalWidth || img0.width, ih = img0.naturalHeight || img0.height, k = L / Math.max(iw, ih); x.drawImage(img0, cx - iw * k / 2, cy - ih * k / 2, iw * k, ih * k); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(cx, cy, L * 0.48, 0, TAU); x.arc(cx, cy, L * 0.28, 0, TAU, true); x.fill('evenodd'); x.fillRect(cx - L * 0.07, cy - L * 0.5, L * 0.14, L); }
+      const d = x.getImageData(0, 0, mw, mh).data; let transp = 0; for (let i = 3; i < d.length; i += 4) if (d[i] < 128) transp++;
+      const useA = transp > mw * mh * 0.05; mask = new Uint8Array(mw * mh);
+      for (let i = 0; i < mw * mh; i++) { const l = (d[i * 4] * 0.2126 + d[i * 4 + 1] * 0.7152 + d[i * 4 + 2] * 0.0722) / 255; mask[i] = (useA ? d[i * 4 + 3] > 128 : d[i * 4 + 3] > 128 && l < 0.5) ? 1 : 0; }
+      return mask;
+    }
+
+    // ——— Cercles à l'écran, avec leur couleur ———
+    function shapes(t) {
+      const { w, h } = app.size, R = radius(), cx = w / 2, cy = h / 2, C = p.couleurs, nC = C.length, g = p.ecart, lg = p.logo ? logoMask(w, h) : null;
+      const out = [];
+      for (const c of gasket(t)) {
+        const r = R / c.k, x = cx + c.x * R, y = cy + c.y * R;
+        if (x + r < 0 || y + r < 0 || x - r > w || y - r > h) continue;
+        let col;
+        if (p.couleur === 'generation') col = C[c.g % nC];
+        else if (p.couleur === 'famille') col = C[c.f % nC];
+        else col = C[((Math.floor(Math.log2(Math.max(1, c.k)) * p.bandes) % nC) + nC) % nC];
+        if (lg) { const i = (x / w * mw) | 0, j = (y / h * mh) | 0; if (i >= 0 && j >= 0 && i < mw && j < mh && lg[j * mw + i]) col = p.accent; }
+        out.push({ x, y, r: r * (1 - g), col });
+      }
+      return out;
+    }
+
+    function draw(c, list) {
+      const ring = p.rendu !== 'plein', lw = p.trait;
+      // lots courts par couleur : un chemin de milliers de cercles se remplit lentement
+      const bins = new Map();
+      for (const o of list) { let L = bins.get(o.col); if (!L) bins.set(o.col, L = []); L.push(o); }
+      c.lineWidth = lw;
+      for (const [col, L] of bins) {
+        for (let i = 0; i < L.length; i += 80) {
+          const P = new Path2D();
+          for (let j = i; j < Math.min(L.length, i + 80); j++) {
+            const o = L[j];
+            if (p.rendu === 'cibles') { for (let rr = o.r - lw / 2; rr > lw; rr -= lw * 3) { P.moveTo(o.x + rr, o.y); P.arc(o.x, o.y, rr, 0, TAU); } if (o.r < lw * 2) { P.moveTo(o.x + o.r, o.y); P.arc(o.x, o.y, o.r * 0.6, 0, TAU); } }
+            else { const rr = ring ? Math.max(0.3, o.r - lw / 2) : o.r; P.moveTo(o.x + rr, o.y); P.arc(o.x, o.y, rr, 0, TAU); }
+          }
+          if (ring) { c.strokeStyle = col; c.stroke(P); } else { c.fillStyle = col; c.fill(P); }
+        }
+      }
+    }
+
+    app.loop((t, dt) => {
+      dt = Math.min(0.1, dt || 0);
+      if (!app.thumbnail) aT += dt * p.vitesse;
+      lastT = app.thumbnail ? 0 : t;
+      const { w, h, dpr } = app.size;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = p.fond; ctx.fillRect(0, 0, w, h);
+      draw(ctx, shapes(lastT));
+      if (p.cadre) { ctx.strokeStyle = p.couleurs[0]; ctx.lineWidth = Math.max(1, p.trait); ctx.beginPath(); ctx.arc(w / 2, h / 2, radius(), 0, TAU); ctx.stroke(); }
+      app.finish(ctx);
+    });
+
+    function toSVG() {
+      const { w, h } = app.size, list = shapes(lastT), f = (v) => +v.toFixed(2), bins = new Map(), lw = p.trait;
+      for (const o of list) {
+        let L = bins.get(o.col); if (!L) bins.set(o.col, L = []);
+        if (p.rendu === 'cibles') { for (let rr = o.r - lw / 2; rr > lw; rr -= lw * 3) L.push(`<circle cx="${f(o.x)}" cy="${f(o.y)}" r="${f(rr)}"/>`); }
+        else L.push(`<circle cx="${f(o.x)}" cy="${f(o.y)}" r="${f(p.rendu === 'anneaux' ? Math.max(0.3, o.r - lw / 2) : o.r)}"/>`);
+      }
+      const out = [`<rect width="100%" height="100%" fill="${p.fond}"/>`];
+      for (const [c, L] of bins) out.push(p.rendu === 'plein' ? `<g fill="${c}">${L.join('')}</g>` : `<g fill="none" stroke="${c}" stroke-width="${lw}">${L.join('')}</g>`);
+      if (p.cadre) out.push(`<circle cx="${f(w / 2)}" cy="${f(h / 2)}" r="${f(radius())}" fill="none" stroke="${p.couleurs[0]}" stroke-width="${Math.max(1, lw)}"/>`);
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">${out.join('')}</svg>`;
+    }
+  </script>
+</body>
+</html>

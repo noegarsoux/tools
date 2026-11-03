@@ -1,0 +1,15 @@
+{
+  "slug": "baderne-apollonius",
+  "title": "Baderne d'Apollonius",
+  "type": "motion",
+  "description": "Des cercles tangents logés à l'infini dans les interstices d'un cercle ; une transformation de Möbius fait couler toute la baderne sans la défaire.",
+  "tags": ["mathematiques", "cercles", "fractale", "vectoriel", "logo", "svg"],
+  "inspiration": [
+    "Apollonius de Perga, le problème des cercles tangents",
+    "René Descartes, le théorème des cercles (1643)",
+    "Mumford, Series et Wright, Indra's Pearls (2002)"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}
