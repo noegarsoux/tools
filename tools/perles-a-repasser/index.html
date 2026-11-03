@@ -1,0 +1,352 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Perles à repasser</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Perles à repasser : une plaque à picots (grille carrée, ou en nid d'abeille pour la plaque hexagonale).
+    // Chaque picot reçoit l'indice de couleur que donne le motif (logo pixelisé, dégradé tramé, cercles…).
+    // Cycle d'une plaque : pose des perles dans un ordre (rangs, hasard, par couleur, depuis le centre),
+    // passage du fer (une « chaleur » gaussienne qui suit un trajet en lacet et fait monter la fusion de chaque perle),
+    // pause, puis la pièce fondue est décollée et emportée. La fusion élargit la perle, arrondit moins ses coins
+    // et referme son trou : les perles voisines se soudent. Perles et ombres viennent de sprites mis en cache.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const BIT = PAL('bitmap'), MEN = PAL('menthe'), SAL = PAL('salon'), THE = PAL('thermique');
+    const MOTIFS = ['logo', 'degrade', 'cercles', 'rayures', 'damier', 'spirale', 'onde'];
+    const LV = 6; // niveaux de fusion mis en cache
+
+    let simT = 0, vKey = '', logoM = null, logoKey = '', LM = null, ptr = null, G = null, gKey = '', board = null, bKey = '', spr = new Map(), sKey = '';
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.04, vignette: 0.12 },
+      hint: 'Glissez pour faire sauter des perles · clic : passer à l\'étape suivante · molette : taille des perles',
+      notes: 'Les perles à repasser se posent une à une sur une plaque à picots, puis on les couvre d\'un papier cuisson et on passe le fer : le plastique ramollit, les perles s\'élargissent, leur trou se referme et elles se soudent entre voisines. Ici, le motif (logo pixelisé, dégradé tramé, cercles, rayures, damier, spirale ou onde) se monte perle après perle, le fer passe en lacet, puis la pièce fondue est décollée et une nouvelle plaque commence. Glissez sur la plaque pour faire sauter des perles, cliquez pour passer à l\'étape suivante.',
+      params: {
+        'Plaque': {
+          plaque: { type: 'segmented', label: 'Plaque', options: { ecran: 'Plein cadre', carre: 'Carrée', rond: 'Ronde', hexagone: 'Hexagonale' }, value: 'ecran' },
+          maille: { type: 'range', label: 'Taille des perles', min: 0.012, max: 0.08, step: 0.001, value: 0.03 },
+          picots: { type: 'toggle', label: 'Montrer les picots vides', value: true },
+        },
+        'Motif': {
+          motif: { type: 'select', label: 'Motif', options: { logo: 'Logo', degrade: 'Dégradé tramé', cercles: 'Cercles', rayures: 'Rayures', damier: 'Damier', spirale: 'Spirale', onde: 'Onde' }, value: 'logo' },
+          enchainer: { type: 'toggle', label: 'Changer de motif à chaque plaque', value: false },
+          echelle: { type: 'range', label: 'Échelle du motif', min: 0.3, max: 2, step: 0.01, value: 1 },
+          tailleLogo: { type: 'range', label: 'Taille du logo', min: 0.3, max: 1, step: 0.01, value: 0.72 },
+          remplissage: { type: 'segmented', label: 'Autour du logo', options: { vide: 'Vide', contour: 'Contour', plein: 'Plein' }, value: 'contour' },
+          image: { type: 'file', label: 'Logo', accept: 'image/*' },
+        },
+        'Pose et fer': {
+          ordre: { type: 'select', label: 'Ordre de pose', options: { rangs: 'Rang par rang', hasard: 'Au hasard', couleur: 'Couleur par couleur', centre: 'Depuis le centre' }, value: 'rangs' },
+          pose: { type: 'range', label: 'Durée de la pose (s)', min: 1, max: 30, step: 0.5, value: 7 },
+          fusion: { type: 'range', label: 'Fusion au repassage', min: 0, max: 1, step: 0.01, value: 0.75 },
+          relief: { type: 'range', label: 'Relief', min: 0, max: 1, step: 0.01, value: 0.6 },
+        },
+        'Couleurs': {
+          fond: { type: 'color', label: 'Table', value: '#e9e4da' },
+          plateau: { type: 'color', label: 'Plaque', value: '#f6f4ef' },
+          couleurs: { type: 'palette', label: 'Perles', value: ['#16161a', '#e8552b', '#4b6cf0', '#f4c53a'] },
+        },
+      },
+      presets: {
+        'Logo': {},
+        'Logo plein': { remplissage: 'plein', couleurs: ['#e8552b', '#16161a', '#f4c53a'], plaque: 'carre', maille: 0.026 },
+        'Hexagone': { plaque: 'hexagone', motif: 'cercles', couleurs: ['#e57d9e', '#f2c230', '#3a6fd0', '#2f6b3a', '#f4f1ea'], ordre: 'centre', maille: 0.032 },
+        'Dégradé': { motif: 'degrade', couleurs: ['#3b3bb3', '#7a47b4', '#e0622e', '#f2c06a'], ordre: 'hasard', maille: 0.022 },
+        'Damier': { motif: 'damier', plaque: 'carre', couleurs: ['#16161a', '#f4f1ea'], ordre: 'couleur', echelle: 1.4 },
+        'Spirale': { motif: 'spirale', plaque: 'rond', couleurs: ['#e8552b', '#f4c53a', '#4b6cf0', '#f4f1ea'], ordre: 'centre' },
+        'Fondu': { motif: 'onde', fusion: 1, maille: 0.04, couleurs: ['#4f9d7a', '#a4e0bc', '#191d1e'] },
+        'Enchaînement': { enchainer: true, pose: 4, maille: 0.028 },
+        'Salon': { fond: SAL[0], plateau: mix(SAL[0], '#ffffff', 0.6), couleurs: SAL.slice(1), motif: 'rayures', ordre: 'couleur' },
+        'Menthe': { fond: MEN[0], plateau: mix(MEN[0], '#ffffff', 0.5), couleurs: [MEN[1], MEN[3], MEN[2]], plaque: 'hexagone', motif: 'logo', remplissage: 'plein' },
+      },
+      brand(colors) {
+        const s = colors.slice().sort((a, b) => lum(a) - lum(b)), L = s[s.length - 1];
+        return { fond: mix(L, '#000000', 0.06), plateau: mix(L, '#ffffff', 0.5), couleurs: s.length > 1 ? s.slice(0, -1) : ['#16161a'] };
+      },
+      pointer: {
+        down: (q) => { ptr = { x: q.x, y: q.y, moved: 0 }; knock(q.x, q.y); },
+        drag: (q) => { if (!ptr) return; ptr.moved += Math.hypot(q.x - ptr.x, q.y - ptr.y); ptr.x = q.x; ptr.y = q.y; knock(q.x, q.y); },
+        up: () => { if (ptr && ptr.moved < 6) advance(); ptr = null; },
+        wheel: (q, dy) => app.set('maille', Math.max(0.012, Math.min(0.08, +(p.maille * (dy > 0 ? 0.92 : 1.08)).toFixed(3)))),
+      },
+      onChange(k) { if (['*', 'image'].includes(k)) logoKey = ''; },
+      export: { name: 'perles-a-repasser', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    function hex(x) { const n = parseInt(x.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
+    function lum(x) { const c = hex(x); return (c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114) / 255; }
+    function mix(a, b, t) { const A = hex(a), C = hex(b); return '#' + A.map((v, i) => Math.round(v + (C[i] - v) * t).toString(16).padStart(2, '0')).join(''); }
+    function rng(s) { let a = s >>> 0; return () => { a = (a + 0x6d2b79f5) >>> 0; let t = a; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+
+    function buildLogo() {
+      const img0 = p.image || app.logoImg, key = img0 ? (img0.src || 'c') : 'demo'; if (key === logoKey) return; logoKey = key; vKey = '';
+      const M = 200, c = document.createElement('canvas'); c.width = c.height = M; const x = c.getContext('2d', { willReadFrequently: true }), L = M * 0.94, cx = M / 2;
+      if (img0) { const iw = img0.naturalWidth || img0.width, ih = img0.naturalHeight || img0.height, s = L / Math.max(iw, ih); x.drawImage(img0, cx - iw * s / 2, cx - ih * s / 2, iw * s, ih * s); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(cx, cx, L * 0.48, 0, TAU); x.arc(cx, cx, L * 0.27, 0, TAU, true); x.fill('evenodd'); x.fillRect(cx - L * 0.07, cx - L * 0.5, L * 0.14, L); }
+      const d = x.getImageData(0, 0, M, M).data; let transp = 0; for (let i = 3; i < d.length; i += 4) if (d[i] < 128) transp++; const useA = transp > M * M * 0.05;
+      const F = new Float64Array(M * M); for (let i = 0; i < M * M; i++) { const o = i * 4, l = (d[o] * 0.2126 + d[o + 1] * 0.7152 + d[o + 2] * 0.0722) / 255; F[i] = useA ? d[o + 3] / 255 : (d[o + 3] / 255) * Math.min(1, Math.max(0, (0.75 - l) * 2)); }
+      { const G2 = new Float64Array(M * M); for (let j = 1; j < M - 1; j++) for (let i = 1; i < M - 1; i++) { let a = 0; for (let b = -1; b <= 1; b++) for (let c = -1; c <= 1; c++) a += F[(j + b) * M + i + c] * (b || c ? (b && c ? 1 : 2) : 4); G2[j * M + i] = a / 16; } F.set(G2); }
+      for (let k = 0; k < M; k++) F[k] = F[(M - 1) * M + k] = F[k * M] = F[k * M + M - 1] = 0;
+      logoM = contours(F, M, M, 0.5, 0, 0, 1).filter((c) => c.closed && c.pts.length > 6).map((c) => chaikin(chaikin(c.pts, true), true).map((q) => [q[0] / M - 0.5, q[1] / M - 0.5]));
+    }
+    // carrés marchants + chaînage
+    function contours(F, nx, ny, lev, ox, oy, cs) {
+      const pt = new Map(), adj = new Map();
+      const P = (id) => { let q = pt.get(id); if (q) return q; const cell = id >> 1, i = cell % nx, j = (cell - i) / nx; let a, b, ax, ay, bx, by; if (id & 1) { a = F[j * nx + i]; b = F[(j + 1) * nx + i]; ax = bx = i; ay = j; by = j + 1; } else { a = F[j * nx + i]; b = F[j * nx + i + 1]; ay = by = j; ax = i; bx = i + 1; } const t = (lev - a) / (b - a || 1e-9); q = [ox + (ax + (bx - ax) * t) * cs, oy + (ay + (by - ay) * t) * cs]; pt.set(id, q); return q; };
+      const link = (a, b) => { (adj.get(a) || adj.set(a, []).get(a)).push(b); (adj.get(b) || adj.set(b, []).get(b)).push(a); };
+      for (let j = 0; j < ny - 1; j++) for (let i = 0; i < nx - 1; i++) {
+        const A = F[j * nx + i] > lev, B = F[j * nx + i + 1] > lev, C = F[(j + 1) * nx + i + 1] > lev, D = F[(j + 1) * nx + i] > lev, idx = A | (B << 1) | (C << 2) | (D << 3);
+        if (idx === 0 || idx === 15) continue;
+        const T = (j * nx + i) * 2, R = (j * nx + i + 1) * 2 + 1, Bo = ((j + 1) * nx + i) * 2, Le = (j * nx + i) * 2 + 1;
+        const ctr = (F[j * nx + i] + F[j * nx + i + 1] + F[(j + 1) * nx + i + 1] + F[(j + 1) * nx + i]) / 4 > lev;
+        switch (idx) {
+          case 1: case 14: link(Le, T); break; case 2: case 13: link(T, R); break; case 3: case 12: link(Le, R); break;
+          case 4: case 11: link(R, Bo); break; case 6: case 9: link(T, Bo); break; case 7: case 8: link(Le, Bo); break;
+          case 5: if (ctr) { link(Le, Bo); link(T, R); } else { link(Le, T); link(R, Bo); } break;
+          case 10: if (ctr) { link(Le, T); link(R, Bo); } else { link(Le, Bo); link(T, R); } break;
+        }
+      }
+      const seen = new Set(), out = [];
+      const walk = (s) => { const L = [s]; seen.add(s); let cur = s; for (;;) { const nb = (adj.get(cur) || []).find((x) => !seen.has(x)); if (nb === undefined) break; seen.add(nb); L.push(nb); cur = nb; } return L; };
+      for (const [id, nb] of adj) if (nb.length === 1 && !seen.has(id)) out.push({ pts: walk(id).map(P), closed: false });
+      for (const [id] of adj) if (!seen.has(id)) out.push({ pts: walk(id).map(P), closed: true });
+      return out;
+    }
+    function chaikin(pts, closed) {
+      const o = []; const n = pts.length; for (let k = 0; k < (closed ? n : n - 1); k++) { const a = pts[k], b = pts[(k + 1) % n]; o.push([a[0] * 0.75 + b[0] * 0.25, a[1] * 0.75 + b[1] * 0.25], [a[0] * 0.25 + b[0] * 0.75, a[1] * 0.25 + b[1] * 0.75]); }
+      if (!closed) { o.unshift(pts[0]); o.push(pts[n - 1]); } return o;
+    }
+
+
+    // masque du logo, rasterisé une fois (pair-impair) pour être lu picot par picot
+    function logoMask() {
+      buildLogo(); if (LM && LM.key === logoKey) return LM;
+      const N = 320, c = document.createElement('canvas'); c.width = c.height = N; const g = c.getContext('2d', { willReadFrequently: true });
+      g.setTransform(N, 0, 0, N, N / 2, N / 2); g.beginPath(); for (const L of logoM || []) { L.forEach((q, i) => (i ? g.lineTo(q[0], q[1]) : g.moveTo(q[0], q[1]))); g.closePath(); } g.fillStyle = '#000'; g.fill('evenodd');
+      const d = g.getImageData(0, 0, N, N).data, A = new Uint8Array(N * N); for (let i = 0; i < A.length; i++) A[i] = d[i * 4 + 3] > 110 ? 1 : 0;
+      LM = { key: logoKey, A, N }; return LM;
+    }
+    function inLogo(u, v) { const M = LM, s = p.tailleLogo, x = Math.floor((u / s + 0.5) * M.N), y = Math.floor((v / s + 0.5) * M.N); return x >= 0 && y >= 0 && x < M.N && y < M.N && M.A[y * M.N + x] === 1; }
+
+    const BAYER = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5];
+    // indice de couleur d'un picot (-1 = picot vide)
+    function motifAt(m, c, n, R0) {
+      const u = c.u, v = c.v, e = p.echelle, r = Math.hypot(u, v), a = Math.atan2(v, u), B = (c.i & 3) + (c.j & 3) * 4, th = (BAYER[B] + 0.5) / 16;
+      if (m === 'degrade') { const t = Math.max(0, Math.min(0.999, (u * Math.cos(R0) + v * Math.sin(R0)) / (0.9 * e) + 0.5)) * (n - 1); return Math.min(n - 1, Math.floor(t) + (t % 1 > th ? 1 : 0)); }
+      if (m === 'cercles') return Math.floor(r / (0.07 * e)) % n;
+      if (m === 'rayures') return ((Math.floor((u * Math.cos(R0) + v * Math.sin(R0)) / (0.06 * e) + 100) % n) + n) % n;
+      if (m === 'damier') { const k = 0.1 * e; return (((Math.floor(u / k + 50) + Math.floor(v / k + 50)) % n) + n) % n; }
+      if (m === 'spirale') return ((Math.floor((a / TAU * 3 + r / (0.09 * e)) * 1 + 1000) % n) + n) % n;
+      if (m === 'onde') { const t = (v + 0.06 * Math.sin(u / (0.08 * e) + R0)) / (0.08 * e); return ((Math.floor(t + 100) % n) + n) % n; }
+      return inLogo(u, v) ? 0 : -1;
+    }
+
+    // ——— Plaque : picots, formes, couleur de chaque perle ———
+    function geometry(w, h) {
+      const m = Math.min(w, h), cell = m * p.maille, pl = p.plaque, hx = pl === 'hexagone', B = pl === 'ecran' ? m : m * 0.88, cx = w / 2, cy = h / 2;
+      const dy = hx ? cell * 0.866 : cell, Wd = pl === 'ecran' ? w - cell * 0.4 : B, Hd = pl === 'ecran' ? h - cell * 0.4 : B, nx = Math.floor(Wd / cell), ny = Math.floor(Hd / dy), cells = [];
+      for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+        const x = cx + (i - (nx - 1) / 2 + (hx && j % 2 ? 0.25 : hx ? -0.25 : 0)) * cell, y = cy + (j - (ny - 1) / 2) * dy, X = (x - cx) / B, Y = (y - cy) / B;
+        if (pl === 'rond' && Math.hypot(X, Y) > 0.5 - p.maille * 0.4) continue;
+        if (hx && Math.max(Math.abs(X) * 0.866 + Math.abs(Y) * 0.5, Math.abs(Y)) > 0.5 * 0.97 - p.maille * 0.4) continue;
+        cells.push({ x, y, u: (x - cx) / m, v: (y - cy) / m, i, j, k: -1, t0: Infinity, f: 0, fly: null });
+      }
+      return { cell, cells, B, cx, cy, nx, ny, hx };
+    }
+    function plateShape(g, Gm, w, h, pad) {
+      const { B, cx, cy } = Gm, r = B / 2 + pad; g.beginPath();
+      if (p.plaque === 'ecran') g.rect(-10, -10, w + 20, h + 20);
+      else if (p.plaque === 'carre') g.roundRect(cx - r, cy - r, r * 2, r * 2, Gm.cell * 0.8);
+      else if (p.plaque === 'rond') g.arc(cx, cy, r, 0, TAU);
+      else for (let k = 0; k < 6; k++) { const a = k / 6 * TAU; g[k ? 'lineTo' : 'moveTo'](cx + Math.cos(a) * r * 1.03, cy + Math.sin(a) * r * 1.03); }
+      g.closePath();
+    }
+
+    function garden(w, h) {
+      logoMask();
+      const key = [p.plaque, p.maille, p.motif, p.enchainer, p.echelle, p.tailleLogo, p.remplissage, p.ordre, p.pose, p.couleurs.join(), logoKey, app.seed, w, h].join();
+      if (key === gKey && G) return G; gKey = key;
+      G = Object.assign(geometry(w, h), { w, h, sheet: 0, phase: 'pose', tp: 0, fly: [], iron: null });
+      fill(G, 0); G.tp = simT - p.pose * 0.55; schedule(G);
+      return G;
+    }
+    function fill(Gm, sheet) {
+      const C = p.couleurs.length ? p.couleurs : ['#16161a'], n = C.length, R = rng(app.seed * 131 + sheet * 7), R0 = R() * TAU;
+      const m = p.enchainer ? MOTIFS[(MOTIFS.indexOf(p.motif) + sheet) % MOTIFS.length] : p.motif, rot = p.enchainer || sheet === 0 ? 0 : sheet;
+      for (const c of Gm.cells) { const k = motifAt(m, c, n, R0); c.k = k < 0 ? -1 : (k + rot) % n; c.t0 = Infinity; c.f = 0; c.fly = null; c.drawn = false; } Gm.dirty = true;
+      if (m === 'logo' && p.remplissage !== 'vide') {
+        const at = new Map(); Gm.cells.forEach((c) => at.set(c.i + ',' + c.j, c));
+        const near = (c) => { for (let a = -1; a <= 1; a++) for (let b = -1; b <= 1; b++) { const o = at.get((c.i + a) + ',' + (c.j + b)); if (o && o.k === 0 + rot % n && o !== c && Math.hypot(o.x - c.x, o.y - c.y) < Gm.cell * 1.5) return true; } return false; };
+        const ring = Gm.cells.filter((c) => c.k < 0 && near(c));
+        if (n > 1) ring.forEach((c) => { c.k = (1 + rot) % n; });
+        if (p.remplissage === 'plein') for (const c of Gm.cells) if (c.k < 0) c.k = (Math.min(2, n - 1) + rot) % n;
+      }
+      Gm.motifNow = m;
+    }
+    function schedule(Gm) {
+      const R = rng(app.seed * 17 + Gm.sheet * 3), L = Gm.cells.filter((c) => c.k >= 0), o = p.ordre;
+      const key = (c) => o === 'hasard' ? R() : o === 'couleur' ? c.k * 1e6 + c.j * 1e3 + (c.j % 2 ? -c.i : c.i) : o === 'centre' ? Math.hypot(c.u, c.v) + R() * 0.02 : c.j * 1e3 + (c.j % 2 ? -c.i : c.i);
+      L.map((c) => [key(c), c]).sort((a, b) => a[0] - b[0]).forEach(([, c], r) => { c.t0 = Gm.tp + (r / Math.max(1, L.length)) * p.pose; });
+    }
+
+    // ——— Interaction ———
+    function knock(x, y) {
+      if (!G || G.phase === 'vidage') return; const R = G.cell * 1.4;
+      for (const c of G.cells) {
+        if (c.k < 0 || c.t0 > simT - 0.2 || c.fly) continue; const dx = c.x - x, dy = c.y - y, d = Math.hypot(dx, dy); if (d > R) continue;
+        const a = Math.atan2(dy, dx) + (Math.random() - 0.5) * 1.2, sp = G.cell * (6 + Math.random() * 10);
+        G.fly.push({ x: c.x, y: c.y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, vz: 2.2 + Math.random() * 1.6, z: 0, k: c.k, t: 0 });
+        c.fly = true; c.f = 0; c.t0 = simT + 0.9 + Math.random() * 0.8; G.dirty = true;
+      }
+    }
+    function advance() {
+      if (!G) return;
+      if (G.phase === 'pose') { for (const c of G.cells) if (c.k >= 0 && c.t0 > simT) c.t0 = simT + Math.random() * 0.35; G.tp = simT - p.pose; }
+      else if (G.phase === 'fer') G.phase = 'pause', G.tp = simT - 1.6;
+      else if (G.phase === 'pause') { G.phase = 'vidage'; G.tp = simT; }
+    }
+
+    // trajet du fer : un lacet de trois passes sur la plaque
+    function ironAt(s, Gm) {
+      const W = p.plaque === 'ecran' ? Gm.w : Gm.B, H = p.plaque === 'ecran' ? Gm.h : Gm.B, nr = 3, q = Math.min(nr - 1e-6, s * nr), r = Math.floor(q), f = q - r, e = f * f * (3 - 2 * f), dir = r % 2 ? -1 : 1;
+      const yb = Gm.cy + ((r + 0.5) / nr - 0.5) * H * 0.92, yn = Gm.cy + ((Math.min(nr - 1, r + 1) + 0.5) / nr - 0.5) * H * 0.92;
+      return { x: Gm.cx + dir * (e - 0.5) * W * 1.05, y: yb + (f > 0.85 ? (f - 0.85) / 0.15 * (yn - yb) * 0.3 : 0), a: dir > 0 ? 0 : Math.PI };
+    }
+    const T_FER = 5, T_PAUSE = 2.4, T_VIDE = 1.5;
+    function step(dt) {
+      const Gm = G;
+      for (const b of Gm.fly) { b.t += dt; b.x += b.vx * dt; b.y += b.vy * dt; b.vx *= Math.exp(-3 * dt); b.vy *= Math.exp(-3 * dt); b.vz -= 9 * dt; b.z = Math.max(0, b.z + b.vz * dt); if (b.z === 0) { b.vz = Math.abs(b.vz) * 0.35; } }
+      Gm.fly = Gm.fly.filter((b) => b.t < 1.6);
+      for (const c of Gm.cells) if (c.fly && c.t0 <= simT) c.fly = null;
+      if (Gm.phase === 'pose' && simT > Gm.tp + p.pose + 0.5) { Gm.phase = p.fusion > 0 ? 'fer' : 'pause'; Gm.tp = simT; }
+      else if (Gm.phase === 'fer') {
+        const s = (simT - Gm.tp) / T_FER; if (s >= 1) { Gm.phase = 'pause'; Gm.tp = simT; Gm.iron = null; return; }
+        const I = ironAt(s, Gm), R = (p.plaque === 'ecran' ? Math.min(Gm.w, Gm.h) : Gm.B) * 0.2, rate = p.fusion * 2.2; Gm.iron = I;
+        for (const c of Gm.cells) { if (c.k < 0 || c.t0 > simT) continue; const d2 = (c.x - I.x) ** 2 + (c.y - I.y) ** 2; if (d2 > R * R * 6) continue; c.f = Math.min(Math.min(1, p.fusion * 1.2), c.f + dt * rate * Math.exp(-d2 / (R * R))); }
+      } else if (Gm.phase === 'pause' && simT > Gm.tp + T_PAUSE) { Gm.phase = 'vidage'; Gm.tp = simT; }
+      else if (Gm.phase === 'vidage' && simT > Gm.tp + T_VIDE) { Gm.sheet++; fill(Gm, Gm.sheet); Gm.phase = 'pose'; Gm.tp = simT + 0.3; Gm.fly = []; schedule(Gm); }
+    }
+
+    // ——— Sprites ———
+    function sprites(cell, dpr) {
+      const key = [cell, dpr, p.couleurs.join(), p.relief, p.plateau].join(); if (key === sKey) return spr; sKey = key; spr = new Map();
+      return spr;
+    }
+    function beadPath(g, f) { const s = 0.88 + 0.2 * f, r = s / 2 * (1 - 0.62 * f); g.beginPath(); g.roundRect(-s / 2, -s / 2, s, s, r); }
+    function holeR(f) { return 0.21 * Math.max(0, 1 - f * 1.05); }
+    function sprite(k, lv) {
+      const id = k + ':' + lv; let s = spr.get(id); if (s) return s;
+      const dpr = app.size.dpr, cell = G.cell, S = Math.ceil(cell * 1.4 * dpr) + 2, c = document.createElement('canvas'); c.width = c.height = S; const g = c.getContext('2d');
+      g.translate(S / 2, S / 2); g.scale(cell * dpr, cell * dpr); const f = lv / (LV - 1), col = (p.couleurs[k] || '#16161a'), rl = p.relief;
+      if (k < 0) { beadPath(g, f); g.fillStyle = 'rgba(0,0,0,1)'; g.fill(); }
+      else {
+        beadPath(g, f); const gr = g.createLinearGradient(-0.5, -0.5, 0.5, 0.5); gr.addColorStop(0, mix(col, '#ffffff', 0.28 * rl)); gr.addColorStop(0.5, col); gr.addColorStop(1, mix(col, '#000000', 0.3 * rl)); g.fillStyle = gr; g.fill();
+        const hr = holeR(f);
+        if (hr > 0.01) {
+          // le trou : paroi intérieure sombre en haut à gauche, et le picot qui dépasse au centre
+          const hg = g.createLinearGradient(-hr, -hr, hr, hr); hg.addColorStop(0, mix(col, '#000000', 0.55)); hg.addColorStop(1, mix(col, '#000000', 0.15)); g.beginPath(); g.arc(0, 0, hr, 0, TAU); g.fillStyle = hg; g.fill();
+          const pr = hr * 0.62; g.beginPath(); g.arc(0.012, 0.012, pr, 0, TAU); g.fillStyle = mix(p.plateau, '#000000', 0.12); g.fill(); g.beginPath(); g.arc(-0.008, -0.008, pr * 0.85, 0, TAU); g.fillStyle = mix(p.plateau, '#ffffff', 0.3); g.fill();
+        }
+        g.globalAlpha = (0.45 - 0.25 * f) * rl; g.beginPath(); g.arc(0, 0, 0.32 + 0.06 * f, Math.PI * 1.05, Math.PI * 1.45); g.lineWidth = 0.07; g.lineCap = 'round'; g.strokeStyle = '#ffffff'; g.stroke(); g.globalAlpha = 1;
+      }
+      s = { c, S }; spr.set(id, s); return s;
+    }
+    function boardLayer(w, h, dpr) {
+      const key = [gKey, p.fond, p.plateau, p.picots, dpr].join(); if (key === bKey && board) return board; bKey = key;
+      board = document.createElement('canvas'); board.width = Math.ceil(w * dpr); board.height = Math.ceil(h * dpr); const g = board.getContext('2d'); g.setTransform(dpr, 0, 0, dpr, 0, 0);
+      g.fillStyle = p.fond; g.fillRect(0, 0, w, h);
+      if (p.plaque !== 'ecran') { g.save(); g.shadowColor = 'rgba(0,0,0,0.18)'; g.shadowBlur = G.cell * 1.2; g.shadowOffsetY = G.cell * 0.4; plateShape(g, G, w, h, G.cell * 0.6); g.fillStyle = p.plateau; g.fill(); g.restore(); }
+      else { g.fillStyle = p.plateau; g.fillRect(0, 0, w, h); }
+      if (p.picots) { const r = G.cell * 0.15, a = mix(p.plateau, '#000000', 0.16), b = mix(p.plateau, '#ffffff', 0.5); for (const c of G.cells) { g.beginPath(); g.arc(c.x + r * 0.25, c.y + r * 0.35, r, 0, TAU); g.fillStyle = a; g.fill(); g.beginPath(); g.arc(c.x, c.y, r * 0.9, 0, TAU); g.fillStyle = b; g.fill(); } }
+      return board;
+    }
+
+    function drawIron(g, I, cell) {
+      const L = Math.min(G.w, G.h) * 0.36; g.save(); g.translate(I.x, I.y); g.rotate(I.a);
+      const body = () => { g.beginPath(); g.moveTo(L * 0.55, 0); g.bezierCurveTo(L * 0.35, -L * 0.3, -L * 0.3, -L * 0.3, -L * 0.45, -L * 0.24); g.lineTo(-L * 0.45, L * 0.24); g.bezierCurveTo(-L * 0.3, L * 0.3, L * 0.35, L * 0.3, L * 0.55, 0); g.closePath(); };
+      g.save(); g.translate(L * 0.05, L * 0.09); body(); g.fillStyle = 'rgba(0,0,0,0.2)'; g.fill(); g.restore();
+      body(); const gr = g.createLinearGradient(0, -L * 0.3, 0, L * 0.3); gr.addColorStop(0, '#fbfaf8'); gr.addColorStop(1, '#cfccc6'); g.fillStyle = gr; g.fill();
+      g.beginPath(); g.roundRect(-L * 0.32, -L * 0.07, L * 0.62, L * 0.14, L * 0.07); g.fillStyle = p.couleurs[1] || p.couleurs[0] || '#e8552b'; g.fill();
+      g.beginPath(); g.arc(-L * 0.18, 0, L * 0.04, 0, TAU); g.fillStyle = 'rgba(255,255,255,0.7)'; g.fill();
+      g.restore();
+    }
+
+    function layer(w, h, dpr) {
+      const Gm = G; let L = Gm.L;
+      if (!L || L.width !== Math.ceil(w * dpr) || L.height !== Math.ceil(h * dpr) || Gm.Lspr !== sKey) { L = Gm.L = document.createElement('canvas'); L.width = Math.ceil(w * dpr); L.height = Math.ceil(h * dpr); Gm.dirty = true; Gm.Lspr = sKey; }
+      const g = L.getContext('2d'), D = dpr, sh = Gm.cell * 0.07, ready = (c) => c.k >= 0 && !c.fly && simT - c.t0 >= 0.25;
+      const put = (c, shadow) => { const lv = Math.round(c.f * (LV - 1)), s = sprite(shadow ? -1 : c.k, lv), q = s.S / D; if (shadow) g.drawImage(s.c, c.x + sh - q / 2, c.y + sh * 1.3 - q / 2, q, q); else { g.drawImage(s.c, c.x - q / 2, c.y - q / 2, q, q); c.lv = lv; c.drawn = true; } };
+      if (!Gm.dirty && Gm.phase === 'fer' && simT - (Gm.built || 0) > 0.07) for (const c of Gm.cells) if (c.drawn && Math.round(c.f * (LV - 1)) !== c.lv) { Gm.dirty = true; break; }
+      g.setTransform(D, 0, 0, D, 0, 0);
+      if (Gm.dirty) {
+        Gm.dirty = false; Gm.built = simT; g.clearRect(0, 0, w, h); const R = Gm.cells.filter(ready); Gm.cells.forEach((c) => { c.drawn = false; });
+        g.globalAlpha = 0.28; R.forEach((c) => put(c, true)); g.globalAlpha = 1; R.forEach((c) => put(c, false));
+      } else for (const c of Gm.cells) if (!c.drawn && ready(c)) { g.globalAlpha = 0.28; put(c, true); g.globalAlpha = 1; put(c, false); }
+      return L;
+    }
+
+    app.loop((t, dt) => {
+      dt = Math.min(1 / 20, dt || 0);
+      const { w, h, dpr } = app.size; garden(w, h); sprites(G.cell, dpr);
+      if (app.thumbnail) { if (!G.thumb) { G.thumb = true; for (const c of G.cells) { c.t0 = -1; c.f = p.fusion * 0.55 * (0.6 + 0.4 * Math.sin(c.u * 7 + c.v * 5) ** 2); } G.phase = 'pause'; G.tp = simT - 10; G.dirty = true; } }
+      else { simT += dt; step(dt); }
+      ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.drawImage(boardLayer(w, h, dpr), 0, 0);
+      // décollage : la pièce fondue part d'un bloc
+      let ox = 0, oy = 0, lift = 0; if (G.phase === 'vidage') { const e = Math.min(1, (simT - G.tp) / T_VIDE); lift = Math.min(1, e * 4); ox = e * e * e * (w + G.B) * 1.1; oy = -e * e * h * 0.08; }
+      const sc = 1 + lift * 0.03, D = dpr;
+      ctx.setTransform(D * sc, 0, 0, D * sc, D * (w / 2 * (1 - sc) + ox), D * (h / 2 * (1 - sc) + oy));
+      // les perles posées vivent dans un calque, complété perle par perle et refait quand la fusion change
+      const Lc = layer(w, h, dpr), sh = G.cell * 0.07;
+      ctx.drawImage(Lc, 0, 0, w, h);
+      for (const c of G.cells) {
+        if (c.k < 0 || c.fly) continue; const a = simT - c.t0; if (a < 0 || a >= 0.25) continue;
+        const z = 1 - a / 0.25, lv = Math.round(c.f * (LV - 1)), s0 = sprite(-1, lv), s = sprite(c.k, lv), q0 = s0.S / D * (1 + z * 0.4), q = s.S / D * (1 + z * z * 0.6);
+        ctx.globalAlpha = 0.28 * (1 - z * 0.5); ctx.drawImage(s0.c, c.x + sh * (1 + z * 3) - q0 / 2, c.y + sh * 1.3 * (1 + z * 3) - q0 / 2, q0, q0);
+        ctx.globalAlpha = 1 - z * z; ctx.drawImage(s.c, c.x - q / 2, c.y - q / 2, q, q); ctx.globalAlpha = 1;
+      }
+      ctx.setTransform(D, 0, 0, D, 0, 0);
+      for (const b of G.fly) { const s = sprite(b.k, 0), q = s.S / D * (1 + b.z * 0.25), al = Math.min(1, (1.6 - b.t) / 0.4); ctx.globalAlpha = 0.25 * al; const sp = sprite(-1, 0); ctx.drawImage(sp.c, b.x + G.cell * (0.07 + b.z * 0.25) - q / 2, b.y + G.cell * (0.1 + b.z * 0.35) - q / 2, q, q); ctx.globalAlpha = al; ctx.drawImage(s.c, b.x - q / 2, b.y - q / 2, q, q); }
+      ctx.globalAlpha = 1;
+      // papier cuisson et fer
+      if (G.phase === 'fer' || (G.phase === 'pause' && simT - G.tp < 0.5 && simT >= G.tp)) {
+        const s = G.phase === 'fer' ? (simT - G.tp) / T_FER : 1, a = G.phase === 'fer' ? Math.min(1, s * 10) : 1 - (simT - G.tp) / 0.5;
+        ctx.globalAlpha = 0.24 * a; plateShape(ctx, G, w, h, G.cell * 0.3); ctx.fillStyle = '#fbf6ea'; ctx.fill(); ctx.globalAlpha = 1;
+        if (G.iron) drawIron(ctx, G.iron, G.cell);
+      }
+      app.finish(ctx);
+    });
+
+    function toSVG() {
+      const { w, h } = app.size, f = (v) => +v.toFixed(2); garden(w, h);
+      const used = new Set(); let defs = '', s = `<rect width="100%" height="100%" fill="${p.fond}"/>`;
+      if (p.plaque === 'ecran') s += `<rect width="100%" height="100%" fill="${p.plateau}"/>`;
+      else { const { B, cx, cy, cell } = G, r = B / 2 + cell * 0.6; let d; if (p.plaque === 'carre') s += `<rect x="${f(cx - r)}" y="${f(cy - r)}" width="${f(2 * r)}" height="${f(2 * r)}" rx="${f(cell * 0.8)}" fill="${p.plateau}"/>`; else if (p.plaque === 'rond') s += `<circle cx="${f(cx)}" cy="${f(cy)}" r="${f(r)}" fill="${p.plateau}"/>`; else { d = Array.from({ length: 6 }, (_, k) => f(cx + Math.cos(k / 6 * TAU) * r * 1.03) + ' ' + f(cy + Math.sin(k / 6 * TAU) * r * 1.03)).join('L'); s += `<path d="M${d}Z" fill="${p.plateau}"/>`; } }
+      const cell = G.cell, live = G.cells.filter((c) => c.k >= 0 && c.t0 <= simT && !c.fly), LS = new Set(live), gu = new Set();
+      if (p.picots) { const r = cell * 0.15; s += `<g fill="${mix(p.plateau, '#ffffff', 0.5)}" stroke="${mix(p.plateau, '#000000', 0.12)}" stroke-width="${f(r * 0.25)}">`; for (const c of G.cells) if (!LS.has(c)) s += `<circle cx="${f(c.x)}" cy="${f(c.y)}" r="${f(r * 0.9)}"/>`; s += '</g>'; }
+      const lvOf = (c) => Math.round(c.f * (LV - 1)), bp = (fv) => { const z = 0.88 + 0.2 * fv, r = z / 2 * (1 - 0.62 * fv); return `x="${f(-z / 2)}" y="${f(-z / 2)}" width="${f(z)}" height="${f(z)}" rx="${+r.toFixed(3)}"`; };
+      s += `<g fill="#000" opacity="0.28">`; for (const c of live) { const fv = lvOf(c) / (LV - 1); s += `<rect transform="translate(${f(c.x + cell * 0.07)} ${f(c.y + cell * 0.09)}) scale(${f(cell)})" ${bp(fv)}/>`; } s += '</g>';
+      for (const c of live) {
+        const lv = lvOf(c), id = 'b' + c.k + '_' + lv;
+        if (!used.has(id)) { used.add(id); const fv = lv / (LV - 1), col = p.couleurs[c.k], rl = p.relief, hr = holeR(fv);
+          if (!gu.has(c.k)) { gu.add(c.k); defs += `<linearGradient id="g${c.k}" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="${mix(col, '#ffffff', 0.28 * rl)}"/><stop offset="0.5" stop-color="${col}"/><stop offset="1" stop-color="${mix(col, '#000000', 0.3 * rl)}"/></linearGradient>`; }
+          defs += `<g id="${id}"><rect ${bp(fv)} fill="url(#g${c.k})"/>${hr > 0.01 ? `<circle r="${+hr.toFixed(3)}" fill="${mix(col, '#000000', 0.4)}"/><circle r="${+(hr * 0.55).toFixed(3)}" fill="${mix(p.plateau, '#ffffff', 0.3)}"/>` : ''}</g>`; }
+        s += `<use href="#${id}" transform="translate(${f(c.x)} ${f(c.y)}) scale(${f(cell)})"/>`;
+      }
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><defs>${defs}</defs>${s}</svg>`;
+    }
+  </script>
+</body>
+</html>
