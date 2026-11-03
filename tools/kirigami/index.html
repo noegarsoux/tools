@@ -1,0 +1,260 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Kirigami</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Kirigami : une feuille découpée en carreaux qui ne tiennent plus que par un coin à chacun de leurs voisins.
+    // Les carreaux voisins tournent en sens contraires : tirée d'un côté, la feuille s'élargit aussi dans l'autre
+    // sens (matériau auxétique) et s'ouvre en losanges. Chaque carreau est un solide ; chaque charnière est une
+    // contrainte de position, un peu élastique en rotation (méthode XPBD).
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const BIEN = PAL('biennale'), KB = PAL('kegelbahn'), LUZ = PAL('luzern'), MENTHE = PAL('menthe'), ORB = PAL('orbite'), SALON = PAL('salon');
+
+    let simKey = '', frozen = false, rng = Math.random, B = null, nB = 0, hinges = null, nH = 0, cols = 0, rows = 0, tw = 0, th = 0, ox = 0, oy = 0;
+    let tileRGB = null, T = 0, held = null, tex = null, texKey = '', texData = null, maskKey = null;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.05, vignette: 0.15 },
+      hint: 'Glissez un carreau pour ouvrir la feuille · touchez pour une secousse · molette : ouverture',
+      notes: 'Découpez une feuille en carreaux en ne laissant qu’un coin de chacun attaché à chaque voisin. Tirez : un carreau ne peut s’écarter qu’en tournant, et il entraîne ses voisins à tourner en sens contraire. Le motif s’ouvre alors partout à la fois et la feuille grandit dans les deux directions, à l’inverse d’un élastique qui s’amincit. Ici chaque carreau est un petit solide et chaque coin une charnière, un peu raide.',
+      params: {
+        'Feuille': {
+          colonnes: { type: 'range', label: 'Carreaux par ligne', min: 6, max: 48, step: 1, value: 22 },
+          proportion: { type: 'range', label: 'Proportion des carreaux', min: 0.4, max: 2.5, step: 0.05, value: 1 },
+          taille: { type: 'range', label: 'Taille de la feuille', min: 0.3, max: 0.9, step: 0.01, value: 0.62 },
+          raideur: { type: 'range', label: 'Raideur des charnières', min: 0, max: 1, step: 0.01, value: 0.35 },
+        },
+        'Mouvement': {
+          traction: { type: 'segmented', label: 'Traction', options: { x: 'Côtés', y: 'Haut et bas', xy: 'Partout' }, value: 'x' },
+          ouverture: { type: 'range', label: 'Ouverture', min: 0, max: 1, step: 0.01, value: 0.75 },
+          periode: { type: 'range', label: 'Durée d’un souffle (s)', min: 2, max: 20, step: 0.5, value: 7 },
+          vague: { type: 'range', label: 'Vague', min: 0, max: 1, step: 0.01, value: 0.2 },
+        },
+        'Rendu': {
+          texture: { type: 'segmented', label: 'Feuille', options: { aplat: 'Aplat', degrade: 'Dégradé', logo: 'Logo' }, value: 'degrade' },
+          image: { type: 'file', label: 'Logo', accept: 'image/*', show: (q) => q.texture === 'logo' },
+          couleurs: { type: 'palette', label: 'Couleurs', value: ['#f2efe8', '#e8c9a0', '#d9734a'] },
+          fond: { type: 'color', label: 'Fond', value: '#16161a' },
+          lumiere: { type: 'color', label: 'Lumière derrière', value: '#ffcf7a' },
+          reflets: { type: 'range', label: 'Reflets', min: 0, max: 1, step: 0.01, value: 0.55 },
+        },
+      },
+      presets: {
+        'Lanterne': {},
+        'Papier': { texture: 'aplat', couleurs: ['#f4f1ea'], fond: '#e9e4da', lumiere: '#ffffff', reflets: 0.8, colonnes: 18 },
+        'Grille fine': { colonnes: 36, ouverture: 0.6, raideur: 0.2 },
+        'Grands carreaux': { colonnes: 9, ouverture: 0.9, reflets: 0.8, periode: 9 },
+        'Rectangles': { proportion: 1.8, colonnes: 26, traction: 'y' },
+        'Partout': { traction: 'xy', ouverture: 0.6, vague: 0.6 },
+        'Logo': { texture: 'logo', colonnes: 26, couleurs: ['#f2efe8', '#151515'], fond: '#151515', lumiere: '#e5452a' },
+        'Biennale': { texture: 'degrade', couleurs: [BIEN[3], BIEN[2], BIEN[4]], fond: BIEN[1], lumiere: BIEN[0] },
+        'Kegelbahn': { texture: 'degrade', couleurs: [KB[1], KB[2], KB[3]], fond: KB[0], lumiere: KB[5] },
+        'Menthe': { texture: 'aplat', couleurs: [MENTHE[2]], fond: MENTHE[1], lumiere: MENTHE[0], colonnes: 16 },
+        'Luzern': { texture: 'logo', couleurs: [LUZ[2], LUZ[1]], fond: LUZ[3], lumiere: LUZ[0] },
+      },
+      brand(colors) {
+        const lum = (x) => { const c = hex(x); return c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114; };
+        const all = colors.slice().sort((a, b) => lum(a) - lum(b));
+        return { fond: all[0], couleurs: all.length > 2 ? all.slice(1, -1).reverse().concat([all[all.length - 1]]).reverse() : [all[all.length - 1]], lumiere: all[all.length - 1] };
+      },
+      pointer: {
+        down: (q) => { const k = nearest(q.x, q.y); held = { k, x: q.x, y: q.y, x0: q.x, y0: q.y, moved: false }; },
+        drag: (q) => { if (!held) return; if (Math.hypot(q.x - held.x0, q.y - held.y0) > 5) held.moved = true; held.x = q.x; held.y = q.y; },
+        up: () => { if (held && !held.moved && held.k >= 0) { const i = held.k; for (let k = 0; k < nB; k++) { const d = Math.hypot(B.x[k] - B.x[i], B.y[k] - B.y[i]) / (tw * 4); if (d < 1) B.va[k] += (1 - d) * 3 * (B.par[k] ? 1 : -1); } } held = null; },
+        wheel: (q, dy) => app.set('ouverture', Math.max(0, Math.min(1, +(p.ouverture + (dy > 0 ? -0.05 : 0.05)).toFixed(2)))),
+      },
+      onChange(k) { if (k === 'image') maskKey = null; if (k === '*' || ['colonnes', 'proportion', 'taille'].includes(k)) simKey = ''; texKey = ''; frozen = false; },
+      onSeed() { simKey = ''; frozen = false; },
+      export: { name: 'kirigami', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    const hex = (x) => { const n = parseInt(x.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; };
+    const mix = (a, b, t) => { const A = hex(a), C = hex(b); return '#' + A.map((v, i) => Math.round(v + (C[i] - v) * t).toString(16).padStart(2, '0')).join(''); };
+    function mulberry(a) { return () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+
+    // ——— La feuille : carreaux (solides) et charnières (coins partagés) ———
+    function build() {
+      const { w, h } = app.size; rng = mulberry(app.seed * 4111 + 9);
+      cols = Math.round(p.colonnes);
+      const SW = w * p.taille, SH = h * p.taille;
+      tw = SW / cols; th = tw * p.proportion; rows = Math.max(2, Math.round(SH / th));
+      ox = w / 2 - cols * tw / 2; oy = h / 2 - rows * th / 2;
+      nB = cols * rows;
+      B = { x: new Float64Array(nB), y: new Float64Array(nB), a: new Float64Array(nB), px: new Float64Array(nB), py: new Float64Array(nB), pa: new Float64Array(nB), vx: new Float64Array(nB), vy: new Float64Array(nB), va: new Float64Array(nB), rx: new Float64Array(nB), ry: new Float64Array(nB), par: new Uint8Array(nB), i: new Int16Array(nB), j: new Int16Array(nB) };
+      for (let j = 0; j < rows; j++) for (let i = 0; i < cols; i++) {
+        const k = j * cols + i; B.i[k] = i; B.j[k] = j; B.par[k] = (i + j) & 1 ? 0 : 1;
+        B.rx[k] = B.x[k] = ox + (i + 0.5) * tw; B.ry[k] = B.y[k] = oy + (j + 0.5) * th;
+        B.a[k] = (B.par[k] ? -1 : 1) * 0.03; // une pointe d'ouverture : le mécanisme sait dans quel sens tourner
+      }
+      // charnières : [A, B, ax, ay, bx, by] en coordonnées locales des deux carreaux
+      const H = [];
+      for (let j = 0; j < rows; j++) for (let i = 0; i < cols; i++) {
+        const k = j * cols + i, e = B.par[k] === 1;
+        if (i < cols - 1) { const yy = e ? th / 2 : -th / 2; H.push(k, k + 1, tw / 2, yy, -tw / 2, yy); }
+        if (j < rows - 1) { const xx = e ? -tw / 2 : tw / 2; H.push(k, k + cols, xx, th / 2, xx, -th / 2); }
+      }
+      hinges = Float64Array.from(H); nH = H.length / 6; T = 0;
+    }
+    const inertia = () => (tw * tw + th * th) / 12;
+    function nearest(x, y) { let best = -1, bd = 1e18; for (let k = 0; k < nB; k++) { const d = (B.x[k] - x) ** 2 + (B.y[k] - y) ** 2; if (d < bd) { bd = d; best = k; } } return bd < (tw * 3) ** 2 ? best : -1; }
+
+    // ouverture de consigne : l'écartement des bords (le mécanisme s'ouvre au plus de √2 pour des carrés)
+    function target(t) {
+      const phase = 0.5 - 0.5 * Math.cos(TAU * t / p.periode), op = p.ouverture * phase;
+      return op;
+    }
+    function step(dt) {
+      if (!(dt > 0)) return;
+      const sub = 2, h = dt / sub, I = inertia(), iI = 1 / I, op = target(T), comp = (1 - p.raideur) * 0.02 + 1e-5;
+      // cinématique des rectangles tournants : à l'angle φ, le pas vaut a·cos φ + b·sin φ (et l'inverse en hauteur)
+      const r = th / tw, phi = op * 0.78, ex = Math.cos(phi) + r * Math.sin(phi), ey = Math.cos(phi) + Math.sin(phi) / r;
+      const sx = p.traction !== 'y' ? ex : 0, sy = p.traction !== 'x' ? ey : 0, guide = held && held.moved ? 0.004 : 0.03;
+      const cx = app.size.w / 2, cy = app.size.h / 2;
+      for (let s = 0; s < sub; s++) {
+        for (let k = 0; k < nB; k++) {
+          B.px[k] = B.x[k]; B.py[k] = B.y[k]; B.pa[k] = B.a[k];
+          B.x[k] += B.vx[k] * h; B.y[k] += B.vy[k] * h; B.a[k] += B.va[k] * h;
+        }
+        for (let it = 0; it < 5; it++) {
+          // charnières : les deux coins doivent coïncider
+          for (let q = 0; q < nH; q++) {
+            const o = q * 6, A = hinges[o], C = hinges[o + 1];
+            const ca = Math.cos(B.a[A]), sa = Math.sin(B.a[A]), cb = Math.cos(B.a[C]), sb = Math.sin(B.a[C]);
+            const rax = hinges[o + 2] * ca - hinges[o + 3] * sa, ray = hinges[o + 2] * sa + hinges[o + 3] * ca;
+            const rbx = hinges[o + 4] * cb - hinges[o + 5] * sb, rby = hinges[o + 4] * sb + hinges[o + 5] * cb;
+            let dx = B.x[C] + rbx - B.x[A] - rax, dy = B.y[C] + rby - B.y[A] - ray; const d = Math.hypot(dx, dy); if (d < 1e-9) continue;
+            const nx = dx / d, ny = dy / d, crA = rax * ny - ray * nx, crB = rbx * ny - rby * nx;
+            const wA = 1 + crA * crA * iI, wB = 1 + crB * crB * iI, l = d / (wA + wB), Px = nx * l, Py = ny * l;
+            B.x[A] += Px; B.y[A] += Py; B.a[A] += (rax * Py - ray * Px) * iI;
+            B.x[C] -= Px; B.y[C] -= Py; B.a[C] -= (rbx * Py - rby * Px) * iI;
+          }
+          // raideur des charnières : deux voisins préfèrent garder le même angle (feuille fermée)
+          if (p.raideur > 0) for (let q = 0; q < nH; q++) {
+            const o = q * 6, A = hinges[o], C = hinges[o + 1], c = B.a[A] - B.a[C], al = comp / (h * h) * I;
+            const dl = c / (2 + al); B.a[A] -= dl; B.a[C] += dl;
+          }
+          // bords tirés : les colonnes (ou lignes) extrêmes suivent la consigne
+          for (let k = 0; k < nB; k++) {
+            const i = B.i[k], j = B.j[k];
+            if (sx && (i === 0 || i === cols - 1)) { const tx = cx + (B.rx[k] - cx) * sx * (1 + p.vague * 0.035 * Math.sin(TAU * (T / p.periode * 2) + j * 0.35)); B.x[k] += (tx - B.x[k]) * 0.5; }
+            if (sy && (j === 0 || j === rows - 1)) { const ty = cy + (B.ry[k] - cy) * sy * (1 + p.vague * 0.035 * Math.sin(TAU * (T / p.periode * 2) + i * 0.35)); B.y[k] += (ty - B.y[k]) * 0.5; }
+          }
+          // guidage doux vers la pose idéale du mécanisme (sinon l'ouverture mettrait longtemps à gagner le centre)
+          if (it === 0) for (let k = 0; k < nB; k++) {
+            const tx = cx + (B.rx[k] - cx) * ex, ty = cy + (B.ry[k] - cy) * ey, ta = (B.par[k] ? -1 : 1) * phi;
+            B.x[k] += (tx - B.x[k]) * guide; B.y[k] += (ty - B.y[k]) * guide; B.a[k] += (ta - B.a[k]) * guide;
+          }
+          if (held && held.k >= 0 && held.moved) { const k = held.k; B.x[k] += (held.x - B.x[k]) * 0.6; B.y[k] += (held.y - B.y[k]) * 0.6; }
+        }
+        for (let k = 0; k < nB; k++) {
+          B.vx[k] = (B.x[k] - B.px[k]) / h * 0.985; B.vy[k] = (B.y[k] - B.py[k]) / h * 0.985; B.va[k] = (B.a[k] - B.pa[k]) / h * 0.985;
+        }
+        T += h;
+      }
+    }
+
+    // ——— Texture de la feuille ———
+    function logoCanvas(L) {
+      const img0 = p.image || app.logoImg, c = document.createElement('canvas'); c.width = c.height = Math.max(4, Math.round(L)); const x = c.getContext('2d');
+      if (img0) { const iw = img0.naturalWidth || img0.width, ih = img0.naturalHeight || img0.height, k = L / Math.max(iw, ih); x.drawImage(img0, (L - iw * k) / 2, (L - ih * k) / 2, iw * k, ih * k); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(L / 2, L / 2, L * 0.48, 0, TAU); x.arc(L / 2, L / 2, L * 0.26, 0, TAU, true); x.fill('evenodd'); x.fillRect(L / 2 - L * 0.06, 0, L * 0.12, L); }
+      x.globalCompositeOperation = 'source-in'; x.fillStyle = p.couleurs[Math.min(1, p.couleurs.length - 1)]; x.fillRect(0, 0, L, L); return c;
+    }
+    function buildTexture() {
+      const SW = Math.ceil(cols * tw), SH = Math.ceil(rows * th), dpr = Math.min(2, app.size.dpr);
+      tex = document.createElement('canvas'); tex.width = Math.max(2, Math.round(SW * dpr)); tex.height = Math.max(2, Math.round(SH * dpr));
+      const x = tex.getContext('2d'); x.setTransform(dpr, 0, 0, dpr, 0, 0);
+      const C = p.couleurs;
+      if (p.texture === 'degrade' && C.length > 1) { const g = x.createLinearGradient(0, 0, SW, SH); C.forEach((c, i) => g.addColorStop(i / (C.length - 1), c)); x.fillStyle = g; }
+      else x.fillStyle = C[0];
+      x.fillRect(0, 0, SW, SH);
+      if (p.texture === 'logo') { const L = Math.min(SW, SH) * 0.82, lc = logoCanvas(L); x.drawImage(lc, (SW - L) / 2, (SH - L) / 2, L, L); }
+      texData = { d: x.getImageData(0, 0, tex.width, tex.height).data, W: tex.width, H: tex.height, dpr };
+      tileRGB = new Uint8Array(nB * 3); for (let k = 0; k < nB; k++) { const c = hex(texColor(k)); tileRGB[k * 3] = c[0]; tileRGB[k * 3 + 1] = c[1]; tileRGB[k * 3 + 2] = c[2]; }
+    }
+    function texColor(k) { const { d, W, H, dpr } = texData, X = Math.min(W - 1, Math.max(0, Math.round((B.rx[k] - ox) * dpr))), Y = Math.min(H - 1, Math.max(0, Math.round((B.ry[k] - oy) * dpr))), o = (Y * W + X) * 4; return '#' + [d[o], d[o + 1], d[o + 2]].map((v) => v.toString(16).padStart(2, '0')).join(''); }
+
+    // ——— Rendu ———
+    function corners(k, grow) {
+      const c = Math.cos(B.a[k]), s = Math.sin(B.a[k]), hx = tw / 2 + grow, hy = th / 2 + grow, x = B.x[k], y = B.y[k];
+      return [x + c * hx - s * hy, y + s * hx + c * hy, x - c * hx - s * hy, y - s * hx + c * hy, x - c * hx + s * hy, y - s * hx - c * hy, x + c * hx + s * hy, y + s * hx - c * hy];
+    }
+    function draw() {
+      const { w, h, dpr } = app.size;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over';
+      ctx.fillStyle = p.fond; ctx.fillRect(0, 0, w, h);
+      // lumière derrière la feuille : elle passe par les jours
+      let x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9; for (let k = 0; k < nB; k++) { x0 = Math.min(x0, B.x[k]); x1 = Math.max(x1, B.x[k]); y0 = Math.min(y0, B.y[k]); y1 = Math.max(y1, B.y[k]); }
+      const gcx = (x0 + x1) / 2, gcy = (y0 + y1) / 2, gr = Math.hypot(x1 - x0, y1 - y0) * 0.6;
+      const g = ctx.createRadialGradient(gcx, gcy, 0, gcx, gcy, gr); g.addColorStop(0, p.lumiere); g.addColorStop(0.55, mix(p.lumiere, p.fond, 0.45)); g.addColorStop(1, p.fond);
+      ctx.fillStyle = g; ctx.fillRect(0, 0, w, h);
+      // ombre portée de la feuille
+      // par paquets de 64 : un chemin géant serait rastérisé très lentement
+      const sh = Math.max(1.5, tw * 0.12), flat = p.texture !== 'logo' || nB > 420; ctx.fillStyle = mix(p.fond, '#000000', 0.45); ctx.globalAlpha = 0.5;
+      if (!flat) for (let k0 = 0; k0 < nB; k0 += 64) { const SP = new Path2D(); for (let k = k0; k < Math.min(nB, k0 + 64); k++) { const c = corners(k, 0); SP.moveTo(c[0] + sh, c[1] + sh); SP.lineTo(c[2] + sh, c[3] + sh); SP.lineTo(c[4] + sh, c[5] + sh); SP.lineTo(c[6] + sh, c[7] + sh); SP.closePath(); } ctx.fill(SP); }
+      ctx.globalAlpha = 1;
+      // carreaux : la texture de la feuille, découpée et tournée avec chaque carreau
+      const tdpr = texData.dpr;
+      if (flat) {
+        // aplats : un polygone par carreau, teinte de la feuille éclairée selon son angle
+        const bins = new Map();
+        for (let k = 0; k < nB; k++) {
+          const c = corners(k, 0.25), r = p.reflets > 0 ? Math.sin(B.a[k] * 2.2 + 0.4) * p.reflets : 0, o = k * 3;
+          let R = tileRGB[o], G = tileRGB[o + 1], Bl = tileRGB[o + 2];
+          if (r > 0) { const t = r * 0.35; R += (255 - R) * t; G += (255 - G) * t; Bl += (255 - Bl) * t; } else { const t = 1 + r * 0.4; R *= t; G *= t; Bl *= t; }
+          // regroupés par teinte (5 bits par canal) : quelques centaines de remplissages au lieu d'un millier
+          const key = ((Math.min(255, R) >> 3) << 10) | ((Math.min(255, G) >> 3) << 5) | (Math.min(255, Bl) >> 3);
+          let P = bins.get(key); if (!P) { P = new Path2D(); bins.set(key, P); }
+          P.moveTo(c[0], c[1]); P.lineTo(c[2], c[3]); P.lineTo(c[4], c[5]); P.lineTo(c[6], c[7]); P.closePath();
+        }
+        // l'ombre réutilise les mêmes chemins, décalés
+        ctx.save(); ctx.translate(sh, sh); ctx.fillStyle = mix(p.fond, '#000000', 0.45); ctx.globalAlpha = 0.5; for (const P of bins.values()) ctx.fill(P); ctx.restore(); ctx.globalAlpha = 1;
+        for (const [key, P] of bins) { ctx.fillStyle = `rgb(${((key >> 10) & 31) * 8 + 4},${((key >> 5) & 31) * 8 + 4},${(key & 31) * 8 + 4})`; ctx.fill(P); }
+        return;
+      }
+      for (let k = 0; k < nB; k++) {
+        const c = Math.cos(B.a[k]), s = Math.sin(B.a[k]);
+        ctx.setTransform(dpr * c, dpr * s, -dpr * s, dpr * c, dpr * B.x[k], dpr * B.y[k]);
+        const sxp = (B.rx[k] - ox - tw / 2) * tdpr, syp = (B.ry[k] - oy - th / 2) * tdpr;
+        ctx.drawImage(tex, sxp, syp, tw * tdpr, th * tdpr, -tw / 2 - 0.25, -th / 2 - 0.25, tw + 0.5, th + 0.5);
+        // reflet : chaque carreau incliné renvoie la lumière selon son angle
+        if (p.reflets > 0) { const r = Math.sin(B.a[k] * 2.2 + 0.4); ctx.fillStyle = r > 0 ? `rgba(255,255,255,${r * 0.35 * p.reflets})` : `rgba(0,0,0,${-r * 0.4 * p.reflets})`; ctx.fillRect(-tw / 2 - 0.25, -th / 2 - 0.25, tw + 0.5, th + 0.5); }
+      }
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+
+    app.loop((tt, dt) => {
+      dt = Math.min(0.033, dt || 0);
+      const { w, h } = app.size, key = [p.colonnes, p.proportion, p.taille, w, h, app.seed].join();
+      if (key !== simKey) { build(); simKey = key; texKey = ''; T = p.periode * 0.35; for (let i = 0; i < 40; i++) step(1 / 60); }
+      const tk = [p.texture, p.couleurs.join(), maskKey, simKey, p.image ? 1 : 0].join();
+      if (tk !== texKey) { buildTexture(); texKey = tk; }
+      if (app.thumbnail) { if (!frozen) { T = p.periode * 0.5 - 1.2; for (let i = 0; i < 90; i++) step(1 / 60); frozen = true; } }
+      else step(dt);
+      draw();
+      app.finish(ctx);
+    });
+
+    // ——— Export SVG : chaque carreau en polygone, couleur de la feuille à cet endroit ———
+    function toSVG() {
+      const { w, h } = app.size, out = [`<rect width="100%" height="100%" fill="${p.fond}"/>`];
+      for (let k = 0; k < nB; k++) { const c = corners(k, 0); out.push(`<polygon points="${[0, 2, 4, 6].map((o) => c[o].toFixed(1) + ',' + c[o + 1].toFixed(1)).join(' ')}" fill="${texColor(k)}"/>`); }
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">${out.join('')}</svg>`;
+    }
+  </script>
+</body>
+</html>
