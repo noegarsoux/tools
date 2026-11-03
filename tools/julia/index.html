@@ -1,0 +1,290 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Courbes de Julia</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Courbes de Julia : on itère z ← z^d + c et on compte en combien de pas le point s'échappe. Ce compte, lissé
+    // (n + 1 − log(log|z|)/log d), forme un relief continu autour de l'ensemble : on le découpe en courbes de niveau
+    // (marching squares) et en aplats. En mode Julia, c tourne lentement et l'ensemble se métamorphose ; en mode
+    // Mandelbrot, c est le point lui-même et la vue plonge vers une région choisie. Le logo sert de piège d'orbite :
+    // une orbite qui passe dans sa silhouette est marquée, et le logo réapparaît, déformé, dans chaque spirale.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const BIEN = PAL('biennale'), GLY = PAL('glyphes'), SAL = PAL('salon'), MEN = PAL('menthe'), KB = PAL('kegelbahn');
+
+    const CIBLES = { ensemble: [-0.6, 0], hippocampes: [-0.74364, 0.13183], elephants: [0.28693, 0.01428], spirale: [-0.7453, 0.1127], satellite: [-1.75488, 0] };
+    let simT = 0, grab = null, cU = null, cAnchor = 0, zoomU = 1, panU = [0, 0], logoM = null, logoKey = '', off = null, offCtx = null;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: false,
+      finish: { grain: 0.025, vignette: 0.12 },
+      hint: 'Glissez pour promener c (Julia) ou déplacer la vue (Mandelbrot) · molette : zoom',
+      notes: 'En 1918, Gaston Julia et Pierre Fatou étudient ce qui arrive quand on applique sans fin z ← z² + c à un nombre complexe. Certains points restent prisonniers, d\'autres filent à l\'infini ; la frontière entre les deux est l\'ensemble de Julia, une dentelle qui change du tout au tout quand c bouge. L\'ensemble de Mandelbrot en est la carte : il rassemble les c dont la dentelle reste d\'un seul tenant. Ici, le temps de fuite de chaque point devient un relief qu\'on découpe en courbes de niveau, comme une carte topographique. Le logo sert de piège : chaque orbite qui traverse sa silhouette est marquée, et il réapparaît, tordu et répété, au fond des spirales.',
+      params: {
+        'Fractale': {
+          genre: { type: 'segmented', label: 'Ensemble', options: { julia: 'Julia', mandelbrot: 'Mandelbrot' }, value: 'julia' },
+          puissance: { type: 'range', label: 'Puissance', min: 2, max: 6, step: 1, value: 2 },
+          rayon: { type: 'range', label: 'Module de c', min: 0.2, max: 1.2, step: 0.001, value: 0.7885, show: (q) => q.genre === 'julia' },
+          angle: { type: 'range', label: 'Argument de c (°)', min: 0, max: 360, step: 0.5, value: 205, show: (q) => q.genre === 'julia' },
+          cible: { type: 'select', label: 'Plongée vers', options: { ensemble: 'L\'ensemble entier', hippocampes: 'La vallée des hippocampes', elephants: 'La vallée des éléphants', spirale: 'Une double spirale', satellite: 'Un Mandelbrot miniature' }, value: 'hippocampes', show: (q) => q.genre === 'mandelbrot' },
+          plongee: { type: 'range', label: 'Profondeur de plongée', min: 0, max: 1, step: 0.01, value: 0.6, show: (q) => q.genre === 'mandelbrot' },
+          vitesse: { type: 'range', label: 'Vitesse', min: 0, max: 2, step: 0.01, value: 0.35 },
+        },
+        'Relief': {
+          iterations: { type: 'range', label: 'Itérations', min: 20, max: 300, step: 1, value: 90 },
+          densite: { type: 'range', label: 'Courbes par palier', min: 1, max: 20, step: 0.5, value: 6 },
+          flux: { type: 'range', label: 'Défilement des courbes', min: -1, max: 1, step: 0.01, value: 0.2 },
+          definition: { type: 'range', label: 'Définition', min: 140, max: 640, step: 10, value: 340 },
+          zoom: { type: 'range', label: 'Zoom', min: 0.5, max: 4, step: 0.01, value: 1 },
+        },
+        'Trait': {
+          aplats: { type: 'toggle', label: 'Aplats', value: true },
+          traits: { type: 'toggle', label: 'Courbes de niveau', value: true },
+          epaisseur: { type: 'range', label: 'Épaisseur', min: 0.3, max: 3, step: 0.05, value: 0.8, show: (q) => q.traits },
+        },
+        'Piège d\'orbite': {
+          logo: { type: 'toggle', label: 'Le logo piège les orbites', value: false },
+          tailleLogo: { type: 'range', label: 'Taille du piège', min: 0.1, max: 1.2, step: 0.01, value: 0.3, show: (q) => q.logo },
+          image: { type: 'file', label: 'Logo', accept: 'image/*', show: (q) => q.logo },
+        },
+        'Couleurs': {
+          fond: { type: 'color', label: 'Fond et intérieur', value: '#0d0d12' },
+          couleurs: { type: 'palette', label: 'Paliers', value: ['#1d2340', '#3a4fa8', '#7fa7f0', '#f2e6c9', '#ef8f5a'] },
+          trait: { type: 'color', label: 'Courbes', value: '#0d0d12' },
+          accent: { type: 'color', label: 'Logo', value: '#edd14b' },
+        },
+      },
+      presets: {
+        'Julia': {},
+        'Lapin de Douady': { rayon: 0.755, angle: 99.4, vitesse: 0.12, couleurs: ['#f1ece1', '#e8c9b5', '#ef5a2f', '#2a2a33'], trait: '#1b1b1f', fond: '#1b1b1f', densite: 5 },
+        'Dendrite': { rayon: 1, angle: 90, vitesse: 0.15, iterations: 140, couleurs: ['#0b0c12', '#20264a', '#486cfc', '#f272ba'], trait: '#f4f1ea', fond: '#f4f1ea', densite: 4, epaisseur: 0.6 },
+        'Mandelbrot': { genre: 'mandelbrot', cible: 'ensemble', plongee: 0, iterations: 120, couleurs: ['#12141c', '#2c3566', '#5f7fd6', '#c9d6f2'], fond: '#f4f1ea', trait: '#12141c', densite: 4 },
+        'Hippocampes': { genre: 'mandelbrot', cible: 'hippocampes', plongee: 0.75, iterations: 220, couleurs: ['#2a1630', '#7a2a52', '#ef5a2f', '#edd14b', '#f4f1ea'], fond: '#0b0c12', trait: '#0b0c12', densite: 5, vitesse: 0.5 },
+        'Courbes seules': { aplats: false, traits: true, fond: '#f1ece1', trait: '#1b1b1f', epaisseur: 0.7, densite: 9, rayon: 0.7, angle: 140 },
+        'Multibrot': { puissance: 4, rayon: 0.66, angle: 30, couleurs: ['#3b0f2e', '#a3214a', '#f07a3a', '#f6d860'], fond: '#14060f', trait: '#14060f', densite: 5 },
+        'Logo': { logo: true, tailleLogo: 0.27, rayon: 0.7885, angle: 205, couleurs: ['#16161c', '#2a2a33', '#3d3d4a'], trait: '#5a5a66', fond: '#0b0b0e', accent: '#ef5a2f', densite: 4 },
+        'Biennale': { fond: BIEN[1], couleurs: [BIEN[0], BIEN[3], BIEN[2], BIEN[4]], trait: BIEN[1], accent: BIEN[1], rayon: 0.72, angle: 118 },
+        'Menthe': { genre: 'mandelbrot', cible: 'elephants', plongee: 0.7, iterations: 200, fond: MEN[1], couleurs: [MEN[3], MEN[2], MEN[0]], trait: MEN[1], accent: MEN[0] },
+        'Kegelbahn': { fond: KB[0], couleurs: [KB[1], KB[2], KB[0]], trait: KB[0], accent: KB[2], rayon: 0.69, angle: 260, densite: 7 },
+      },
+      brand(colors) {
+        const s = colors.slice().sort((a, b) => lum(a) - lum(b));
+        return { fond: s[0], trait: s[0], couleurs: s.length > 1 ? s.slice(1) : ['#ffffff'], accent: s[s.length - 1] };
+      },
+      pointer: {
+        down: (q) => { grab = { x: q.x, y: q.y, pan: panU.slice() }; if (p.genre === 'julia') setC(q.x, q.y); },
+        drag: (q) => {
+          if (!grab) return;
+          if (p.genre === 'julia') setC(q.x, q.y);
+          else { const v = view(app.size.w, app.size.h, simT); panU = [grab.pan[0] - (q.x - grab.x) * v.sc, grab.pan[1] - (q.y - grab.y) * v.sc]; }
+        },
+        up: () => { if (grab && cU) { const r = Math.hypot(cU[0], cU[1]), a = Math.atan2(cU[1], cU[0]); cAnchor = { r, a, t: simT }; } cU = null; grab = null; },
+        wheel: (q, dy) => { zoomU = Math.max(0.3, Math.min(400, zoomU * (dy > 0 ? 1 / 1.12 : 1.12))); },
+      },
+      onChange(k) {
+        if (['*', 'genre', 'cible', 'rayon', 'angle'].includes(k)) { cAnchor = 0; zoomU = 1; panU = [0, 0]; }
+        if (['*', 'logo', 'image'].includes(k)) logoKey = '';
+      },
+      export: { name: 'julia', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    function hex(x) { const n = parseInt(x.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
+    function lum(x) { const c = hex(x); return (c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114) / 255; }
+
+    // ——— Le paramètre c et la vue ———
+    function cAt(t) {
+      if (cU) return cU;
+      const sp = p.vitesse * 0.11;
+      if (cAnchor) { const a = cAnchor.a + (t - cAnchor.t) * sp; return [Math.cos(a) * cAnchor.r, Math.sin(a) * cAnchor.r]; }
+      // c décrit un petit cercle autour du point choisi : l'ensemble respire sans perdre son caractère
+      const a0 = p.angle * Math.PI / 180, r = p.rayon, b = t * sp * 3;
+      return [Math.cos(a0) * r + Math.cos(b) * 0.035 * Math.min(1, p.vitesse * 4), Math.sin(a0) * r + Math.sin(b) * 0.035 * Math.min(1, p.vitesse * 4)];
+    }
+    function view(w, h, t) {
+      const m = Math.min(w, h);
+      if (p.genre === 'julia') { const span = 3.1 / (p.zoom * zoomU); return { cx: panU[0], cy: panU[1], sc: span / m }; }
+      const base = [-0.6, 0], T = CIBLES[p.cible] || base, depth = p.cible === 'ensemble' ? 0 : p.plongee;
+      // plongée et remontée : k = e^(7·profondeur·(1 − cos)/2), la cible reste fixe à l'écran
+      const k = Math.exp(depth * 7.5 * (1 - Math.cos(t * p.vitesse * 0.16)) / 2) * p.zoom * zoomU;
+      const g = Math.pow(Math.max(1, k / (p.zoom * zoomU)), 1.6), cx = T[0] + (base[0] - T[0]) / g, cy = T[1] + (base[1] - T[1]) / g;
+      return { cx: cx + panU[0], cy: cy + panU[1], sc: 3.2 / k / m };
+    }
+    function setC(x, y) { const { w, h } = app.size, v = view(w, h, simT); cU = [v.cx + (x - w / 2) * v.sc, v.cy + (y - h / 2) * v.sc]; }
+
+    // ——— Le logo en piège d'orbite ———
+    function buildLogo() {
+      const img0 = p.image || app.logoImg, key = [p.logo, img0 ? (img0.src || 'c') : 'demo'].join(); if (key === logoKey) return; logoKey = key;
+      logoM = null; if (!p.logo) return;
+      const M = 160, c = document.createElement('canvas'); c.width = c.height = M; const x = c.getContext('2d', { willReadFrequently: true }), L = M * 0.92, cx = M / 2;
+      if (img0) { const iw = img0.naturalWidth || img0.width, ih = img0.naturalHeight || img0.height, s = L / Math.max(iw, ih); x.drawImage(img0, cx - iw * s / 2, cx - ih * s / 2, iw * s, ih * s); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(cx, cx, L * 0.48, 0, TAU); x.arc(cx, cx, L * 0.27, 0, TAU, true); x.fill('evenodd'); x.fillRect(cx - L * 0.07, cx - L * 0.5, L * 0.14, L); }
+      const d = x.getImageData(0, 0, M, M).data; let transp = 0; for (let i = 3; i < d.length; i += 4) if (d[i] < 128) transp++; const useA = transp > M * M * 0.05;
+      const m = new Uint8Array(M * M);
+      for (let i = 0; i < M * M; i++) { const o = i * 4, l = (d[o] * 0.2126 + d[o + 1] * 0.7152 + d[o + 2] * 0.0722) / 255; m[i] = (useA ? d[o + 3] > 128 : d[o + 3] > 128 && l < 0.5) ? 1 : 0; }
+      logoM = { m, M };
+    }
+
+    // ——— Le relief : temps de fuite lissé sur une grille ———
+    let F = null, TR = null, GW = 0, GH = 0;
+    function compute(w, h, t) {
+      buildLogo();
+      const asp = w / h, D0 = Math.round(p.definition * (app.thumbnail ? 2 : 1)); GW = asp >= 1 ? D0 : Math.round(D0 * asp); GH = asp >= 1 ? Math.round(D0 / asp) : D0;
+      if (!F || F.length !== GW * GH) { F = new Float32Array(GW * GH); TR = new Uint8Array(GW * GH); }
+      const v = view(w, h, t), c = cAt(t), jul = p.genre === 'julia', N = p.iterations | 0, d = p.puissance | 0, ld = Math.log(d);
+      const sx = w / GW, sy = h / GH, trap = logoM && p.logo, T = p.tailleLogo, LM = logoM ? logoM.M : 0, LA = logoM ? logoM.m : null;
+      for (let j = 0; j < GH; j++) {
+        const y0 = v.cy + ((j + 0.5) * sy - h / 2) * v.sc;
+        for (let i = 0; i < GW; i++) {
+          const x0 = v.cx + ((i + 0.5) * sx - w / 2) * v.sc;
+          let zx = jul ? x0 : 0, zy = jul ? y0 : 0; const cr = jul ? c[0] : x0, ci = jul ? c[1] : y0;
+          let n = 0, r2 = zx * zx + zy * zy, hit = 0, px = 1e9, py = 1e9;
+          while (n < N && r2 < 256) {
+            if (d === 2) { const nx = zx * zx - zy * zy + cr; zy = 2 * zx * zy + ci; zx = nx; }
+            else { let ax = zx, ay = zy; for (let k = 1; k < d; k++) { const nx = ax * zx - ay * zy; ay = ax * zy + ay * zx; ax = nx; } zx = ax + cr; zy = ay + ci; }
+            r2 = zx * zx + zy * zy; n++;
+            // orbite périodique : le point est prisonnier, inutile d'aller jusqu'au bout
+            if ((n & (n - 1)) === 0) { px = zx; py = zy; } else if (Math.abs(zx - px) + Math.abs(zy - py) < 1e-9) { n = N; break; }
+            if (trap && n > 1 && zx > -T && zx < T && zy > -T && zy < T) {
+              const u = ((zx / T) * 0.5 + 0.5) * LM | 0, q = ((zy / T) * 0.5 + 0.5) * LM | 0;
+              if (LA[q * LM + u]) { hit = 1; break; }
+            }
+          }
+          const o = j * GW + i; TR[o] = hit;
+          F[o] = r2 >= 256 ? Math.log(1 + Math.max(0, n + 1 - Math.log(Math.log(r2) * 0.5) / ld)) : (hit ? Math.log(1 + n) : Math.log(2 + N));
+        }
+      }
+      return { N };
+    }
+
+    // ——— Couleurs par palier ———
+    let RGB = [];
+    function bandOf(u, uIn) { return u >= uIn ? -1 : Math.floor(u); }
+    function colorOf(k) { const C = p.couleurs.length ? p.couleurs : ['#ffffff']; return C[((k % C.length) + C.length) % C.length]; }
+
+    // ——— Marching squares : courbes de niveau u = k (u déjà multiplié par la densité) ———
+    function contours(U, uIn, emit) {
+      for (let j = 0; j < GH - 1; j++) for (let i = 0; i < GW - 1; i++) {
+        const o = j * GW + i, a = U[o], b = U[o + 1], c = U[o + 1 + GW], d = U[o + GW];
+        const lo = Math.min(a, b, c, d), hi = Math.min(uIn, Math.max(a, b, c, d));
+        const k0 = Math.ceil(lo), k1 = Math.floor(hi); if (k1 < k0 || k1 - k0 > 1) continue;
+        for (let k = k0; k <= k1; k++) {
+          const ca = a >= k, cb = b >= k, cc = c >= k, cd = d >= k, idx = (ca ? 8 : 0) | (cb ? 4 : 0) | (cc ? 2 : 0) | (cd ? 1 : 0);
+          if (idx === 0 || idx === 15) continue;
+          const T = () => [i + (k - a) / (b - a), j], R = () => [i + 1, j + (k - b) / (c - b)], B = () => [i + (k - d) / (c - d), j + 1], L = () => [i, j + (k - a) / (d - a)];
+          switch (idx) {
+            case 1: case 14: emit(L(), B()); break;
+            case 2: case 13: emit(B(), R()); break;
+            case 3: case 12: emit(L(), R()); break;
+            case 4: case 11: emit(T(), R()); break;
+            case 6: case 9: emit(T(), B()); break;
+            case 7: case 8: emit(L(), T()); break;
+            case 5: emit(L(), T()); emit(B(), R()); break;
+            case 10: emit(T(), R()); emit(L(), B()); break;
+          }
+        }
+      }
+    }
+    function trapContours(emit) {
+      for (let j = 0; j < GH - 1; j++) for (let i = 0; i < GW - 1; i++) {
+        const o = j * GW + i, a = TR[o], b = TR[o + 1], c = TR[o + 1 + GW], d = TR[o + GW], idx = a * 8 + b * 4 + c * 2 + d;
+        if (idx === 0 || idx === 15) continue;
+        const T = [i + 0.5, j], R = [i + 1, j + 0.5], B = [i + 0.5, j + 1], L = [i, j + 0.5];
+        switch (idx) { case 1: case 14: emit(L, B); break; case 2: case 13: emit(B, R); break; case 3: case 12: emit(L, R); break; case 4: case 11: emit(T, R); break; case 6: case 9: emit(T, B); break; case 7: case 8: emit(L, T); break; case 5: emit(L, T); emit(B, R); break; case 10: emit(T, R); emit(L, B); break; }
+      }
+    }
+
+    function frame(w, h, t) {
+      const { N } = compute(w, h, t), dens = p.densite, shift = t * p.flux * 0.9, uIn = Math.log(2 + N) * dens - shift - 1e-3;
+      // un léger flou 3×3 calme le grésillement des paliers serrés au bord de l'ensemble
+      const U = new Float32Array(GW * GH), top = Math.log(2 + N) - 1e-6;
+      for (let j = 0; j < GH; j++) for (let i = 0; i < GW; i++) {
+        const o = j * GW + i, v = F[o]; if (v >= top) { U[o] = v * dens - shift; continue; }
+        let s = v * 4, wsum = 4;
+        for (let dj = -1; dj <= 1; dj++) for (let di = -1; di <= 1; di++) { if (!di && !dj) continue; const ii = i + di, jj = j + dj; if (ii < 0 || jj < 0 || ii >= GW || jj >= GH) continue; const q = F[jj * GW + ii]; if (q >= top) continue; const wq = di && dj ? 1 : 2; s += q * wq; wsum += wq; }
+        U[o] = s / wsum * dens - shift;
+      }
+      return { U, uIn };
+    }
+
+    app.loop((t, dt) => {
+      dt = Math.min(0.1, dt || 0);
+      if (!app.thumbnail) simT += dt; else simT = 6;
+      const { w, h, dpr } = app.size, { U, uIn } = frame(w, h, simT);
+      if (!off || off.width !== GW || off.height !== GH) { off = document.createElement('canvas'); off.width = GW; off.height = GH; offCtx = off.getContext('2d'); }
+      const img = offCtx.createImageData(GW, GH), D = img.data, fondC = hex(p.fond), accC = hex(p.accent), cache = new Map();
+      for (let i = 0; i < U.length; i++) {
+        let col;
+        if (p.logo && logoM && TR[i]) col = accC;
+        else if (!p.aplats) col = fondC;
+        else { const k = bandOf(U[i], uIn); if (k === -1) col = fondC; else { col = cache.get(k); if (!col) cache.set(k, (col = hex(colorOf(k)))); } }
+        D[i * 4] = col[0]; D[i * 4 + 1] = col[1]; D[i * 4 + 2] = col[2]; D[i * 4 + 3] = 255;
+      }
+      offCtx.putImageData(img, 0, 0);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'low';
+      ctx.drawImage(off, 0, 0, w, h);
+      const sx = w / GW, sy = h / GH, X = (q) => (q[0] + 0.5) * sx, Y = (q) => (q[1] + 0.5) * sy;
+      if (p.traits) {
+        const P2 = new Path2D(); contours(U, uIn, (a, b) => { P2.moveTo(X(a), Y(a)); P2.lineTo(X(b), Y(b)); });
+        ctx.lineWidth = p.epaisseur; ctx.lineCap = 'butt'; ctx.strokeStyle = p.trait; ctx.stroke(P2);
+      }
+      if (p.logo && logoM) {
+        const P3 = new Path2D(); trapContours((a, b) => { P3.moveTo(X(a), Y(a)); P3.lineTo(X(b), Y(b)); });
+        ctx.lineWidth = Math.max(0.8, p.epaisseur); ctx.strokeStyle = p.accent; ctx.stroke(P3);
+      }
+      if (grab && p.genre === 'julia') { const c = cAt(simT), v = view(w, h, simT), x = w / 2 + (c[0] - v.cx) / v.sc, y = h / 2 + (c[1] - v.cy) / v.sc; ctx.strokeStyle = p.accent; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.arc(x, y, 7, 0, TAU); ctx.moveTo(x - 12, y); ctx.lineTo(x + 12, y); ctx.moveTo(x, y - 12); ctx.lineTo(x, y + 12); ctx.stroke(); }
+      app.finish(ctx);
+    });
+
+    // ——— SVG : aplats en bandes horizontales fusionnées, courbes de niveau chaînées ———
+    function chain(segs) {
+      // relie les segments qui se touchent pour alléger le fichier
+      const key = (q) => Math.round(q[0] * 64) + ',' + Math.round(q[1] * 64), ends = new Map(), used = new Uint8Array(segs.length), out = [];
+      segs.forEach((s, i) => { for (const e of [0, 1]) { const k = key(s[e]); let L = ends.get(k); if (!L) ends.set(k, (L = [])); L.push(i); } });
+      const next = (q, skip) => { const L = ends.get(key(q)); if (!L) return -1; for (const i of L) if (!used[i] && i !== skip) return i; return -1; };
+      for (let s0 = 0; s0 < segs.length; s0++) {
+        if (used[s0]) continue; used[s0] = 1; const line = [segs[s0][0], segs[s0][1]];
+        for (const dir of [1, 0]) {
+          for (;;) { const end = dir ? line[line.length - 1] : line[0], i = next(end, -1); if (i < 0) break; used[i] = 1; const s = segs[i], far = key(s[0]) === key(end) ? s[1] : s[0]; if (dir) line.push(far); else line.unshift(far); }
+        }
+        out.push(line);
+      }
+      return out;
+    }
+    function toSVG() {
+      const { w, h } = app.size, f = (v) => +v.toFixed(2), { U, uIn } = frame(w, h, simT), sx = w / GW, sy = h / GH;
+      let s = `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><rect width="100%" height="100%" fill="${p.fond}"/>`;
+      if (p.aplats || p.logo) {
+        const paths = new Map();
+        for (let j = 0; j < GH; j++) {
+          let i = 0;
+          while (i < GW) {
+            const o = j * GW + i, k = p.logo && logoM && TR[o] ? 'A' : p.aplats ? bandOf(U[o], uIn) : -1; let e = i + 1;
+            while (e < GW) { const o2 = j * GW + e, k2 = p.logo && logoM && TR[o2] ? 'A' : p.aplats ? bandOf(U[o2], uIn) : -1; if (k2 !== k) break; e++; }
+            if (k !== -1) { const col = k === 'A' ? p.accent : colorOf(k); paths.set(col, (paths.get(col) || '') + `M${f(i * sx)} ${f(j * sy)}h${f((e - i) * sx)}v${f(sy + 0.3)}h${f(-(e - i) * sx)}z`); }
+            i = e;
+          }
+        }
+        for (const [col, d] of paths) s += `<path d="${d}" fill="${col}"/>`;
+      }
+      const P = (q) => `${f((q[0] + 0.5) * sx)} ${f((q[1] + 0.5) * sy)}`;
+      const lines = (segs, col, lw) => { let d = ''; for (const L of chain(segs)) d += 'M' + L.map(P).join('L'); return `<path d="${d}" fill="none" stroke="${col}" stroke-width="${f(lw)}" stroke-linecap="round" stroke-linejoin="round"/>`; };
+      if (p.traits) { const segs = []; contours(U, uIn, (a, b) => segs.push([a, b])); s += lines(segs, p.trait, p.epaisseur); }
+      if (p.logo && logoM) { const segs = []; trapContours((a, b) => segs.push([a, b])); s += lines(segs, p.accent, Math.max(0.8, p.epaisseur)); }
+      return s + '</svg>';
+    }
+  </script>
+</body>
+</html>

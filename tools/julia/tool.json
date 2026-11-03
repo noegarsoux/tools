@@ -1,0 +1,15 @@
+{
+  "slug": "julia",
+  "title": "Courbes de Julia",
+  "type": "motion",
+  "description": "Les ensembles de Julia et de Mandelbrot tracés en courbes de niveau et en aplats ; on promène le paramètre au doigt et le logo se niche dans les spirales.",
+  "tags": ["fractale", "mathematiques", "courbes-de-niveau", "logo", "svg"],
+  "inspiration": [
+    "Gaston Julia et Pierre Fatou, l'itération des fractions rationnelles (1918)",
+    "Les planches de « The Beauty of Fractals » de Peitgen et Richter (1986)",
+    "Les pièges d'orbite des images de fractales des années 1990"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}
