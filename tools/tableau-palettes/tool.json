@@ -1,0 +1,15 @@
+{
+  "slug": "tableau-palettes",
+  "title": "Tableau à palettes",
+  "type": "motion",
+  "description": "Un tableau de gare à palettes colorées : chaque case bascule de couleur en couleur jusqu'à la sienne, en cascade, pour afficher logo, dégradés et motifs.",
+  "tags": ["affichage", "grille", "mecanique", "cascade", "logo", "svg"],
+  "inspiration": [
+    "Les tableaux d'affichage à palettes Solari des gares et aéroports",
+    "Le cliquetis des horloges à palettes",
+    "Les mosaïques de pixels"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}
