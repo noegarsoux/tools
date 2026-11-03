@@ -1,0 +1,15 @@
+{
+  "slug": "aquarelle",
+  "title": "Aquarelle",
+  "type": "motion",
+  "description": "Une aquarelle qui se peint seule aux couleurs de la marque : lavis, logo, couleur déposée dans le mouillé qui fleurit, auréoles et granulation du papier.",
+  "tags": ["peinture", "simulation", "fluide", "interaction", "logo", "svg"],
+  "inspiration": [
+    "Le lavis et la réserve du blanc en aquarelle",
+    "Les auréoles qui se forment quand une flaque sèche par les bords",
+    "Les pigments qui granulent dans le grain d’un papier torchon"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}
