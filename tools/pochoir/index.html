@@ -1,0 +1,296 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pochoir</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Pochoir : un « tag » = une suite de couches. Pour chaque couche, une feuille de carton percée d'une forme
+    // (le logo, son ombre décalée, un fond rond, carré ou en étoile) se pose sur le mur ; la bombe la balaie en lacet.
+    // Chaque goutte du brouillard est tirée autour de la buse (loi normale) : si elle tombe dans la découpe,
+    // elle peint le mur ; sur le carton, elle peint le carton ; hors de la feuille, elle fait un débord sur le mur.
+    // Une grille de densité sur le mur déclenche des coulures là où la peinture s'accumule. Le carton se lève,
+    // le tag suivant se place ailleurs ; quand le mur est plein, un rouleau repasse la couleur du mur.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const ACI = PAL('acide'), BIT = PAL('bitmap'), GLY = PAL('glyphes'), ORB = PAL('orbite');
+
+    let simT = 0, vKey = '', logoM = null, logoKey = '', ptr = null, S = null, sKey = '', BG = null, bgKey = '';
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.05, vignette: 0.14 },
+      hint: 'Glissez pour peindre à la bombe · clic : lever le carton · molette : largeur du jet',
+      notes: 'Un pochoir se peint en plusieurs passages : on pose le carton découpé, on balaie à la bombe, on lève, et on recommence avec la couche suivante, un peu décalée parfois. La bombe ne donne jamais un aplat : c\'est un brouillard de gouttes, plus dense au centre du jet, qui déborde du carton et coule là où l\'on insiste. Ici, le logo se peint avec son ombre ou sur un fond rond, carré ou en étoile, tag après tag, jusqu\'à ce qu\'un rouleau repeigne le mur. Glissez pour peindre à main levée, cliquez pour lever le carton.',
+      params: {
+        'Pochoir': {
+          couches: { type: 'select', label: 'Couches', options: { simple: 'Logo seul', ombre: 'Logo et son ombre', rond: 'Logo sur fond rond', carre: 'Logo sur fond carré', etoile: 'Logo sur une étoile' }, value: 'ombre' },
+          taille: { type: 'range', label: 'Taille', min: 0.15, max: 0.9, step: 0.01, value: 0.42 },
+          placement: { type: 'segmented', label: 'Placement', options: { centre: 'Au centre', hasard: 'Au hasard', rang: 'En rang' }, value: 'hasard' },
+          decalage: { type: 'range', label: 'Décalage entre couches', min: 0, max: 0.08, step: 0.001, value: 0.012 },
+          tags: { type: 'range', label: 'Tags avant le rouleau', min: 1, max: 16, step: 1, value: 5 },
+          image: { type: 'file', label: 'Logo', accept: 'image/*' },
+        },
+        'Bombe': {
+          buse: { type: 'range', label: 'Largeur du jet', min: 0.01, max: 0.12, step: 0.001, value: 0.045 },
+          debit: { type: 'range', label: 'Débit', min: 0.2, max: 3, step: 0.01, value: 1 },
+          vitesse: { type: 'range', label: 'Vitesse du geste', min: 0.2, max: 3, step: 0.01, value: 1 },
+          coulures: { type: 'range', label: 'Coulures', min: 0, max: 1, step: 0.01, value: 0.45 },
+          gouttes: { type: 'range', label: 'Taille des gouttes', min: 0.5, max: 3, step: 0.05, value: 1 },
+        },
+        'Mur': {
+          mur: { type: 'segmented', label: 'Mur', options: { beton: 'Béton', brique: 'Briques', papier: 'Papier' }, value: 'beton' },
+          fond: { type: 'color', label: 'Couleur du mur', value: '#cfcac0' },
+          couleurs: { type: 'palette', label: 'Bombes', value: ['#16161a', '#e5452a', '#f2c230', '#2f5fd0'] },
+        },
+      },
+      presets: {
+        'Mur de béton': {},
+        'Grand tag': { placement: 'centre', taille: 0.8, couches: 'rond', tags: 1, couleurs: ['#f2c230', '#16161a', '#e5452a'] },
+        'En rang': { placement: 'rang', taille: 0.26, couches: 'simple', tags: 8, couleurs: ['#16161a', '#2f5fd0'], coulures: 0.25 },
+        'Briques': { mur: 'brique', fond: '#9a4a36', couleurs: ['#f4f1ea', '#16161a', '#f2c230'], couches: 'carre' },
+        'Étoile': { couches: 'etoile', placement: 'centre', taille: 0.7, tags: 1, couleurs: ['#e5452a', '#f4f1ea', '#16161a'] },
+        'Coulures': { coulures: 1, debit: 2.2, vitesse: 0.6, couches: 'simple', couleurs: ['#e5452a', '#16161a'] },
+        'Jet fin': { buse: 0.018, debit: 1.6, gouttes: 0.7, decalage: 0.004 },
+        'Affiche': { mur: 'papier', fond: '#efe9dc', couleurs: [BIT[3], BIT[2], BIT[1]], couches: 'ombre', decalage: 0.03, coulures: 0.1 },
+        'Acide': { fond: ACI[1], couleurs: [ACI[2], ACI[3], ACI[0]], mur: 'beton', couches: 'rond' },
+        'Orbite': { fond: ORB[2], couleurs: [ORB[0], ORB[1]], mur: 'papier', placement: 'rang', taille: 0.3 },
+      },
+      brand(colors) {
+        const s = colors.slice().sort((a, b) => lum(a) - lum(b)), L = s[s.length - 1];
+        return { fond: L, couleurs: s.length > 1 ? s.slice(0, -1) : ['#16161a'] };
+      },
+      pointer: {
+        down: (q) => { ptr = { x: q.x, y: q.y, moved: 0, t: simT }; if (S) { ptr.st = { pts: [[q.x, q.y]], r: Math.min(S.w, S.h) * p.buse }; S.strokes.push(ptr.st); } },
+        drag: (q) => { if (!ptr || !S) return; ptr.moved += Math.hypot(q.x - ptr.x, q.y - ptr.y); const n = Math.max(1, Math.ceil(Math.hypot(q.x - ptr.x, q.y - ptr.y) / 3)); for (let k = 1; k <= n; k++) spray(ptr.x + (q.x - ptr.x) * k / n, ptr.y + (q.y - ptr.y) * k / n, 0.035 / n, ptr.col ?? (ptr.col = Math.floor(Math.random() * 97))); ptr.x = q.x; ptr.y = q.y; if (ptr.st) { ptr.st.pts.push([q.x, q.y]); ptr.st.ci = ptr.col; } },
+        up: () => { if (ptr && ptr.moved < 6 && S && S.phase === 'spray') { S.phase = 'leve'; S.tp = simT; } ptr = null; },
+        wheel: (q, dy) => app.set('buse', Math.max(0.01, Math.min(0.12, +(p.buse * (dy > 0 ? 0.93 : 1.07)).toFixed(4)))),
+      },
+      onChange(k) { if (['*', 'image'].includes(k)) logoKey = ''; },
+      export: { name: 'pochoir', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    function hex(x) { const n = parseInt(x.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
+    function lum(x) { const c = hex(x); return (c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114) / 255; }
+    function mix(a, b, t) { const A = hex(a), C = hex(b); return '#' + A.map((v, i) => Math.round(v + (C[i] - v) * t).toString(16).padStart(2, '0')).join(''); }
+    function rng(s) { let a = s >>> 0; return () => { a = (a + 0x6d2b79f5) >>> 0; let t = a; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+
+    function buildLogo() {
+      const img0 = p.image || app.logoImg, key = img0 ? (img0.src || 'c') : 'demo'; if (key === logoKey) return; logoKey = key; vKey = '';
+      const M = 200, c = document.createElement('canvas'); c.width = c.height = M; const x = c.getContext('2d', { willReadFrequently: true }), L = M * 0.94, cx = M / 2;
+      if (img0) { const iw = img0.naturalWidth || img0.width, ih = img0.naturalHeight || img0.height, s = L / Math.max(iw, ih); x.drawImage(img0, cx - iw * s / 2, cx - ih * s / 2, iw * s, ih * s); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(cx, cx, L * 0.48, 0, TAU); x.arc(cx, cx, L * 0.27, 0, TAU, true); x.fill('evenodd'); x.fillRect(cx - L * 0.07, cx - L * 0.5, L * 0.14, L); }
+      const d = x.getImageData(0, 0, M, M).data; let transp = 0; for (let i = 3; i < d.length; i += 4) if (d[i] < 128) transp++; const useA = transp > M * M * 0.05;
+      const F = new Float64Array(M * M); for (let i = 0; i < M * M; i++) { const o = i * 4, l = (d[o] * 0.2126 + d[o + 1] * 0.7152 + d[o + 2] * 0.0722) / 255; F[i] = useA ? d[o + 3] / 255 : (d[o + 3] / 255) * Math.min(1, Math.max(0, (0.75 - l) * 2)); }
+      { const G2 = new Float64Array(M * M); for (let j = 1; j < M - 1; j++) for (let i = 1; i < M - 1; i++) { let a = 0; for (let b = -1; b <= 1; b++) for (let c = -1; c <= 1; c++) a += F[(j + b) * M + i + c] * (b || c ? (b && c ? 1 : 2) : 4); G2[j * M + i] = a / 16; } F.set(G2); }
+      for (let k = 0; k < M; k++) F[k] = F[(M - 1) * M + k] = F[k * M] = F[k * M + M - 1] = 0;
+      logoM = contours(F, M, M, 0.5, 0, 0, 1).filter((c) => c.closed && c.pts.length > 6).map((c) => chaikin(chaikin(c.pts, true), true).map((q) => [q[0] / M - 0.5, q[1] / M - 0.5]));
+    }
+    // carrés marchants + chaînage
+    function contours(F, nx, ny, lev, ox, oy, cs) {
+      const pt = new Map(), adj = new Map();
+      const P = (id) => { let q = pt.get(id); if (q) return q; const cell = id >> 1, i = cell % nx, j = (cell - i) / nx; let a, b, ax, ay, bx, by; if (id & 1) { a = F[j * nx + i]; b = F[(j + 1) * nx + i]; ax = bx = i; ay = j; by = j + 1; } else { a = F[j * nx + i]; b = F[j * nx + i + 1]; ay = by = j; ax = i; bx = i + 1; } const t = (lev - a) / (b - a || 1e-9); q = [ox + (ax + (bx - ax) * t) * cs, oy + (ay + (by - ay) * t) * cs]; pt.set(id, q); return q; };
+      const link = (a, b) => { (adj.get(a) || adj.set(a, []).get(a)).push(b); (adj.get(b) || adj.set(b, []).get(b)).push(a); };
+      for (let j = 0; j < ny - 1; j++) for (let i = 0; i < nx - 1; i++) {
+        const A = F[j * nx + i] > lev, B = F[j * nx + i + 1] > lev, C = F[(j + 1) * nx + i + 1] > lev, D = F[(j + 1) * nx + i] > lev, idx = A | (B << 1) | (C << 2) | (D << 3);
+        if (idx === 0 || idx === 15) continue;
+        const T = (j * nx + i) * 2, R = (j * nx + i + 1) * 2 + 1, Bo = ((j + 1) * nx + i) * 2, Le = (j * nx + i) * 2 + 1;
+        const ctr = (F[j * nx + i] + F[j * nx + i + 1] + F[(j + 1) * nx + i + 1] + F[(j + 1) * nx + i]) / 4 > lev;
+        switch (idx) {
+          case 1: case 14: link(Le, T); break; case 2: case 13: link(T, R); break; case 3: case 12: link(Le, R); break;
+          case 4: case 11: link(R, Bo); break; case 6: case 9: link(T, Bo); break; case 7: case 8: link(Le, Bo); break;
+          case 5: if (ctr) { link(Le, Bo); link(T, R); } else { link(Le, T); link(R, Bo); } break;
+          case 10: if (ctr) { link(Le, T); link(R, Bo); } else { link(Le, Bo); link(T, R); } break;
+        }
+      }
+      const seen = new Set(), out = [];
+      const walk = (s) => { const L = [s]; seen.add(s); let cur = s; for (;;) { const nb = (adj.get(cur) || []).find((x) => !seen.has(x)); if (nb === undefined) break; seen.add(nb); L.push(nb); cur = nb; } return L; };
+      for (const [id, nb] of adj) if (nb.length === 1 && !seen.has(id)) out.push({ pts: walk(id).map(P), closed: false });
+      for (const [id] of adj) if (!seen.has(id)) out.push({ pts: walk(id).map(P), closed: true });
+      return out;
+    }
+    function chaikin(pts, closed) {
+      const o = []; const n = pts.length; for (let k = 0; k < (closed ? n : n - 1); k++) { const a = pts[k], b = pts[(k + 1) % n]; o.push([a[0] * 0.75 + b[0] * 0.25, a[1] * 0.75 + b[1] * 0.25], [a[0] * 0.25 + b[0] * 0.75, a[1] * 0.25 + b[1] * 0.75]); }
+      if (!closed) { o.unshift(pts[0]); o.push(pts[n - 1]); } return o;
+    }
+
+
+    // ——— Formes des couches (carré unité centré) ———
+    const circ = (r, n = 64) => [Array.from({ length: n }, (_, k) => [Math.cos(k / n * TAU) * r, Math.sin(k / n * TAU) * r])];
+    function starLoops(r) { const n = 16; return [Array.from({ length: n * 2 }, (_, k) => { const a = k / (n * 2) * TAU - Math.PI / 2, rr = k % 2 ? r * 0.72 : r; return [Math.cos(a) * rr, Math.sin(a) * rr]; })]; }
+    function layersOf(kind) {
+      const lg = logoM || circ(0.4), d = p.decalage;
+      if (kind === 'simple') return [{ loops: lg, s: 0.82, c: 0, dx: 0, dy: 0 }];
+      if (kind === 'ombre') return [{ loops: lg, s: 0.82, c: 1, dx: 0.035, dy: 0.04 }, { loops: lg, s: 0.82, c: 0, dx: d, dy: -d * 0.5 }];
+      if (kind === 'rond') return [{ loops: circ(0.5), s: 1, c: 1, dx: 0, dy: 0 }, { loops: lg, s: 0.68, c: 0, dx: d, dy: d * 0.6 }];
+      if (kind === 'carre') return [{ loops: [[[-0.47, -0.47], [0.47, -0.47], [0.47, 0.47], [-0.47, 0.47]]], s: 1, c: 1, dx: 0, dy: 0 }, { loops: lg, s: 0.7, c: 0, dx: d, dy: d * 0.6 }];
+      return [{ loops: starLoops(0.5), s: 1, c: 1, dx: 0, dy: 0 }, { loops: lg, s: 0.58, c: 0, dx: d * 0.6, dy: d }];
+    }
+
+    // ——— Mur ———
+    function wall(w, h, dpr) {
+      const key = [w, h, dpr, p.mur, p.fond, app.seed].join(); if (BG && bgKey === key) return BG; bgKey = key;
+      BG = document.createElement('canvas'); BG.width = Math.ceil(w * dpr); BG.height = Math.ceil(h * dpr); const g = BG.getContext('2d'), R = rng(app.seed * 31 + 5); g.setTransform(dpr, 0, 0, dpr, 0, 0);
+      const m = Math.min(w, h); g.fillStyle = p.fond; g.fillRect(0, 0, w, h);
+      if (p.mur === 'brique') {
+        const bh = m * 0.055, bw = bh * 2.6, mortar = mix(p.fond, '#ffffff', 0.35);
+        g.fillStyle = mortar; g.fillRect(0, 0, w, h);
+        for (let j = 0, y = 0; y < h; j++, y += bh) for (let x = -(j % 2) * bw / 2; x < w; x += bw) { g.fillStyle = mix(p.fond, R() < 0.5 ? '#000000' : '#ffffff', R() * 0.12); g.fillRect(x + bh * 0.06, y + bh * 0.06, bw - bh * 0.12, bh - bh * 0.12); }
+      }
+      // grain : taches et pores
+      const n = Math.round(w * h / (p.mur === 'papier' ? 900 : 260));
+      for (let k = 0; k < n; k++) { const x = R() * w, y = R() * h, r = (p.mur === 'papier' ? 0.4 : 0.5) + R() * (p.mur === 'beton' ? 2.2 : 1); g.globalAlpha = 0.05 + R() * 0.1; g.fillStyle = R() < 0.55 ? '#000000' : '#ffffff'; g.beginPath(); g.arc(x, y, r, 0, TAU); g.fill(); }
+      if (p.mur === 'beton') for (let k = 0; k < 40; k++) { const x = R() * w, y = R() * h, r = m * (0.05 + R() * 0.2); const gr = g.createRadialGradient(x, y, 0, x, y, r); const c = R() < 0.5 ? '0,0,0' : '255,255,255'; gr.addColorStop(0, `rgba(${c},0.05)`); gr.addColorStop(1, `rgba(${c},0)`); g.globalAlpha = 1; g.fillStyle = gr; g.fillRect(x - r, y - r, r * 2, r * 2); }
+      if (p.mur === 'papier') { g.globalAlpha = 0.08; g.strokeStyle = '#000000'; g.lineWidth = 1; for (let k = 0; k < 4; k++) { const x = w * (0.15 + R() * 0.7); g.beginPath(); g.moveTo(x, 0); g.lineTo(x + (R() - 0.5) * 6, h); g.stroke(); } }
+      g.globalAlpha = 1; return BG;
+    }
+
+    // ——— Atelier : tags, couches, carton ———
+    function studio(w, h) {
+      buildLogo();
+      const key = [p.couches, p.taille, p.placement, p.decalage, p.tags, logoKey, app.seed, w, h].join();
+      if (key === sKey && S) return S; sKey = key;
+      const dpr = app.size.dpr, mk = () => { const c = document.createElement('canvas'); c.width = Math.ceil(w * dpr); c.height = Math.ceil(h * dpr); return c; };
+      S = { w, h, done: [], strokes: [], paint: mk(), R: rng(app.seed * 4099 + 1), tag: -1, layer: 0, phase: 'pose', tp: simT, drips: [], dens: new Float32Array(Math.ceil(w / 6) * Math.ceil(h / 6)), dw: Math.ceil(w / 6), roller: -1 };
+      nextTag();
+      // le mur n'est jamais vierge : un premier tag est déjà peint
+      if (!app.thumbnail) { const t0 = simT; for (let k = 0; k < 1500 && S.tag < 1; k++) { simT += 1 / 30; step(1 / 30); } simT = t0; S.tp = simT; S.drips = []; }
+      return S;
+    }
+    function nextTag() {
+      const { w, h, R } = S, m = Math.min(w, h), sz = m * p.taille; S.tag++;
+      let x = w / 2, y = h / 2;
+      if (p.placement === 'hasard') { x = sz * 0.6 + R() * Math.max(1, w - sz * 1.2); y = sz * 0.6 + R() * Math.max(1, h - sz * 1.2); }
+      else if (p.placement === 'rang') { const n = Math.max(1, Math.floor(w / (sz * 1.15))), row = Math.floor(S.tag / n) % Math.max(1, Math.floor(h / (sz * 1.15))), col = S.tag % n, ny = Math.max(1, Math.floor(h / (sz * 1.15))); x = (col + 0.5) * w / n; y = (row + 0.5) * h / ny; }
+      S.pos = { x, y, sz, rot: p.placement === 'hasard' ? (R() - 0.5) * 0.35 : (R() - 0.5) * 0.04 }; S.layers = layersOf(p.couches); S.layer = 0; S.cOff = Math.floor(R() * 97);
+      makeSheet();
+    }
+    function makeSheet() {
+      const L = S.layers[S.layer], { x, y, sz, rot } = S.pos, dpr = app.size.dpr, pad = 0.22, W = sz * (1 + pad * 2);
+      const cx = x + L.dx * sz, cy = y + L.dy * sz, N = Math.ceil(W * dpr);
+      // masque de la découpe, dans le repère de la feuille
+      const mc = document.createElement('canvas'); mc.width = mc.height = N; const g = mc.getContext('2d', { willReadFrequently: true });
+      g.setTransform(N / (1 + pad * 2) * L.s, 0, 0, N / (1 + pad * 2) * L.s, N / 2, N / 2); g.beginPath(); for (const lp of L.loops) { lp.forEach((q, i) => (i ? g.lineTo(q[0], q[1]) : g.moveTo(q[0], q[1]))); g.closePath(); } g.fillStyle = '#000'; g.fill('evenodd');
+      const d = g.getImageData(0, 0, N, N).data, M = new Uint8Array(N * N); for (let i = 0; i < M.length; i++) M[i] = d[i * 4 + 3] > 127 ? 1 : 0;
+      // carton percé
+      const card = document.createElement('canvas'); card.width = card.height = N; const c = card.getContext('2d'), R = S.R;
+      c.fillStyle = '#c9a77a'; c.fillRect(0, 0, N, N); for (let k = 0; k < N * N / 120; k++) { c.fillStyle = R() < 0.5 ? 'rgba(0,0,0,0.06)' : 'rgba(255,255,255,0.07)'; c.fillRect(R() * N, R() * N, 1 + R() * 2, 1 + R() * 2); }
+      c.strokeStyle = 'rgba(0,0,0,0.25)'; c.lineWidth = 2; c.strokeRect(1, 1, N - 2, N - 2);
+      c.globalCompositeOperation = 'destination-out'; c.drawImage(mc, 0, 0); c.globalCompositeOperation = 'source-over';
+      const sp = document.createElement('canvas'); sp.width = sp.height = N;
+      const shd = document.createElement('canvas'); shd.width = shd.height = N; const hg = shd.getContext('2d'); hg.drawImage(card, 0, 0); hg.globalCompositeOperation = 'source-in'; hg.fillStyle = '#000'; hg.fillRect(0, 0, N, N);
+      S.sheet = { cx, cy, W, N, rot, M, card, sp, mc, shd };
+      // trajet de la bombe : un lacet qui couvre la feuille
+      // (seulement sur l'emprise de la découpe, en rangs serrés pour que le brouillard se rejoigne)
+      let x0 = N, y0 = N, x1 = 0, y1 = 0; for (let j = 0; j < N; j += 2) for (let i = 0; i < N; i += 2) if (M[j * N + i]) { x0 = Math.min(x0, i); x1 = Math.max(x1, i); y0 = Math.min(y0, j); y1 = Math.max(y1, j); }
+      const jr = Math.min(S.w, S.h) * p.buse, bx0 = (x0 / N - 0.5) * W - jr * 0.5, bx1 = (x1 / N - 0.5) * W + jr * 0.5, by0 = (y0 / N - 0.5) * W, by1 = (y1 / N - 0.5) * W;
+      const rows = Math.max(2, Math.ceil((by1 - by0) / (jr * 0.75)) + 1), pts = [];
+      for (let r = 0; r < rows; r++) { const yy = by0 + (by1 - by0) * r / (rows - 1), [a, b] = r % 2 ? [bx1, bx0] : [bx0, bx1]; pts.push([a, yy], [b, yy]); }
+      S.path = pts; S.pl = pts.reduce((s, q, i) => (i ? s + Math.hypot(q[0] - pts[i - 1][0], q[1] - pts[i - 1][1]) : 0), 0); S.ps = 0;
+    }
+    function toSheet(x, y) { const sh = S.sheet, dx = x - sh.cx, dy = y - sh.cy, c = Math.cos(-sh.rot), s = Math.sin(-sh.rot); return [(dx * c - dy * s) / sh.W + 0.5, (dx * s + dy * c) / sh.W + 0.5]; }
+
+    // une bouffée de peinture autour de (x, y)
+    function spray(x, y, dt, ci) {
+      const m = Math.min(S.w, S.h), r = m * p.buse, n = Math.round(42000 * p.debit * dt * (r / (m * 0.045)) ** 1.6), C = p.couleurs.length ? p.couleurs : ['#16161a'], col = C[ci % C.length], dpr = app.size.dpr;
+      const pg = S.paint.getContext('2d'); pg.setTransform(dpr, 0, 0, dpr, 0, 0); pg.fillStyle = col;
+      const sh = S.phase === 'spray' || S.phase === 'pose' ? S.sheet : null, sg = sh ? sh.sp.getContext('2d') : null; if (sg) { sg.setTransform(1, 0, 0, 1, 0, 0); sg.fillStyle = col; }
+      const dot = p.gouttes * Math.max(0.8, m * 0.0016), R = Math.random;
+      for (let k = 0; k < n; k++) {
+        const u = R() || 1e-9, v = R(), rr = Math.sqrt(-2 * Math.log(u)) * r * 0.42, a = v * TAU, px = x + Math.cos(a) * rr, py = y + Math.sin(a) * rr, ds = dot * (0.4 + R() * R() * 1.6);
+        if (sh) { const [sx, sy] = toSheet(px, py); if (sx >= 0 && sy >= 0 && sx < 1 && sy < 1) { const ix = Math.floor(sx * sh.N), iy = Math.floor(sy * sh.N); if (!sh.M[iy * sh.N + ix]) { sg.globalAlpha = 0.5 + R() * 0.5; sg.fillRect(ix, iy, ds * dpr, ds * dpr); continue; } } }
+        pg.globalAlpha = 0.45 + R() * 0.55; pg.fillRect(px - ds / 2, py - ds / 2, ds, ds);
+        const gi = Math.floor(px / 6), gj = Math.floor(py / 6); if (gi >= 0 && gj >= 0 && gi < S.dw && gj * S.dw < S.dens.length) { const o = gj * S.dw + gi; S.dens[o] += ds * ds / 36; if (S.dens[o] > 3.2 / Math.max(0.05, p.coulures) && p.coulures > 0 && S.drips.length < 30 && R() < 0.02) { S.drips.push({ x: px, y: py, v: m * (0.05 + R() * 0.08), w: dot * (1.4 + R() * 1.5), col, life: 0.6 + R() * 1.6 * p.coulures, t: 0 }); S.dens[o] = 0; } }
+      }
+      pg.globalAlpha = 1; if (sg) sg.globalAlpha = 1;
+    }
+
+    function step(dt) {
+      const { w, h } = S, m = Math.min(w, h), C = p.couleurs.length ? p.couleurs : ['#16161a'];
+      // coulures
+      const pg = S.paint.getContext('2d'), dpr = app.size.dpr; pg.setTransform(dpr, 0, 0, dpr, 0, 0); pg.lineCap = 'round';
+      for (const d of S.drips) { d.t += dt; const vy = d.v * Math.max(0, 1 - d.t / d.life), y2 = d.y + vy * dt; pg.strokeStyle = d.col; pg.lineWidth = d.w * (1 - d.t / d.life * 0.4); pg.beginPath(); pg.moveTo(d.x, d.y); pg.lineTo(d.x + (Math.random() - 0.5) * 0.3, y2); pg.stroke(); d.y = y2; if (d.t >= d.life) { pg.fillStyle = d.col; pg.beginPath(); pg.arc(d.x, d.y, d.w * 0.75, 0, TAU); pg.fill(); } }
+      S.drips = S.drips.filter((d) => d.t < d.life);
+      if (S.roller >= 0) { // le rouleau repeint le mur
+        S.roller += dt / 2.2; const y = S.roller * (h + m * 0.2); pg.save(); pg.globalCompositeOperation = 'destination-out'; pg.fillRect(0, 0, w, Math.max(0, y - m * 0.1)); pg.restore();
+        if (S.roller >= 1) { S.roller = -1; S.dens.fill(0); S.done = []; S.strokes = []; S.tag = -1; nextTag(); S.phase = 'pose'; S.tp = simT; }
+        return;
+      }
+      const sh = S.sheet, L = S.layers[S.layer];
+      if (S.phase === 'pose' && simT - S.tp > 0.45) { S.phase = 'spray'; S.tp = simT; }
+      else if (S.phase === 'spray') {
+        S.ps += m * 1.6 * p.vitesse * dt; const q = along(S.ps); S.can = q;
+        spray(q[0], q[1], dt, L.c + S.cOff);
+        if (S.ps >= S.pl) { S.phase = 'leve'; S.tp = simT; }
+      } else if (S.phase === 'leve' && simT - S.tp > 0.6) {
+        S.done.push({ loops: L.loops, s: L.s, cx: sh.cx, cy: sh.cy, W: sh.W, rot: sh.rot, ci: L.c + S.cOff });
+        S.layer++; S.can = null;
+        if (S.layer < S.layers.length) { makeSheet(); S.phase = 'pose'; S.tp = simT; }
+        else if (S.tag + 1 >= p.tags) { S.roller = 0; S.sheet = null; }
+        else { nextTag(); S.phase = 'pose'; S.tp = simT; }
+      }
+    }
+    function along(s) {
+      const P = S.path, sh = S.sheet, c = Math.cos(sh.rot), sn = Math.sin(sh.rot); let acc = 0;
+      for (let i = 1; i < P.length; i++) { const a = P[i - 1], b = P[i], d = Math.hypot(b[0] - a[0], b[1] - a[1]); if (acc + d >= s) { const u = (s - acc) / d, x = a[0] + (b[0] - a[0]) * u, y = a[1] + (b[1] - a[1]) * u; return [sh.cx + x * c - y * sn, sh.cy + x * sn + y * c]; } acc += d; }
+      const q = P[P.length - 1]; return [sh.cx + q[0] * c - q[1] * sn, sh.cy + q[0] * sn + q[1] * c];
+    }
+
+    function drawCan(g, x, y, col, m) {
+      const r = m * 0.03; g.save(); g.translate(x + r * 0.9, y + r * 2.2); g.rotate(0.35);
+      g.fillStyle = 'rgba(0,0,0,0.25)'; g.beginPath(); g.roundRect(-r * 0.6 + r * 0.4, -r * 1.6 + r * 0.5, r * 1.2, r * 3.6, r * 0.3); g.fill();
+      const gr = g.createLinearGradient(-r * 0.6, 0, r * 0.6, 0); gr.addColorStop(0, '#9da2a8'); gr.addColorStop(0.4, '#eef0f2'); gr.addColorStop(1, '#7c8187'); g.fillStyle = gr; g.beginPath(); g.roundRect(-r * 0.6, -r * 1.6, r * 1.2, r * 3.6, r * 0.3); g.fill();
+      g.fillStyle = col; g.fillRect(-r * 0.6, -r * 0.6, r * 1.2, r * 1.4);
+      g.fillStyle = mix(col, '#000000', 0.2); g.beginPath(); g.roundRect(-r * 0.42, -r * 2.1, r * 0.84, r * 0.6, r * 0.15); g.fill();
+      g.restore();
+    }
+
+    app.loop((t, dt) => {
+      dt = Math.min(1 / 20, dt || 0);
+      const { w, h, dpr } = app.size; studio(w, h);
+      if (app.thumbnail) { if (!S.th) { S.th = true; for (let k = 0; k < 900 && !(S.tag >= 2 && S.phase === 'spray' && S.layer === S.layers.length - 1 && S.ps > S.pl * 0.6); k++) { simT += 1 / 30; step(1 / 30); } } }
+      else { simT += dt; step(dt); }
+      ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.drawImage(wall(w, h, dpr), 0, 0); ctx.drawImage(S.paint, 0, 0);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      const m = Math.min(w, h), sh = S.sheet;
+      if (sh && S.roller < 0) {
+        let k = 1, lift = 0; if (S.phase === 'pose') k = Math.min(1, (simT - S.tp) / 0.45); if (S.phase === 'leve') lift = Math.min(1, (simT - S.tp) / 0.6);
+        const e = lift * lift, ox = e * m * 0.15, oy = -e * m * 0.35, sc = 1 + (1 - k) * 0.08 + e * 0.06;
+        ctx.save(); ctx.globalAlpha = Math.min(1, k * 1.5) * (1 - e); ctx.translate(sh.cx + ox, sh.cy + oy); ctx.rotate(sh.rot + e * 0.3); ctx.scale(sc, sc);
+        const so = m * 0.004 + e * m * 0.03, ga = ctx.globalAlpha; ctx.globalAlpha = ga * (0.18 - e * 0.08); ctx.drawImage(sh.shd, -sh.W / 2 + so * 0.4, -sh.W / 2 + so, sh.W, sh.W); ctx.drawImage(sh.shd, -sh.W / 2 + so * 0.2, -sh.W / 2 + so * 0.5, sh.W, sh.W); ctx.globalAlpha = ga;
+        ctx.drawImage(sh.card, -sh.W / 2, -sh.W / 2, sh.W, sh.W); ctx.drawImage(sh.sp, -sh.W / 2, -sh.W / 2, sh.W, sh.W);
+        ctx.restore();
+      }
+      if (S.roller >= 0) { const y = S.roller * (h + m * 0.2) - m * 0.1, rh = m * 0.1; ctx.fillStyle = p.fond; ctx.fillRect(0, y - rh, w, rh); ctx.fillStyle = mix(p.fond, '#000000', 0.25); ctx.fillRect(0, y - rh * 0.15, w, rh * 0.3); ctx.fillStyle = '#3a3a3e'; ctx.fillRect(w * 0.48, y, w * 0.04, m * 0.3); }
+      const C = p.couleurs.length ? p.couleurs : ['#16161a'];
+      if (S.can && S.phase === 'spray') drawCan(ctx, S.can[0], S.can[1], C[(S.layers[S.layer].c + S.cOff) % C.length], m);
+      if (ptr && ptr.col !== undefined) drawCan(ctx, ptr.x, ptr.y, C[ptr.col % C.length], m);
+      app.finish(ctx);
+    });
+
+    function toSVG() {
+      const { w, h } = app.size, f = (v) => +v.toFixed(2); studio(w, h);
+      const R = rng(7), m = Math.min(w, h), C = p.couleurs.length ? p.couleurs : ['#16161a'];
+      let s = `<rect width="100%" height="100%" fill="${p.fond}"/>`;
+      if (p.mur === 'brique') { const bh = m * 0.055, bw = bh * 2.6; s = `<rect width="100%" height="100%" fill="${mix(p.fond, '#ffffff', 0.35)}"/><g fill="${p.fond}">`; for (let j = 0, y = 0; y < h; j++, y += bh) for (let x = -(j % 2) * bw / 2; x < w; x += bw) s += `<rect x="${f(x + bh * 0.06)}" y="${f(y + bh * 0.06)}" width="${f(bw - bh * 0.12)}" height="${f(bh * 0.88)}" opacity="${(0.85 + R() * 0.15).toFixed(2)}"/>`; s += '</g>'; }
+      // brouillard de bombe : bords rongés (déplacement) et grain (seuil d'un bruit)
+      const defs = `<filter id="bombe" x="-0.1" y="-0.1" width="1.2" height="1.2" color-interpolation-filters="sRGB"><feTurbulence type="fractalNoise" baseFrequency="${f(0.9 / Math.max(1, p.gouttes))}" numOctaves="2" seed="4" result="n"/><feDisplacementMap in="SourceGraphic" in2="n" scale="${f(m * 0.004)}" xChannelSelector="R" yChannelSelector="G" result="d"/><feColorMatrix in="n" type="matrix" values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 -7 4.6" result="g"/><feComposite in="d" in2="g" operator="in"/></filter><filter id="flou" x="-0.3" y="-0.3" width="1.6" height="1.6"><feGaussianBlur stdDeviation="${f(m * p.buse * 0.25)}"/></filter>`;
+      s += '<g filter="url(#bombe)">';
+      for (const L of S.done) { const sc = L.W / 1.44 * L.s; s += `<path transform="translate(${f(L.cx)} ${f(L.cy)}) rotate(${f(L.rot * 180 / Math.PI)}) scale(${f(sc)})" fill="${C[L.ci % C.length]}" fill-rule="evenodd" d="${L.loops.map((lp) => 'M' + lp.map((q) => q[0].toFixed(4) + ' ' + q[1].toFixed(4)).join('L') + 'Z').join('')}"/>`; }
+      s += '</g>';
+      for (const st of S.strokes) if (st.pts.length > 1) s += `<path filter="url(#flou)" fill="none" stroke="${C[(st.ci || 0) % C.length]}" stroke-width="${f(st.r * 0.7)}" stroke-linecap="round" stroke-linejoin="round" opacity="0.85" d="M${st.pts.map((q) => f(q[0]) + ' ' + f(q[1])).join('L')}"/>`;
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><defs>${defs}</defs>${s}</svg>`;
+    }
+  </script>
+</body>
+</html>
