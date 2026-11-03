@@ -1,0 +1,15 @@
+{
+  "slug": "stores",
+  "title": "Stores",
+  "type": "motion",
+  "description": "Un store vénitien devant le ciel : fermées d’un côté, les lames recomposent le logo, de l’autre une seconde image ; elles ondulent, basculent en cascade et s’écartent au survol.",
+  "tags": ["lames", "motif", "animation", "interaction", "logo", "svg"],
+  "inspiration": [
+    "Les stores vénitiens des bureaux et la lumière qui passe entre les lames",
+    "Les panneaux à lames pivotantes qui changent d’image",
+    "Le geste d’écarter deux lames pour regarder dehors"
+  ],
+  "author": "claude",
+  "created": "2026-11-03",
+  "status": "finished"
+}
