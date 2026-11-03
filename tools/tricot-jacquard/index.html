@@ -1,0 +1,272 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tricot jacquard</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Tricot jacquard : l'étoffe est une grille de mailles (une maille = un « V » de deux pétales).
+    // Le motif est une suite de bandes (petits losanges, étoiles, sapins, chevrons, logo…), chacune une fonction
+    // grille → couleur. Les rangs se tricotent à vitesse constante, en aller-retour comme sur des aiguilles droites,
+    // et l'étoffe descend d'un rang à chaque rang fini. Les rangs plus récents recouvrent la pointe des V du dessous.
+    // Au pointeur, on tire sur l'étoffe : une poignée gaussienne qui revient en ressort quand on lâche.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const BIEN = PAL('biennale'), MEN = PAL('menthe'), KB = PAL('kegelbahn');
+
+    let simT = 0, B = null, bKey = '', logoM = null, logoKey = '', handles = [], ptr = null, reseed = 0, breakAt = -1;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.05, vignette: 0.16 },
+      hint: 'Glissez pour tirer sur la laine · clic : changer de motif · molette : nombre de mailles',
+      notes: 'Le jacquard, c\'est un dessin compté maille par maille : chaque case d\'une grille devient un petit V de laine de la couleur voulue, et le fil qui ne sert pas court derrière. Les tricots de Fair Isle alternent de petites frises de trois ou cinq rangs et de grandes bandes d\'étoiles ; les pulls nordiques ajoutent sapins et flocons. Ici, l\'écharpe pousse sous l\'aiguille, rang après rang, dans les couleurs de la marque, et le logo y passe de temps en temps, compté comme le reste. Tirez sur la laine pour la déformer, cliquez pour lancer un nouveau motif.',
+      params: {
+        'Tricot': {
+          mailles: { type: 'range', label: 'Mailles par rang', min: 16, max: 120, step: 1, value: 56 },
+          vitesse: { type: 'range', label: 'Vitesse (rangs/s)', min: 0.2, max: 12, step: 0.1, value: 2.2 },
+          largeur: { type: 'range', label: 'Largeur de l\'écharpe', min: 0.4, max: 1.1, step: 0.01, value: 0.86 },
+          relief: { type: 'range', label: 'Relief des mailles', min: 0, max: 1, step: 0.01, value: 0.6 },
+          gonflant: { type: 'range', label: 'Gonflant de la laine', min: 0.6, max: 1.3, step: 0.01, value: 1 },
+          balancement: { type: 'range', label: 'Balancement', min: 0, max: 1, step: 0.01, value: 0.3 },
+        },
+        'Motif': {
+          motif: { type: 'select', label: 'Motif', options: { fairisle: 'Fair Isle', nordique: 'Nordique', rayures: 'Rayures', chevrons: 'Chevrons', damier: 'Damier', vagues: 'Vagues' }, value: 'fairisle' },
+          aiguille: { type: 'toggle', label: 'Montrer l\'aiguille et le fil', value: true },
+        },
+        'Logo en jacquard': {
+          logo: { type: 'toggle', label: 'Inclure le logo', value: false },
+          tailleLogo: { type: 'range', label: 'Taille du logo', min: 0.2, max: 0.9, step: 0.01, value: 0.5, show: (q) => q.logo },
+          frequence: { type: 'range', label: 'Une bande sur', min: 1, max: 8, step: 1, value: 3, show: (q) => q.logo },
+          image: { type: 'file', label: 'Logo', accept: 'image/*', show: (q) => q.logo },
+        },
+        'Couleurs': {
+          fond: { type: 'color', label: 'Mur', value: '#d9d2c5' },
+          couleurs: { type: 'palette', label: 'Laines', value: ['#f1ebdf', '#b8322a', '#1f3a5f', '#e0a526', '#2f6b4a'] },
+          accent: { type: 'color', label: 'Laine du logo', value: '#b8322a', show: (q) => q.logo },
+        },
+      },
+      presets: {
+        'Fair Isle': {},
+        'Nordique': { motif: 'nordique', couleurs: ['#f4f1ea', '#b02a2a', '#f4f1ea', '#1d2a44'], fond: '#2a2f38' },
+        'Rayures': { motif: 'rayures', mailles: 40, couleurs: ['#e8e1d3', '#d9573b', '#2d4f8a', '#f0c04a', '#1d1d1d'] },
+        'Chevrons': { motif: 'chevrons', mailles: 64, couleurs: ['#1d1d1d', '#f4f1ea', '#e5452a'], fond: '#efe9df' },
+        'Grosse laine': { mailles: 24, gonflant: 1.2, vitesse: 1.2, relief: 0.8 },
+        'Fine laine': { mailles: 110, vitesse: 7, relief: 0.45, gonflant: 0.9 },
+        'Logo': { logo: true, frequence: 2, motif: 'nordique', mailles: 64, couleurs: ['#f1ebdf', '#1f3a5f', '#8aa3c2'], accent: '#b8322a' },
+        'Biennale': { fond: BIEN[0], couleurs: [BIEN[0], BIEN[1], BIEN[2], BIEN[3], BIEN[4]], accent: BIEN[2], motif: 'damier' },
+        'Menthe': { fond: MEN[1], couleurs: [MEN[0], MEN[3], MEN[2], MEN[1]], accent: MEN[3], motif: 'vagues' },
+        'Kegelbahn': { fond: '#1d1a22', couleurs: [KB[0], KB[1], KB[2], KB[3], KB[4], KB[5]], accent: KB[1], motif: 'fairisle', mailles: 48 },
+      },
+      brand(colors) {
+        const s = colors.slice().sort((a, b) => lum(a) - lum(b)), L = s[s.length - 1], D = s[0];
+        return { fond: mix(L, D, 0.2), couleurs: [L].concat(s.slice(0, -1).reverse()), accent: s.length > 2 ? s[1] : D };
+      },
+      pointer: {
+        down: (q) => { ptr = { x: q.x, y: q.y, moved: 0, H: { x0: q.x, y0: q.y, dx: 0, dy: 0, vx: 0, vy: 0, held: true } }; handles.push(ptr.H); },
+        drag: (q) => { if (!ptr) return; ptr.moved += Math.hypot(q.x - ptr.x, q.y - ptr.y); ptr.x = q.x; ptr.y = q.y; ptr.H.dx = q.x - ptr.H.x0; ptr.H.dy = q.y - ptr.H.y0; },
+        up: () => { if (!ptr) return; ptr.H.held = false; if (ptr.moved < 6) { reseed++; breakAt = Math.floor(rowsDone()) + 1; bKey = ''; } ptr = null; },
+        wheel: (q, dy) => app.set('mailles', Math.max(16, Math.min(120, p.mailles + (dy > 0 ? -2 : 2)))),
+      },
+      onChange(k) { if (['*', 'logo', 'image'].includes(k)) logoKey = ''; },
+      export: { name: 'tricot-jacquard', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    function hex(x) { const n = parseInt(x.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
+    function lum(x) { const c = hex(x); return (c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114) / 255; }
+    function mix(a, b, t) { const A = hex(a), C = hex(b); return '#' + A.map((v, i) => Math.round(v + (C[i] - v) * t).toString(16).padStart(2, '0')).join(''); }
+    function rng(s) { let a = s >>> 0; return () => { a = (a + 0x6d2b79f5) >>> 0; let t = a; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+
+    // ——— Logo ———
+    function buildLogo() {
+      const img0 = p.image || app.logoImg, key = [p.logo, img0 ? (img0.src || 'c') : 'demo'].join(); if (key === logoKey) return; logoKey = key; bKey = '';
+      const M = 200, c = document.createElement('canvas'); c.width = c.height = M; const x = c.getContext('2d', { willReadFrequently: true }), L = M * 0.94, cx = M / 2;
+      if (img0) { const iw = img0.naturalWidth || img0.width, ih = img0.naturalHeight || img0.height, s = L / Math.max(iw, ih); x.drawImage(img0, cx - iw * s / 2, cx - ih * s / 2, iw * s, ih * s); }
+      else { x.fillStyle = '#000'; x.beginPath(); x.arc(cx, cx, L * 0.48, 0, TAU); x.arc(cx, cx, L * 0.27, 0, TAU, true); x.fill('evenodd'); x.fillRect(cx - L * 0.07, cx - L * 0.5, L * 0.14, L); }
+      const d = x.getImageData(0, 0, M, M).data; let transp = 0; for (let i = 3; i < d.length; i += 4) if (d[i] < 128) transp++; const useA = transp > M * M * 0.05;
+      const m = new Uint8Array(M * M); for (let i = 0; i < M * M; i++) { const o = i * 4, l = (d[o] * 0.2126 + d[o + 1] * 0.7152 + d[o + 2] * 0.0722) / 255; m[i] = (useA ? d[o + 3] > 128 : d[o + 3] > 128 && l < 0.5) ? 1 : 0; }
+      logoM = { m, M };
+    }
+
+    // ——— Bandes du motif : chaque bande = hauteur + fonction (x, y) → 0 (fond) / 1 (dessin) / 2 (logo) ———
+    // étoile à huit branches, définie sur un huitième (a ≥ b) puis symétrisée
+    const STAR = new Set([0, 20, 30, 40, 50, 60, 21, 31, 41, 22, 33, 44, 32, 43, 54, 55]);
+    const SHAPES = {
+      liseré: { h: 2, f: (x, y) => (y === 0 ? 1 : 0) },
+      rayure: { h: 4, f: (x, y) => (y < 2 ? 1 : 0) },
+      peerie: { h: 5, f: (x, y) => { const dx = Math.abs((x % 6) - 3), dy = Math.abs(y - 2); return dx + dy <= 1 || (dy === 2 && dx === 3) ? 1 : 0; } },
+      losanges: { h: 11, f: (x, y) => { const d = Math.abs((x % 12) - 6) + Math.abs(y - 5); return d === 5 || d <= 1 || (d === 3 && (x + y) % 2 === 0) ? 1 : 0; } },
+      etoile: { h: 15, f: (x, y) => { const dx = Math.abs((x % 16) - 8), dy = Math.abs(y - 7), a = Math.max(dx, dy), b = Math.min(dx, dy); return STAR.has(a * 10 + b) ? 1 : 0; } },
+      sapins: { h: 11, f: (x, y) => { const dx = Math.abs((x % 10) - 5); if (y < 2) return dx === 0 ? 1 : 0; return dx <= (10 - y) * 0.55 && (y % 2 === 0 || dx <= (10 - y) * 0.4) ? 1 : 0; } },
+      chevron: { h: 8, f: (x, y) => ((y + Math.abs((x % 8) - 4)) % 8 < 3 ? 1 : 0) },
+      damier: { h: 8, f: (x, y) => ((Math.floor(x / 4) + Math.floor(y / 4)) % 2) },
+      vague: { h: 7, f: (x, y) => { const c = Math.round(3 + 2.4 * Math.sin(x * TAU / 14)); return y === c || y === c + 1 ? 1 : 0; } },
+      croix: { h: 7, f: (x, y) => { const dx = Math.abs((x % 8) - 4), dy = Math.abs(y - 3); return (dx === 0 && dy <= 2) || (dy === 0 && dx <= 2) ? 1 : 0; } },
+    };
+    const SETS = {
+      fairisle: ['peerie', 'losanges', 'croix', 'etoile', 'peerie', 'vague', 'liseré'],
+      nordique: ['etoile', 'sapins', 'peerie', 'losanges', 'liseré', 'croix'],
+      rayures: ['rayure'],
+      chevrons: ['chevron'],
+      damier: ['damier'],
+      vagues: ['vague'],
+    };
+    function bands() {
+      buildLogo();
+      const key = [p.motif, p.couleurs.join(), p.accent, p.logo, p.tailleLogo, p.frequence, logoKey, p.mailles, reseed, app.seed].join();
+      if (key === bKey && B) return B;
+      const keep = B && breakAt >= 0 ? B.list.filter((b) => b.start + b.h <= breakAt) : [];
+      bKey = key; B = { list: keep, R: rng(app.seed * 2203 + reseed * 7 + 1), n: keep.length, end: keep.length ? keep[keep.length - 1].start + keep[keep.length - 1].h : 0 };
+      if (keep.length && B.end < breakAt) B.end = breakAt; breakAt = -1;
+      return B;
+    }
+    function bandAt(r) {
+      const b = bands(), Cs = p.couleurs.length ? p.couleurs : ['#ffffff', '#000000'], set = SETS[p.motif] || SETS.fairisle;
+      while (b.end <= r) {
+        const R = b.R, idx = b.n++, bg = Cs[0], others = Cs.length > 1 ? Cs.slice(1) : [mix(Cs[0], '#000000', 0.5)];
+        let band;
+        if (p.logo && logoM && idx % Math.max(1, p.frequence) === Math.max(1, p.frequence) - 1) {
+          const W = p.mailles, S = Math.max(6, Math.round(W * p.tailleLogo)), rows = Math.round(S / 0.75) + 4;
+          band = { h: rows, kind: 'logo', S, bg, fg: p.accent };
+        } else {
+          const name = set[Math.floor(R() * set.length)], sh = SHAPES[name], fg = others[Math.floor(R() * others.length)];
+          let alt = others[Math.floor(R() * others.length)]; if (alt === fg && others.length > 1) alt = others[(others.indexOf(fg) + 1) % others.length];
+          const swap = p.motif !== 'fairisle' && p.motif !== 'nordique' && R() < 0.3;
+          band = { h: sh.h + (p.motif === 'rayures' ? Math.floor(R() * 5) : 0), kind: name, bg: swap ? fg : bg, fg: swap ? bg : fg, alt, gap: p.motif === 'fairisle' || p.motif === 'nordique' ? 1 : 0, shift: Math.floor(R() * 16) };
+        }
+        band.start = b.end; b.end += band.h + (band.gap || 0); b.list.push(band);
+        if (b.list.length > 400) b.list.splice(0, 100);
+      }
+      let lo = 0, hi = b.list.length - 1; while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (b.list[mid].start <= r) lo = mid; else hi = mid - 1; }
+      return b.list[lo];
+    }
+    function colorAt(x, r) {
+      const b = bandAt(r), y = r - b.start;
+      if (y >= b.h) return b.bg; // rang d'espacement
+      if (b.kind === 'logo') {
+        const W = p.mailles, S = b.S, u = (x - (W - S) / 2) / S, v = 1 - (y - 2) * 0.75 / S;
+        if (u < 0 || u >= 1 || v < 0 || v >= 1) return b.bg; return logoM.m[Math.floor(v * logoM.M) * logoM.M + Math.floor(u * logoM.M)] ? b.fg : b.bg;
+      }
+      const sh = SHAPES[b.kind], f = sh.f(x + b.shift + 64, y);
+      if (p.motif === 'rayures') return y < 2 + (b.h - 4) * 0.5 ? b.fg : b.bg;
+      return f ? ((b.kind === 'etoile' || b.kind === 'losanges') && Math.abs(y - (sh.h - 1) / 2) < 1.6 ? b.alt : b.fg) : b.bg;
+    }
+
+    // ——— Géométrie ———
+    function rowsDone() { const G = geom(app.size.w, app.size.h); return simT * p.vitesse + Math.ceil((app.size.h - G.top) / G.rh) + 2; }
+    function geom(w, h) {
+      const W = p.mailles, fw = w * p.largeur, s = fw / W, rh = s * 0.74, x0 = (w - fw) / 2, top = h * 0.07 + s * 0.6;
+      return { W, s, rh, x0, top, fw };
+    }
+    function displace(x, y, G, t) {
+      let dx = 0, dy = 0; const sig2 = 2 * Math.pow(Math.min(app.size.w, app.size.h) * 0.12, 2);
+      for (const H of handles) { const e = Math.exp(-((x - H.x0) ** 2 + (y - H.y0) ** 2) / sig2); dx += H.dx * e; dy += H.dy * e; }
+      return [x + dx + swayAt(y, G, t), y + dy];
+    }
+    function swayAt(y, G, t) { const fall = Math.max(0, y - G.top) / Math.max(1, app.size.h); return (Math.sin(t * 0.9 + y * 0.006) * 2.2 + Math.sin(t * 0.37) * 1.5) * p.balancement * G.s * fall; }
+    // couleurs d'un rang, gardées en cache tant que le motif ne change pas
+    let rowCache = new Map(), rcKey = '';
+    function rowColors(r) {
+      bands(); if (rcKey !== bKey) { rcKey = bKey; rowCache = new Map(); }
+      let a = rowCache.get(r); if (a) return a; a = []; for (let x = 0; x < p.mailles; x++) a.push(colorAt(x, r));
+      rowCache.set(r, a); if (rowCache.size > 600) { const k = rowCache.keys().next().value; rowCache.delete(k); } return a;
+    }
+    function physics(dt) {
+      for (const H of handles) if (!H.held) { const k = 70, c = 7; H.vx += (-H.dx * k - H.vx * c) * dt; H.vy += (-H.dy * k - H.vy * c) * dt; H.dx += H.vx * dt; H.dy += H.vy * dt; }
+      handles = handles.filter((H) => H.held || Math.abs(H.dx) + Math.abs(H.dy) + Math.abs(H.vx) + Math.abs(H.vy) > 0.05);
+    }
+
+    // ——— Dessin (commun canvas / SVG) ———
+    function scene(pen, w, h, t, done) {
+      const G = geom(w, h), R0 = Math.floor(done), frac = done - R0, W = G.W, nVis = Math.ceil((h - G.top) / G.rh) + 3;
+      pen.bg(p.fond);
+      // ombre portée de l'écharpe sur le mur
+      pen.shadow(G.x0 + G.s * 0.6, G.top, G.fw, h);
+      for (let k = nVis; k >= 0; k--) {
+        const r = R0 - k; if (r < 0) continue;
+        const yRow = G.top + (k + frac) * G.rh, n = k === 0 ? Math.floor(frac * W) : W, ltr = r % 2 === 0;
+        const cols = rowColors(r), sway = swayAt(yRow, G, t), hs = handles.length > 0;
+        if (!hs && k > 0 && pen.row) { pen.row(r, G.x0 + sway, yRow, cols); continue; }
+        for (let j = 0; j < n; j++) { const x = ltr ? j : W - 1 - j, X = G.x0 + (x + 0.5) * G.s; if (hs) { const q = displace(X, yRow, G, t); pen.stitch(q[0], q[1], cols[x]); } else pen.stitch(X + sway, yRow, cols[x]); }
+      }
+      if (p.aiguille) {
+        const ny = G.top - G.rh * 0.15, q0 = displace(G.x0, ny, G, t), q1 = displace(G.x0 + G.fw, ny, G, t), ext = G.s * 3;
+        // fil : de la dernière maille à la pelote, hors champ
+        const n = Math.floor(frac * W), ltr = R0 % 2 === 0, x = ltr ? n : W - 1 - n, cur = displace(G.x0 + (x + 0.5) * G.s, G.top + frac * G.rh, G, t);
+        pen.yarn(cur, [w * 0.97, -G.s * 2], colorAt(Math.max(0, Math.min(W - 1, x)), R0), G.s);
+        pen.needle([q0[0] - ext, q0[1]], [q1[0] + ext, q1[1]], G.s);
+      }
+    }
+
+    // une maille : deux pétales inclinés ; le « relief » assombrit le bord et éclaire le haut
+    function petals(s, rh) { const g = p.gonflant; return [{ cx: -s * 0.22, cy: rh * 0.05, rx: s * 0.29 * g, ry: rh * 0.82 * g, a: -0.5 }, { cx: s * 0.22, cy: rh * 0.05, rx: s * 0.29 * g, ry: rh * 0.82 * g, a: 0.5 }]; }
+    const sprites = new Map(); let spKey = '';
+    function sprite(c, s, rh, dpr) {
+      const k = [s.toFixed(2), rh.toFixed(2), dpr, p.relief, p.gonflant].join(); if (k !== spKey) { spKey = k; sprites.clear(); } let S = sprites.get(c); if (S) return S;
+      const W = Math.ceil(s * 1.4 * dpr) + 2, H = Math.ceil(rh * 2.4 * dpr) + 2, cv = document.createElement('canvas'); cv.width = W; cv.height = H; const g = cv.getContext('2d');
+      g.translate(W / 2, H / 2); g.scale(dpr, dpr);
+      for (const P of petals(s, rh)) {
+        g.save(); g.translate(P.cx, P.cy); g.rotate(P.a);
+        g.fillStyle = mix(c, '#000000', 0.45 * p.relief + 0.05); g.beginPath(); g.ellipse(0, 0, P.rx, P.ry, 0, 0, TAU); g.fill();
+        g.fillStyle = c; g.beginPath(); g.ellipse(-P.rx * 0.06, -P.ry * 0.07, P.rx * 0.8, P.ry * 0.86, 0, 0, TAU); g.fill();
+        g.strokeStyle = mix(c, '#ffffff', 0.35 * p.relief); g.lineWidth = Math.max(0.6, P.rx * 0.22); g.beginPath(); g.ellipse(-P.rx * 0.12, -P.ry * 0.12, P.rx * 0.42, P.ry * 0.6, 0, Math.PI * 1.05, Math.PI * 1.6); g.stroke();
+        g.restore();
+      }
+      S = { cv, w: W / dpr, h: H / dpr }; sprites.set(c, S); return S;
+    }
+
+    // un rang entier peint une fois dans une bande : on ne redessine ensuite qu'une image par rang
+    let strips = new Map(), stKey = '';
+    function rowStrip(r, cols, G, dpr) {
+      const key = [bKey, G.s.toFixed(3), dpr, p.relief, p.gonflant, p.mailles].join(); if (key !== stKey) { stKey = key; strips = new Map(); }
+      let S = strips.get(r); if (S) return S;
+      const one = sprite(cols[0], G.s, G.rh, dpr), pad = one.w / 2 + 1, Wd = G.fw + pad * 2, Hd = one.h, cv = document.createElement('canvas'); cv.width = Math.ceil(Wd * dpr); cv.height = Math.ceil(Hd * dpr);
+      const g = cv.getContext('2d'); g.setTransform(dpr, 0, 0, dpr, 0, 0);
+      for (let x = 0; x < cols.length; x++) { const sp = sprite(cols[x], G.s, G.rh, dpr); g.drawImage(sp.cv, pad + (x + 0.5) * G.s - sp.w / 2, Hd / 2 - sp.h / 2, sp.w, sp.h); }
+      S = { cv, w: Wd, h: Hd, pad }; strips.set(r, S); if (strips.size > 260) strips.delete(strips.keys().next().value); return S;
+    }
+
+    app.loop((t, dt) => {
+      dt = Math.min(1 / 20, dt || 0);
+      const { w, h, dpr } = app.size, G = geom(w, h);
+      let done;
+      if (app.thumbnail) { done = Math.ceil((h - G.top) / G.rh) + 20.55; handles = []; }
+      else { simT += dt; physics(dt); done = rowsDone(); }
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      scene({
+        bg(c) { ctx.fillStyle = c; ctx.fillRect(0, 0, w, h); },
+        shadow(x, y, fw, hh) { ctx.fillStyle = 'rgba(0,0,0,0.16)'; ctx.fillRect(x, y + G.s * 0.8, fw, hh); ctx.fillStyle = 'rgba(0,0,0,0.08)'; ctx.fillRect(x + G.s * 0.5, y + G.s * 1.2, fw, hh); },
+        stitch(x, y, c) { const S = sprite(c, G.s, G.rh, dpr); ctx.drawImage(S.cv, x - S.w / 2, y - S.h / 2, S.w, S.h); },
+        row(r, x, y, cols) { const S = rowStrip(r, cols, G, dpr); ctx.drawImage(S.cv, x - S.pad, y - S.h / 2, S.w, S.h); },
+        yarn(a, b, c, s) { ctx.strokeStyle = mix(c, '#000000', 0.25); ctx.lineWidth = s * 0.22; ctx.lineCap = 'round'; ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.bezierCurveTo(a[0], a[1] - s * 4, b[0] - s * 6, b[1] + s * 8, b[0], b[1]); ctx.stroke(); ctx.strokeStyle = c; ctx.lineWidth = s * 0.13; ctx.stroke(); },
+        needle(a, b, s) { const r = Math.max(1.5, s * 0.16); ctx.lineCap = 'round'; ctx.strokeStyle = 'rgba(0,0,0,0.25)'; ctx.lineWidth = r * 2; ctx.beginPath(); ctx.moveTo(a[0] + r, a[1] + r * 1.4); ctx.lineTo(b[0] + r, b[1] + r * 1.4); ctx.stroke(); ctx.strokeStyle = '#b9a07a'; ctx.lineWidth = r * 2; ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.stroke(); ctx.strokeStyle = '#e8d8b8'; ctx.lineWidth = r * 0.6; ctx.beginPath(); ctx.moveTo(a[0], a[1] - r * 0.4); ctx.lineTo(b[0], b[1] - r * 0.4); ctx.stroke(); ctx.fillStyle = '#8a7350'; ctx.beginPath(); ctx.arc(b[0] + r * 0.5, b[1], r * 1.9, 0, TAU); ctx.fill(); },
+      }, w, h, simT, done);
+      app.finish(ctx);
+    });
+
+    function toSVG() {
+      const { w, h } = app.size, f = (v) => +v.toFixed(2), G = geom(w, h), ids = new Map();
+      let defs = '', body = '';
+      const sym = (c) => { let id = ids.get(c); if (id) return id; id = 's' + ids.size; ids.set(c, id); defs += `<g id="${id}">`; for (const P of petals(G.s, G.rh)) defs += `<g transform="translate(${f(P.cx)} ${f(P.cy)}) rotate(${f(P.a * 180 / Math.PI)})"><ellipse rx="${f(P.rx)}" ry="${f(P.ry)}" fill="${mix(c, '#000000', 0.45 * p.relief + 0.05)}"/><ellipse cx="${f(-P.rx * 0.06)}" cy="${f(-P.ry * 0.07)}" rx="${f(P.rx * 0.8)}" ry="${f(P.ry * 0.86)}" fill="${c}"/></g>`; defs += '</g>'; return id; };
+      scene({
+        bg(c) { body += `<rect width="100%" height="100%" fill="${c}"/>`; },
+        shadow(x, y, fw, hh) { body += `<rect x="${f(x)}" y="${f(y + G.s * 0.8)}" width="${f(fw)}" height="${f(hh)}" fill="#000000" fill-opacity="0.16"/>`; },
+        stitch(x, y, c) { body += `<use href="#${sym(c)}" x="${f(x)}" y="${f(y)}"/>`; },
+        yarn(a, b, c, s) { body += `<path d="M${f(a[0])} ${f(a[1])}C${f(a[0])} ${f(a[1] - s * 4)} ${f(b[0] - s * 6)} ${f(b[1] + s * 8)} ${f(b[0])} ${f(b[1])}" fill="none" stroke="${c}" stroke-width="${f(s * 0.18)}" stroke-linecap="round"/>`; },
+        needle(a, b, s) { const r = Math.max(1.5, s * 0.16); body += `<path d="M${f(a[0])} ${f(a[1])}L${f(b[0])} ${f(b[1])}" stroke="#b9a07a" stroke-width="${f(r * 2)}" stroke-linecap="round"/><circle cx="${f(b[0] + r * 0.5)}" cy="${f(b[1])}" r="${f(r * 1.9)}" fill="#8a7350"/>`; },
+      }, w, h, simT, rowsDone());
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><defs>${defs}</defs>${body}</svg>`;
+    }
+  </script>
+</body>
+</html>
