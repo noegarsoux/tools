@@ -20,6 +20,15 @@ const store = {
   del(k) { try { localStorage.removeItem(k); } catch {} },
 };
 const FAVS = 'atelier:favoris', GONE = 'atelier:supprimes', KEY = 'atelier:cle-admin';
+// Lien d'admin : ouvrir le site avec ?cle=… enregistre la clé dans ce navigateur, puis nettoie l'adresse.
+{
+  const u = new URL(location.href), cle = u.searchParams.get('cle');
+  if (cle) {
+    store.set(KEY, cle);
+    u.searchParams.delete('cle');
+    history.replaceState(null, '', u.pathname + u.search + u.hash);
+  }
+}
 // Un outil supprimé reste dans tools.json jusqu'à la republication du site : on le masque d'ici là.
 const gone = store.get(GONE, []).filter((s) => data.tools.some((t) => t.slug === s));
 store.set(GONE, gone);
