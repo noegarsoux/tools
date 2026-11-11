@@ -1,0 +1,17 @@
+{
+  "slug": "surfaces-minimales",
+  "title": "Surfaces minimales",
+  "type": "webgl",
+  "description": "Gyroïde, Schwarz P et D, Neovius… des treillis minimaux en matière 3D, logés dans une forme ou le logo, coupés, traversés ou mis à plat, exportés en SVG et OBJ.",
+  "tags": ["3d", "raymarching", "gyroide", "treillis", "svg", "obj"],
+  "inspiration": [
+    "Alan Schoen (gyroïde, NASA 1970), Hermann Schwarz (P, D), Edvard Neovius : surfaces minimales triplement périodiques",
+    "references/physique-maths.md — Courbes et surfaces : surfaces minimales, champs de distance",
+    "Saranathan et al. — Gyroid photonic crystals in butterfly wing scales (PNAS, 2010) : le rendu irisé",
+    "Inigo Quilez — raymarching, ombres douces, occlusion ambiante ; Kiel Danger — matières et boucles 3D",
+    "Atelier.PALETTES : orbite, menthe, kegelbahn, luzern, papier-60, biennale, papier"
+  ],
+  "author": "cursor",
+  "created": "2026-11-11",
+  "status": "finished"
+}
