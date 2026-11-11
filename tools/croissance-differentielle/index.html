@@ -1,0 +1,996 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Croissance différentielle</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Croissance différentielle (Anders Hoff, Jason Webb, Nervous System) : une ligne de nœuds reliés
+    // par des ressorts. Chaque nœud repousse tous les autres nœuds proches et se lisse vers le milieu
+    // de ses deux voisins ; de nouveaux nœuds s'insèrent sans cesse au hasard ou là où la ligne se courbe.
+    // La ligne s'allonge plus vite que la place ne le permet : elle flambe et se plisse en méandres.
+    // Positions en unités normalisées : origine au centre, 1 = le plus petit côté du cadre.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const BIEN = PAL('biennale'), KB = PAL('kegelbahn'), PYR = PAL('pyramides'), LUZ = PAL('luzern'), PAP = PAL('papier');
+    const ORB = PAL('orbite'), PG = PAL('papier-gris'), ACI = PAL('acide');
+
+    // Constantes du modèle, en fractions du rayon de répulsion R.
+    const REST = 0.5;          // longueur de repos d'un ressort
+    const SPLIT_MIN = 0.5;     // une arête plus courte ne pousse plus (zone tassée)
+    const SPLIT_MAX = 1;       // une arête plus longue est toujours coupée en deux
+    const K_REP = 0.35, K_SPRING = 0.4, MAX_MOVE = 0.22;
+    const GROWTH = 0.02;       // probabilité d'insertion par arête et par pas, au taux maximal
+    const STEPS_PER_S = 180, FF_PER_FRAME = 10, AGE_STEPS = 240, FADE = 1.2, HARD = 24000;
+
+    // ——— Nœuds : tableaux typés, listes doublement chaînées, emplacements recyclés ———
+    const X = new Float64Array(HARD), Y = new Float64Array(HARD), DX = new Float64Array(HARD), DY = new Float64Array(HARD);
+    const U = new Float64Array(HARD), BORN = new Float64Array(HARD), WID = new Float64Array(HARD);
+    const PV = new Int32Array(HARD), NX = new Int32Array(HARD), GRP = new Int32Array(HARD), CI = new Int32Array(HARD), MARK = new Int32Array(HARD);
+    const LIVE = new Uint8Array(HARD), NEW = new Uint8Array(HARD), freeL = new Int32Array(HARD), fresh = new Int32Array(HARD);
+    let hi = 0, nFree = 0, nAlive = 0, stepNo = 0, stamp = 0, groups = [];
+    let cellStart = new Int32Array(1), cellFill = new Int32Array(1);
+    const cellIdx = new Int32Array(HARD), nodeCell = new Int32Array(HARD);
+    let gw = 1, gh = 1, gx0 = 0, gy0 = 0;
+
+    let rand = () => 0.5, gen = 0, acc = 0, ff = 0, life = 0, need = true, shape = null, logoCache = null, aspect = 0;
+    let snaps = [], snapId = 0, lastSnap = 0, strataCv = null, strataKey = '', strataDrawn = 0;
+    let ghost = null, ghostA = 0, stroke = null;
+    const brush = { on: false, x: 0, y: 0, px: 0, py: 0 };
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.1, vignette: 0 },
+      hint: 'Tracez une ligne : elle pousse et se plisse · cliquez pour semer une graine · molette : épaisseur ou pinceau',
+      notes: 'Chaque nœud est tiré vers ses deux voisins par un ressort, repousse tous les autres nœuds situés dans le rayon de répulsion et se lisse vers le milieu de ses voisins. De nouveaux nœuds s’insèrent sans cesse : la ligne s’allonge plus vite que la place ne le permet, flambe et se plisse. Une arête tassée sous la longueur de repos cesse de pousser.',
+      params: {
+        'Forme': {
+          contenant: { type: 'select', label: 'Contenant', options: { disque: 'Disque', anneau: 'Anneau', triangle: 'Triangle', cadre: 'Cadre', logo: 'Logo' }, value: 'disque' },
+          image: { type: 'file', label: 'Logo ou image', accept: 'image/*', show: (q) => q.contenant === 'logo' },
+          taille: { type: 'range', label: 'Taille du contenant', min: 0.4, max: 1, step: 0.01, value: 0.92 },
+          graine: { type: 'select', label: 'Graine', options: { cercle: 'Un cercle', semis: 'Semis de cercles', lignes: 'Lignes parallèles', contour: 'Contour du contenant' }, value: 'cercle' },
+          graines: { type: 'range', label: 'Nombre de graines', min: 2, max: 30, step: 1, value: 9, show: (q) => q.graine === 'semis' || q.graine === 'lignes' },
+          rayonGraine: { type: 'range', label: 'Taille de la graine', min: 0.03, max: 0.3, step: 0.005, value: 0.12, show: (q) => q.graine === 'cercle' || q.graine === 'semis' },
+        },
+        'Croissance': {
+          espacement: { type: 'range', label: 'Rayon de répulsion', min: 0.006, max: 0.04, step: 0.001, value: 0.015 },
+          croissance: { type: 'range', label: 'Taux de croissance', min: 0, max: 1, step: 0.01, value: 0.5 },
+          courbure: { type: 'range', label: 'Croissance selon la courbure', min: 0, max: 1, step: 0.01, value: 0.35 },
+          zones: { type: 'range', label: 'Croissance différentielle', min: 0, max: 1, step: 0.01, value: 0 },
+          echelleZones: { type: 'range', label: 'Taille des zones', min: 0.08, max: 1, step: 0.01, value: 0.35, show: (q) => q.zones > 0 },
+          lissage: { type: 'range', label: 'Lissage', min: 0, max: 1, step: 0.01, value: 0.4 },
+          agitation: { type: 'range', label: 'Agitation brownienne', min: 0, max: 1, step: 0.01, value: 0.2 },
+          capacite: { type: 'range', label: 'Nœuds au maximum', min: 1000, max: 20000, step: 500, value: 8000, explore: false },
+          depart: { type: 'range', label: 'Avance au départ (s)', min: 0, max: 10, step: 0.5, value: 4, explore: false },
+          cycle: { type: 'range', label: 'Replanter toutes les (s, 0 = jamais)', min: 0, max: 90, step: 1, value: 20, explore: false },
+        },
+        'Geste': {
+          geste: { type: 'segmented', label: 'Au pointeur', options: { tracer: 'Tracer', nourrir: 'Nourrir', repousser: 'Repousser', couper: 'Couper' }, value: 'tracer', explore: false },
+          pinceau: { type: 'range', label: 'Taille du pinceau', min: 0.02, max: 0.3, step: 0.005, value: 0.08, show: (q) => q.geste !== 'tracer' },
+          replanter: { type: 'button', label: 'Replanter', action: () => restart() },
+          effacer: { type: 'button', label: 'Tout effacer pour dessiner', action: () => wipe() },
+        },
+        'Rendu': {
+          rendu: { type: 'segmented', label: 'Rendu', options: { trait: 'Trait', tube: 'Tube', aplat: 'Aplat', strates: 'Strates', perles: 'Perles' }, value: 'trait' },
+          epaisseur: { type: 'range', label: 'Épaisseur (× rayon)', min: 0.05, max: 1.2, step: 0.01, value: 0.5 },
+          modulation: { type: 'segmented', label: 'Modulation de l’épaisseur', options: { aucune: 'Aucune', age: 'Âge', onde: 'Onde', courbure: 'Courbure' }, value: 'age' },
+          modAmt: { type: 'range', label: 'Intensité de la modulation', min: 0, max: 1, step: 0.01, value: 0.6, show: (q) => q.modulation !== 'aucune' },
+          onde: { type: 'range', label: 'Longueur de l’onde (× rayon)', min: 4, max: 80, step: 1, value: 24, show: (q) => q.modulation === 'onde' },
+          paroi: { type: 'range', label: 'Paroi du tube', min: 0.1, max: 0.8, step: 0.01, value: 0.35, show: (q) => q.rendu === 'tube' },
+          strates: { type: 'range', label: 'Nombre de strates', min: 4, max: 60, step: 1, value: 30, show: (q) => q.rendu === 'strates' },
+          ecart: { type: 'range', label: 'Écart entre strates (pas)', min: 3, max: 80, step: 1, value: 22, show: (q) => q.rendu === 'strates' },
+          voile: { type: 'range', label: 'Opacité des strates', min: 0.05, max: 1, step: 0.01, value: 1, show: (q) => q.rendu === 'strates' },
+        },
+        'Couleur': {
+          fond: { type: 'color', label: 'Fond', value: BIEN[0] },
+          encre: { type: 'color', label: 'Encre', value: BIEN[1] },
+          interieur: { type: 'color', label: 'Intérieur du tube', value: BIEN[0], show: (q) => q.rendu === 'tube' },
+          mode: { type: 'segmented', label: 'Couleurs du trait', options: { encre: 'Encre', graine: 'Par graine', lignee: 'Lignée', zones: 'Zones' }, value: 'lignee' },
+          couleurs: { type: 'palette', label: 'Palette', value: [BIEN[1], BIEN[2], BIEN[3]] },
+          bandes: { type: 'range', label: 'Nombre de bandes', min: 1, max: 40, step: 1, value: 9, show: (q) => q.mode === 'lignee' || q.mode === 'zones' },
+        },
+      },
+      presets: {
+        'Corail': {},
+        'Labyrinthe': {
+          contenant: 'cadre', taille: 0.94, graine: 'lignes', graines: 7, espacement: 0.013, croissance: 0.55, courbure: 0, lissage: 0.55, agitation: 0.35,
+          capacite: 14000, rendu: 'trait', epaisseur: 0.62, modulation: 'aucune', fond: PAP[0], encre: PAP[1], mode: 'encre', couleurs: [PAP[1]],
+        },
+        'Agate': {
+          contenant: 'disque', graine: 'cercle', rayonGraine: 0.06, espacement: 0.018, croissance: 0.45, courbure: 0.6, lissage: 0.3, rendu: 'strates',
+          epaisseur: 0.12, strates: 48, ecart: 12, voile: 0.32, modulation: 'aucune', fond: ORB[1], encre: ORB[2], mode: 'encre', couleurs: [ORB[0], ORB[2]], depart: 1,
+        },
+        'Lichen': {
+          contenant: 'disque', taille: 1, graine: 'semis', graines: 11, rayonGraine: 0.06, espacement: 0.012, croissance: 0.5, courbure: 0.5, lissage: 0.3,
+          capacite: 12000, rendu: 'aplat', epaisseur: 0.3, modulation: 'aucune', fond: PYR[0], encre: PYR[6], mode: 'encre', couleurs: [PYR[1], PYR[2], PYR[3], PYR[4], PYR[5]],
+        },
+        'Tubes': {
+          contenant: 'anneau', graine: 'contour', espacement: 0.03, croissance: 0.5, courbure: 0.15, lissage: 0.8, agitation: 0.05, rendu: 'tube', epaisseur: 0.64,
+          paroi: 0.36, modulation: 'aucune', fond: LUZ[0], encre: LUZ[3], interieur: LUZ[4], mode: 'encre', couleurs: [LUZ[3], LUZ[1]],
+        },
+        'Zones': {
+          contenant: 'triangle', taille: 1, graine: 'contour', espacement: 0.014, croissance: 0.6, courbure: 0.3, lissage: 0.45, capacite: 11000, rendu: 'trait',
+          epaisseur: 0.55, modulation: 'aucune', fond: KB[0], encre: KB[1], mode: 'zones', couleurs: [KB[1], KB[2], KB[3], KB[4], KB[5]], bandes: 7,
+        },
+        'Perles': {
+          contenant: 'cadre', taille: 0.9, graine: 'semis', graines: 7, rayonGraine: 0.08, espacement: 0.028, croissance: 0.45, courbure: 0.5, rendu: 'perles', epaisseur: 0.5,
+          modulation: 'onde', modAmt: 0.7, onde: 14, fond: ACI[2], encre: ACI[1], mode: 'encre', couleurs: [ACI[1], ACI[3]],
+        },
+        'Logo': {
+          contenant: 'logo', graine: 'contour', espacement: 0.011, croissance: 0.55, courbure: 0.4, lissage: 0.4, capacite: 12000, rendu: 'trait', epaisseur: 0.45,
+          modulation: 'courbure', modAmt: 0.5, fond: PG[0], encre: PG[1], mode: 'encre', couleurs: [PG[1], PG[2]],
+        },
+      },
+      brand(colors) {
+        const inks = colors.slice(1);
+        return { fond: colors[0], encre: inks[0] || '#111111', interieur: colors[0], couleurs: inks.length ? inks.slice(0, 6) : ['#111111'] };
+      },
+      pointer: {
+        down(q) {
+          life = 0;
+          const [x, y] = toN(q);
+          brush.on = true; brush.x = brush.px = x; brush.y = brush.py = y;
+          if (p.geste === 'tracer') beginStroke(x, y);
+          else if (p.geste === 'couper') cutSeg(x, y, x, y);
+        },
+        drag(q) {
+          life = 0;
+          const [x, y] = toN(q);
+          brush.px = brush.x; brush.py = brush.y; brush.x = x; brush.y = y;
+          if (p.geste === 'tracer') extendStroke(x, y);
+          else if (p.geste === 'couper') cutSeg(brush.px, brush.py, x, y);
+        },
+        up() { brush.on = false; if (stroke) endStroke(); },
+        wheel(q, dy) {
+          const k = dy > 0 ? 0.92 : 1.08;
+          if (p.geste === 'tracer') app.set('epaisseur', +clamp(p.epaisseur * k, 0.05, 1.2).toFixed(2));
+          else app.set('pinceau', +clamp(p.pinceau * k, 0.02, 0.3).toFixed(3));
+        },
+      },
+      onChange(k) {
+        if (k === '*' || ['contenant', 'image', 'taille', 'graine', 'graines', 'rayonGraine'].includes(k)) restart();
+        if (k === 'capacite' && nAlive > p.capacite) restart();
+        if (k === 'rendu' || k === 'ecart' || k === 'strates') { snaps = []; snapId = 0; lastSnap = stepNo; strataKey = ''; }
+      },
+      onSeed() { gen = 0; restart(); },
+      onResize({ w, h }) {
+        ghost = null; ghostA = 0;
+        if (Math.abs(w / h - aspect) > aspect * 0.01 && (p.contenant === 'cadre' || p.graine === 'lignes')) restart();
+      },
+      export: {
+        name: 'croissance-differentielle',
+        svg: () => toSVG(false),
+        extra: { 'Tracé central (SVG pour traceur)': (a) => a.download(`croissance-differentielle-trace-${a.seed}.svg`, new Blob([toSVG(true)], { type: 'image/svg+xml' })) },
+      },
+    });
+    const p = app.params;
+    const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
+    const frame = () => { const { w, h } = app.size, u = Math.min(w, h); return { w, h, u, W: w / u, H: h / u }; };
+    const toN = (q) => { const { w, h, u } = frame(); return [(q.x - w / 2) / u, (q.y - h / 2) / u]; };
+    const margin = () => p.espacement * (0.3 + 0.5 * p.epaisseur);
+
+    // ——— Allocation des nœuds ———
+    function alloc() {
+      let i;
+      if (nFree) i = freeL[--nFree]; else if (hi < HARD) i = hi++; else return -1;
+      LIVE[i] = 1; PV[i] = NX[i] = -1; NEW[i] = 0; BORN[i] = stepNo; nAlive++;
+      return i;
+    }
+    function kill(i) {
+      if (!LIVE[i]) return;
+      const a = PV[i], b = NX[i];
+      if (a >= 0) NX[a] = -1;
+      if (b >= 0) PV[b] = -1;
+      LIVE[i] = 0; PV[i] = NX[i] = -1; freeL[nFree++] = i; nAlive--;
+    }
+    function clearNodes() { LIVE.fill(0, 0, hi); hi = 0; nFree = 0; nAlive = 0; groups = []; stroke = null; }
+    // Insère un nœud au milieu de l'arête (i, suivant de i). La lignée U (abscisse sur la graine) est interpolée.
+    function split(i) {
+      const b = NX[i], k = alloc();
+      if (k < 0) return -1;
+      X[k] = (X[i] + X[b]) * 0.5; Y[k] = (Y[i] + Y[b]) * 0.5; GRP[k] = GRP[i];
+      const per = groups[GRP[i]] ? groups[GRP[i]].period : 0;
+      let ua = U[i], ub = U[b];
+      if (per > 0 && Math.abs(ub - ua) > per / 2) ub += ua > ub ? per : -per;
+      let um = (ua + ub) * 0.5;
+      if (per > 0) um = ((um % per) + per) % per;
+      U[k] = um;
+      NX[i] = k; PV[k] = i; NX[k] = b; PV[b] = k; NEW[k] = 1;
+      return k;
+    }
+    // Ajoute une ligne (ouverte ou fermée) faite des points donnés.
+    // Une ligne semée à la main (user) peut pousser au-delà de la capacité.
+    function addPath(pts, closed, user = false) {
+      const n = pts.length;
+      if (n < (closed ? 3 : 2)) return;
+      let L = 0;
+      for (let k = 1; k < n; k++) L += Math.hypot(pts[k][0] - pts[k - 1][0], pts[k][1] - pts[k - 1][1]);
+      if (closed) L += Math.hypot(pts[0][0] - pts[n - 1][0], pts[0][1] - pts[n - 1][1]);
+      const g = groups.length;
+      groups.push({ period: closed ? L : 0, user });
+      let first = -1, prev = -1, s = 0;
+      for (let k = 0; k < n; k++) {
+        const i = alloc();
+        if (i < 0) break;
+        if (k) s += Math.hypot(pts[k][0] - pts[k - 1][0], pts[k][1] - pts[k - 1][1]);
+        X[i] = pts[k][0]; Y[i] = pts[k][1]; U[i] = s; GRP[i] = g; BORN[i] = stepNo - AGE_STEPS;
+        if (prev >= 0) { NX[prev] = i; PV[i] = prev; } else first = i;
+        prev = i;
+      }
+      if (closed && first >= 0 && prev !== first) { NX[prev] = first; PV[first] = prev; }
+    }
+    function circlePts(cx, cy, r) {
+      const n = Math.max(8, Math.round(TAU * r / (p.espacement * REST))), out = [];
+      for (let k = 0; k < n; k++) { const a = (k / n) * TAU; out.push([cx + Math.cos(a) * r, cy + Math.sin(a) * r]); }
+      return out;
+    }
+
+    // ——— Contenants : champs de distance signés (négatifs dedans) ———
+    function sdBox(x, y, bx, by) {
+      const qx = Math.abs(x) - bx, qy = Math.abs(y) - by;
+      return Math.hypot(Math.max(qx, 0), Math.max(qy, 0)) + Math.min(Math.max(qx, qy), 0);
+    }
+    // Triangle équilatéral pointe en haut (Inigo Quilez), r = demi-côté.
+    function sdTri(x, y, r) {
+      const k = Math.sqrt(3);
+      let px = Math.abs(x) - r, py = -y + r / k;
+      if (px + k * py > 0) { const nx = (px - k * py) / 2, ny = (-k * px - py) / 2; px = nx; py = ny; }
+      px -= clamp(px, -2 * r, 0);
+      return -Math.hypot(px, py) * Math.sign(py);
+    }
+    function logoKey() { const img = p.image || app.logoImg; return img ? (img.src || 'image') : 'demo'; }
+    // Masque du logo (ou d'une forme de démonstration), puis distance exacte (Felzenszwalb) en pixels.
+    function logoField() {
+      const key = logoKey();
+      if (logoCache && logoCache.key === key) return logoCache;
+      const G = 240, c = document.createElement('canvas');
+      c.width = c.height = G;
+      const x = c.getContext('2d', { willReadFrequently: true });
+      const demo = () => {
+        x.clearRect(0, 0, G, G); x.fillStyle = '#000';
+        x.beginPath(); x.arc(G / 2, G / 2, G * 0.42, 0, TAU); x.arc(G / 2, G / 2, G * 0.22, 0, TAU, true); x.fill('evenodd');
+        x.fillRect(G * 0.44, G * 0.03, G * 0.12, G * 0.94);
+      };
+      const img = p.image || app.logoImg;
+      if (img) { const iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height, k = G * 0.9 / Math.max(iw, ih); x.drawImage(img, (G - iw * k) / 2, (G - ih * k) / 2, iw * k, ih * k); }
+      else demo();
+      let mask = readMask(x, G);
+      if (mask.count < G * G * 0.01) { demo(); mask = readMask(x, G); }
+      const INF = 1e20, fin = new Float64Array(G * G), fout = new Float64Array(G * G);
+      for (let i = 0; i < G * G; i++) { fin[i] = mask.m[i] ? INF : 0; fout[i] = mask.m[i] ? 0 : INF; }
+      edt(fin, G, G); edt(fout, G, G);
+      const sd = new Float32Array(G * G);
+      for (let i = 0; i < G * G; i++) sd[i] = mask.m[i] ? -(Math.sqrt(fin[i]) - 0.5) : Math.sqrt(fout[i]) - 0.5;
+      logoCache = { key, G, sd };
+      return logoCache;
+    }
+    function readMask(x, G) {
+      const d = x.getImageData(0, 0, G, G).data, m = new Uint8Array(G * G);
+      let transp = 0, count = 0;
+      for (let i = 3; i < d.length; i += 16) if (d[i] < 128) transp++;
+      const useA = transp > d.length / 16 * 0.05;
+      for (let i = 0; i < G * G; i++) {
+        const l = (d[i * 4] * 0.2126 + d[i * 4 + 1] * 0.7152 + d[i * 4 + 2] * 0.0722) / 255;
+        m[i] = (useA ? d[i * 4 + 3] > 128 : d[i * 4 + 3] > 128 && l < 0.5) ? 1 : 0;
+        count += m[i];
+      }
+      return { m, count };
+    }
+    function edt(f, W, H) {
+      const n = Math.max(W, H), v = new Int32Array(n), z = new Float64Array(n + 1), g = new Float64Array(n), d = new Float64Array(n);
+      const pass = (len) => {
+        let k = 0; v[0] = 0; z[0] = -Infinity; z[1] = Infinity;
+        for (let q = 1; q < len; q++) {
+          let s = ((g[q] + q * q) - (g[v[k]] + v[k] * v[k])) / (2 * q - 2 * v[k]);
+          while (s <= z[k]) { k--; s = ((g[q] + q * q) - (g[v[k]] + v[k] * v[k])) / (2 * q - 2 * v[k]); }
+          k++; v[k] = q; z[k] = s; z[k + 1] = Infinity;
+        }
+        k = 0;
+        for (let q = 0; q < len; q++) { while (z[k + 1] < q) k++; d[q] = (q - v[k]) * (q - v[k]) + g[v[k]]; }
+      };
+      for (let xx = 0; xx < W; xx++) { for (let y = 0; y < H; y++) g[y] = f[y * W + xx]; pass(H); for (let y = 0; y < H; y++) f[y * W + xx] = d[y]; }
+      for (let y = 0; y < H; y++) { for (let xx = 0; xx < W; xx++) g[xx] = f[y * W + xx]; pass(W); for (let xx = 0; xx < W; xx++) f[y * W + xx] = d[xx]; }
+    }
+    function sampleLogo(L, x, y, B) {
+      const G = L.G, k = B / G, gx = clamp((x / B + 0.5) * G - 0.5, 0, G - 1.001), gy = clamp((y / B + 0.5) * G - 0.5, 0, G - 1.001);
+      const i = Math.floor(gx), j = Math.floor(gy), fx = gx - i, fy = gy - j, o = j * G + i, sd = L.sd;
+      const v = (sd[o] * (1 - fx) + sd[o + 1] * fx) * (1 - fy) + (sd[o + G] * (1 - fx) + sd[o + G + 1] * fx) * fy;
+      return Math.max(v * k, sdBox(x, y, B / 2, B / 2));
+    }
+    function buildShape() {
+      const { W, H } = frame(), T = p.taille, fx = W / 2 - 0.012, fy = H / 2 - 0.012;
+      let f;
+      switch (p.contenant) {
+        case 'anneau': { const rm = 0.31 * T, hw = 0.15 * T; f = (x, y) => Math.abs(Math.hypot(x, y) - rm) - hw; break; }
+        case 'triangle': { const rc = 0.56 * T, r = rc * Math.sqrt(3) / 2, oy = rc / 4; f = (x, y) => sdTri(x, y - oy, r); break; }
+        case 'cadre': { const m = 0.03 + (1 - T) * 0.3, bx = W / 2 - m, by = H / 2 - m, rr = Math.min(0.05, Math.min(bx, by) * 0.5); f = (x, y) => sdBox(x, y, bx - rr, by - rr) - rr; break; }
+        case 'logo': { const L = logoField(), B = 0.92 * T; f = (x, y) => sampleLogo(L, x, y, B); break; }
+        default: { const rc = 0.46 * T; f = (x, y) => Math.hypot(x, y) - rc; }
+      }
+      const sdf = (x, y) => Math.max(f(x, y), sdBox(x, y, fx, fy));
+      // Échantillonnage sur grille : point le plus profond, courbes de niveau pour les graines.
+      const cs = Math.min(W, H) / 150, nx = Math.ceil(W / cs) + 3, ny = Math.ceil(H / cs) + 3, x0 = -nx * cs / 2, y0 = -ny * cs / 2;
+      const F = new Float64Array(nx * ny);
+      let deep = { x: 0, y: 0, d: 0 }, y1 = Infinity, y2 = -Infinity, xa = Infinity, xb = -Infinity;
+      for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+        const x = x0 + i * cs, y = y0 + j * cs, s = sdf(x, y);
+        F[j * nx + i] = s;
+        if (-s > deep.d) deep = { x, y, d: -s };
+        if (s < 0) { y1 = Math.min(y1, y); y2 = Math.max(y2, y); xa = Math.min(xa, x); xb = Math.max(xb, x); }
+      }
+      return { sdf, F, nx, ny, x0, y0, cs, deep, box: [xa, y1, xb, y2], key: p.contenant === 'logo' ? logoKey() : '' };
+    }
+
+    // Courbes de niveau (marching squares) du champ échantillonné, en boucles fermées.
+    function isoLoops(S, lev) {
+      const { F, nx, ny, x0, y0, cs } = S, link = new Map();
+      const add = (a, b) => { (link.get(a) || link.set(a, []).get(a)).push(b); (link.get(b) || link.set(b, []).get(b)).push(a); };
+      const pos = (id) => {
+        const e = id >> 1, i = e % nx, j = (e - i) / nx;
+        if (id & 1) { const a = F[j * nx + i], b = F[(j + 1) * nx + i]; return [x0 + i * cs, y0 + (j + (lev - a) / (b - a || 1e-9)) * cs]; }
+        const a = F[j * nx + i], b = F[j * nx + i + 1]; return [x0 + (i + (lev - a) / (b - a || 1e-9)) * cs, y0 + j * cs];
+      };
+      const hid = (i, j) => (j * nx + i) * 2, vid = (i, j) => (j * nx + i) * 2 + 1;
+      for (let j = 0; j < ny - 1; j++) for (let i = 0; i < nx - 1; i++) {
+        const a = F[j * nx + i] < lev, b = F[j * nx + i + 1] < lev, c = F[(j + 1) * nx + i + 1] < lev, d = F[(j + 1) * nx + i] < lev;
+        const code = (a << 3) | (b << 2) | (c << 1) | d;
+        if (code === 0 || code === 15) continue;
+        const t = hid(i, j), bo = hid(i, j + 1), l = vid(i, j), r = vid(i + 1, j);
+        switch (code) {
+          case 1: case 14: add(l, bo); break;
+          case 2: case 13: add(bo, r); break;
+          case 3: case 12: add(l, r); break;
+          case 4: case 11: add(t, r); break;
+          case 6: case 9: add(t, bo); break;
+          case 7: case 8: add(l, t); break;
+          case 5: add(l, t); add(bo, r); break;
+          case 10: add(t, r); add(l, bo); break;
+        }
+      }
+      const seen = new Set(), loops = [];
+      for (const start of link.keys()) {
+        if (seen.has(start)) continue;
+        const lp = [];
+        let prev = -1, cur = start, guard = 0;
+        while (guard++ < 100000) {
+          seen.add(cur); lp.push(pos(cur));
+          const nb = link.get(cur), nx2 = nb[0] !== prev ? nb[0] : nb[1];
+          if (nx2 == null || nx2 === start || seen.has(nx2)) break;
+          prev = cur; cur = nx2;
+        }
+        if (lp.length > 6) loops.push(lp);
+      }
+      return loops;
+    }
+    // Rééchantillonne une boucle à pas constant.
+    function resample(lp, step) {
+      const n = lp.length, cum = [0];
+      for (let k = 1; k <= n; k++) cum.push(cum[k - 1] + Math.hypot(lp[k % n][0] - lp[k - 1][0], lp[k % n][1] - lp[k - 1][1]));
+      const L = cum[n], m = Math.max(8, Math.round(L / step)), out = [];
+      let k = 0;
+      for (let q = 0; q < m; q++) {
+        const s = (q / m) * L;
+        while (k < n - 1 && cum[k + 1] < s) k++;
+        const a = lp[k], b = lp[(k + 1) % n], f = (s - cum[k]) / (cum[k + 1] - cum[k] || 1);
+        out.push([a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f]);
+      }
+      return out;
+    }
+
+    // ——— Plantation ———
+    function plant() {
+      const R = p.espacement, L0 = R * REST, S = shape, inset = margin() + R * 0.6, sdf = S.sdf;
+      const circleAtDeep = (r) => { const rr = Math.max(R * 2, Math.min(r, S.deep.d - inset)); addPath(circlePts(S.deep.x, S.deep.y, rr), true); };
+      if (S.deep.d < inset + R) { if (S.deep.d > R) addPath(circlePts(S.deep.x, S.deep.y, R * 1.5), true); return; }
+      switch (p.graine) {
+        case 'semis': {
+          const n = Math.round(p.graines), cs = [];
+          for (let a = 0; a < n * 400 && cs.length < n; a++) {
+            const r = p.rayonGraine * (0.45 + rand() * 0.35), x = S.box[0] + rand() * (S.box[2] - S.box[0]), y = S.box[1] + rand() * (S.box[3] - S.box[1]);
+            if (sdf(x, y) > -(r + inset)) continue;
+            if (cs.some((c) => Math.hypot(c[0] - x, c[1] - y) < c[2] + r + R * 2)) continue;
+            cs.push([x, y, r]);
+          }
+          if (!cs.length) circleAtDeep(p.rayonGraine);
+          for (const c of cs) addPath(circlePts(c[0], c[1], c[2]), true);
+          break;
+        }
+        case 'lignes': {
+          const n = Math.round(p.graines), [xa, ya, xb, yb] = S.box;
+          for (let k = 0; k < n; k++) {
+            const y = ya + (yb - ya) * (k + 0.5) / n;
+            let run = [];
+            for (let x = xa - L0; x <= xb + L0; x += L0) {
+              const yy = y + Math.sin(x * 9 + k * 1.7) * R * 0.3;
+              if (sdf(x, yy) < -inset) run.push([x, yy]);
+              else { if (run.length > 4) addPath(run, false); run = []; }
+            }
+            if (run.length > 4) addPath(run, false);
+          }
+          break;
+        }
+        case 'contour': {
+          const loops = isoLoops(S, -inset);
+          for (const lp of loops) addPath(resample(lp, L0), true);
+          if (!loops.length) circleAtDeep(p.rayonGraine);
+          break;
+        }
+        default: circleAtDeep(p.rayonGraine);
+      }
+    }
+    function restart() { need = true; }
+    function reset() {
+      need = false;
+      const { w, h } = frame();
+      if (!w || !h) return;
+      aspect = w / h;
+      clearNodes();
+      snaps = []; snapId = 0; lastSnap = 0; strataKey = '';
+      stepNo = 0; acc = 0; life = 0;
+      rand = app.rng(7 + gen * 7919);
+      shape = buildShape();
+      plant();
+      ff = Math.round(p.depart * STEPS_PER_S);
+    }
+    function wipe() { clearNodes(); snaps = []; strataKey = ''; ff = 0; life = 0; }
+    function renew() {
+      if (canvas.width && canvas.height) {
+        ghost = ghost || document.createElement('canvas');
+        ghost.width = canvas.width; ghost.height = canvas.height;
+        ghost.getContext('2d').drawImage(canvas, 0, 0);
+        ghostA = 1;
+      }
+      gen++;
+      reset();
+    }
+
+    // ——— Champ de croissance différentielle : bruit de valeur à deux octaves ———
+    function hash2(i, j) {
+      let h = Math.imul(i, 374761393) + Math.imul(j, 668265263) + Math.imul(app.seed + gen * 101, 1442695041);
+      h = Math.imul(h ^ (h >>> 13), 1274126177);
+      return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+    }
+    function vnoise(x, y) {
+      const i = Math.floor(x), j = Math.floor(y), fx = x - i, fy = y - j, sx = fx * fx * (3 - 2 * fx), sy = fy * fy * (3 - 2 * fy);
+      const a = hash2(i, j), b = hash2(i + 1, j), c = hash2(i, j + 1), d = hash2(i + 1, j + 1);
+      return a + (b - a) * sx + (c - a) * sy + (a - b - c + d) * sx * sy;
+    }
+    function growthField(x, y) {
+      const s = 1 / p.echelleZones, v = 0.68 * vnoise(x * s + 3.1, y * s + 7.7) + 0.32 * vnoise(x * s * 2.3 + 11, y * s * 2.3 + 5);
+      return clamp((v - 0.32) / 0.36, 0, 1);
+    }
+
+    // ——— Une itération de la simulation ———
+    function buildGrid(R) {
+      const { W, H } = frame();
+      gx0 = -W / 2 - R; gy0 = -H / 2 - R;
+      gw = Math.ceil((W + 2 * R) / R) + 1; gh = Math.ceil((H + 2 * R) / R) + 1;
+      const nc = gw * gh;
+      if (cellStart.length < nc + 1) { cellStart = new Int32Array(nc + 1); cellFill = new Int32Array(nc + 1); } else cellStart.fill(0, 0, nc + 1);
+      for (let i = 0; i < hi; i++) {
+        if (!LIVE[i]) continue;
+        const cx = clamp(Math.floor((X[i] - gx0) / R), 0, gw - 1), cy = clamp(Math.floor((Y[i] - gy0) / R), 0, gh - 1), c = cy * gw + cx;
+        nodeCell[i] = c; cellStart[c + 1]++;
+      }
+      for (let c = 0; c < nc; c++) cellStart[c + 1] += cellStart[c];
+      cellFill.set(cellStart.subarray(0, nc));
+      for (let i = 0; i < hi; i++) if (LIVE[i]) cellIdx[cellFill[nodeCell[i]]++] = i;
+    }
+    function step() {
+      if (!nAlive || !shape) { stepNo++; return; }
+      const R = p.espacement, R2 = R * R, L0 = R * REST, KA = 0.02 + p.lissage * 0.4, J = p.agitation * 0.07 * R, MD = MAX_MOVE * R, MD2 = MD * MD;
+      const push = brush.on && p.geste === 'repousser', feed = brush.on && p.geste === 'nourrir', B = p.pinceau, B2 = B * B, bx = brush.x, by = brush.y;
+      // Le trait qu'on dessine écarte les lignes qu'il traverse, comme un soc.
+      const plow = brush.on && stroke && stroke.g >= 0 ? stroke.g : -1, PB = R * 2.5, PB2 = PB * PB;
+      const sdf = shape.sdf, m = margin(), { W, H } = frame(), fx = W / 2 - 0.005, fy = H / 2 - 0.005;
+      buildGrid(R);
+      for (let i = 0; i < hi; i++) {
+        if (!LIVE[i]) continue;
+        const x = X[i], y = Y[i], a = PV[i], b = NX[i], c = nodeCell[i], cx = c % gw, cy = (c - cx) / gw;
+        let dx = 0, dy = 0;
+        const ya = cy > 0 ? cy - 1 : 0, yb = cy < gh - 1 ? cy + 1 : cy, xa = cx > 0 ? cx - 1 : 0, xb = cx < gw - 1 ? cx + 1 : cx;
+        for (let yy = ya; yy <= yb; yy++) {
+          for (let xx = xa; xx <= xb; xx++) {
+            const cc = yy * gw + xx;
+            for (let s = cellStart[cc], e = cellStart[cc + 1]; s < e; s++) {
+              const j = cellIdx[s];
+              if (j === i || j === a || j === b) continue;
+              const ex = x - X[j], ey = y - Y[j], d2 = ex * ex + ey * ey;
+              if (d2 >= R2 || d2 < 1e-14) continue;
+              const d = Math.sqrt(d2), f = (R - d) / d;
+              dx += ex * f; dy += ey * f;
+            }
+          }
+        }
+        dx *= K_REP; dy *= K_REP;
+        if (a >= 0) { const ex = X[a] - x, ey = Y[a] - y, d = Math.sqrt(ex * ex + ey * ey) || 1e-9, f = K_SPRING * (d - L0) / d; dx += ex * f; dy += ey * f; }
+        if (b >= 0) { const ex = X[b] - x, ey = Y[b] - y, d = Math.sqrt(ex * ex + ey * ey) || 1e-9, f = K_SPRING * (d - L0) / d; dx += ex * f; dy += ey * f; }
+        if (a >= 0 && b >= 0) { dx += ((X[a] + X[b]) * 0.5 - x) * KA; dy += ((Y[a] + Y[b]) * 0.5 - y) * KA; }
+        if (J > 0) { dx += (rand() - 0.5) * J; dy += (rand() - 0.5) * J; }
+        const m2 = dx * dx + dy * dy;
+        if (m2 > MD2) { const k = MD / Math.sqrt(m2); dx *= k; dy *= k; }
+        if (push) {
+          const ex = x - bx, ey = y - by, d2 = ex * ex + ey * ey;
+          if (d2 < B2) { const d = Math.sqrt(d2) || 1e-6, f = Math.min(B - d, R * 0.6) * 0.6 / d; dx += ex * f; dy += ey * f; }
+        }
+        if (plow >= 0 && GRP[i] !== plow) {
+          const ex = x - bx, ey = y - by, d2 = ex * ex + ey * ey;
+          if (d2 < PB2) { const d = Math.sqrt(d2) || 1e-6, f = Math.min(PB - d, R * 0.6) * 0.8 / d; dx += ex * f; dy += ey * f; }
+        }
+        DX[i] = dx; DY[i] = dy;
+      }
+      // Déplacement, puis projection dans le contenant (le trait reste à l'intérieur).
+      const h = 0.002;
+      for (let i = 0; i < hi; i++) {
+        if (!LIVE[i]) continue;
+        let x = X[i] + DX[i], y = Y[i] + DY[i];
+        const s = sdf(x, y);
+        if (s > -m) {
+          let gx = sdf(x + h, y) - sdf(x - h, y), gy = sdf(x, y + h) - sdf(x, y - h);
+          const gl = Math.hypot(gx, gy) || 1;
+          gx /= gl; gy /= gl;
+          const k = Math.min(s + m, R * 2) * 0.7;
+          x -= gx * k; y -= gy * k;
+        }
+        X[i] = clamp(x, -fx, fx); Y[i] = clamp(y, -fy, fy);
+      }
+      // Croissance : on coupe les arêtes trop longues, et on insère au hasard (ou selon la courbure).
+      const cap = p.capacite, H0 = hi, base = p.croissance * GROWTH, kc = p.courbure, kz = p.zones;
+      const LMIN = R * SPLIT_MIN, LMAX = R * SPLIT_MAX;
+      let nf = 0;
+      for (let i = 0; i < H0; i++) {
+        if (!LIVE[i] || NEW[i]) continue;
+        const b = NX[i];
+        if (b < 0) { if (PV[i] < 0 && !(stroke && stroke.last === i)) kill(i); continue; }
+        if (nAlive >= HARD - 8) continue;
+        let fed = 0;
+        if (feed) { const qx = X[i] - bx, qy = Y[i] - by, q2 = qx * qx + qy * qy; if (q2 < B2) fed = 1 - Math.sqrt(q2) / B; }
+        if (nAlive >= cap && fed <= 0 && !(groups[GRP[i]] && groups[GRP[i]].user)) continue;
+        const ex = X[b] - X[i], ey = Y[b] - Y[i], d = Math.sqrt(ex * ex + ey * ey);
+        let k = -1;
+        if (d > LMAX) k = split(i);
+        else if (d > LMIN && base > 0) {
+          let pr = base;
+          const a = PV[i];
+          if (kc > 0 && a >= 0) {
+            const ax = X[i] - X[a], ay = Y[i] - Y[a], al = Math.sqrt(ax * ax + ay * ay) || 1e-9;
+            const bend = (1 - (ax * ex + ay * ey) / (al * (d || 1e-9))) * 0.5;
+            pr *= 1 - kc + kc * Math.min(1, bend / 0.03) * 2.4;
+          }
+          if (kz > 0) pr *= 1 - kz + kz * growthField(X[i], Y[i]) * 2;
+          if (fed > 0) pr = Math.max(pr, base + 0.006) * (1 + 7 * fed);
+          if (rand() < pr) k = split(i);
+        }
+        if (k >= 0) fresh[nf++] = k;
+      }
+      for (let q = 0; q < nf; q++) NEW[fresh[q]] = 0;
+      stepNo++;
+      if (p.rendu === 'strates' && snaps.length < p.strates && stepNo - lastSnap >= p.ecart) { lastSnap = stepNo; capture(); }
+    }
+
+    // ——— Tracé à la main, coupe ———
+    function beginStroke(x, y) { stroke = { g: -1, last: -1, n: 0, x0: x, y0: y, far: 0 }; extendStroke(x, y); }
+    function extendStroke(x, y) {
+      const st = stroke;
+      if (!st || !shape) return;
+      st.far = Math.max(st.far, Math.hypot(x - st.x0, y - st.y0));
+      const L0 = p.espacement * REST;
+      if (shape.sdf(x, y) > -margin()) { st.last = -1; return; }
+      // Le trait coupe un sillon dans les autres lignes : deux lignes ne se croisent jamais.
+      const r = p.espacement;
+      if (st.last < 0 || !LIVE[st.last] || NX[st.last] >= 0) {
+        st.g = groups.length; groups.push({ period: 0, user: true });
+        carve(x, y, x, y, r, st.g);
+        const i = alloc();
+        if (i < 0) return;
+        X[i] = x; Y[i] = y; U[i] = 0; GRP[i] = st.g; st.last = i; st.n++;
+        return;
+      }
+      carve(X[st.last], Y[st.last], x, y, r, st.g);
+      let guard = 0;
+      while (guard++ < 400) {
+        const lx = X[st.last], ly = Y[st.last], d = Math.hypot(x - lx, y - ly);
+        if (d < L0) break;
+        const i = alloc();
+        if (i < 0) return;
+        X[i] = lx + (x - lx) * L0 / d; Y[i] = ly + (y - ly) * L0 / d; U[i] = U[st.last] + L0; GRP[i] = st.g;
+        NX[st.last] = i; PV[i] = st.last; st.last = i; st.n++;
+      }
+    }
+    function endStroke() {
+      const st = stroke;
+      stroke = null;
+      if (!st || st.far > p.espacement * 3) return;
+      // Un simple clic : on remplace le point posé par une petite graine ronde.
+      for (let i = 0; i < hi; i++) if (LIVE[i] && GRP[i] === st.g) kill(i);
+      const r = Math.max(p.espacement * 2.5, 0.03);
+      if (shape && shape.sdf(st.x0, st.y0) < -(r + margin())) {
+        carve(st.x0, st.y0, st.x0, st.y0, r + p.espacement);
+        addPath(circlePts(st.x0, st.y0, r), true, true);
+      }
+    }
+    // Retire les nœuds à moins de r du segment (sauf ceux du groupe keep), puis les nœuds restés seuls.
+    function carve(ax, ay, bx, by, r, keep = -1) {
+      const r2 = r * r, vx = bx - ax, vy = by - ay, l2 = vx * vx + vy * vy || 1e-12;
+      let hit = false;
+      for (let i = 0; i < hi; i++) {
+        if (!LIVE[i] || GRP[i] === keep) continue;
+        const t = clamp(((X[i] - ax) * vx + (Y[i] - ay) * vy) / l2, 0, 1), qx = ax + vx * t - X[i], qy = ay + vy * t - Y[i];
+        if (qx * qx + qy * qy < r2) { kill(i); hit = true; }
+      }
+      if (hit) for (let i = 0; i < hi; i++) if (LIVE[i] && GRP[i] !== keep && PV[i] < 0 && NX[i] < 0) kill(i);
+    }
+    function cutSeg(ax, ay, bx, by) { carve(ax, ay, bx, by, Math.max(p.pinceau * 0.35, p.espacement * 1.2)); }
+
+    // ——— Lecture des lignes : chaînes ouvertes puis boucles ———
+    function collectPaths() {
+      stamp++;
+      const out = [];
+      for (let i = 0; i < hi; i++) {
+        if (!LIVE[i] || PV[i] >= 0 || MARK[i] === stamp) continue;
+        const ids = [];
+        for (let k = i; k >= 0 && MARK[k] !== stamp; k = NX[k]) { MARK[k] = stamp; ids.push(k); }
+        if (ids.length > 1) out.push({ ids, closed: false, g: GRP[i] });
+      }
+      for (let i = 0; i < hi; i++) {
+        if (!LIVE[i] || MARK[i] === stamp) continue;
+        const ids = [];
+        let k = i;
+        for (; k >= 0 && MARK[k] !== stamp; k = NX[k]) { MARK[k] = stamp; ids.push(k); }
+        if (ids.length > 2) out.push({ ids, closed: k === i, g: GRP[i] });
+      }
+      return out;
+    }
+    function capture() {
+      const list = [];
+      for (const P of collectPaths()) {
+        const n = P.ids.length, stp = n > 4000 ? 2 : 1, m = Math.floor(n / stp), a = new Float32Array(m * 2);
+        for (let q = 0; q < m; q++) { const i = P.ids[q * stp]; a[q * 2] = X[i]; a[q * 2 + 1] = Y[i]; }
+        list.push({ pts: a, closed: P.closed });
+      }
+      snaps.push({ id: snapId++, list });
+    }
+
+    // ——— Couleurs et épaisseurs des nœuds ———
+    function colorize(paths, n) {
+      const mode = p.mode, bu = TAU * p.rayonGraine / Math.max(1, p.bandes), deep = Math.max(1e-3, shape ? shape.deep.d : 0.4);
+      for (const P of paths) {
+        const per = groups[P.g] ? groups[P.g].period : 0, bands = per > 0 ? Math.max(1, Math.round(per / bu)) : 0;
+        for (const i of P.ids) {
+          let c = 0;
+          if (mode === 'graine') c = P.g;
+          else if (mode === 'lignee') c = per > 0 ? Math.floor(U[i] / per * bands) % bands : Math.floor(U[i] / bu);
+          else if (mode === 'zones') c = Math.floor(clamp(-shape.sdf(X[i], Y[i]) / deep, 0, 0.999) * p.bandes);
+          CI[i] = ((c % n) + n) % n;
+        }
+      }
+    }
+    function widths(paths, t) {
+      const W0 = p.epaisseur * p.espacement, amt = p.modulation === 'aucune' ? 0 : p.modAmt, mod = p.modulation, lam = p.onde * p.espacement;
+      for (const P of paths) {
+        const ids = P.ids, n = ids.length;
+        let s = 0;
+        for (let k = 0; k < n; k++) {
+          const i = ids[k];
+          let m = 1;
+          if (amt > 0) {
+            if (mod === 'age') { const a = clamp((stepNo - BORN[i]) / AGE_STEPS, 0, 1); m = 0.15 + 0.85 * a * a * (3 - 2 * a); }
+            else if (mod === 'onde') { if (k) s += Math.hypot(X[i] - X[ids[k - 1]], Y[i] - Y[ids[k - 1]]); m = 0.12 + 0.88 * (0.5 + 0.5 * Math.cos(TAU * (s / lam - t * 0.5))); }
+            else if (mod === 'courbure') {
+              const a = PV[i], b = NX[i];
+              if (a >= 0 && b >= 0) {
+                const ax = X[i] - X[a], ay = Y[i] - Y[a], bx = X[b] - X[i], by = Y[b] - Y[i];
+                const bend = (1 - (ax * bx + ay * by) / ((Math.hypot(ax, ay) * Math.hypot(bx, by)) || 1e-9)) * 0.5;
+                m = 0.2 + 0.8 * clamp(bend / 0.05, 0, 1);
+              }
+            }
+          }
+          WID[i] = W0 * (1 - amt * (1 - m));
+        }
+      }
+    }
+
+    // ——— Géométrie : morceaux d'une couleur, tracés en courbes quadratiques par les milieux ———
+    // Morceau ouvert : [début, contrôles…, fin] ; morceau fermé : contrôles seuls.
+    function pieces(P) {
+      const ids = P.ids, n = ids.length, out = [];
+      const pos = (k) => ids[((k % n) + n) % n];
+      const mk = (a, b, closed, capS, capE) => {
+        const m = closed ? n : b - a + 3, pts = new Float64Array(m * 2), ws = new Float64Array(m);
+        if (closed) { for (let k = 0; k < n; k++) { const i = ids[k]; pts[k * 2] = X[i]; pts[k * 2 + 1] = Y[i]; ws[k] = WID[i]; } return { pts, ws, closed: true, c: CI[ids[0]] }; }
+        const i0 = pos(a - 1), i1 = pos(a), j0 = pos(b), j1 = pos(b + 1);
+        if (capS) { pts[0] = X[i0]; pts[1] = Y[i0]; ws[0] = WID[i0]; } else { pts[0] = (X[i0] + X[i1]) / 2; pts[1] = (Y[i0] + Y[i1]) / 2; ws[0] = (WID[i0] + WID[i1]) / 2; }
+        for (let k = a; k <= b; k++) { const i = pos(k), q = k - a + 1; pts[q * 2] = X[i]; pts[q * 2 + 1] = Y[i]; ws[q] = WID[i]; }
+        if (capE) { pts[(m - 1) * 2] = X[j1]; pts[(m - 1) * 2 + 1] = Y[j1]; ws[m - 1] = WID[j1]; } else { pts[(m - 1) * 2] = (X[j0] + X[j1]) / 2; pts[(m - 1) * 2 + 1] = (Y[j0] + Y[j1]) / 2; ws[m - 1] = (WID[j0] + WID[j1]) / 2; }
+        return { pts, ws, closed: false, capS, capE, c: CI[i1] };
+      };
+      if (P.closed) {
+        let s0 = -1;
+        for (let k = 0; k < n; k++) if (CI[ids[k]] !== CI[pos(k - 1)]) { s0 = k; break; }
+        if (s0 < 0) { out.push(mk(0, n - 1, true)); return out; }
+        for (let k = 0; k < n;) {
+          const c = CI[pos(s0 + k)];
+          let e = k;
+          while (e + 1 < n && CI[pos(s0 + e + 1)] === c) e++;
+          out.push(mk(s0 + k, s0 + e, false, false, false));
+          k = e + 1;
+        }
+        return out;
+      }
+      if (n === 2) {
+        const a = ids[0], b = ids[1];
+        out.push({ pts: Float64Array.of(X[a], Y[a], X[b], Y[b]), ws: Float64Array.of(WID[a], WID[b]), closed: false, capS: true, capE: true, c: CI[a] });
+        return out;
+      }
+      for (let k = 1; k <= n - 2;) {
+        const c = CI[ids[k]];
+        let e = k;
+        while (e + 1 <= n - 2 && CI[ids[e + 1]] === c) e++;
+        out.push(mk(k, e, false, k === 1, e === n - 2));
+        k = e + 1;
+      }
+      return out;
+    }
+    function traceCtx(c, g) {
+      const q = g.pts, m = q.length / 2;
+      if (g.closed) {
+        c.moveTo((q[2 * m - 2] + q[0]) / 2, (q[2 * m - 1] + q[1]) / 2);
+        for (let j = 0; j < m; j++) { const k = (j + 1) % m; c.quadraticCurveTo(q[2 * j], q[2 * j + 1], (q[2 * j] + q[2 * k]) / 2, (q[2 * j + 1] + q[2 * k + 1]) / 2); }
+        c.closePath();
+        return;
+      }
+      c.moveTo(q[0], q[1]);
+      if (m === 2) { c.lineTo(q[2], q[3]); return; }
+      for (let j = 1; j < m - 1; j++) {
+        const last = j === m - 2;
+        c.quadraticCurveTo(q[2 * j], q[2 * j + 1], last ? q[2 * m - 2] : (q[2 * j] + q[2 * j + 2]) / 2, last ? q[2 * m - 1] : (q[2 * j + 1] + q[2 * j + 3]) / 2);
+      }
+    }
+    const fmt = (v) => (Math.round(v * 1e4) / 1e4).toString();
+    function traceSVG(g) {
+      const q = g.pts, m = q.length / 2;
+      let d = '';
+      if (g.closed) {
+        d = `M${fmt((q[2 * m - 2] + q[0]) / 2)} ${fmt((q[2 * m - 1] + q[1]) / 2)}`;
+        for (let j = 0; j < m; j++) { const k = (j + 1) % m; d += `Q${fmt(q[2 * j])} ${fmt(q[2 * j + 1])} ${fmt((q[2 * j] + q[2 * k]) / 2)} ${fmt((q[2 * j + 1] + q[2 * k + 1]) / 2)}`; }
+        return d + 'Z';
+      }
+      d = `M${fmt(q[0])} ${fmt(q[1])}`;
+      if (m === 2) return d + `L${fmt(q[2])} ${fmt(q[3])}`;
+      for (let j = 1; j < m - 1; j++) {
+        const last = j === m - 2;
+        d += `Q${fmt(q[2 * j])} ${fmt(q[2 * j + 1])} ${fmt(last ? q[2 * m - 2] : (q[2 * j] + q[2 * j + 2]) / 2)} ${fmt(last ? q[2 * m - 1] : (q[2 * j + 1] + q[2 * j + 3]) / 2)}`;
+      }
+      return d;
+    }
+    // Ruban d'épaisseur variable : la courbe est affinée (milieux des quadratiques), puis décalée des deux côtés.
+    function ribbon(g, scale, out) {
+      const q = g.pts, ws = g.ws, m = q.length / 2, xs = [], ys = [], wl = [];
+      const push = (x, y, w) => { xs.push(x); ys.push(y); wl.push(w * scale * 0.5); };
+      if (g.closed) {
+        for (let j = 0; j < m; j++) {
+          const a = (j + m - 1) % m, b = (j + 1) % m;
+          const sx = (q[2 * a] + q[2 * j]) / 2, sy = (q[2 * a + 1] + q[2 * j + 1]) / 2, ex = (q[2 * j] + q[2 * b]) / 2, ey = (q[2 * j + 1] + q[2 * b + 1]) / 2;
+          const sw = (ws[a] + ws[j]) / 2, ew = (ws[j] + ws[b]) / 2;
+          push(0.25 * sx + 0.5 * q[2 * j] + 0.25 * ex, 0.25 * sy + 0.5 * q[2 * j + 1] + 0.25 * ey, 0.25 * sw + 0.5 * ws[j] + 0.25 * ew);
+          push(ex, ey, ew);
+        }
+      } else {
+        push(q[0], q[1], ws[0]);
+        if (m === 2) push(q[2], q[3], ws[1]);
+        for (let j = 1; j < m - 1; j++) {
+          const last = j === m - 2, sx = j === 1 ? q[0] : (q[2 * j - 2] + q[2 * j]) / 2, sy = j === 1 ? q[1] : (q[2 * j - 1] + q[2 * j + 1]) / 2;
+          const ex = last ? q[2 * m - 2] : (q[2 * j] + q[2 * j + 2]) / 2, ey = last ? q[2 * m - 1] : (q[2 * j + 1] + q[2 * j + 3]) / 2;
+          const sw = j === 1 ? ws[0] : (ws[j - 1] + ws[j]) / 2, ew = last ? ws[m - 1] : (ws[j] + ws[j + 1]) / 2;
+          push(0.25 * sx + 0.5 * q[2 * j] + 0.25 * ex, 0.25 * sy + 0.5 * q[2 * j + 1] + 0.25 * ey, 0.25 * sw + 0.5 * ws[j] + 0.25 * ew);
+          push(ex, ey, ew);
+        }
+      }
+      const n = xs.length, L = new Float64Array(n * 2), Rt = new Float64Array(n * 2), ang = new Float64Array(n);
+      for (let k = 0; k < n; k++) {
+        const a = g.closed ? (k + n - 1) % n : Math.max(0, k - 1), b = g.closed ? (k + 1) % n : Math.min(n - 1, k + 1);
+        let tx = xs[b] - xs[a], ty = ys[b] - ys[a];
+        const tl = Math.hypot(tx, ty) || 1e-9;
+        tx /= tl; ty /= tl; ang[k] = Math.atan2(ty, tx);
+        const w = Math.max(1e-5, wl[k]);
+        L[k * 2] = xs[k] - ty * w; L[k * 2 + 1] = ys[k] + tx * w;
+        Rt[k * 2] = xs[k] + ty * w; Rt[k * 2 + 1] = ys[k] - tx * w;
+      }
+      if (g.closed) {
+        out.push(L);
+        const r = new Float64Array(n * 2);
+        for (let k = 0; k < n; k++) { r[k * 2] = Rt[(n - 1 - k) * 2]; r[k * 2 + 1] = Rt[(n - 1 - k) * 2 + 1]; }
+        out.push(r);
+        return;
+      }
+      const poly = [], cap = (k, from) => { const w = Math.max(1e-5, wl[k]); for (let s = 1; s < 8; s++) { const a = from - Math.PI * s / 8; poly.push(xs[k] + Math.cos(a) * w, ys[k] + Math.sin(a) * w); } };
+      for (let k = 0; k < n; k++) poly.push(L[k * 2], L[k * 2 + 1]);
+      if (g.capE) cap(n - 1, ang[n - 1] + Math.PI / 2);
+      for (let k = n - 1; k >= 0; k--) poly.push(Rt[k * 2], Rt[k * 2 + 1]);
+      if (g.capS) cap(0, ang[0] - Math.PI / 2);
+      out.push(Float64Array.from(poly));
+    }
+
+    // ——— Composition : une liste d'opérations de dessin, partagée par le canvas et le SVG ———
+    function lineOps(paths, cols, scale, override, ops, vary) {
+      const by = new Map();
+      for (const P of paths) {
+        for (const g of pieces(P)) {
+          const color = override || cols[g.c % cols.length];
+          let o = by.get(color);
+          if (!o) { o = vary ? { t: 'poly', color, items: [] } : { t: 'stroke', color, w: p.epaisseur * p.espacement * scale, items: [], caps: [] }; by.set(color, o); }
+          if (vary) ribbon(g, scale, o.items);
+          else {
+            o.items.push(g);
+            if (g.capS) o.caps.push(g.pts[0], g.pts[1]);
+            if (g.capE) o.caps.push(g.pts[g.pts.length - 2], g.pts[g.pts.length - 1]);
+          }
+        }
+      }
+      ops.push(...by.values());
+    }
+    function compose(t, paths) {
+      const ops = [], cols = p.mode === 'encre' ? [p.encre] : (p.couleurs && p.couleurs.length ? p.couleurs : [p.encre]);
+      const fills = p.couleurs && p.couleurs.length ? p.couleurs : [p.encre];
+      colorize(paths, cols.length);
+      widths(paths, t);
+      const vary = p.modulation !== 'aucune' && p.modAmt > 0.001;
+      if (p.rendu === 'aplat') {
+        const by = new Map();
+        for (const P of paths) {
+          if (!P.closed) continue;
+          const color = fills[P.g % fills.length], pts = new Float64Array(P.ids.length * 2);
+          P.ids.forEach((i, k) => { pts[k * 2] = X[i]; pts[k * 2 + 1] = Y[i]; });
+          (by.get(color) || by.set(color, { t: 'fill', color, items: [] }).get(color)).items.push({ pts, closed: true });
+        }
+        ops.push(...by.values());
+      }
+      if (p.rendu === 'perles') {
+        const by = new Map();
+        for (const P of paths) for (const i of P.ids) {
+          const color = cols[CI[i] % cols.length];
+          (by.get(color) || by.set(color, { t: 'dots', color, items: [] }).get(color)).items.push(X[i], Y[i], WID[i] * 0.5);
+        }
+        ops.push(...by.values());
+        return ops;
+      }
+      lineOps(paths, cols, 1, null, ops, vary);
+      if (p.rendu === 'tube') lineOps(paths, cols, 1 - p.paroi, p.interieur, ops, vary);
+      return ops;
+    }
+    // Les strates suivent la palette en dégradé : la plus ancienne prend la première couleur, la dernière la dernière.
+    const hexRGB = (c) => {
+      const s = c.length === 4 ? [...c.slice(1)].map((x) => x + x).join('') : c.slice(1, 7), v = parseInt(s, 16) || 0;
+      return [v >> 16 & 255, v >> 8 & 255, v & 255];
+    };
+    function mixPalette(cols, t) {
+      if (cols.length < 2) return cols[0];
+      const f = clamp(t, 0, 1) * (cols.length - 1), k = Math.min(cols.length - 2, Math.floor(f)), r = f - k;
+      const a = hexRGB(cols[k]), b = hexRGB(cols[k + 1]);
+      return '#' + a.map((v, i) => Math.round(v + (b[i] - v) * r).toString(16).padStart(2, '0')).join('');
+    }
+    function strataOps() {
+      const cols = p.couleurs && p.couleurs.length ? p.couleurs : [p.encre], w = p.epaisseur * p.espacement, ops = [];
+      for (const s of snaps) {
+        ops.push({ t: 'stroke', color: mixPalette(cols, s.id / Math.max(1, p.strates - 1)), w, items: s.list, caps: [], round: true, alpha: p.voile });
+      }
+      return ops;
+    }
+
+    function drawOps(c, ops) {
+      for (const o of ops) {
+        c.fillStyle = c.strokeStyle = o.color;
+        c.globalAlpha = o.alpha ?? 1;
+        if (o.t === 'stroke') {
+          c.lineWidth = o.w; c.lineCap = o.round ? 'round' : 'butt'; c.lineJoin = 'round';
+          c.beginPath(); for (const g of o.items) traceCtx(c, g); c.stroke();
+          if (o.caps.length) { const r = o.w / 2; c.beginPath(); for (let k = 0; k < o.caps.length; k += 2) { c.moveTo(o.caps[k] + r, o.caps[k + 1]); c.arc(o.caps[k], o.caps[k + 1], r, 0, TAU); } c.fill(); }
+        } else if (o.t === 'fill') {
+          c.beginPath(); for (const g of o.items) traceCtx(c, g); c.fill('evenodd');
+        } else if (o.t === 'poly') {
+          c.beginPath();
+          for (const q of o.items) { c.moveTo(q[0], q[1]); for (let k = 2; k < q.length; k += 2) c.lineTo(q[k], q[k + 1]); c.closePath(); }
+          c.fill('nonzero');
+        } else if (o.t === 'dots') {
+          c.beginPath();
+          for (let k = 0; k < o.items.length; k += 3) { const r = Math.max(1e-5, o.items[k + 2]); c.moveTo(o.items[k] + r, o.items[k + 1]); c.arc(o.items[k], o.items[k + 1], r, 0, TAU); }
+          c.fill();
+        }
+      }
+    }
+    function opsSVG(ops) {
+      const out = [];
+      for (const o of ops) {
+        if (o.t === 'stroke') {
+          const op = (o.alpha ?? 1) < 1 ? ` stroke-opacity="${fmt(o.alpha)}"` : '';
+          out.push(`<path d="${o.items.map(traceSVG).join('')}" fill="none" stroke="${o.color}" stroke-width="${fmt(o.w)}" stroke-linecap="${o.round ? 'round' : 'butt'}" stroke-linejoin="round"${op}/>`);
+          if (o.caps.length) { const r = fmt(o.w / 2); let d = ''; for (let k = 0; k < o.caps.length; k += 2) d += `<circle cx="${fmt(o.caps[k])}" cy="${fmt(o.caps[k + 1])}" r="${r}"/>`; out.push(`<g fill="${o.color}">${d}</g>`); }
+        } else if (o.t === 'fill') out.push(`<path d="${o.items.map(traceSVG).join('')}" fill="${o.color}" fill-rule="evenodd"/>`);
+        else if (o.t === 'poly') {
+          let d = '';
+          for (const q of o.items) { d += `M${fmt(q[0])} ${fmt(q[1])}`; for (let k = 2; k < q.length; k += 2) d += `L${fmt(q[k])} ${fmt(q[k + 1])}`; d += 'Z'; }
+          out.push(`<path d="${d}" fill="${o.color}"/>`);
+        } else if (o.t === 'dots') {
+          let d = '';
+          for (let k = 0; k < o.items.length; k += 3) { const r = o.items[k + 2]; d += `M${fmt(o.items[k] - r)} ${fmt(o.items[k + 1])}a${fmt(r)} ${fmt(r)} 0 1 0 ${fmt(2 * r)} 0a${fmt(r)} ${fmt(r)} 0 1 0 ${fmt(-2 * r)} 0`; }
+          out.push(`<path d="${d}" fill="${o.color}"/>`);
+        }
+      }
+      return out.join('\n');
+    }
+
+    // Strates : les anneaux capturés ne changent plus, on les garde dans un calque mis à jour par ajout.
+    function drawStrata(c) {
+      const { w, h, dpr } = app.size, { u } = frame(), key = [canvas.width, canvas.height, p.epaisseur, p.espacement, p.strates, p.voile, (p.couleurs || []).join(), p.encre].join('|');
+      if (!strataCv) strataCv = document.createElement('canvas');
+      if (key !== strataKey || strataDrawn > snaps.length) {
+        strataKey = key; strataDrawn = 0;
+        strataCv.width = canvas.width; strataCv.height = canvas.height;
+      }
+      if (strataDrawn < snaps.length) {
+        const sc = strataCv.getContext('2d');
+        sc.setTransform(dpr * u, 0, 0, dpr * u, dpr * w / 2, dpr * h / 2);
+        const all = strataOps();
+        drawOps(sc, all.slice(strataDrawn));
+        strataDrawn = snaps.length;
+      }
+      c.save(); c.setTransform(1, 0, 0, 1, 0, 0); c.drawImage(strataCv, 0, 0); c.restore();
+    }
+
+    function paint(c, t) {
+      const { w, h, dpr } = app.size, { u } = frame();
+      c.setTransform(1, 0, 0, 1, 0, 0);
+      c.globalAlpha = 1;
+      c.fillStyle = p.fond;
+      c.fillRect(0, 0, canvas.width, canvas.height);
+      if (p.rendu === 'strates' && snaps.length) drawStrata(c);
+      c.setTransform(dpr * u, 0, 0, dpr * u, dpr * w / 2, dpr * h / 2);
+      drawOps(c, compose(t, collectPaths()));
+    }
+
+    app.loop((t, dt) => {
+      const { w, h } = app.size;
+      if (!w || !h) return;
+      if (need || !shape || (p.contenant === 'logo' && shape.key !== logoKey())) reset();
+      if (dt > 0) {
+        if (p.cycle > 0 && !brush.on) { life += dt; if (life >= p.cycle) renew(); }
+        acc += dt * STEPS_PER_S;
+        let n = Math.floor(acc);
+        acc -= n;
+        n = Math.min(n, 8);
+        if (ff > 0) { const k = Math.min(ff, FF_PER_FRAME); n += k; ff -= k; }
+        for (let i = 0; i < n; i++) step();
+      }
+      paint(ctx, t);
+      if (ghostA > 0 && ghost && ghost.width === canvas.width && ghost.height === canvas.height) {
+        ctx.save(); ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.globalAlpha = Math.min(1, ghostA); ctx.drawImage(ghost, 0, 0); ctx.restore();
+        if (dt > 0) ghostA -= dt / FADE;
+      }
+      app.finish(ctx);
+    });
+
+    function toSVG(centerline) {
+      const { w, h } = app.size, { u } = frame(), paths = collectPaths();
+      const head = `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">`;
+      const g = `<g transform="translate(${fmt(w / 2)} ${fmt(h / 2)}) scale(${fmt(u)})">`;
+      if (centerline) {
+        const d = paths.map((P) => { const pts = new Float64Array(P.ids.length * 2); P.ids.forEach((i, k) => { pts[k * 2] = X[i]; pts[k * 2 + 1] = Y[i]; }); return traceSVG({ pts, closed: P.closed }); }).join('');
+        return `${head}\n${g}\n<path d="${d}" fill="none" stroke="#000000" stroke-width="${fmt(1 / u)}"/>\n</g>\n</svg>`;
+      }
+      const body = [];
+      if (p.rendu === 'strates') body.push(opsSVG(strataOps()));
+      body.push(opsSVG(compose(app.time || 0, paths)));
+      return `${head}\n<rect width="100%" height="100%" fill="${p.fond}"/>\n${g}\n${body.join('\n')}\n</g>\n</svg>`;
+    }
+  </script>
+</body>
+</html>

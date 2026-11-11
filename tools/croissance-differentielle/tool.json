@@ -1,0 +1,17 @@
+{
+  "slug": "croissance-differentielle",
+  "title": "Croissance différentielle",
+  "type": "generative",
+  "description": "Une ligne qui pousse plus vite que la place ne le permet : elle flambe et se plisse en méandres, coraux et labyrinthes dans un disque, le cadre ou le logo.",
+  "tags": ["croissance", "morphogenese", "meandres", "labyrinthe", "logo", "svg"],
+  "inspiration": [
+    "Anders Hoff (inconvergent) — Differential Line ; Shepherding Random Growth (2016)",
+    "Jason Webb — Exploring 2D differential growth with JavaScript (2019)",
+    "Nervous System — Floraform ; Pedersen et Singh — Organic Labyrinths and Mazes (2006)",
+    "references/techniques.md : croissance différentielle",
+    "Palettes biennale, papier, orbite, pyramides, luzern, kegelbahn, acide, papier-gris"
+  ],
+  "author": "cursor",
+  "created": "2026-11-11",
+  "status": "finished"
+}
