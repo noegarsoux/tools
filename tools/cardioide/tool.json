@@ -1,0 +1,16 @@
+{
+  "slug": "cardioide",
+  "title": "Cardioïde",
+  "type": "generative",
+  "description": "Le point i d'un contour rejoint son multiple : l'enveloppe des cordes est une cardioïde, une néphroïde, ou un sceau gravé pour une marque.",
+  "tags": ["mathematiques", "cordes", "gravure", "sceau", "logo", "svg"],
+  "inspiration": [
+    "Tables de multiplication modulo n : l'enveloppe des cordes est une cardioïde (physique-maths, théorie des nombres)",
+    "Burkard Polster (Mathologer), Times Tables, Mandelbrot and the Heart of Mathematics",
+    "Robert Yates, The Cardioid, The Mathematical Gazette (1947)",
+    "Palettes papier-60, biennale, kegelbahn, thermique, trame-nuit, acide, orbite, papier-gris"
+  ],
+  "author": "cursor",
+  "created": "2026-11-11",
+  "status": "finished"
+}

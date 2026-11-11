@@ -1,0 +1,825 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Cardioïde</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Cardioïde modulaire. Sur un contour fermé, le point d'indice i est relié au point
+    // d'indice (m · i) modulo n. Pour un cercle et m = 2, l'enveloppe des cordes est une
+    // cardioïde ; m = 3 donne une néphroïde, puis des épicycloïdes. m réel : la figure
+    // passe d'une courbe à l'autre sans saut. Les épingles sont réparties selon l'abscisse
+    // curviligne, donc le même multiplicateur grave un polygone, une étoile, un stade ou un logo.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const TAU = Math.PI * 2;
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const P60 = PAL('papier-60'), BIEN = PAL('biennale'), KB = PAL('kegelbahn');
+    const NUIT = PAL('trame-nuit'), THERM = PAL('thermique'), ACIDE = PAL('acide');
+    const ORB = PAL('orbite'), PG = PAL('papier-gris');
+
+    let factorDrag = 0, rotDrag = 0, zoom = 1;
+    let warpOn = false, warpU = 0.5, warpV = 0.5;
+    let drag = null;
+    const jitter = new Float32Array(4096);
+    let curve = null, curveKey = '';
+    let logoSrc = null, logoPoly = null;
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.18, vignette: 0.12 },
+      hint: 'Glissez pour décaler le multiplicateur et bomber le contour · Maj : tourner · molette : échelle',
+      notes: 'Chaque épingle i du contour est reliée à l’épingle (multiplicateur × i) modulo n. Sur un cercle, 2 dessine une cardioïde, 3 une néphroïde, puis des épicycloïdes : l’enveloppe est la courbe tangente à toutes les cordes. Le multiplicateur est réel, la figure se déforme sans saut. La trame répète le même sceau, comme un papier filigrané. Le pointeur bombe le contour et décale le multiplicateur.',
+      params: {
+        'Module': {
+          module: { type: 'range', label: 'Module n', min: 12, max: 900, step: 1, value: 300 },
+          facteur: { type: 'range', label: 'Multiplicateur', min: 0, max: 24, step: 0.01, value: 2 },
+          familles: { type: 'range', label: 'Familles', min: 1, max: 5, step: 1, value: 1 },
+          pas: { type: 'range', label: 'Pas du multiplicateur', min: 0, max: 6, step: 0.01, value: 1, show: (q) => q.familles > 1 || q.vue !== 'une' },
+          retrait: { type: 'range', label: 'Retrait des familles', min: 0, max: 0.42, step: 0.01, value: 0.18, show: (q) => q.familles > 1 },
+        },
+        'Support': {
+          forme: { type: 'segmented', label: 'Contour', options: { cercle: 'Cercle', polygone: 'Polygone', etoile: 'Étoile', stade: 'Stade', logo: 'Logo' }, value: 'cercle' },
+          cotes: { type: 'range', label: 'Côtés', min: 3, max: 12, step: 1, value: 5, show: (q) => q.forme === 'polygone' || q.forme === 'etoile' },
+          creux: { type: 'range', label: 'Creux de l’étoile', min: 0.15, max: 0.92, step: 0.01, value: 0.4, show: (q) => q.forme === 'etoile' },
+          allongement: { type: 'range', label: 'Allongement', min: 0.4, max: 2.8, step: 0.01, value: 1.65, show: (q) => q.forme === 'stade' },
+          image: { type: 'file', label: 'Logo', accept: 'image/*', show: (q) => q.forme === 'logo' },
+          echelle: { type: 'range', label: 'Échelle', min: 0.28, max: 0.96, step: 0.01, value: 0.7 },
+          angle: { type: 'range', label: 'Angle (°)', min: -180, max: 180, step: 1, value: 180 },
+        },
+        'Trait': {
+          epaisseur: { type: 'range', label: 'Épaisseur', min: 0.25, max: 8, step: 0.05, value: 0.95 },
+          contraste: { type: 'range', label: 'Contraste d’épaisseur', min: 0, max: 1, step: 0.01, value: 0.4 },
+          opacite: { type: 'range', label: 'Opacité', min: 0.03, max: 1, step: 0.01, value: 0.62 },
+          halo: { type: 'range', label: 'Halo', min: 0, max: 1, step: 0.01, value: 0.12 },
+          perles: { type: 'range', label: 'Perles', min: 0, max: 1, step: 0.01, value: 0 },
+          cerne: { type: 'range', label: 'Cerne', min: 0, max: 1, step: 0.01, value: 0.9 },
+          anneaux: { type: 'range', label: 'Anneaux', min: 0, max: 3, step: 1, value: 2 },
+          fusion: { type: 'segmented', label: 'Fusion', options: { normale: 'Normale', multiplication: 'Produit', ecran: 'Écran' }, value: 'normale' },
+        },
+        'Couleur': {
+          fond: { type: 'color', label: 'Fond', value: P60[0] },
+          encre: { type: 'color', label: 'Encre', value: P60[1] },
+          accent: { type: 'color', label: 'Accent', value: P60[1] },
+          teinte: { type: 'segmented', label: 'Teinte des cordes', options: { uni: 'Unie', famille: 'Familles', secteur: 'Secteurs', longueur: 'Longueur' }, value: 'uni' },
+          palette: { type: 'palette', label: 'Palette', value: [P60[1], '#9c4032', '#c4a882'] },
+        },
+        'Mouvement': {
+          balayage: { type: 'range', label: 'Balayage du multiplicateur', min: 0, max: 6, step: 0.01, value: 0.38 },
+          onde: { type: 'range', label: 'Décalage de phase', min: 0, max: 1, step: 0.01, value: 0.18 },
+          tours: { type: 'range', label: 'Tours par boucle', min: -2, max: 2, step: 1, value: 0 },
+          balancement: { type: 'range', label: 'Balancement (°)', min: -80, max: 80, step: 1, value: 6 },
+          respiration: { type: 'range', label: 'Respiration', min: 0, max: 0.18, step: 0.005, value: 0.012 },
+          duree: { type: 'range', label: 'Durée de boucle (s)', min: 3, max: 36, step: 0.5, value: 14 },
+          desordre: { type: 'range', label: 'Désordre des épingles', min: 0, max: 1, step: 0.01, value: 0.03 },
+        },
+        'Geste': {
+          aimant: { type: 'range', label: 'Force du lobe', min: 0, max: 1.2, step: 0.01, value: 0.58 },
+          ouverture: { type: 'range', label: 'Ouverture du lobe', min: 0.15, max: 2.2, step: 0.01, value: 0.7 },
+        },
+        'Mise en page': {
+          vue: { type: 'segmented', label: 'Vue', options: { une: 'Médaille', suite: 'Suite', planche: 'Planche' }, value: 'une' },
+          nombre: { type: 'range', label: 'Médailles de la suite', min: 2, max: 8, step: 1, value: 3, show: (q) => q.vue === 'suite' },
+          colonnes: { type: 'range', label: 'Colonnes', min: 2, max: 6, step: 1, value: 4, show: (q) => q.vue === 'planche' },
+          lignes: { type: 'range', label: 'Lignes', min: 1, max: 5, step: 1, value: 2, show: (q) => q.vue === 'planche' },
+          gouttiere: { type: 'range', label: 'Gouttière', min: 0, max: 0.14, step: 0.005, value: 0.04, show: (q) => q.vue !== 'une' },
+          trame: { type: 'range', label: 'Trame de fond', min: 0, max: 1, step: 0.01, value: 0.72, show: (q) => q.vue !== 'planche' },
+          maille: { type: 'range', label: 'Maille de la trame', min: 0.1, max: 0.42, step: 0.01, value: 0.155, show: (q) => q.vue !== 'planche' && q.trame > 0 },
+        },
+      },
+      presets: {
+        'Gravure': {},
+        'Néphroïde': {
+          facteur: 3, balayage: 0.45, module: 380, epaisseur: 0.9, opacite: 0.38, halo: 0.4, contraste: 0.2,
+          fusion: 'ecran', cerne: 0.7, anneaux: 2, trame: 0.6, maille: 0.16, teinte: 'longueur',
+          fond: NUIT[0], encre: THERM[3], accent: THERM[2], palette: [THERM[1], THERM[2], THERM[3], THERM[4]],
+          grain: 0.22, vignette: 0.32, echelle: 0.7, angle: 180,
+        },
+        'Médaillon': {
+          familles: 3, pas: 1, retrait: 0.22, module: 170, facteur: 2, balayage: 0.16, epaisseur: 1.35,
+          opacite: 0.55, contraste: 0.2, halo: 0, fusion: 'normale', teinte: 'famille', cerne: 1, anneaux: 2,
+          fond: BIEN[0], encre: BIEN[1], accent: BIEN[1], palette: [BIEN[1], BIEN[2], BIEN[4]],
+          trame: 0.45, maille: 0.18, echelle: 0.68, grain: 0.12, vignette: 0.08,
+        },
+        'Sceau': {
+          module: 64, facteur: 2, balayage: 0.1, epaisseur: 5.8, opacite: 1, contraste: 0.15, halo: 0,
+          perles: 1, cerne: 1, anneaux: 2, fusion: 'normale', teinte: 'uni', trame: 0, desordre: 0,
+          fond: ORB[0], encre: ORB[1], accent: ORB[2], palette: [ORB[1], ORB[2]],
+          echelle: 0.72, respiration: 0.018, balancement: 0, grain: 0.06, vignette: 0.14,
+        },
+        'Suite': {
+          vue: 'suite', nombre: 3, pas: 1, facteur: 2, module: 200, epaisseur: 1.25, opacite: 0.7,
+          contraste: 0.35, halo: 0.05, cerne: 1, anneaux: 2, trame: 0.28, maille: 0.16, gouttiere: 0.05,
+          fusion: 'normale', teinte: 'uni', fond: P60[0], encre: P60[1], accent: P60[1],
+          echelle: 0.82, balayage: 0.28, onde: 0.22, grain: 0.14, vignette: 0.1,
+        },
+        'Planche': {
+          vue: 'planche', colonnes: 4, lignes: 2, pas: 1, facteur: 2, familles: 1, module: 160,
+          epaisseur: 1.35, opacite: 0.78, contraste: 0.35, halo: 0, cerne: 0.9, anneaux: 1, trame: 0,
+          gouttiere: 0.05, fusion: 'normale', teinte: 'uni', fond: PG[0], encre: PG[1], accent: PG[1],
+          echelle: 0.9, balayage: 0.18, onde: 0.08, grain: 0.08, vignette: 0.05,
+        },
+        'Étoile': {
+          forme: 'etoile', cotes: 5, creux: 0.42, facteur: 2, module: 120, epaisseur: 1.5, opacite: 0.88,
+          contraste: 0.15, halo: 0.15, fusion: 'ecran', teinte: 'uni', cerne: 1, anneaux: 2,
+          fond: ACIDE[1], encre: ACIDE[2], accent: ACIDE[2], palette: [ACIDE[2], ACIDE[3]],
+          trame: 0.4, maille: 0.17, echelle: 0.66, grain: 0.14, vignette: 0.26, desordre: 0,
+        },
+        'Kegelbahn': {
+          facteur: 2, familles: 3, pas: 1, retrait: 0.2, module: 200, epaisseur: 1.15, opacite: 0.62,
+          contraste: 0.1, halo: 0.12, fusion: 'ecran', teinte: 'famille', cerne: 0.85, anneaux: 2,
+          fond: KB[0], encre: KB[1], accent: KB[3], palette: [KB[1], KB[2], KB[3]],
+          trame: 0.45, maille: 0.16, balayage: 0.28, tours: 1, echelle: 0.68, grain: 0.16, vignette: 0.3,
+        },
+      },
+      brand(colors) {
+        const bg = colors[0];
+        const ink = colors[1] || bg;
+        const accent = colors[2] || ink;
+        const dark = luma(bg) < 0.42;
+        return {
+          fond: bg,
+          encre: ink,
+          accent: accent,
+          palette: colors.length > 1 ? colors.slice(1) : [ink],
+          fusion: dark ? 'ecran' : 'multiplication',
+          teinte: colors.length > 2 ? 'longueur' : 'uni',
+        };
+      },
+      pointer: {
+        down(q) {
+          drag = { x: q.x, f: factorDrag, r: rotDrag, shift: q.shift };
+          warpOn = true; warpU = q.x / Math.max(1, app.size.w); warpV = q.y / Math.max(1, app.size.h);
+        },
+        drag(q) {
+          if (!drag) return;
+          const w = Math.max(1, app.size.w);
+          if (q.shift || drag.shift) rotDrag = drag.r + (q.x - drag.x) / 160;
+          else factorDrag = drag.f + (q.x - drag.x) / (w * 0.28);
+          warpOn = true; warpU = q.x / w; warpV = q.y / Math.max(1, app.size.h);
+        },
+        up() { drag = null; },
+        wheel(q, dy) { zoom = Math.min(1.75, Math.max(0.32, zoom * Math.exp(-dy * 0.0011))); },
+      },
+      onChange(key) { if (key === '*' || key === 'image') logoSrc = null; if (key === '*') clearGesture(); },
+      onSeed() { rebuildJitter(); },
+      export: { name: 'cardioide', svg: () => toSVG() },
+    });
+    const p = app.params;
+
+    function clearGesture() { factorDrag = 0; rotDrag = 0; zoom = 1; warpOn = false; }
+    function rebuildJitter() {
+      const rnd = app.rng(3);
+      for (let i = 0; i < jitter.length; i++) jitter[i] = rnd() * 2 - 1;
+    }
+    rebuildJitter();
+
+    function luma(h) {
+      const [r, g, b] = rgb(h);
+      return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
+    }
+    function rgb(h) {
+      let s = String(h || '#000').replace('#', '');
+      if (s.length === 3) s = s.replace(/./g, (c) => c + c);
+      const n = parseInt(s.slice(0, 6), 16);
+      if (!Number.isFinite(n)) return [0, 0, 0];
+      return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+    }
+    function rgba(h, a) {
+      const [r, g, b] = rgb(h);
+      return `rgba(${r},${g},${b},${Math.max(0, Math.min(1, a))})`;
+    }
+    function mix(a, b, t) {
+      const A = rgb(a), B = rgb(b);
+      const h = (c) => Math.round(A[c] + (B[c] - A[c]) * t).toString(16).padStart(2, '0');
+      return '#' + h(0) + h(1) + h(2);
+    }
+    function ramp(pal, t) {
+      const c = (pal && pal.length) ? pal : ['#111111'];
+      if (c.length === 1) return c[0];
+      const x = Math.max(0, Math.min(0.9999, t)) * (c.length - 1);
+      const i = Math.floor(x);
+      return mix(c[i], c[Math.min(c.length - 1, i + 1)], x - i);
+    }
+    const mod1 = (u) => ((u % 1) + 1) % 1;
+
+    function chaikin(pts, passes) {
+      let cur = pts;
+      for (let k = 0; k < passes; k++) {
+        const n = [];
+        for (let i = 0; i < cur.length; i++) {
+          const a = cur[i], b = cur[(i + 1) % cur.length];
+          n.push([0.75 * a[0] + 0.25 * b[0], 0.75 * a[1] + 0.25 * b[1]]);
+          n.push([0.25 * a[0] + 0.75 * b[0], 0.25 * a[1] + 0.75 * b[1]]);
+        }
+        cur = n;
+      }
+      return cur;
+    }
+
+    function logoContour() {
+      const img = p.image || app.logoImg;
+      if (!img || !(img.naturalWidth || img.width)) return null;
+      if (img === logoSrc && logoPoly) return logoPoly;
+      logoSrc = img;
+      const N = 200;
+      const iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height;
+      const k = N / Math.max(iw, ih);
+      const cw = Math.max(2, Math.round(iw * k)), ch = Math.max(2, Math.round(ih * k));
+      const W = cw + 4, H = ch + 4;
+      const cv = document.createElement('canvas');
+      cv.width = W; cv.height = H;
+      const x = cv.getContext('2d', { willReadFrequently: true });
+      x.fillStyle = '#fff';
+      x.fillRect(0, 0, W, H);
+      x.drawImage(img, 2, 2, cw, ch);
+      const data = x.getImageData(0, 0, W, H).data;
+      const v = new Float32Array(W * H);
+      for (let i = 0; i < W * H; i++) v[i] = 1 - (data[i * 4] * 0.2126 + data[i * 4 + 1] * 0.7152 + data[i * 4 + 2] * 0.0722) / 255;
+      let edge = 0;
+      for (let i = 0; i < W; i++) edge += v[2 * W + i] + v[(H - 3) * W + i];
+      if (edge / (2 * W) > 0.5) for (let i = 0; i < v.length; i++) v[i] = 1 - v[i];
+      for (let i = 0; i < W; i++) v[i] = v[(H - 1) * W + i] = 0;
+      for (let j = 0; j < H; j++) v[j * W] = v[j * W + W - 1] = 0;
+      const th = 0.45, pos = new Map(), adj = new Map();
+      const keyOf = (xx, yy, id) => { const key = id; if (!pos.has(key)) pos.set(key, [xx, yy]); return key; };
+      const hE = (i, j) => { const a = v[j * W + i], b = v[j * W + i + 1]; return keyOf(i + (th - a) / ((b - a) || 1e-6), j, (j * W + i) * 2); };
+      const vE = (i, j) => { const a = v[j * W + i], b = v[(j + 1) * W + i]; return keyOf(i, j + (th - a) / ((b - a) || 1e-6), (j * W + i) * 2 + 1); };
+      const link = (a, b) => {
+        if (a === b) return;
+        (adj.get(a) || adj.set(a, []).get(a)).push(b);
+        (adj.get(b) || adj.set(b, []).get(b)).push(a);
+      };
+      for (let j = 0; j < H - 1; j++) for (let i = 0; i < W - 1; i++) {
+        const c = (v[j * W + i] > th ? 1 : 0) | (v[j * W + i + 1] > th ? 2 : 0) | (v[(j + 1) * W + i + 1] > th ? 4 : 0) | (v[(j + 1) * W + i] > th ? 8 : 0);
+        if (!c || c === 15) continue;
+        const T = hE(i, j), R = vE(i + 1, j), B = hE(i, j + 1), L = vE(i, j);
+        if (c === 1 || c === 14) link(L, T);
+        else if (c === 2 || c === 13) link(T, R);
+        else if (c === 3 || c === 12) link(L, R);
+        else if (c === 4 || c === 11) link(R, B);
+        else if (c === 6 || c === 9) link(T, B);
+        else if (c === 7 || c === 8) link(L, B);
+        else if (c === 5) { link(L, T); link(R, B); }
+        else if (c === 10) { link(T, R); link(B, L); }
+      }
+      const seen = new Set(), loops = [];
+      for (const start of adj.keys()) {
+        if (seen.has(start)) continue;
+        const loop = [];
+        let prev = -1, cur = start, guard = 0;
+        while (cur !== undefined && !seen.has(cur) && guard++ < 20000) {
+          seen.add(cur);
+          loop.push(pos.get(cur));
+          const nb = adj.get(cur) || [];
+          const nx = nb[0] !== prev ? nb[0] : nb[1];
+          prev = cur; cur = nx;
+        }
+        if (loop.length > 12) loops.push(loop);
+      }
+      if (!loops.length) { logoPoly = null; return null; }
+      const len = (L) => { let s = 0; for (let i = 0; i < L.length; i++) { const a = L[i], b = L[(i + 1) % L.length]; s += Math.hypot(b[0] - a[0], b[1] - a[1]); } return s; };
+      loops.sort((a, b) => len(b) - len(a));
+      let poly = chaikin(loops[0], 2);
+      let cx = 0, cy = 0;
+      for (const q of poly) { cx += q[0]; cy += q[1]; }
+      cx /= poly.length; cy /= poly.length;
+      let m = 1e-6;
+      for (const q of poly) m = Math.max(m, Math.hypot(q[0] - cx, q[1] - cy));
+      logoPoly = poly.map((q) => [(q[0] - cx) / m, (q[1] - cy) / m]);
+      return logoPoly;
+    }
+
+    function polygonPoly(sides, star, creux) {
+      const n = Math.max(3, Math.round(sides));
+      const pts = [];
+      const steps = star ? n * 2 : n;
+      const seg = 28;
+      for (let i = 0; i < steps; i++) {
+        const r0 = star && i % 2 ? creux : 1;
+        const r1 = star && i % 2 === 0 ? creux : 1;
+        const a0 = -Math.PI / 2 + (i / steps) * TAU;
+        const a1 = -Math.PI / 2 + ((i + 1) / steps) * TAU;
+        for (let k = 0; k < seg; k++) {
+          const t = k / seg;
+          pts.push([
+            Math.cos(a0) * r0 + (Math.cos(a1) * r1 - Math.cos(a0) * r0) * t,
+            Math.sin(a0) * r0 + (Math.sin(a1) * r1 - Math.sin(a0) * r0) * t,
+          ]);
+        }
+      }
+      return pts;
+    }
+
+    function stadiumPoly(aspect) {
+      const A = Math.max(0.35, aspect);
+      const horiz = A >= 1;
+      const hL = horiz ? A - 1 : 1 / A - 1;
+      const pts = [];
+      const capN = 48, linN = 24;
+      const push = (x, y) => pts.push(horiz ? [x, y] : [y, x]);
+      for (let i = 0; i <= capN; i++) {
+        const a = -Math.PI / 2 + Math.PI * (i / capN);
+        push(hL + Math.cos(a), Math.sin(a));
+      }
+      for (let i = 1; i <= linN; i++) push(hL + (-hL - hL) * (i / linN), 1);
+      for (let i = 1; i <= capN; i++) {
+        const a = Math.PI / 2 + Math.PI * (i / capN);
+        push(-hL + Math.cos(a), Math.sin(a));
+      }
+      for (let i = 1; i < linN; i++) push(-hL + (hL + hL) * (i / linN), -1);
+      let m = 1e-6;
+      for (const q of pts) m = Math.max(m, Math.hypot(q[0], q[1]));
+      return pts.map((q) => [q[0] / m, q[1] / m]);
+    }
+
+    function circlePoly() {
+      const pts = [];
+      const N = 480;
+      for (let i = 0; i < N; i++) {
+        const a = -Math.PI / 2 + (i / N) * TAU;
+        pts.push([Math.cos(a), Math.sin(a)]);
+      }
+      return pts;
+    }
+
+    function pack(pts) {
+      if (!pts || pts.length < 8) return null;
+      const acc = new Float64Array(pts.length + 1);
+      for (let i = 1; i < pts.length; i++) acc[i] = acc[i - 1] + Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]);
+      acc[pts.length] = acc[pts.length - 1] + Math.hypot(pts[0][0] - pts[pts.length - 1][0], pts[0][1] - pts[pts.length - 1][1]);
+      return { pts, acc, total: acc[pts.length] || 1 };
+    }
+
+    function support() {
+      const img = p.forme === 'logo' ? (p.image || app.logoImg) : null;
+      const key = [p.forme, p.cotes, p.creux, p.allongement, img ? (img.src || 'img') + ':' + (img.naturalWidth || 0) : ''].join('|');
+      if (key === curveKey && curve) return curve;
+      curveKey = key;
+      let pts = null;
+      if (p.forme === 'polygone') pts = polygonPoly(p.cotes, false, 1);
+      else if (p.forme === 'etoile') pts = polygonPoly(p.cotes, true, p.creux);
+      else if (p.forme === 'stade') pts = stadiumPoly(p.allongement);
+      else if (p.forme === 'logo') pts = logoContour();
+      curve = pack(pts || circlePoly());
+      return curve;
+    }
+
+    function at(cv, u) {
+      const target = mod1(u) * cv.total;
+      let lo = 1, hi = cv.acc.length - 1;
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (cv.acc[mid] < target) lo = mid + 1;
+        else hi = mid;
+      }
+      const i1 = lo, i0 = i1 - 1;
+      const span = cv.acc[i1] - cv.acc[i0] || 1;
+      const f = (target - cv.acc[i0]) / span;
+      const a = cv.pts[i0 % cv.pts.length], b = cv.pts[i1 % cv.pts.length];
+      return [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f];
+    }
+
+    function pin(cv, u, n) {
+      const j = jitter[Math.abs(Math.floor(mod1(u) * n)) % jitter.length];
+      const j2 = jitter[(Math.abs(Math.floor(mod1(u) * n)) + 97) % jitter.length];
+      const uu = u + j * p.desordre * 0.42 / n;
+      const rad = 1 + j2 * p.desordre * 0.04;
+      const q = at(cv, uu);
+      return [q[0] * rad, q[1] * rad];
+    }
+
+    function place(unit, cx, cy, R, rot, amp, spread, wang) {
+      const c = Math.cos(rot), s = Math.sin(rot);
+      let x = unit[0] * c - unit[1] * s;
+      let y = unit[0] * s + unit[1] * c;
+      if (amp > 0.001) {
+        const ang = Math.atan2(y, x);
+        let da = ang - wang;
+        da = Math.atan2(Math.sin(da), Math.cos(da));
+        const wgt = Math.exp(-(da * da) / (2 * spread * spread));
+        const boost = 1 + amp * wgt;
+        x *= boost; y *= boost;
+      }
+      return [cx + x * R, cy + y * R];
+    }
+
+    function lobeFor(cx, cy, w, h) {
+      if (!warpOn || p.aimant <= 0) return { amp: 0, ang: 0 };
+      const px = warpU * w, py = warpV * h;
+      const dx = px - cx, dy = py - cy;
+      const dist = Math.hypot(dx, dy);
+      const reach = Math.min(w, h) * 0.62;
+      const fall = Math.exp(-(dist * dist) / (2 * reach * reach));
+      return { amp: p.aimant * Math.min(1.15, fall * 1.35), ang: Math.atan2(dy, dx) };
+    }
+
+    function phaseOf(t) {
+      const d = Math.max(0.5, p.duree);
+      return mod1(t / d);
+    }
+
+    function cellsOf(w, h) {
+      const gap = Math.min(w, h) * (p.vue === 'une' ? 0 : p.gouttiere);
+      if (p.vue === 'planche') {
+        const cols = Math.round(p.colonnes), rows = Math.round(p.lignes);
+        const pad = Math.min(w, h) * 0.045;
+        const cw = (w - pad * 2 - gap * (cols - 1)) / cols;
+        const ch = (h - pad * 2 - gap * (rows - 1)) / rows;
+        const gridW = cols * cw + (cols - 1) * gap, gridH = rows * ch + (rows - 1) * gap;
+        const x0 = (w - gridW) / 2, y0 = (h - gridH) / 2;
+        const R = Math.min(cw, ch) * 0.5 * p.echelle * zoom;
+        const out = [];
+        for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
+          const i = r * cols + c;
+          out.push({ cx: x0 + cw / 2 + c * (cw + gap), cy: y0 + ch / 2 + r * (ch + gap), R, add: p.pas * (c + r * 0.5), ph: i * p.onde });
+        }
+        return out;
+      }
+      if (p.vue === 'suite') {
+        const n = Math.round(p.nombre);
+        const landscape = w >= h;
+        const pad = Math.min(w, h) * 0.05;
+        const out = [];
+        if (landscape) {
+          const cw = (w - pad * 2 - gap * (n - 1)) / n;
+          const R = Math.min(cw, h - pad * 2) * 0.5 * p.echelle * zoom;
+          for (let i = 0; i < n; i++) out.push({ cx: pad + cw / 2 + i * (cw + gap), cy: h / 2, R, add: i * p.pas, ph: i * p.onde });
+        } else {
+          const ch = (h - pad * 2 - gap * (n - 1)) / n;
+          const R = Math.min(w - pad * 2, ch) * 0.5 * p.echelle * zoom;
+          for (let i = 0; i < n; i++) out.push({ cx: w / 2, cy: pad + ch / 2 + i * (ch + gap), R, add: i * p.pas, ph: i * p.onde });
+        }
+        return out;
+      }
+      const R = Math.min(w, h) * 0.5 * p.echelle * zoom;
+      return [{ cx: w / 2, cy: h / 2, R, add: 0, ph: 0 }];
+    }
+
+    function inkOf(teinte, pal, encre, i, n, k, len01) {
+      if (teinte === 'famille') return pal[k % pal.length];
+      if (teinte === 'secteur') return pal[Math.floor((i / n) * pal.length) % pal.length];
+      if (teinte === 'longueur') return ramp(pal, len01);
+      return encre;
+    }
+
+    function scene(t, w, h) {
+      const cv = support();
+      const ph = phaseOf(t);
+      const breath = 1 + Math.sin(ph * TAU) * p.respiration;
+      const rot0 = (p.angle * Math.PI) / 180 + rotDrag + ph * p.tours * TAU + Math.sin(ph * TAU) * (p.balancement * Math.PI) / 180;
+      const cells = cellsOf(w, h);
+      const fam = Math.max(1, Math.round(p.familles));
+      const n = Math.max(12, Math.round(p.module));
+      const pal = (p.palette && p.palette.length) ? p.palette : [p.encre];
+      const figures = [];
+      let budget = 9000;
+      for (const cell of cells) {
+        const lobe = lobeFor(cell.cx, cell.cy, w, h);
+        const spread = Math.max(0.12, p.ouverture);
+        const fams = [];
+        for (let k = 0; k < fam; k++) {
+          if (p.vue === 'planche' && k > 0 && budget < n) break;
+          const f = p.facteur + factorDrag + cell.add + (p.vue === 'planche' ? 0 : k * p.pas) + Math.sin((ph + cell.ph + k * p.onde) * TAU) * p.balayage;
+          const R = Math.max(4, cell.R * breath * Math.max(0.12, 1 - k * p.retrait));
+          const stride = Math.max(1, Math.ceil(n / Math.max(24, Math.floor(budget / Math.max(1, cells.length)))));
+          const chords = [];
+          let maxLen = 1;
+          const sample = (s) => place(pin(cv, s, n), cell.cx, cell.cy, R, rot0, lobe.amp, spread, lobe.ang);
+          for (let i = 0; i < n; i += stride) {
+            const a = sample(i / n);
+            const b = sample((f * i) / n);
+            const len = Math.hypot(b[0] - a[0], b[1] - a[1]);
+            if (len > maxLen) maxLen = len;
+            chords.push({ a, b, i, len });
+          }
+          budget -= chords.length;
+          fams.push({ R, chords, maxLen, k, lobe });
+        }
+        figures.push({ cx: cell.cx, cy: cell.cy, R: cell.R * breath, rot: rot0, lobe, fams });
+      }
+      return { cv, figures, n, pal };
+    }
+
+    function widthFor(R, len, maxLen) {
+      const u = Math.max(R * 2, 48);
+      const base = Math.max(0.35, u * 0.00105 * p.epaisseur);
+      const t = maxLen > 0 ? len / maxLen : 0;
+      return Math.max(0.3, base * (1 - p.contraste * t * 0.82));
+    }
+
+    // Cercle unité déformé par le lobe : le disque et le cerne extérieur suivent le geste.
+    function traceRim(cx, cy, R, rot, amp, spread, wang, samples = 128) {
+      ctx.beginPath();
+      for (let i = 0; i <= samples; i++) {
+        const a = -Math.PI / 2 + (i / samples) * TAU;
+        const q = place([Math.cos(a), Math.sin(a)], cx, cy, R, rot, amp, spread, wang);
+        if (i) ctx.lineTo(q[0], q[1]); else ctx.moveTo(q[0], q[1]);
+      }
+      ctx.closePath();
+    }
+    function rimPath(cx, cy, R, rot, amp, spread, wang, samples = 96) {
+      let d = '';
+      for (let i = 0; i <= samples; i++) {
+        const a = -Math.PI / 2 + (i / samples) * TAU;
+        const q = place([Math.cos(a), Math.sin(a)], cx, cy, R, rot, amp, spread, wang);
+        d += (i ? 'L' : 'M') + q[0].toFixed(1) + ' ' + q[1].toFixed(1);
+      }
+      return d + 'Z';
+    }
+    function rimScale() { return (p.forme === 'cercle' || p.forme === 'logo') ? 1.075 : 1.028; }
+    function trameLook() {
+      const dark = luma(p.fond) < 0.45;
+      return { alpha: p.trame * (dark ? 0.5 : 0.18), ring: p.trame * (dark ? 0.7 : 0.32) };
+    }
+    let circleCv = null;
+    function circleSupport() {
+      if (!circleCv) circleCv = pack(circlePoly());
+      return circleCv;
+    }
+
+    function drawOutline(cv, cx, cy, R, rot, amp, spread, wang, samples) {
+      ctx.beginPath();
+      for (let i = 0; i <= samples; i++) {
+        const q = place(at(cv, i / samples), cx, cy, R, rot, amp, spread, wang);
+        if (i) ctx.lineTo(q[0], q[1]); else ctx.moveTo(q[0], q[1]);
+      }
+      ctx.closePath();
+      ctx.stroke();
+    }
+
+    function paint(t, w, h, target) {
+      const S = scene(t, w, h);
+      const blend = p.fusion === 'multiplication' ? 'multiply' : p.fusion === 'ecran' ? 'screen' : 'source-over';
+      target.setup(p.fond, w, h);
+
+      if (p.trame > 0 && p.vue !== 'planche') {
+        target.blend(blend);
+        const maille = Math.min(w, h) * p.maille;
+        const cols = Math.ceil(w / maille) + 1;
+        const rows = Math.ceil(h / maille) + 1;
+        const ox = (w - (cols - 1) * maille) / 2;
+        const oy = (h - (rows - 1) * maille) / 2;
+        const nT = 48;
+        const cvT = circleSupport();
+        const ph = phaseOf(t);
+        const f = 2 + Math.sin(ph * TAU) * Math.min(0.35, p.balayage);
+        const rot = (p.angle * Math.PI) / 180 + ph * p.tours * TAU;
+        const Rr = maille * 0.36;
+        const look = trameLook();
+        const lw = Math.max(0.45, Rr * 0.013);
+        for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
+          const cx = ox + c * maille, cy = oy + r * maille;
+          target.chordsStart();
+          for (let i = 0; i < nT; i++) {
+            const a = place(at(cvT, i / nT), cx, cy, Rr, rot, 0, 1, 0);
+            const b = place(at(cvT, (f * i) / nT), cx, cy, Rr, rot, 0, 1, 0);
+            target.chord(a[0], a[1], b[0], b[1], p.encre, look.alpha, lw);
+          }
+          target.chordsEnd();
+          target.strokeStyle(p.encre, look.ring, Math.max(0.4, lw * 0.9));
+          target.ring(cx, cy, Rr, rot, 0, 1, 0);
+          target.endStyle();
+        }
+      }
+
+      target.blend('source-over');
+      for (const fig of S.figures) {
+        const rim = fig.R * rimScale();
+        target.disc(fig.cx, fig.cy, rim, fig.rot, fig.lobe.amp, p.ouverture, fig.lobe.ang);
+      }
+
+      target.blend(blend);
+      for (const fig of S.figures) {
+        for (let fi = 0; fi < fig.fams.length; fi++) {
+          const fam = fig.fams[fi];
+          target.chordsStart();
+          const ordered = fam.chords.slice().sort((a, b) => b.len - a.len);
+          for (const ch of ordered) {
+            const len01 = fam.maxLen > 0 ? ch.len / fam.maxLen : 0;
+            const col = inkOf(p.teinte, S.pal, p.encre, ch.i, S.n, fam.k, len01);
+            const lw = widthFor(fam.R, ch.len, fam.maxLen);
+            if (p.halo > 0) target.chord(ch.a[0], ch.a[1], ch.b[0], ch.b[1], p.accent, p.opacite * p.halo * 0.35, lw * (2.4 + p.halo * 2.2));
+            target.chord(ch.a[0], ch.a[1], ch.b[0], ch.b[1], col, p.opacite, lw);
+          }
+          target.chordsEnd();
+        }
+        if (p.cerne > 0) {
+          const lw = Math.max(0.4, fig.R * 2 * 0.00115 * Math.max(0.8, p.epaisseur * 0.85));
+          target.strokeStyle(p.encre, Math.min(1, p.cerne * 0.95), lw);
+          const samples = p.forme === 'cercle' ? 180 : 240;
+          for (const fam of fig.fams) {
+            target.outline(S.cv, fig.cx, fig.cy, fam.R, fig.rot, fig.lobe.amp, p.ouverture, fig.lobe.ang, samples);
+          }
+          if (p.anneaux >= 2) {
+            const rim = fig.R * rimScale();
+            target.strokeStyle(p.accent, Math.min(1, p.cerne * 0.95), Math.max(0.4, lw * 0.85));
+            target.ring(fig.cx, fig.cy, rim, fig.rot, fig.lobe.amp, p.ouverture, fig.lobe.ang);
+            if (p.anneaux >= 3) target.ring(fig.cx, fig.cy, rim * 0.955, fig.rot, fig.lobe.amp, p.ouverture, fig.lobe.ang);
+          }
+        }
+        if (p.perles > 0) {
+          const fam = fig.fams[0];
+          const pr = p.perles * fam.R * 0.042 * Math.min(1, 56 / S.n);
+          const step = Math.max(1, Math.round(S.n / 160));
+          target.dotsStart(p.accent, Math.min(1, 0.35 + p.perles * 0.65));
+          for (let i = 0; i < S.n; i += step) {
+            const q = place(pin(S.cv, i / S.n, S.n), fig.cx, fig.cy, fam.R, fig.rot, fig.lobe.amp, p.ouverture, fig.lobe.ang);
+            target.dot(q[0], q[1], pr);
+          }
+          target.dotsEnd();
+        }
+      }
+      target.done();
+    }
+
+    function canvasTarget() {
+      const groups = new Map();
+      let blend = 'source-over';
+      let styleOpen = false;
+      const closeStyle = () => { if (styleOpen) { ctx.restore(); styleOpen = false; } };
+      const flush = () => {
+        closeStyle();
+        if (!groups.size) return;
+        ctx.save();
+        ctx.globalCompositeOperation = blend;
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        for (const [k, arr] of groups) {
+          const [col, a, lw] = k.split('|');
+          ctx.beginPath();
+          for (let i = 0; i < arr.length; i += 4) {
+            ctx.moveTo(arr[i], arr[i + 1]);
+            ctx.lineTo(arr[i + 2], arr[i + 3]);
+          }
+          ctx.strokeStyle = rgba(col, +a);
+          ctx.lineWidth = +lw;
+          ctx.stroke();
+        }
+        ctx.restore();
+        groups.clear();
+      };
+      const key = (col, a, lw) => col + '|' + a.toFixed(3) + '|' + lw.toFixed(2);
+      return {
+        setup(bg, w, h) {
+          closeStyle();
+          ctx.setTransform(app.size.dpr, 0, 0, app.size.dpr, 0, 0);
+          ctx.globalCompositeOperation = 'source-over';
+          ctx.globalAlpha = 1;
+          ctx.fillStyle = bg;
+          ctx.fillRect(0, 0, w, h);
+        },
+        blend(mode) { flush(); blend = mode; },
+        chordsStart() {},
+        chord(x0, y0, x1, y1, col, a, lw) {
+          if (a <= 0.004 || lw <= 0) return;
+          const k = key(col, a, lw);
+          let b = groups.get(k);
+          if (!b) groups.set(k, b = []);
+          b.push(x0, y0, x1, y1);
+        },
+        chordsEnd() { flush(); },
+        disc(cx, cy, R, rot, amp, spread, wang) {
+          flush();
+          ctx.save();
+          ctx.globalCompositeOperation = 'source-over';
+          ctx.fillStyle = p.fond;
+          traceRim(cx, cy, R, rot, amp, spread, wang);
+          ctx.fill();
+          ctx.restore();
+        },
+        strokeStyle(col, a, lw) {
+          flush();
+          ctx.save();
+          styleOpen = true;
+          ctx.globalCompositeOperation = blend;
+          ctx.strokeStyle = rgba(col, a);
+          ctx.lineWidth = lw;
+          ctx.lineCap = 'round';
+          ctx.lineJoin = 'round';
+        },
+        outline(cv, cx, cy, R, rot, amp, spread, wang, samples) { drawOutline(cv, cx, cy, R, rot, amp, spread, wang, samples); },
+        ring(cx, cy, R, rot, amp, spread, wang) {
+          traceRim(cx, cy, R, rot, amp, spread, wang);
+          ctx.stroke();
+        },
+        endStyle() { closeStyle(); },
+        dotsStart(col, a) {
+          closeStyle();
+          ctx.save();
+          styleOpen = true;
+          ctx.globalCompositeOperation = blend;
+          ctx.fillStyle = rgba(col, a);
+        },
+        dot(x, y, r) {
+          ctx.beginPath();
+          ctx.arc(x, y, Math.max(0.4, r), 0, TAU);
+          ctx.fill();
+        },
+        dotsEnd() { closeStyle(); },
+        done() { closeStyle(); ctx.globalCompositeOperation = 'source-over'; },
+      };
+    }
+
+    function toSVG() {
+      const { w, h } = app.size;
+      const S = scene(app.time, w, h);
+      const blend = p.fusion === 'multiplication' ? 'multiply' : p.fusion === 'ecran' ? 'screen' : 'normal';
+      const buckets = new Map();
+      const add = (x0, y0, x1, y1, col, a, lw) => {
+        if (a <= 0.004) return;
+        const k = col + '|' + a.toFixed(3) + '|' + lw.toFixed(2);
+        let d = buckets.get(k);
+        if (!d) buckets.set(k, d = []);
+        d.push(`M${x0.toFixed(1)} ${y0.toFixed(1)}L${x1.toFixed(1)} ${y1.toFixed(1)}`);
+      };
+      let body = '';
+      const flush = (mode) => {
+        if (!buckets.size) return;
+        const parts = [];
+        for (const [k, segs] of buckets) {
+          const [col, a, lw] = k.split('|');
+          parts.push(`<path d="${segs.join('')}" fill="none" stroke="${col}" stroke-opacity="${a}" stroke-width="${lw}" stroke-linecap="round"/>`);
+        }
+        body += `<g style="mix-blend-mode:${mode}">${parts.join('')}</g>`;
+        buckets.clear();
+      };
+      if (p.trame > 0 && p.vue !== 'planche') {
+        const maille = Math.min(w, h) * p.maille;
+        const cols = Math.ceil(w / maille) + 1, rows = Math.ceil(h / maille) + 1;
+        const ox = (w - (cols - 1) * maille) / 2, oy = (h - (rows - 1) * maille) / 2;
+        const nT = 48, ph = phaseOf(app.time), cvT = circleSupport();
+        const f = 2 + Math.sin(ph * TAU) * Math.min(0.35, p.balayage);
+        const rot = (p.angle * Math.PI) / 180 + ph * p.tours * TAU;
+        const Rr = maille * 0.36, look = trameLook();
+        const lw = Math.max(0.45, Rr * 0.013);
+        const rings = [];
+        for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
+          const cx = ox + c * maille, cy = oy + r * maille;
+          for (let i = 0; i < nT; i++) {
+            const a = place(at(cvT, i / nT), cx, cy, Rr, rot, 0, 1, 0);
+            const b = place(at(cvT, (f * i) / nT), cx, cy, Rr, rot, 0, 1, 0);
+            add(a[0], a[1], b[0], b[1], p.encre, look.alpha, lw);
+          }
+          rings.push(`<path d="${rimPath(cx, cy, Rr, rot, 0, 1, 0)}" fill="none" stroke="${p.encre}" stroke-opacity="${look.ring.toFixed(3)}" stroke-width="${Math.max(0.4, lw * 0.9).toFixed(2)}"/>`);
+        }
+        flush(blend);
+        body += rings.join('');
+      }
+      for (const fig of S.figures) {
+        const rim = fig.R * rimScale();
+        body += `<path d="${rimPath(fig.cx, fig.cy, rim, fig.rot, fig.lobe.amp, p.ouverture, fig.lobe.ang)}" fill="${p.fond}"/>`;
+      }
+      for (const fig of S.figures) {
+        for (let fi = 0; fi < fig.fams.length; fi++) {
+          const fam = fig.fams[fi];
+          for (const ch of fam.chords) {
+            const len01 = fam.maxLen > 0 ? ch.len / fam.maxLen : 0;
+            const col = inkOf(p.teinte, S.pal, p.encre, ch.i, S.n, fam.k, len01);
+            const lw = widthFor(fam.R, ch.len, fam.maxLen);
+            if (p.halo > 0) add(ch.a[0], ch.a[1], ch.b[0], ch.b[1], p.accent, p.opacite * p.halo * 0.35, lw * (2.4 + p.halo * 2.2));
+            add(ch.a[0], ch.a[1], ch.b[0], ch.b[1], col, p.opacite, lw);
+          }
+        }
+      }
+      flush(blend);
+      if (p.cerne > 0) {
+        for (const fig of S.figures) {
+          const lw = Math.max(0.4, fig.R * 2 * 0.00115 * Math.max(0.8, p.epaisseur * 0.85));
+          for (const fam of fig.fams) {
+            let d = '';
+            const samples = 180;
+            for (let i = 0; i <= samples; i++) {
+              const q = place(at(S.cv, i / samples), fig.cx, fig.cy, fam.R, fig.rot, fig.lobe.amp, p.ouverture, fig.lobe.ang);
+              d += (i ? 'L' : 'M') + q[0].toFixed(1) + ' ' + q[1].toFixed(1);
+            }
+            body += `<path d="${d}Z" fill="none" stroke="${p.encre}" stroke-opacity="${Math.min(1, p.cerne * 0.95)}" stroke-width="${lw.toFixed(2)}"/>`;
+          }
+          if (p.anneaux >= 2) {
+            const rim = fig.R * rimScale();
+            const op = Math.min(1, p.cerne * 0.95);
+            const sw = Math.max(0.4, lw * 0.85).toFixed(2);
+            body += `<path d="${rimPath(fig.cx, fig.cy, rim, fig.rot, fig.lobe.amp, p.ouverture, fig.lobe.ang)}" fill="none" stroke="${p.accent}" stroke-opacity="${op}" stroke-width="${sw}"/>`;
+            if (p.anneaux >= 3) body += `<path d="${rimPath(fig.cx, fig.cy, rim * 0.955, fig.rot, fig.lobe.amp, p.ouverture, fig.lobe.ang)}" fill="none" stroke="${p.accent}" stroke-opacity="${op}" stroke-width="${sw}"/>`;
+          }
+        }
+      }
+      return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}"><rect width="100%" height="100%" fill="${p.fond}"/>${body}</svg>`;
+    }
+
+    app.loop((t) => {
+      const { w, h } = app.size;
+      if (w < 2 || h < 2) return;
+      paint(t, w, h, canvasTarget());
+      app.finish(ctx);
+    });
+  </script>
+</body>
+</html>
