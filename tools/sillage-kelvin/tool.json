@@ -1,0 +1,17 @@
+{
+  "slug": "sillage-kelvin",
+  "title": "Sillage de Kelvin",
+  "type": "generative",
+  "description": "Sillage de Kelvin : le V à 19,47° d'un mobile en eau profonde, crêtes transverses et divergentes, longueur d'onde 2πU²/g. Convois, croisements, export SVG.",
+  "tags": ["sillage", "kelvin", "ondes", "vagues", "convoi", "svg"],
+  "inspiration": [
+    "physique-maths.md — ondes, dispersion en eau profonde ω² = gk",
+    "Lord Kelvin, 1887 — angle de sillage arcsin(1/3), indépendant de la vitesse",
+    "Darmon, Dubois, Démery — Kelvin-Froude wake patterns (arXiv:1902.01884), crêtes (19) et (20)",
+    "DLMF §36.13 — Kelvin’s ship-wave pattern, caustique d’Airy sur les bras",
+    "Palettes chladni, papier-60, thermique, kegelbahn, menthe, luzern, photocopie, good-room"
+  ],
+  "author": "cursor",
+  "created": "2026-11-11",
+  "status": "finished"
+}

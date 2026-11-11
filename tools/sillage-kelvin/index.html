@@ -1,0 +1,523 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sillage de Kelvin</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Sillage de Kelvin (1887), eau profonde.
+    // Une vague d'angle θ ne suit le mobile que si sa célérité égale U cos θ.
+    // Avec ω² = g k, cela fixe k(θ) = k₀ / cos²θ, k₀ = g/U².
+    // Les crêtes sont les lignes de phase de Havelock (Darmon, Dubois, Démery, 2019) :
+    //   fₙ = −π (2n + 5/4)
+    //   x(k) = f k^(−3/2) (2k − 1) ,   y(k) = −f k^(−3/2) √(k − 1)
+    // k ∈ [1, 3/2] : crête transverse ; k > 3/2 : crête divergente.
+    // Les deux familles se rejoignent sur la caustique k = 3/2, d'angle arctan(1/(2√2)) = arcsin(1/3).
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d', { alpha: false });
+
+    const CHLADNI = Atelier.PALETTES.chladni.colors;
+    const P60 = Atelier.PALETTES['papier-60'].colors;
+    const THERM = Atelier.PALETTES.thermique.colors;
+    const KB = Atelier.PALETTES.kegelbahn.colors;
+    const MENTHE = Atelier.PALETTES.menthe.colors;
+    const LUZ = Atelier.PALETTES.luzern.colors;
+    const PHOTO = Atelier.PALETTES.photocopie.colors;
+    const GOOD = Atelier.PALETTES['good-room'].colors;
+    const ORB = Atelier.PALETTES.orbite.colors;
+
+    const TAU = Math.PI * 2;
+    const SAMPLES = 36;
+
+    let pilot = null;
+
+    const isLine = (q) => q.trajet !== 'cercle';
+    const isCircle = (q) => q.trajet === 'cercle';
+    const hasCross = (q) => !!q.rencontre;
+    const crossLine = (q) => q.rencontre && q.trajet !== 'cercle';
+    const isImage = (q) => q.forme === 'image';
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: 11,
+      finish: { grain: 0.12, vignette: 0.34 },
+      hint: 'Glissez pour lancer un mobile · molette pour la longueur d’onde',
+      notes: 'En eau profonde, le sillage tient dans l’angle arcsin(1/3) ≈ 19,47°, quelle que soit la vitesse U. La longueur d’onde le long de la route vaut 2π U²/g : un mobile plus rapide allonge les vagues sans ouvrir le V. Les arcs sont les crêtes transverses (k ≤ 3/2), les plumes les crêtes divergentes. En format portrait, la route se place dans la hauteur du cadre.',
+      params: {
+        'Sillage': {
+          longueur: { type: 'range', label: 'Longueur d’onde λ', min: 0.045, max: 0.26, step: 0.005, value: 0.16 },
+          cretes: { type: 'range', label: 'Crêtes', min: 3, max: 22, step: 1, value: 10 },
+          kmax: { type: 'range', label: 'Coupure des ondes courtes', min: 2.2, max: 12, step: 0.1, value: 5.4 },
+          transverse: { type: 'range', label: 'Poids transverse', min: 0, max: 1.6, step: 0.01, value: 0.72 },
+          caustique: { type: 'range', label: 'Éclat de caustique', min: 0.2, max: 2.6, step: 0.01, value: 1.2 },
+          fondu: { type: 'range', label: 'Fondu lointain', min: 0, max: 1, step: 0.01, value: 0.28 },
+        },
+        'Convoi': {
+          mobiles: { type: 'range', label: 'Mobiles', min: 1, max: 6, step: 1, value: 1 },
+          ecart: { type: 'range', label: 'Espacement (λ)', min: 0, max: 12, step: 0.1, value: 8.5, show: isLine },
+          voies: { type: 'range', label: 'Écart des voies', min: 0, max: 0.72, step: 0.01, value: 0.22, show: isLine },
+          cap: { type: 'range', label: 'Cap (°)', min: -180, max: 180, step: 1, value: 0 },
+          trajet: { type: 'segmented', label: 'Trajet', options: { ligne: 'Ligne', cercle: 'Cercle' }, value: 'ligne' },
+          rayon: { type: 'range', label: 'Rayon', min: 0.16, max: 0.46, step: 0.01, value: 0.34, show: isCircle },
+          rencontre: { type: 'toggle', label: 'Second convoi', value: false },
+          cap2: { type: 'range', label: 'Cap du second (°)', min: -180, max: 180, step: 1, value: -146, show: crossLine },
+          vitesse2: { type: 'range', label: 'Vitesse du second', min: 0.42, max: 1.75, step: 0.01, value: 0.68, show: hasCross },
+          boucle: { type: 'range', label: 'Durée de boucle (s)', min: 4, max: 18, step: 0.5, value: 10 },
+        },
+        'Trait': {
+          epaisseur: { type: 'range', label: 'Épaisseur', min: 0.0008, max: 0.012, step: 0.0001, value: 0.0042 },
+          halo: { type: 'range', label: 'Halo', min: 0, max: 1, step: 0.01, value: 0.48 },
+          lumiere: { type: 'toggle', label: 'Lumière additive', value: true },
+          rendu: { type: 'segmented', label: 'Rendu', options: { encre: 'Encre', familles: 'Familles', convoi: 'Convoi', spectre: 'Spectre' }, value: 'encre' },
+        },
+        'Couleur': {
+          fond: { type: 'color', label: 'Fond', value: CHLADNI[0] },
+          encre: { type: 'color', label: 'Encre', value: CHLADNI[2] },
+          palette: { type: 'palette', label: 'Palette', value: [CHLADNI[2], CHLADNI[1], ORB[0]] },
+        },
+        'Marque': {
+          forme: { type: 'segmented', label: 'Forme', options: { aucune: 'Aucune', anneau: 'Anneau', disque: 'Disque', losange: 'Losange', triangle: 'Triangle', image: 'Image' }, value: 'anneau' },
+          taille: { type: 'range', label: 'Taille', min: 0.006, max: 0.08, step: 0.001, value: 0.015 },
+          marque: { type: 'color', label: 'Encre de marque', value: CHLADNI[2], show: (q) => q.forme !== 'aucune' && q.forme !== 'image' },
+          image: { type: 'file', label: 'Image ou logo', accept: 'image/*', show: isImage },
+        },
+        'Geste': {
+          effacer: { type: 'button', label: 'Effacer le mobile lancé', explore: false, action: () => { pilot = null; } },
+        },
+      },
+      presets: {
+        'Nuit': { seed: 11 },
+        'Canard': {
+          seed: 4, longueur: 0.125, cretes: 8, kmax: 5.8, transverse: 0.75, caustique: 1.05, fondu: 0.15,
+          mobiles: 1, ecart: 2, voies: 0.11, cap: 0, trajet: 'ligne', rencontre: true, cap2: 0, vitesse2: 0.74, boucle: 12,
+          epaisseur: 0.0034, halo: 0.1, lumiere: false, rendu: 'convoi',
+          fond: P60[0], encre: P60[1], palette: [P60[1], ORB[0]], marque: P60[1], forme: 'losange', taille: 0.015,
+          grain: 0.1, vignette: 0.14,
+        },
+        'Rencontre': {
+          seed: 7, longueur: 0.15, cretes: 6, kmax: 3.1, transverse: 1.12, caustique: 0.9, fondu: 0.05,
+          mobiles: 1, voies: 0, cap: 0, rencontre: true, cap2: 180, vitesse2: 1, boucle: 14,
+          epaisseur: 0.0042, halo: 0.12, lumiere: false, rendu: 'convoi',
+          fond: KB[0], encre: KB[1], palette: [KB[1], KB[2]], marque: KB[3], forme: 'triangle', taille: 0.018,
+          grain: 0.11, vignette: 0.32,
+        },
+        'Gravure': {
+          seed: 33, longueur: 0.072, cretes: 18, kmax: 8.5, transverse: 0.95, caustique: 0.55, fondu: 0.15,
+          mobiles: 1, ecart: 6, voies: 0, cap: 4, trajet: 'ligne', rencontre: false, boucle: 14,
+          epaisseur: 0.0018, halo: 0, lumiere: false, rendu: 'encre',
+          fond: PHOTO[0], encre: PHOTO[1], palette: [PHOTO[1], PHOTO[2]], marque: PHOTO[1], forme: 'aucune',
+          grain: 0.2, vignette: 0.16,
+        },
+        'Ronde': {
+          seed: 8, longueur: 0.066, cretes: 5, kmax: 3.6, transverse: 0.72, caustique: 1.3, fondu: 0.02,
+          mobiles: 4, cap: 8, trajet: 'cercle', rayon: 0.18, rencontre: true, vitesse2: 0.72, boucle: 16,
+          epaisseur: 0.0074, halo: 0.42, lumiere: true, rendu: 'convoi',
+          fond: MENTHE[1], encre: MENTHE[2], palette: [MENTHE[2], MENTHE[0], MENTHE[3], MENTHE[2]], marque: MENTHE[0], forme: 'disque', taille: 0.012,
+          grain: 0.1, vignette: 0.34,
+        },
+        'Thermique': {
+          seed: 27, longueur: 0.12, cretes: 11, kmax: 5.6, transverse: 0.55, caustique: 1.55, fondu: 0.48,
+          mobiles: 1, ecart: 5, voies: 0, cap: 28, trajet: 'ligne', rencontre: false, boucle: 11,
+          epaisseur: 0.004, halo: 0.7, lumiere: true, rendu: 'spectre',
+          fond: CHLADNI[0], encre: THERM[3], palette: [THERM[1], THERM[4], THERM[2], THERM[3], THERM[5]], marque: THERM[3], forme: 'anneau', taille: 0.02,
+          grain: 0.12, vignette: 0.5,
+        },
+        'Luzern': {
+          seed: 15, longueur: 0.15, cretes: 8, kmax: 4.4, transverse: 0.45, caustique: 1.5, fondu: 0.16,
+          mobiles: 1, ecart: 4, voies: 0, cap: -8, trajet: 'ligne', rencontre: false, boucle: 10,
+          epaisseur: 0.0048, halo: 0.18, lumiere: false, rendu: 'familles',
+          fond: LUZ[0], encre: LUZ[4], palette: [LUZ[1], LUZ[4]], marque: LUZ[3], forme: 'triangle', taille: 0.022,
+          grain: 0.08, vignette: 0.22,
+        },
+        'Convoi': {
+          seed: 42, longueur: 0.14, cretes: 9, kmax: 5.2, transverse: 0.58, caustique: 1.15, fondu: 0.14,
+          mobiles: 3, ecart: 0, voies: 0.1, cap: 0, trajet: 'ligne', rencontre: false, boucle: 10,
+          epaisseur: 0.0034, halo: 0.18, lumiere: false, rendu: 'convoi',
+          fond: GOOD[0], encre: GOOD[1], palette: [GOOD[1], GOOD[2], GOOD[4]], marque: GOOD[1], forme: 'anneau', taille: 0.012,
+          grain: 0.11, vignette: 0.3,
+        },
+      },
+      brand(colors) {
+        const list = (colors || []).filter((c) => /^#[0-9a-f]{6}$/i.test(c));
+        if (!list.length) return {};
+        const fond = [...list].sort((a, b) => luma(a) - luma(b))[0];
+        const inks = list.filter((c) => c.toLowerCase() !== fond.toLowerCase());
+        const ink = inks[0] || CHLADNI[2];
+        return { fond, encre: ink, marque: inks[1] || ink, palette: inks.length ? inks : [ink] };
+      },
+      onChange(key) { if (key === '*') pilot = null; },
+      pointer: {
+        down(q) {
+          const { w, h } = app.size;
+          const hd = course(app.params.cap, w || 1, h || 1);
+          pilot = { x: q.x, y: q.y, fx: hd.fx, fy: hd.fy };
+        },
+        drag(q) {
+          if (!pilot) return;
+          const L = Math.hypot(q.vx, q.vy);
+          if (L > 0.4) {
+            const s = 0.5;
+            pilot.fx = pilot.fx * (1 - s) + (q.vx / L) * s;
+            pilot.fy = pilot.fy * (1 - s) + (q.vy / L) * s;
+            const n = Math.hypot(pilot.fx, pilot.fy) || 1;
+            pilot.fx /= n;
+            pilot.fy /= n;
+          }
+          pilot.x = q.x;
+          pilot.y = q.y;
+        },
+        up(q) { if (pilot) { pilot.x = q.x; pilot.y = q.y; } },
+        wheel(_q, dy) {
+          const step = 0.005;
+          let next = app.params.longueur * (dy > 0 ? 0.92 : 1.08);
+          next = Math.round(next / step) * step;
+          next = Math.min(0.26, Math.max(0.045, next));
+          app.set('longueur', +next.toFixed(3));
+        },
+      },
+      export: {
+        svg: () => sceneSVG(app.size.w, app.size.h, app.time),
+      },
+    });
+
+    const p = app.params;
+
+    function luma(hex) {
+      const n = parseInt(String(hex).slice(1), 16);
+      const r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255;
+      return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    }
+
+    function rgba(hex, a) {
+      const n = parseInt(String(hex).replace('#', ''), 16);
+      return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${Math.max(0, Math.min(1, a))})`;
+    }
+
+    function mix(a, b, t) {
+      const pa = parseInt(a.slice(1), 16), pb = parseInt(b.slice(1), 16);
+      const ch = (s) => {
+        const ca = (pa >> s) & 255, cb = (pb >> s) & 255;
+        return Math.round(ca + (cb - ca) * t);
+      };
+      return '#' + [ch(16), ch(8), ch(0)].map((v) => v.toString(16).padStart(2, '0')).join('');
+    }
+
+    function samplePal(pal, t) {
+      if (!pal.length) return p.encre;
+      if (pal.length === 1) return pal[0];
+      const x = Math.min(0.9999, Math.max(0, t)) * (pal.length - 1);
+      const i = Math.floor(x);
+      return mix(pal[i], pal[Math.min(pal.length - 1, i + 1)], x - i);
+    }
+
+    function heading(deg) {
+      const rad = -deg * Math.PI / 180;
+      const fx = Math.cos(rad), fy = Math.sin(rad);
+      return { fx, fy, px: fy, py: -fx };
+    }
+
+    // En portrait la route suit la hauteur, pour que le V occupe le cadre.
+    function course(deg, w, h) {
+      return heading(h > w * 1.06 ? deg + 90 : deg);
+    }
+
+    function placeOrigin(w, h, hd, back) {
+      const inset = Math.min(w, h) * 0.08;
+      const cx = w * 0.5, cy = h * 0.5;
+      const room = (dir, span, center) => (
+        Math.abs(dir) < 0.02 ? Infinity : (dir > 0 ? span - inset - center : center - inset) / Math.abs(dir)
+      );
+      const reach = Math.max(0, Math.min(back, room(hd.fx, w, cx), room(hd.fy, h, cy)));
+      return { x: cx + hd.fx * reach, y: cy + hd.fy * reach };
+    }
+
+    function mod1(x) { return ((x % 1) + 1) % 1; }
+
+    function phaseOf(t) {
+      const shift = app.rng(4)();
+      return mod1(t / Math.max(0.5, p.boucle) + shift);
+    }
+
+    // Poids d'une crête : pic d'Airy sur la caustique k = 3/2, transverse plus faible, fondu vers l'arrière.
+    function weight(k, family, n, crestCount) {
+      const d = Math.abs(k - 1.5);
+      const airy = 0.42 + (0.38 * p.caustique) / (1 + d * 6.5);
+      const fam = family === 0 ? p.transverse : 1;
+      const dist = crestCount <= 1 ? 0 : n / (crestCount - 1);
+      const fade = 1 - p.fondu * Math.pow(dist, 0.85);
+      const u = family === 1 ? (k - 1.5) / Math.max(0.2, p.kmax - 1.5) : 0;
+      const taper = family === 1 ? Math.pow(Math.max(0, 1 - u), 1.15) : 1;
+      return Math.max(0, airy * fam * fade * taper);
+    }
+
+    function kelvin(n, k, phi) {
+      const f = -Math.PI * (2 * (n + phi) + 1.25);
+      const s = Math.pow(k, -1.5);
+      return { x: f * s * (2 * k - 1), y: -f * s * Math.sqrt(Math.max(0, k - 1)), f };
+    }
+
+    function screenOf(ship, x, y) {
+      const X = x * ship.unit, Y = y * ship.unit;
+      return { x: ship.x + ship.fx * X + ship.px * Y, y: ship.y + ship.fy * X + ship.py * Y };
+    }
+
+    function halfWidth(ship, wt) {
+      const u = ship.u;
+      return Math.min(u * 0.055, Math.max(0.35, p.epaisseur * u * wt));
+    }
+
+    function colorFor(ship, family, n, crestCount) {
+      const pal = (p.palette && p.palette.length) ? p.palette : [p.encre];
+      if (p.rendu === 'familles') return pal[family % pal.length];
+      if (p.rendu === 'convoi') return pal[ship.color % pal.length];
+      if (p.rendu === 'spectre') return samplePal(pal, crestCount <= 1 ? 0 : n / (crestCount - 1));
+      return p.encre;
+    }
+
+    function curve(ship, localPts, family, n, crestCount) {
+      const pts = [];
+      for (const lp of localPts) {
+        const wt = weight(lp.k, family, n, crestCount);
+        const s = screenOf(ship, lp.x, lp.y);
+        pts.push({ x: s.x, y: s.y, w: halfWidth(ship, wt), k: lp.k });
+      }
+      let minx = Infinity, miny = Infinity, maxx = -Infinity, maxy = -Infinity;
+      for (const q of pts) {
+        if (q.x < minx) minx = q.x;
+        if (q.y < miny) miny = q.y;
+        if (q.x > maxx) maxx = q.x;
+        if (q.y > maxy) maxy = q.y;
+      }
+      const m = ship.u * 0.08;
+      if (maxx < -m || maxy < -m || minx > ship.w + m || miny > ship.h + m) return null;
+      const fade = 1 - p.fondu * (crestCount <= 1 ? 0 : n / (crestCount - 1));
+      return {
+        pts, family, n,
+        color: colorFor(ship, family, n, crestCount),
+        alpha: Math.max(0.08, fade),
+      };
+    }
+
+    function transverseLocals(n, phi) {
+      const count = SAMPLES;
+      const pts = [];
+      for (let i = 0; i < count; i++) {
+        const u = i / (count - 1);
+        const c = 0.5 - 0.5 * Math.cos(u * Math.PI);
+        const k = 1.5 - (1.5 - 1.004) * c;
+        const kv = kelvin(n, k, phi);
+        pts.push({ x: kv.x, y: kv.y, k });
+      }
+      const mid = kelvin(n, 1, phi);
+      pts.push({ x: mid.f, y: 0, k: 1 });
+      for (let i = count - 1; i >= 0; i--) pts.push({ x: pts[i].x, y: -pts[i].y, k: pts[i].k });
+      return pts;
+    }
+
+    function divergentLocals(n, sign, phi) {
+      const count = SAMPLES;
+      const pts = [];
+      const kmax = Math.max(2.05, p.kmax);
+      for (let i = 0; i < count; i++) {
+        const u = i / (count - 1);
+        const k = 1.5 + (kmax - 1.5) * (1 - Math.cos(u * Math.PI * 0.5));
+        const kv = kelvin(n, k, phi);
+        pts.push({ x: kv.x, y: sign * kv.y, k });
+      }
+      return pts;
+    }
+
+    function shipCurves(ship, phi) {
+      const N = p.cretes | 0;
+      const out = [];
+      for (let n = 0; n < N; n++) {
+        if (p.transverse > 0.001) {
+          const c = curve(ship, transverseLocals(n, phi), 0, n, N);
+          if (c) out.push(c);
+        }
+        for (const sign of [1, -1]) {
+          const c = curve(ship, divergentLocals(n, sign, phi), 1, n, N);
+          if (c) out.push(c);
+        }
+      }
+      return out;
+    }
+
+    function collectShips(w, h, t) {
+      const u = Math.min(w, h);
+      const ph = phaseOf(t);
+      const ships = [];
+      const refL = u * p.longueur;
+      if (p.trajet === 'cercle') {
+        const groups = p.rencontre ? 2 : 1;
+        for (let g = 0; g < groups; g++) {
+          const count = p.mobiles | 0;
+          const speed = g === 0 ? 1 : p.vitesse2;
+          const R = p.rayon * u * (g === 0 ? 1 : 0.64);
+          const dir = g === 0 ? 1 : -1;
+          for (let i = 0; i < count; i++) {
+            const ang = dir * ph * TAU + (i / count) * TAU - p.cap * Math.PI / 180 + g * 0.35;
+            const fx = -dir * Math.sin(ang), fy = dir * Math.cos(ang);
+            ships.push(makeShip(w / 2 + Math.cos(ang) * R, h / 2 + Math.sin(ang) * R, fx, fy, speed, g * count + i, w, h, u));
+          }
+        }
+      } else {
+        const groups = p.rencontre ? 2 : 1;
+        for (let g = 0; g < groups; g++) {
+          const count = p.mobiles | 0;
+          const speed = g === 0 ? 1 : p.vitesse2;
+          const hd = course(g === 0 ? p.cap : p.cap2, w, h);
+          const angled = groups === 2 && Math.abs(p.cap - p.cap2) > 8;
+          const back = refL * p.cretes * (angled ? 0.44 : 0.42);
+          const origin = placeOrigin(w, h, hd, back);
+          const ox = origin.x, oy = origin.y;
+          const midIndex = (count - 1) / 2;
+          for (let i = 0; i < count; i++) {
+            const along = (i - midIndex) * p.ecart * refL;
+            const spread = p.voies * u;
+            const lane = (i - midIndex) * spread + (groups === 2 ? (g - 0.5) * spread : 0);
+            const x = ox + hd.fx * along + hd.px * lane;
+            const y = oy + hd.fy * along + hd.py * lane;
+            ships.push(makeShip(x, y, hd.fx, hd.fy, speed, g * count + i, w, h, u));
+          }
+        }
+      }
+      if (pilot) {
+        const n = Math.hypot(pilot.fx, pilot.fy) || 1;
+        ships.push(makeShip(pilot.x, pilot.y, pilot.fx / n, pilot.fy / n, 1, 99, w, h, u));
+      }
+      return ships;
+    }
+
+    function makeShip(x, y, fx, fy, speed, color, w, h, u) {
+      const lambda = u * p.longueur * speed * speed;
+      return { x, y, fx, fy, px: fy, py: -fx, unit: lambda / TAU, speed, color, w, h, u, lambda };
+    }
+
+    function buildScene(w, h, t) {
+      const ships = collectShips(w, h, t);
+      const phi = phaseOf(t);
+      const curves = [];
+      for (const ship of ships) curves.push(...shipCurves(ship, phi));
+      curves.sort((a, b) => b.n - a.n || a.family - b.family);
+      return { ships, curves };
+    }
+
+    function strokePath(ctx, pts, width, color, alpha) {
+      if (pts.length < 2 || width < 0.2 || alpha < 0.01) return;
+      ctx.beginPath();
+      ctx.moveTo(pts[0].x, pts[0].y);
+      for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+      ctx.strokeStyle = rgba(color, alpha);
+      ctx.lineWidth = width;
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      ctx.stroke();
+    }
+
+    function paintCurve(ctx, c) {
+      let acc = 0;
+      for (const q of c.pts) acc += q.w;
+      const base = Math.max(0.55, (acc / c.pts.length) * (0.72 + (1 - p.halo) * 0.35));
+      if (p.halo > 0.02) {
+        ctx.save();
+        if (p.lumiere) ctx.globalCompositeOperation = 'lighter';
+        strokePath(ctx, c.pts, base * (1 + p.halo * 2.4), c.color, c.alpha * p.halo * 0.16);
+        ctx.restore();
+      }
+      strokePath(ctx, c.pts, base, c.color, Math.min(1, c.alpha * 0.94));
+    }
+
+    function markInk(ship) {
+      if (p.rendu === 'convoi') {
+        const pal = (p.palette && p.palette.length) ? p.palette : [p.marque];
+        return pal[ship.color % pal.length];
+      }
+      return p.marque;
+    }
+
+    function paintMark(ctx, ship) {
+      if (p.forme === 'aucune') return;
+      const s = ship.u * p.taille;
+      if (s < 0.5) return;
+      ctx.save();
+      ctx.translate(ship.x, ship.y);
+      ctx.rotate(Math.atan2(ship.fy, ship.fx));
+      ctx.fillStyle = p.fond;
+      ctx.beginPath();
+      ctx.arc(0, 0, s * 1.85, 0, TAU);
+      ctx.fill();
+      const ink = markInk(ship);
+      if (p.forme === 'image') {
+        const img = p.image;
+        if (img && img.width) {
+          const iw = s * 3.2, ih = iw * (img.height / img.width);
+          ctx.drawImage(img, -iw / 2, -ih / 2, iw, ih);
+        }
+      } else if (p.forme === 'disque') {
+        ctx.fillStyle = ink;
+        ctx.beginPath();
+        ctx.arc(0, 0, s, 0, TAU);
+        ctx.fill();
+      } else if (p.forme === 'anneau') {
+        ctx.strokeStyle = ink;
+        ctx.lineWidth = Math.max(1, s * 0.28);
+        ctx.beginPath();
+        ctx.arc(0, 0, s, 0, TAU);
+        ctx.stroke();
+      } else if (p.forme === 'losange') {
+        ctx.fillStyle = ink;
+        ctx.beginPath();
+        ctx.moveTo(s * 1.25, 0);
+        ctx.lineTo(0, s * 0.72);
+        ctx.lineTo(-s * 1.25, 0);
+        ctx.lineTo(0, -s * 0.72);
+        ctx.closePath();
+        ctx.fill();
+      } else if (p.forme === 'triangle') {
+        ctx.fillStyle = ink;
+        ctx.beginPath();
+        ctx.moveTo(s * 1.45, 0);
+        ctx.lineTo(-s * 0.9, s * 0.82);
+        ctx.lineTo(-s * 0.9, -s * 0.82);
+        ctx.closePath();
+        ctx.fill();
+      }
+      ctx.restore();
+    }
+
+    function sceneSVG(w, h, t) {
+      const { ships, curves } = buildScene(w, h, t);
+      const parts = [`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}">`];
+      parts.push(`<rect width="${w}" height="${h}" fill="${p.fond}"/>`);
+      for (const c of curves) {
+        if (c.pts.length < 2) continue;
+        const d = c.pts.map((q, i) => `${i ? 'L' : 'M'}${q.x.toFixed(1)} ${q.y.toFixed(1)}`).join(' ');
+        const sw = Math.max(0.4, c.pts.reduce((s, q) => s + q.w, 0) / c.pts.length * (0.5 + (1 - p.halo) * 0.4));
+        parts.push(`<path d="${d}" fill="none" stroke="${c.color}" stroke-width="${sw.toFixed(2)}" stroke-linecap="round" stroke-linejoin="round" opacity="${c.alpha.toFixed(3)}"/>`);
+      }
+      parts.push('</svg>');
+      return parts.join('');
+    }
+
+    app.loop((t) => {
+      const { w, h, dpr } = app.size;
+      if (w < 2 || h < 2) return;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = p.fond;
+      ctx.fillRect(0, 0, w, h);
+      const scene = buildScene(w, h, t);
+      for (const c of scene.curves) paintCurve(ctx, c);
+      for (const s of scene.ships) paintMark(ctx, s);
+      app.finish(ctx);
+    });
+  </script>
+</body>
+</html>
