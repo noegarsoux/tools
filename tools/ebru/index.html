@@ -1,0 +1,1005 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ebru</title>
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Ebru : le papier marbré à la cuve, selon le modèle exact d'Aubrey Jaffer (Mathematical Marbling).
+    // Chaque geste du marbreur est une transformation du plan, continue et inversible :
+    //  · goutte de rayon r en C : P → C + (P − C)·√(1 + r²/|P − C|²) (l'encre déjà posée s'écarte sans perdre d'aire) ;
+    //  · trait de stylet ou de peigne : P → P + z·u^d·M (déplacement le long du trait, qui décroît avec la distance d) ;
+    //  · peigne circulaire et tourbillon de Lamb–Oseen : rotation d'un angle qui ne dépend que du rayon ;
+    //  · stylet en serpentin : trait droit conjugué par une onde de cisaillement.
+    // Comme chez Lu, Jaffer et al. (IEEE CG&A, 2012), chaque goutte est un contour vectoriel que chaque geste
+    // transporte ; on insère des points là où il s'étire ou se courbe. Le rendu est exact à toute définition,
+    // et l'export SVG reprend les contours affichés.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const MAXC = 8;
+    const SKIM = 0.07;          // part du cycle consacrée à l'écrémage du bain
+    const REPRISE = 5;          // secondes sans geste avant que le programme reprenne
+    const TAU = Math.PI * 2;
+    // Précision des contours, en unités du bain (le petit côté de l'image vaut 1).
+    const TOL = 0.00012, CAP = 0.006, VMAX = 600000;
+    const BUDGET = 1.5e6;       // sommets transportés par image quand le cycle est rejoué après un réglage
+
+    const lamOf = (v) => 0.004 * Math.pow(30, v);                 // viscosité → portée du sillage (unités du bain)
+    const ease = (x) => x * x * (3 - 2 * x);
+    const clamp = (x, a, b) => Math.min(b, Math.max(a, x));
+    const rgb = (h) => { const n = parseInt(String(h).slice(1, 7), 16) || 0; return [n >> 16 & 255, n >> 8 & 255, n & 255]; };
+    const hex = (c) => '#' + c.map((v) => Math.round(clamp(v, 0, 255)).toString(16).padStart(2, '0')).join('');
+    const mixHex = (a, b, t) => { const A = rgb(a), B = rgb(b); return hex(A.map((v, i) => v + (B[i] - v) * t)); };
+    const luma = (h) => { const [r, g, b] = rgb(h); return (r * 0.2126 + g * 0.7152 + b * 0.0722) / 255; };
+    const isIn = (v, ...l) => l.includes(v);
+
+    // État du bain : la suite des gestes du cycle, les contours déjà transportés, l'horloge.
+    let prog = [], ops = [], ci = 0, regions = [], baseInit = [], geo = null;
+    let clock = 0, curT = 20, cycleIdx = 0, lastUser = -1e9, lastPhi = -1, dirty = true;
+    let HA = 1, HB = 1, QUAL = 1, VN = 0, behind = false, blank = true;
+    let imgPix = null, imgSrc = null, logoLoops = null, logoSrc;
+    let paperPat = null, gestR = null;
+    const G = { st: null };
+
+    const DEP = { semis: 'Semis (battal)', bandes: 'Bandes', cibles: 'Cibles', sumi: 'Suminagashi', aucun: 'Aucun' };
+    const OUT = { aucun: 'Aucun', allerretour: 'Aller-retour (gel-git)', peigne: 'Peigne (nonpareil)', paon: 'Paon', vagues: 'Stylet en serpentin', souffle: 'Souffle (suminagashi)', petales: 'Pétales (tulipes)', spirales: 'Spirales (nid)', tourbillon: 'Tourbillon', rosace: 'Peigne circulaire' };
+
+    const BM = PAL('bitmap'), BI = PAL('biennale'), GL = PAL('glyphes'), PG = PAL('papier-gris'), LU = PAL('luzern');
+    const AC = PAL('acide'), GR = PAL('good-room'), P60 = PAL('papier-60');
+    const pal = (c) => ({ fond: c[0], encres: c.slice(1), lisereCol: c[0] });
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: true,
+      finish: { grain: 0.1, vignette: 0.1 },
+      hint: 'Touchez pour verser une goutte (maintenez : elle grossit) · glissez pour tirer le stylet ou le peigne · molette : tourbillon',
+      notes: 'Chaque goutte écarte l’encre déjà posée sans en changer l’aire ; chaque trait la déplace d’autant moins qu’elle est loin de la pointe (modèle exact de Jaffer). Le programme rejoue en boucle le travail du marbreur, puis écrème le bain.',
+      params: {
+        'Programme': {
+          depot: { type: 'select', label: 'Dépôt des gouttes', options: DEP, value: 'semis' },
+          outils: { type: 'select', label: 'Outil', options: OUT, value: 'allerretour' },
+          cycle: { type: 'range', label: 'Durée du cycle (s)', min: 6, max: 60, step: 1, value: 20 },
+          pose: { type: 'range', label: 'Temps de pose', min: 0, max: 0.5, step: 0.01, value: 0.16 },
+          boucle: { type: 'toggle', label: 'Écrémer et recommencer', value: true },
+          varier: { type: 'toggle', label: 'Varier à chaque cycle', value: false },
+        },
+        'Gouttes': {
+          gouttes: { type: 'range', label: 'Nombre de gouttes', min: 6, max: 400, step: 1, value: 90, show: (q) => isIn(q.depot, 'semis', 'bandes') },
+          taille: { type: 'range', label: 'Taille des gouttes', min: 0.02, max: 0.3, step: 0.005, value: 0.14 },
+          varTaille: { type: 'range', label: 'Variation de taille', min: 0, max: 1, step: 0.01, value: 0.55, show: (q) => isIn(q.depot, 'semis', 'bandes', 'cibles') },
+          centres: { type: 'range', label: 'Centres', min: 1, max: 16, step: 1, value: 5, show: (q) => isIn(q.depot, 'cibles', 'sumi') || isIn(q.outils, 'petales', 'spirales') },
+          anneaux: { type: 'range', label: 'Anneaux par centre', min: 2, max: 40, step: 1, value: 9, show: (q) => isIn(q.depot, 'cibles', 'sumi') },
+          etalement: { type: 'range', label: 'Étalement d’une goutte (s)', min: 0.2, max: 3, step: 0.05, value: 0.9 },
+          fiel: { type: 'range', label: 'Gouttes de fiel (eau claire)', min: 0, max: 300, step: 1, value: 0 },
+          tailleFiel: { type: 'range', label: 'Taille du fiel', min: 0.1, max: 1, step: 0.01, value: 0.3, show: (q) => q.fiel > 0 },
+          image: { type: 'file', label: 'Couleurs d’après une image', accept: 'image/*' },
+          imageOn: { type: 'toggle', label: 'Prendre les couleurs de l’image', value: true, show: (q) => !!q.image },
+        },
+        'Peigne': {
+          orientation: { type: 'range', label: 'Orientation (°)', min: -90, max: 90, step: 1, value: 0, show: (q) => q.outils !== 'aucun' || q.depot === 'bandes' },
+          passes: { type: 'range', label: 'Passes du stylet', min: 2, max: 30, step: 1, value: 10, show: (q) => isIn(q.outils, 'allerretour', 'peigne', 'paon', 'vagues') },
+          ecart: { type: 'range', label: 'Écart des dents', min: 0.012, max: 0.2, step: 0.001, value: 0.045, show: (q) => isIn(q.outils, 'peigne', 'paon', 'rosace') || q.geste === 'peigne' },
+          force: { type: 'range', label: 'Déplacement (z)', min: 0.02, max: 0.5, step: 0.005, value: 0.22, show: (q) => isIn(q.outils, 'allerretour', 'peigne', 'paon', 'vagues', 'petales', 'rosace') },
+          viscosite: { type: 'range', label: 'Viscosité du bain', min: 0, max: 1, step: 0.01, value: 0.42 },
+          souffles: { type: 'range', label: 'Souffles', min: 1, max: 8, step: 1, value: 3, show: (q) => q.outils === 'souffle' },
+          vague: { type: 'range', label: 'Amplitude des vagues', min: 0, max: 0.3, step: 0.005, value: 0.07, show: (q) => isIn(q.outils, 'paon', 'vagues', 'souffle') },
+          onde: { type: 'range', label: 'Longueur d’onde', min: 0.05, max: 1.2, step: 0.01, value: 0.34, show: (q) => isIn(q.outils, 'paon', 'vagues', 'souffle') },
+          petales: { type: 'range', label: 'Pétales', min: 2, max: 12, step: 1, value: 5, show: (q) => q.outils === 'petales' },
+          sensPetales: { type: 'segmented', label: 'Sens des pétales', options: { centre: 'Vers le centre', dehors: 'Vers l’extérieur' }, value: 'centre', show: (q) => q.outils === 'petales' },
+          tours: { type: 'range', label: 'Tours', min: -3, max: 3, step: 0.05, value: 1.2, show: (q) => isIn(q.outils, 'spirales', 'tourbillon') },
+        },
+        'Geste': {
+          geste: { type: 'segmented', label: 'Au glisser', options: { stylet: 'Stylet', peigne: 'Peigne', gouttes: 'Gouttes', tourbillon: 'Tourbillon' }, value: 'stylet' },
+          dentsGeste: { type: 'range', label: 'Dents du peigne', min: 2, max: 15, step: 1, value: 6, show: (q) => q.geste === 'peigne' },
+          forceGeste: { type: 'range', label: 'Force du geste', min: 0.1, max: 0.9, step: 0.01, value: 0.6, show: (q) => isIn(q.geste, 'stylet', 'peigne') },
+        },
+        'Bain': {
+          base: { type: 'segmented', label: 'Fond du bain', options: { uni: 'Uni', rayures: 'Rayures', forme: 'Forme' }, value: 'uni' },
+          rayures: { type: 'range', label: 'Largeur des rayures', min: 0.01, max: 0.25, step: 0.001, value: 0.05, show: (q) => q.base === 'rayures' },
+          angleRayures: { type: 'range', label: 'Angle des rayures (°)', min: -90, max: 90, step: 1, value: 90, show: (q) => q.base === 'rayures' },
+          forme: { type: 'select', label: 'Forme', options: { disque: 'Disque', anneau: 'Anneau', losange: 'Losange', logo: 'Logo de la charte' }, value: 'logo', show: (q) => q.base === 'forme' },
+          tailleForme: { type: 'range', label: 'Taille de la forme', min: 0.15, max: 1, step: 0.01, value: 0.62, show: (q) => q.base === 'forme' },
+        },
+        'Rendu': {
+          rendu: { type: 'segmented', label: 'Rendu', options: { aplat: 'Aplat', pigment: 'Pigment', trait: 'Trait' }, value: 'pigment' },
+          bord: { type: 'range', label: 'Bord pigmenté', min: 0.04, max: 0.6, step: 0.01, value: 0.2, show: (q) => q.rendu === 'pigment' },
+          veines: { type: 'range', label: 'Veines par goutte', min: 1, max: 4, step: 1, value: 1, show: (q) => q.rendu === 'pigment' },
+          contraste: { type: 'range', label: 'Contraste du pigment', min: 0, max: 1, step: 0.01, value: 0.4, show: (q) => q.rendu === 'pigment' },
+          lisere: { type: 'range', label: 'Liseré / trait (‰)', min: 0, max: 8, step: 0.05, value: 0 },
+          papier: { type: 'range', label: 'Texture du papier', min: 0, max: 1, step: 0.01, value: 0.35 },
+        },
+        'Couleur': {
+          fond: { type: 'color', label: 'Fond (bain)', value: BM[0] },
+          encres: { type: 'palette', label: 'Encres', value: BM.slice(1) },
+          lisereCol: { type: 'color', label: 'Liseré (et trait du fiel)', value: BM[0] },
+        },
+      },
+      presets: {
+        'Gel-git': {},
+        'Nonpareil': { outils: 'peigne', gouttes: 110, taille: 0.11, passes: 9, force: 0.17, ecart: 0.045, ...pal(AC), seed: 11 },
+        'Battal': { outils: 'aucun', gouttes: 260, taille: 0.075, varTaille: 0.8, fiel: 140, tailleFiel: 0.26, ...pal(GL), seed: 17 },
+        'Paon': { outils: 'paon', gouttes: 100, taille: 0.12, passes: 9, ecart: 0.045, force: 0.17, vague: 0.07, onde: 0.34, ...pal(LU), seed: 21 },
+        'Tulipes': { depot: 'cibles', outils: 'petales', centres: 7, anneaux: 11, taille: 0.13, petales: 5, force: 0.13, viscosite: 0.3, ...pal(BI), seed: 8 },
+        'Nid': { outils: 'spirales', gouttes: 140, taille: 0.1, centres: 12, tours: 1.6, ...pal(GR), seed: 4 },
+        'Suminagashi': { depot: 'sumi', outils: 'souffle', centres: 5, anneaux: 40, taille: 0.075, souffles: 4, vague: 0.14, onde: 0.45, viscosite: 0.75, ...pal(PG), seed: 5 },
+        'Gravure': { depot: 'aucun', base: 'rayures', rayures: 0.018, angleRayures: 0, outils: 'vagues', orientation: 90, passes: 7, vague: 0.08, onde: 0.4, force: 0.2, rendu: 'trait', lisere: 1.4, papier: 0.5, ...pal(P60), seed: 2 },
+      },
+      brand(colors, a) {
+        const q = a.params, cur = luma(q.fond);
+        const bath = colors.reduce((a, c) => (Math.abs(luma(c) - cur) < Math.abs(luma(a) - cur) ? c : a), colors[0]);
+        let inks = colors.filter((c) => c !== bath);
+        if (!inks.length) inks = [luma(bath) > 0.5 ? '#111111' : '#f2f2f2'];
+        const far = [...inks].sort((a, b) => Math.abs(luma(b) - luma(bath)) - Math.abs(luma(a) - luma(bath)))[0];
+        return { fond: bath, encres: inks.slice(0, MAXC), lisereCol: q.rendu === 'trait' ? far : bath };
+      },
+      pointer: {
+        down(q) {
+          touch();
+          G.st = 'pending'; G.P0 = loc(q); G.last = G.P0; G.t0 = app.time; G.op = null;
+        },
+        drag(q) {
+          const P = loc(q);
+          if (G.st === 'pending') {
+            if (Math.hypot(P[0] - G.P0[0], P[1] - G.P0[1]) * unit() < 6) return;
+            if (isIn(p.geste, 'stylet', 'peigne')) G.st = 'stroke';
+            else if (p.geste === 'gouttes') { G.st = 'sprinkle'; G.acc = 0; sprinkle(G.P0); }
+            else { G.st = 'vortex'; G.C = G.P0; G.ang = Math.atan2(P[1] - G.C[1], P[0] - G.C[0]); G.sig = clamp(Math.hypot(P[0] - G.C[0], P[1] - G.C[1]), 0.03, 0.6); }
+          }
+          if (G.st === 'stroke') strokeTo(P);
+          else if (G.st === 'sprinkle') sprinkleTo(P);
+          else if (G.st === 'vortex') {
+            const a = Math.atan2(P[1] - G.C[1], P[0] - G.C[0]);
+            let da = a - G.ang; while (da > Math.PI) da -= TAU; while (da < -Math.PI) da += TAU;
+            G.ang = a;
+            if (Math.abs(da) > 1e-4) addUser(vortexOp(G.C, da, G.sig));
+          }
+          if (G.st !== 'pending') touch();
+          idle();
+        },
+        up() {
+          if (G.st === 'pending') addUser(dropOp(G.P0, p.taille * 0.85, true));
+          else if (G.st === 'drop' && G.op) { G.op.hold = false; dirty = true; }
+          G.st = null; G.op = null; touch(); idle();
+        },
+        wheel(q, dy) {
+          touch();
+          addUser(vortexOp(loc(q), -dy * 0.004, Math.max(0.04, p.taille * 1.6)));
+          idle();
+        },
+      },
+      onChange(k, v) {
+        if (k === '*') {
+          // Une charte ou une palette seule recolore le bain sans le réécrémer.
+          const s = shape();
+          if (s !== lastShape) { G.st = null; paperPat = null; rebuild(); clock = startPhase() * p.cycle; curT = p.cycle; recompute(); }
+        }
+        else if (k === 'cycle') { clock = clock / curT * p.cycle; curT = p.cycle; }
+        else if (k === 'encres') { if (v.length !== geo.nInk) rebuild(); }
+        else if (k === 'rendu') recompute();
+        else if (PROG.has(k)) rebuild();
+        else if (GEOM.has(k)) recompute();
+        lastShape = shape();
+        dirty = true; idle();
+      },
+      onSeed() { paperPat = null; rebuild(); clock = startPhase() * p.cycle; recompute(); idle(); },
+      onResize() {
+        const U = unit(), A = app.size.w / U, B = app.size.h / U;
+        if (!geo || Math.abs(A - geo.A) > 1e-4 || Math.abs(B - geo.B) > 1e-4) rebuild();
+        dirty = true; blank = true; idle();
+      },
+      export: { name: 'ebru', svg: () => exportSVG() },
+    });
+    const p = app.params;
+    const PROG = new Set(['depot', 'outils', 'pose', 'gouttes', 'taille', 'varTaille', 'centres', 'anneaux', 'etalement', 'fiel', 'tailleFiel', 'image', 'imageOn', 'orientation', 'passes', 'ecart', 'force', 'viscosite', 'souffles', 'vague', 'onde', 'petales', 'sensPetales', 'tours', 'varier']);
+    const GEOM = new Set(['bord', 'veines', 'base', 'rayures', 'angleRayures', 'forme', 'tailleForme']);
+    const objId = new WeakMap();
+    let objN = 0;
+    const idOf = (o) => { if (!o || typeof o !== 'object') return o || 0; if (!objId.has(o)) objId.set(o, ++objN); return objId.get(o); };
+    const shape = () => JSON.stringify([[...PROG, ...GEOM, 'cycle', 'rendu', 'boucle'].map((k) => (k === 'image' ? idOf(p.image) : p[k])), inks().length]);
+    let lastShape = '';
+
+    // ——— Repère : unités du bain, origine au centre, le petit côté mesure 1 ———
+    const unit = () => Math.min(app.size.w, app.size.h) || 1;
+    const loc = (q) => { const U = unit(); return [(q.x - app.size.w / 2) / U, (q.y - app.size.h / 2) / U]; };
+    const active = () => 1 - p.pose - SKIM;
+    const startPhase = () => Math.max(0.02, active() - 0.1);
+    const inks = () => (p.encres && p.encres.length ? p.encres : ['#111111']);
+
+    // ——— Couleurs prises dans une image (cadrage « couvrir ») ———
+    function syncImage() {
+      const img = p.image || null;
+      if (img === imgSrc) return;
+      imgSrc = img; imgPix = null;
+      const iw = img && (img.naturalWidth || img.width), ih = img && (img.naturalHeight || img.height);
+      if (!iw || !ih) return;
+      const k = Math.min(1, 160 / Math.max(iw, ih)), c = document.createElement('canvas');
+      c.width = Math.max(1, Math.round(iw * k)); c.height = Math.max(1, Math.round(ih * k));
+      const x = c.getContext('2d', { willReadFrequently: true });
+      x.drawImage(img, 0, 0, c.width, c.height);
+      imgPix = { d: x.getImageData(0, 0, c.width, c.height).data, w: c.width, h: c.height };
+    }
+    const useImg = () => !!(imgPix && p.imageOn);
+    function imgCol(x, y) {
+      const { d, w, h } = imgPix, ia = w / h, H = Math.max(geo.A / ia, geo.B);
+      const i = (clamp(Math.floor((y / H + 0.5) * h), 0, h - 1) * w + clamp(Math.floor((x / (H * ia) + 0.5) * w), 0, w - 1)) * 4;
+      return hex([d[i], d[i + 1], d[i + 2]]);
+    }
+
+    // ——— Logo de la charte : contours (marching squares sur la couverture), en unités de sa plus grande dimension ———
+    function syncLogo() {
+      const img = app.logoImg || null;
+      if (img === logoSrc) return;
+      logoSrc = img; logoLoops = null;
+      const iw = img && (img.naturalWidth || img.width), ih = img && (img.naturalHeight || img.height);
+      if (!iw || !ih) return;
+      const N = 320, cv = document.createElement('canvas'); cv.width = cv.height = N;
+      const x = cv.getContext('2d', { willReadFrequently: true });
+      const k = N * 0.9 / Math.max(iw, ih);
+      x.drawImage(img, (N - iw * k) / 2, (N - ih * k) / 2, iw * k, ih * k);
+      const d = x.getImageData(0, 0, N, N).data;
+      let clear = 0;
+      for (let i = 3; i < d.length; i += 4) if (d[i] < 128) clear++;
+      const useAlpha = clear > N * N * 0.1, f = new Float32Array(N * N);
+      for (let i = 0; i < N * N; i++) {
+        const l = (d[i * 4] * 0.2126 + d[i * 4 + 1] * 0.7152 + d[i * 4 + 2] * 0.0722) / 255;
+        f[i] = 0.5 - (useAlpha ? d[i * 4 + 3] / 255 : (1 - l) * d[i * 4 + 3] / 255);
+      }
+      for (let i = 0; i < N; i++) { f[i] = f[(N - 1) * N + i] = f[i * N] = f[i * N + N - 1] = 0.5; }
+      const nb = new Map(), pt = new Map(), at = (X, Y) => f[Y * N + X];
+      const edge = (x0, y0, x1, y1) => {
+        const key = `${x0},${y0},${x1},${y1}`;
+        if (!pt.has(key)) { const a = at(x0, y0), t = a / (a - at(x1, y1)); pt.set(key, [(x0 + (x1 - x0) * t + 0.5) / N - 0.5, (y0 + (y1 - y0) * t + 0.5) / N - 0.5]); }
+        return key;
+      };
+      const link = (a, b) => { for (const [s, e] of [[a, b], [b, a]]) { if (!nb.has(s)) nb.set(s, []); nb.get(s).push(e); } };
+      const CASES = { 1: ['LB'], 2: ['BR'], 3: ['LR'], 4: ['TR'], 5: ['LT', 'BR'], 6: ['TB'], 7: ['LT'], 8: ['LT'], 9: ['TB'], 10: ['TR', 'LB'], 11: ['TR'], 12: ['LR'], 13: ['BR'], 14: ['LB'] };
+      for (let Y = 0; Y < N - 1; Y++) for (let X = 0; X < N - 1; X++) {
+        const c = (at(X, Y) < 0 ? 8 : 0) | (at(X + 1, Y) < 0 ? 4 : 0) | (at(X + 1, Y + 1) < 0 ? 2 : 0) | (at(X, Y + 1) < 0 ? 1 : 0);
+        if (c === 0 || c === 15) continue;
+        const E = { T: () => edge(X, Y, X + 1, Y), R: () => edge(X + 1, Y, X + 1, Y + 1), B: () => edge(X, Y + 1, X + 1, Y + 1), L: () => edge(X, Y, X, Y + 1) };
+        for (const pr of CASES[c]) link(E[pr[0]](), E[pr[1]]());
+      }
+      const loops = [], seen = new Set();
+      for (const start of nb.keys()) {
+        if (seen.has(start)) continue;
+        const loop = [];
+        let prev = null, cur = start;
+        while (cur && !seen.has(cur)) {
+          seen.add(cur); loop.push(pt.get(cur));
+          const nx = nb.get(cur).find((key) => key !== prev && !seen.has(key));
+          prev = cur; cur = nx;
+        }
+        if (loop.length > 8) loops.push(loop.map(([u, v]) => [u / 0.9, v / 0.9]));
+      }
+      logoLoops = loops.length ? loops : null;
+    }
+
+    // ——— Contours : polylignes fermées, transportées par chaque geste avec raffinement adaptatif ———
+    function curve(x, y, n) {
+      let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+      for (let i = 0; i < n; i++) { const a = x[i], b = y[i]; if (a < x0) x0 = a; if (a > x1) x1 = a; if (b < y0) y0 = b; if (b > y1) y1 = b; }
+      return { x, y, n, bb: [x0, y0, x1, y1] };
+    }
+    function circleCurve(cx, cy, r) {
+      const n = clamp(Math.ceil(TAU * r / Math.min(CAP, Math.sqrt(8 * r * TOL))), 16, 4000);
+      const x = new Float32Array(n), y = new Float32Array(n);
+      for (let i = 0; i < n; i++) { const a = TAU * i / n; x[i] = cx + r * Math.cos(a); y[i] = cy + r * Math.sin(a); }
+      return curve(x, y, n);
+    }
+    function polyCurve(pts) {
+      const X = [], Y = [];
+      for (let i = 0; i < pts.length; i++) {
+        const a = pts[i], b = pts[(i + 1) % pts.length], m = Math.max(1, Math.ceil(Math.hypot(b[0] - a[0], b[1] - a[1]) / CAP));
+        for (let k = 0; k < m; k++) { X.push(a[0] + (b[0] - a[0]) * k / m); Y.push(a[1] + (b[1] - a[1]) * k / m); }
+      }
+      return curve(Float32Array.from(X), Float32Array.from(Y), X.length);
+    }
+
+    let TX = new Float64Array(4096), TY = new Float64Array(4096), OX = new Float64Array(16384), OY = new Float64Array(16384), KI = new Int32Array(16384);
+    let ON = 0, MX = 0, MY = 0;
+    function outP(x, y) {
+      if (ON === OX.length) { const nx = new Float64Array(ON * 2), ny = new Float64Array(ON * 2); nx.set(OX); ny.set(OY); OX = nx; OY = ny; }
+      OX[ON] = x; OY[ON++] = y;
+    }
+    // Hors du cadre, les contours peuvent être plus grossiers : on ne les verra qu'une fois ramenés par un trait.
+    const slack = (x, y) => QUAL * (1 + 25 * Math.max(0, Math.abs(x) - HA, Math.abs(y) - HB));
+    function sub(f, ax, ay, AX, AY, bx, by, BX, BY, d) {
+      const mx = (ax + bx) * 0.5, my = (ay + by) * 0.5;
+      f(mx, my);
+      const PX = MX, PY = MY, ex = PX - (AX + BX) * 0.5, ey = PY - (AY + BY) * 0.5, lx = BX - AX, ly = BY - AY, k = slack(PX, PY);
+      if (d < 14 && (ex * ex + ey * ey > TOL * TOL * k * k || lx * lx + ly * ly > CAP * CAP * k * k)) {
+        sub(f, ax, ay, AX, AY, mx, my, PX, PY, d + 1);
+        outP(PX, PY);
+        sub(f, mx, my, PX, PY, bx, by, BX, BY, d + 1);
+      }
+    }
+    // Retire les points alignés (à la tolérance près), sans jamais couper une pointe.
+    function simplify() {
+      const n = ON;
+      if (KI.length < n + 1) KI = new Int32Array(n * 2);
+      let a = 0, cnt = 0;
+      KI[cnt++] = 0;
+      while (a < n - 1) {
+        let best = a + 1;
+        const ax = OX[a], ay = OY[a], k = slack(ax, ay), cap2 = CAP * CAP * k * k, tol = TOL * 0.6 * k;
+        for (let b = a + 2; b < n && b <= a + 24; b++) {
+          const dx = OX[b] - ax, dy = OY[b] - ay, L2 = dx * dx + dy * dy;
+          if (L2 > cap2 || L2 < 1e-24) break;
+          const L = Math.sqrt(L2);
+          let ok = true;
+          for (let m = a + 1; m < b; m++) {
+            const px = OX[m] - ax, py = OY[m] - ay, t = (px * dx + py * dy) / L2;
+            if (t < -0.02 || t > 1.02 || Math.abs(px * dy - py * dx) / L > tol) { ok = false; break; }
+          }
+          if (!ok) break;
+          best = b;
+        }
+        KI[cnt++] = best; a = best;
+      }
+      const x = new Float32Array(cnt), y = new Float32Array(cnt);
+      for (let i = 0; i < cnt; i++) { x[i] = OX[KI[i]]; y[i] = OY[KI[i]]; }
+      return curve(x, y, cnt);
+    }
+    // Chaque geste donne une borne κ de sa courbure : un segment de longueur l y fléchit d'environ l²κ/8.
+    // Là où c'est sous la tolérance, on transporte les points sans chercher à en ajouter.
+    let KA = new Float64Array(4096);
+    function mapCurve(c, F) {
+      const n = c.n, xs = c.x, ys = c.y, f = F.f, kf = F.k, fk = F.fk;
+      if (TX.length < n) { TX = new Float64Array(n * 2); TY = new Float64Array(n * 2); KA = new Float64Array(n * 2); }
+      for (let i = 0; i < n; i++) {
+        const x = xs[i], y = ys[i];
+        if (fk) KA[i] = fk(x, y);
+        else { KA[i] = kf ? kf(x, y) : Infinity; f(x, y); }
+        TX[i] = MX; TY[i] = MY;
+      }
+      ON = 0;
+      let split = false;
+      for (let i = 0; i < n; i++) {
+        const j = i + 1 === n ? 0 : i + 1;
+        outP(TX[i], TY[i]);
+        const kk = Math.max(KA[i], KA[j]);
+        if (kk < Infinity) {
+          const dx = xs[j] - xs[i], dy = ys[j] - ys[i], lx = TX[j] - TX[i], ly = TY[j] - TY[i], s = slack(TX[i], TY[i]);
+          if ((dx * dx + dy * dy) * kk < 4 * TOL * s && lx * lx + ly * ly < 9 * CAP * CAP * s * s) continue;
+        }
+        const before = ON;
+        sub(f, xs[i], ys[i], TX[i], TY[i], xs[j], ys[j], TX[j], TY[j], 0);
+        if (ON > before) split = true;
+      }
+      if (split) return simplify();
+      return curve(Float32Array.from(OX.subarray(0, ON)), Float32Array.from(OY.subarray(0, ON)), ON);
+    }
+    const hit = (bb, box) => !(bb[2] < box[0] || bb[0] > box[2] || bb[3] < box[1] || bb[1] > box[3]);
+    function mapRegion(R, F) {
+      if (F.box && !hit(R.bb, F.box)) return R;
+      if (F.skip && F.skip(R.bb)) return R;
+      const fin = F.final && F.final(R.bb);
+      if (fin && F.memo.has(R)) return F.memo.get(R);
+      const loops = R.loops.map((c) => mapCurve(c, F)), rings = R.rings.map((c) => mapCurve(c, F));
+      const out = { ...R, loops, rings, bb: bbOf(loops) };
+      if (fin) F.memo.set(R, out);
+      return out;
+    }
+    function bbOf(loops) {
+      const b = [Infinity, Infinity, -Infinity, -Infinity];
+      for (const c of loops) { b[0] = Math.min(b[0], c.bb[0]); b[1] = Math.min(b[1], c.bb[1]); b[2] = Math.max(b[2], c.bb[2]); b[3] = Math.max(b[3], c.bb[3]); }
+      return b;
+    }
+    const region = (c, loops, extra = {}) => ({ c, rgb: null, loops, rings: [], bb: bbOf(loops), ...extra });
+
+    // ——— Les gestes, sous forme directe : (x, y) → (MX, MY) ———
+    function combSum(b, o, s, K, il, alt) {
+      if (K < 1.5) return Math.exp(-Math.abs(b - o) * il);
+      const q = Math.exp(-s * il), rho = alt ? -q : q, j = Math.floor((b - o) / s), sg = (k) => (alt && (k & 1) ? -1 : 1);
+      let f = 0;
+      const jb = Math.min(j, K - 1);
+      if (jb >= 0) f += sg(jb) * Math.exp(-(b - (o + jb * s)) * il) * (1 - Math.pow(rho, jb + 1)) / (1 - rho);
+      const ja = Math.max(j + 1, 0);
+      if (ja <= K - 1) f += sg(ja) * Math.exp(-((o + ja * s) - b) * il) * (1 - Math.pow(rho, K - ja)) / (1 - rho);
+      return f;
+    }
+    function rotTh(o, A, h) {
+      if (o.mode < 0.5) { const x = h * h / (o.sig * o.sig); return x < 1e-3 ? A * (1 - x / 2) : A * (1 - Math.exp(-x)) / x; }
+      return A * combSum(h, o.R0, o.s, o.K, 1 / o.lam, o.alt > 0.5) / Math.max(h, o.R0 + 0.01);
+    }
+    function mapper(op, pr) {
+      if (op.k === 0) {
+        const r = op.r * Math.sqrt(1 - Math.pow(1 - pr, 3)), cx = op.x, cy = op.y, r2 = r * r;
+        if (r < 1e-5) return null;
+        // Loin de la goutte, la poussée r²/2d est presque affine : κ ≈ 3r²/d³.
+        return { r, drop: [cx, cy, r2], k(x, y) { const d2 = (x - cx) * (x - cx) + (y - cy) * (y - cy); return d2 < 0.25 * r2 ? Infinity : 3 * r2 / (d2 * Math.sqrt(d2)); }, f(x, y) {
+          const dx = x - cx, dy = y - cy, d2 = dx * dx + dy * dy;
+          if (d2 < 1e-24) { MX = cx + r; MY = cy; return; }
+          const s = Math.sqrt(1 + r2 / d2); MX = cx + dx * s; MY = cy + dy * s;
+        } };
+      }
+      if (op.k === 1) {
+        const { ox, oy, mx, my, z, K, s, o, aS, Ls, Lf, lam } = op, il = 1 / lam, aF = op.a0 + (op.a1 - op.a0) * ease(pr);
+        const proj = (bb) => {
+          let u0 = Infinity, u1 = -Infinity, b0 = Infinity, b1 = -Infinity;
+          for (const x of [bb[0], bb[2]]) for (const y of [bb[1], bb[3]]) {
+            const qx = x - ox, qy = y - oy, u = qx * mx + qy * my, b = -qx * my + qy * mx;
+            if (u < u0) u0 = u; if (u > u1) u1 = u; if (b < b0) b0 = b; if (b > b1) b1 = b;
+          }
+          return [u0, u1, b0, b1];
+        };
+        // Un stylet seul : loin de son sillage, z·e^(−d/λ) courbe peu (le front et le départ ajoutent leurs rampes).
+        const kc = il * il + 6 / (Lf * Lf) + 6 * il / Lf + (aS > -1e5 ? 6 / (Ls * Ls) + 6 * il / Ls : 0);
+        if (!op.memo) op.memo = new WeakMap();
+        return {
+          memo: op.memo,
+          // Devant le front, rien n'a encore bougé ; derrière, le déplacement est définitif.
+          skip(bb) { const [u0, u1, b0, b1] = proj(bb); return u0 >= aF + Lf || u1 <= aS || (K < 1.5 && Math.max(b0 - o, o - b1, 0) > 14 * lam); },
+          final(bb) { const [u0, u1] = proj(bb); return u1 <= aF && (aS < -1e5 || u0 >= aS + Ls); },
+          k(x, y) {
+            const qx = x - ox, qy = y - oy, u = qx * mx + qy * my;
+            if (u >= aF + Lf || u <= aS) return 0;
+            const db = Math.abs(-qx * my + qy * mx - o);
+            return K > 1.5 || db < 3 * lam ? Infinity : z * Math.exp(-db * il) * kc;
+          },
+          f(x, y) {
+          const qx = x - ox, qy = y - oy, u = qx * mx + qy * my;
+          if (u >= aF + Lf || u <= aS) { MX = x; MY = y; return; }
+          let W = 1;
+          if (aS > -1e5 && u < aS + Ls) { const t = (u - aS) / Ls; W = t * t * (3 - 2 * t); }
+          if (u > aF) { const t = (u - aF) / Lf; W *= 1 - t * t * (3 - 2 * t); }
+          const d = z * combSum(-qx * my + qy * mx, o, s, K, il, false) * W;
+          MX = x + d * mx; MY = y + d * my;
+          },
+        };
+      }
+      if (op.k === 2) {
+        const A = op.user ? op.A : op.A * ease(pr), cx = op.x, cy = op.y;
+        if (Math.abs(A) < 1e-7) return null;
+        // Tourbillon : loin du cœur, l'angle Aσ²/h² varie lentement (κ ≈ 6|A|σ²/h³).
+        const s2 = op.sig * op.sig, kA = 6 * Math.abs(A) * s2, s3 = s2 * op.sig;
+        return { k: op.mode < 0.5 ? (x, y) => { const h2 = (x - cx) * (x - cx) + (y - cy) * (y - cy); return kA / (h2 * Math.sqrt(h2) + s3); } : null, f(x, y) {
+          const vx = x - cx, vy = y - cy, th = rotTh(op, A, Math.sqrt(vx * vx + vy * vy)), c = Math.cos(th), s = Math.sin(th);
+          MX = cx + c * vx - s * vy; MY = cy + s * vx + c * vy;
+        } };
+      }
+      if (op.k === 3) {
+        const A = op.A * ease(pr);
+        if (Math.abs(A) < 1e-7) return null;
+        const kw = Math.abs(A) * (op.kx * op.kx + op.ky * op.ky);
+        return { k: () => kw, f(x, y) { const s = A * Math.sin(op.kx * (x - op.ox) + op.ky * (y - op.oy) + op.ph); MX = x + op.dx * s; MY = y + op.dy * s; } };
+      }
+      const { x: qx, y: qy, dx, dy, sig, kap, K, s, nx, ny } = op;
+      const L = Math.hypot(dx, dy) || 1, ux = dx / L, uy = dy / L, is2 = 1 / (sig * sig), hf = (K - 1) / 2 * s, reach = 3 * sig;
+      const ex = Math.abs(nx) * hf + reach + L, ey = Math.abs(ny) * hf + reach + L;
+      return { box: [qx - ex, qy - ey, qx + ex, qy + ey], k(x, y) {
+        const rx = x - qx, ry = y - qy, a = rx * ux + ry * uy, pe = rx * nx + ry * ny;
+        return a > reach || a < -reach || pe > hf + reach || pe < -hf - reach ? 0 : Infinity;
+      }, f(x, y) {
+        const rx = x - qx, ry = y - qy, a = rx * ux + ry * uy;
+        if (a > reach || a < -reach) { MX = x; MY = y; return; }
+        const pe = rx * nx + ry * ny;
+        if (pe > hf + reach || pe < -hf - reach) { MX = x; MY = y; return; }
+        const k0 = K < 1.5 ? 0 : clamp(Math.floor((pe + hf) / s + 0.5), 0, K - 1);
+        let B = 0;
+        for (let k = k0 - 1; k <= k0 + 1; k++) { if (k < 0 || k > K - 1) continue; const t = pe - (k * s - hf); B += Math.exp(-(t * t + a * a) * is2); }
+        B *= kap; MX = x + dx * B; MY = y + dy * B;
+      } };
+    }
+
+    // ——— Programme : la suite de gestes du marbreur pour un cycle ———
+    function shuffle(a, R) { for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(R() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; }
+    function gridCenters(n, A, B, R, jit = 0.16) {
+      const cols = Math.max(1, Math.round(Math.sqrt(n * A / B))), rows = Math.max(1, Math.ceil(n / cols)), out = [];
+      const cw = A / cols, ch = B / rows;
+      for (let i = 0; i < n; i++) {
+        const r = Math.floor(i / cols), inRow = r === rows - 1 ? n - r * cols : cols, c = i % cols;
+        const x0 = -inRow * cw / 2 + (c + 0.5) * cw;
+        out.push({ x: x0 + (R() - 0.5) * jit * 2 * cw, y: -B / 2 + (r + 0.5) * ch + (R() - 0.5) * jit * 2 * ch, cell: Math.min(cw, ch) });
+      }
+      return out;
+    }
+
+    function rebuild() {
+      syncImage();
+      const R = app.rng(101 + (p.varier ? cycleIdx * 7919 : 0));
+      const { w, h } = app.size, U = Math.min(w, h) || 1, A = (w || 1) / U, B = (h || 1) / U;
+      const nInk = Math.max(1, inks().length);
+      geo = { A, B, nInk }; HA = A / 2 + 0.02; HB = B / 2 + 0.02;
+      const th = p.orientation * Math.PI / 180, cu = Math.cos(th), su = Math.sin(th);
+      const Uv = [cu, su], Vv = [-su, cu];
+      const Eu = Math.abs(A * cu) + Math.abs(B * su), Ev = Math.abs(A * su) + Math.abs(B * cu);
+      const at = (u, v) => [u * cu - v * su, u * su + v * cu];
+      const img = useImg();
+      const hasD = p.depot !== 'aucun' || p.fiel > 0, hasT = p.outils !== 'aucun';
+      const act = active(), D0 = 0.015, eps = p.etalement / p.cycle;
+      const Dm = hasD && hasT ? D0 + (act - D0) * 0.48 : act;
+      const T0 = hasD ? Dm : D0, T1 = act;
+      const blocks = [];
+      const add = (list) => blocks.push({ f0: Math.min(...list.map((o) => o.f0)), ops: list });
+      const drop = (x, y, r, c, f0, sx = x, sy = y) => add([{ k: 0, x, y, r, c, rgb: img && c >= 0 ? imgCol(sx, sy) : null, f0, f1: f0 + eps }]);
+      const dropEnd = Math.max(D0 + 0.01, Dm - eps);
+      let centers = null, ringR = 0;
+      // Les traits tirent l'encre depuis l'extérieur du cadre : le semis déborde d'autant (la cuve est plus grande que la feuille).
+      const mm = p.taille * 0.5 + (hasT ? p.force * 0.8 : 0);
+
+      // Dépôt
+      if (p.depot === 'semis') {
+        const m = mm, grow = (A + 2 * m) * (B + 2 * m) / (A * B);
+        const per = Math.max(1, Math.round(p.gouttes * grow / nInk));
+        for (let k = 0; k < nInk; k++) {
+          const cols = Math.max(1, Math.round(Math.sqrt(per * (A + 2 * m) / (B + 2 * m)))), rows = Math.max(1, Math.ceil(per / cols));
+          const cells = [];
+          for (let j = 0; j < rows; j++) for (let i = 0; i < cols; i++) cells.push([i, j]);
+          shuffle(cells, R);
+          const rk = p.taille * (1 - 0.3 * k / Math.max(1, nInk - 1));
+          for (let n = 0; n < per; n++) {
+            const [i, j] = cells[n % cells.length];
+            const x = -A / 2 - m + (i + R()) * (A + 2 * m) / cols, y = -B / 2 - m + (j + R()) * (B + 2 * m) / rows;
+            const r = rk * Math.max(0.2, 1 + p.varTaille * (R() * 1.5 - 0.75));
+            drop(x, y, r, k, D0 + (dropEnd - D0) * (k + R()) / nInk);
+          }
+        }
+      } else if (p.depot === 'bandes') {
+        const m = Math.max(p.taille, mm), Wu = Eu + 2 * m;
+        const C = Math.max(2, Math.round(Math.sqrt(p.gouttes * Wu / Ev))), per = Math.max(2, Math.round(p.gouttes / C));
+        const order = shuffle([...Array(C).keys()], R);
+        order.forEach((col, ci) => {
+          const u = -Wu / 2 + (col + 0.5) * Wu / C;
+          for (let n = 0; n < per; n++) {
+            const v = -Ev / 2 - m + (n + 0.5) * (Ev + 2 * m) / per;
+            const [x, y] = at(u + (R() - 0.5) * 0.2 * Wu / C, v + (R() - 0.5) * 0.3 * (Ev + 2 * m) / per);
+            const r = p.taille * Math.max(0.3, 1 + p.varTaille * (R() - 0.5));
+            drop(x, y, r, col % nInk, D0 + (dropEnd - D0) * (ci + 0.85 * n / per) / C);
+          }
+        });
+      } else if (p.depot === 'cibles' || p.depot === 'sumi') {
+        const sumi = p.depot === 'sumi', N = Math.round(p.anneaux);
+        centers = gridCenters(Math.round(p.centres), A, B, R);
+        const rr = p.taille * (sumi ? 0.42 : 0.6);
+        ringR = rr * Math.sqrt(N);
+        for (let k = 0; k < N; k++) {
+          centers.forEach((c, ci) => {
+            const water = sumi && k % 2 === 1;
+            const col = water ? -1 : (sumi ? (Math.floor(k / 2) + ci) : (k + ci)) % nInk;
+            const r = rr * (water ? 1.1 : 1) * Math.max(0.4, 1 + (sumi ? 0.25 : p.varTaille * 0.5) * (R() - 0.5));
+            const j = sumi ? rr * 0.22 : 0, ga = k * 2.39996, gr = rr * Math.sqrt(N - k);
+            drop(c.x + (R() - 0.5) * j, c.y + (R() - 0.5) * j, r, col, D0 + (dropEnd - D0) * (k + 0.35 * R()) / N, c.x + Math.cos(ga) * gr, c.y + Math.sin(ga) * gr);
+          });
+        }
+      }
+      // Fiel : de petites gouttes d'eau claire qui repoussent les couleurs et ouvrent le motif.
+      if (p.fiel > 0) {
+        const n = Math.round(p.fiel), m = mm;
+        for (let i = 0; i < n; i++) {
+          const x = (R() - 0.5) * (A + 2 * m), y = (R() - 0.5) * (B + 2 * m), r = p.taille * p.tailleFiel * (0.5 + 0.7 * R());
+          drop(x, y, r, -1, D0 + (dropEnd - D0) * (p.depot === 'aucun' ? R() : 0.65 + 0.35 * R()));
+        }
+      }
+
+      // Outils
+      const lam = lamOf(p.viscosite), z = p.force, span = T1 - T0;
+      // Front du trait : la rampe doit rester plus longue que le déplacement (1,6 z) pour que l'encre ne se replie jamais.
+      const line = (O, M, K, s, o, zz, f0, f1, ext) => {
+        const q = Math.exp(-Math.max(s, 1e-6) / lam), peak = K > 1 ? zz * (1 + q) / (1 - q) : zz, Lf = Math.max(1.6 * peak, 3 * lam), reach = ext / 2 + 0.5;
+        return { k: 1, ox: O[0], oy: O[1], mx: M[0], my: M[1], z: zz, lam, K, s, o, aS: -1e6, Ls: 1, Lf, a0: -reach - Lf, a1: reach, f0, f1 };
+      };
+      const combZ = (s, zz) => { const q = Math.exp(-s / lam); return zz * (1 - q) / (1 + q); };
+      // `pull` : ce que le peigne qui suit ramènera de l'extérieur du cadre ; les passes débordent d'autant.
+      const passes = (t0, t1, P0, dirV = false, wave = 0, pull = 0) => {
+        const ext = dirV ? Ev : Eu, cross = dirV ? Eu : Ev, Ax = dirV ? Vv : Uv, gap = cross / P0;
+        const extra = Math.ceil(pull / gap), P = P0 + 2 * extra, list = [], d = (t1 - t0) / P * 1.5;
+        for (let i = 0; i < P; i++) {
+          const v = -cross / 2 + (i - extra + 0.5) * gap;
+          const O = dirV ? at(v, 0) : at(0, v), sg = (i - extra) % 2 ? -1 : 1;
+          const f0 = t0 + (t1 - t0 - d) * (P > 1 ? i / (P - 1) : 0);
+          list.push(line(O, [Ax[0] * sg, Ax[1] * sg], 1, 0, 0, z, f0, f0 + d, ext));
+        }
+        if (wave) {
+          // Stylet en serpentin : le trait droit est conjugué par une onde de cisaillement (S, passes, S⁻¹).
+          const D = dirV ? Uv : Vv, kd = dirV ? Vv : Uv, kk = TAU / p.onde, ph = R() * TAU;
+          const S = (a) => ({ k: 3, ox: 0, oy: 0, dx: D[0], dy: D[1], kx: kd[0] * kk, ky: kd[1] * kk, A: a, ph, f0: t0, f1: t0 });
+          add([S(-wave), ...list, S(wave)]);
+        } else list.forEach((o) => add([o]));
+      };
+      const comb = (t0, t1, s, zz, rev = 1, wave = 0) => {
+        const M = [Vv[0] * rev, Vv[1] * rev], K = Math.ceil(Eu / s) + 4, o = -(K - 1) * s / 2 + (R() - 0.5) * s;
+        const c = line([0, 0], M, K, s, o, combZ(s, zz), t0, t1, Ev);
+        if (wave) {
+          const kk = TAU / p.onde, ph = R() * TAU;
+          const S = (a) => ({ k: 3, ox: 0, oy: 0, dx: Uv[0], dy: Uv[1], kx: Vv[0] * kk, ky: Vv[1] * kk, A: a, ph, f0: t0, f1: t0 });
+          add([S(-wave), c, S(wave)]);
+        } else add([c]);
+      };
+      const P = Math.round(p.passes);
+      if (p.outils === 'allerretour') passes(T0, T1, P);
+      else if (p.outils === 'vagues') passes(T0, T1, P, false, p.vague);
+      else if (p.outils === 'peigne') { passes(T0, T0 + span * 0.6, P, false, 0, z * 0.75); comb(T0 + span * 0.62, T1, p.ecart, z * 0.75); }
+      else if (p.outils === 'paon') {
+        passes(T0, T0 + span * 0.42, P, false, 0, z * 0.8);
+        comb(T0 + span * 0.44, T0 + span * 0.7, p.ecart, z * 0.7);
+        comb(T0 + span * 0.72, T1, p.ecart * 2.2, z * 0.8, -1, p.vague);
+      } else if (p.outils === 'petales') {
+        if (!centers) { centers = gridCenters(Math.round(p.centres), A, B, R); ringR = Math.max(p.taille * 1.8, centers[0].cell * 0.3); }
+        const Rp = ringR * 1.3, nP = Math.round(p.petales), zp = Math.min(z, 0.42 * Rp), out = p.sensPetales === 'dehors';
+        const d = span / nP * 1.6, Lf = Math.max(1.6 * zp, 3 * lam);
+        for (let j = 0; j < nP; j++) {
+          const f0 = T0 + (span - d) * (nP > 1 ? j / (nP - 1) : 0);
+          centers.forEach((c, ci) => {
+            const a = -Math.PI / 2 + TAU * j / nP + (ci % 2) * Math.PI / nP, dx = Math.cos(a), dy = Math.sin(a);
+            const S = out ? [c.x + dx * Rp * 0.08, c.y + dy * Rp * 0.08] : [c.x + dx * Rp, c.y + dy * Rp];
+            const M = out ? [dx, dy] : [-dx, -dy];
+            add([{ k: 1, ox: S[0], oy: S[1], mx: M[0], my: M[1], z: zp, lam, K: 1, s: 0, o: 0, aS: 0, Ls: zp * 2.2, Lf, a0: -Lf, a1: Rp * (out ? 1.15 : 0.94), f0: f0 + R() * 0.01, f1: f0 + d }]);
+          });
+        }
+      } else if (p.outils === 'spirales') {
+        // Un seul stylet : les spirales se tracent l'une après l'autre, en se chevauchant un peu.
+        const cs = gridCenters(Math.round(p.centres), A, B, R, 0.1), n = cs.length, d = span * Math.min(1, 2.2 / n);
+        cs.map((c, k) => [c, k, R()]).sort((a, b) => a[2] - b[2]).forEach(([c, k], i) => {
+          const f0 = T0 + (span - d) * (n > 1 ? i / (n - 1) : 0);
+          add([{ k: 2, x: c.x, y: c.y, mode: 0, A: p.tours * TAU * (k % 2 ? -1 : 1), sig: c.cell * 0.3, R0: 0, s: 1, K: 1, alt: 0, lam, f0, f1: f0 + d }]);
+        });
+      } else if (p.outils === 'tourbillon') {
+        add([{ k: 2, x: (R() - 0.5) * 0.1, y: (R() - 0.5) * 0.1, mode: 0, A: p.tours * TAU, sig: 0.28 * Math.min(A, B), R0: 0, s: 1, K: 1, alt: 0, lam, f0: T0, f1: T1 }]);
+      } else if (p.outils === 'souffle') {
+        // Souffle sur le bain : des ondes de cisaillement lentes, croisées, qui ondulent sans rien déchirer.
+        const n = Math.round(p.souffles), d = Math.min(span, span / n * 1.8);
+        for (let i = 0; i < n; i++) {
+          const a = th + Math.PI * (i / n + (R() - 0.5) * 0.2), kk = TAU / (p.onde * (0.8 + 0.4 * R())), f0 = T0 + (span - d) * (n > 1 ? i / (n - 1) : 0);
+          add([{ k: 3, ox: 0, oy: 0, dx: -Math.sin(a), dy: Math.cos(a), kx: Math.cos(a) * kk, ky: Math.sin(a) * kk, A: p.vague * (0.7 + 0.6 * R()), ph: R() * TAU, f0, f1: f0 + d }]);
+        }
+      } else if (p.outils === 'rosace') {
+        const s = Math.max(p.ecart, 0.02), K = Math.ceil(0.8 * Math.hypot(A, B) / s);
+        add([{ k: 2, x: (R() - 0.5) * 0.06, y: (R() - 0.5) * 0.06, mode: 1, A: z * 0.6, sig: 1, R0: s * 0.5, s, K, alt: 1, lam, f0: T0, f1: T1 }]);
+      }
+      blocks.sort((a, b) => a.f0 - b.f0);
+      prog = [];
+      for (const b of blocks) for (const o of b.ops) { o.bs = b.f0; prog.push(o); }
+      ops = prog.slice();
+      recompute();
+    }
+
+    // ——— Moteur : les gestes terminés sont appliqués une fois pour toutes, les gestes en cours à chaque image ———
+    function prOf(op, phi) {
+      let v;
+      if (op.user) v = op.grow ? clamp((app.time - op.grow.t0) / op.grow.dur, 0, 1) : 1;
+      else v = op.f1 > op.f0 ? clamp((phi - op.f0) / (op.f1 - op.f0), 0, 1) : (phi >= op.f0 ? 1 : 0);
+      return Math.min(v, op.end ?? 1);
+    }
+    const isDone = (op, phi) => !op.hold && prOf(op, phi) >= (op.end ?? 1);
+    function newRegion(op, r) {
+      const R = region(op.c, [circleCurve(op.x, op.y, r)], { rgb: op.rgb || null });
+      if (p.rendu === 'pigment' && op.c >= 0) { let rr = r; for (let k = 0; k < p.veines; k++) { rr *= 1 - p.bord; R.rings.push(circleCurve(op.x, op.y, rr)); } }
+      return R;
+    }
+    function apply(regs, op, pr) {
+      const F = mapper(op, pr);
+      if (!F) return regs;
+      const out = regs.map((R) => mapRegion(R, F));
+      if (op.k === 0) out.push(newRegion(op, F.r));
+      return out;
+    }
+    const countV = (regs) => { let n = 0; for (const R of regs) { for (const c of R.loops) n += c.n; for (const c of R.rings) n += c.n; } return n; };
+    function advance(phi, budget = Infinity) {
+      let j = ci, cost = 0;
+      while (j < ops.length && isDone(ops[j], phi) && cost < budget) { cost += VN + 1000; j++; }
+      const moved = j > ci;
+      if (moved) {
+        regions = applyChain(regions, ops.slice(ci, j).map((o) => [o, prOf(o, phi)]));
+        ci = j;
+        VN = countV(regions);
+        QUAL = clamp(VN / VMAX, 1, 6);
+      }
+      return moved;
+    }
+    // Après un réglage, le cycle est rejoué par tranches : l'image précédente reste affichée en attendant.
+    function settle(budget = Infinity) {
+      if (!behind) return true;
+      const phi = clock / p.cycle;
+      advance(phi, budget);
+      behind = ci < ops.length && isDone(ops[ci], phi);
+      return !behind;
+    }
+    function chain(phi) {
+      const out = [];
+      for (let j = ci; j < ops.length; j++) {
+        const o = ops[j];
+        if (!o.user && o.bs > phi) break;
+        const pr = prOf(o, phi);
+        if (pr > 0) out.push([o, pr]);
+      }
+      return out;
+    }
+    // Gouttes et rotations en cours, enchaînées en une seule transformation : un seul passage sur les contours.
+    function compose(Fs) {
+      if (Fs.length === 1) return Fs[0];
+      if (Fs.every((F) => F.drop)) {
+        // Suite de gouttes : boucle serrée sur un tableau (des dizaines de gouttes s'étalent en même temps).
+        const D = Float64Array.from(Fs.flatMap((F) => F.drop)), m = D.length;
+        const run = (x, y, withK) => {
+          let k = 0;
+          for (let i = 0; i < m; i += 3) {
+            const cx = D[i], cy = D[i + 1], r2 = D[i + 2], dx = x - cx, dy = y - cy, d2 = dx * dx + dy * dy;
+            if (withK) k += d2 < 0.25 * r2 ? Infinity : 3 * r2 / (d2 * Math.sqrt(d2));
+            if (d2 < 1e-24) { x = cx + Math.sqrt(r2); y = cy; } else { const s = Math.sqrt(1 + r2 / d2); x = cx + dx * s; y = cy + dy * s; }
+          }
+          MX = x; MY = y;
+          return k;
+        };
+        return { f: (x, y) => { run(x, y, false); }, fk: (x, y) => run(x, y, true) };
+      }
+      const fs = Fs.map((F) => F.f), ks = Fs.map((F) => F.k || (() => Infinity)), n = fs.length;
+      return {
+        f(x, y) { for (let i = 0; i < n; i++) { fs[i](x, y); x = MX; y = MY; } },
+        fk(x, y) { let k = 0; for (let i = 0; i < n; i++) { k += ks[i](x, y); fs[i](x, y); x = MX; y = MY; } return k; },
+      };
+    }
+    const composable = (o) => o.k === 0;
+    function applyChain(regs, list) {
+      let i = 0;
+      while (i < list.length) {
+        if (!composable(list[i][0])) { regs = apply(regs, list[i][0], list[i][1]); i++; continue; }
+        const run = [];
+        while (i < list.length && composable(list[i][0])) { const F = mapper(list[i][0], list[i][1]); if (F) run.push([list[i][0], F]); i++; }
+        if (!run.length) continue;
+        const C = compose(run.map((e) => e[1]));
+        regs = regs.map((R) => mapRegion(R, C));
+        run.forEach(([o, F], k) => {
+          if (o.k !== 0) return;
+          const R = newRegion(o, F.r), rest = run.slice(k + 1).map((e) => e[1]);
+          regs.push(rest.length ? mapRegion(R, compose(rest)) : R);
+        });
+      }
+      return regs;
+    }
+    const current = (phi) => applyChain(regions, chain(phi));
+    function recompute(sync = false) {
+      if (!geo) return;
+      baseInit = makeBase();
+      regions = baseInit; ci = 0; QUAL = 1; VN = countV(regions);
+      behind = true;
+      if (sync) settle();
+      dirty = true;
+    }
+    function makeBase() {
+      const out = [], { A, B } = geo;
+      if (p.base === 'rayures') {
+        const sa = p.angleRayures * Math.PI / 180, dx = Math.cos(sa), dy = Math.sin(sa), wd = p.rayures, L = Math.hypot(A, B) / 2 + 0.6, nb = inks().length + 1;
+        const P = (a, b) => [dx * a - dy * b, dy * a + dx * b];
+        for (let id = Math.floor(-L / wd - 0.5); id <= Math.ceil(L / wd); id++) {
+          const c = ((id % nb) + nb) % nb;
+          if (c === 0) continue;
+          const a0 = (id - 0.5) * wd, a1 = (id + 0.5) * wd;
+          out.push(region(c - 1, [polyCurve([P(a0, -L), P(a1, -L), P(a1, L), P(a0, L)])]));
+        }
+      } else if (p.base === 'forme') {
+        const R = p.tailleForme / 2;
+        let loops;
+        if (p.forme === 'logo') syncLogo();
+        if (p.forme === 'logo' && logoLoops) loops = logoLoops.map((lp) => polyCurve(lp.map(([u, v]) => [u * 2 * R, v * 2 * R])));
+        else if (p.forme === 'anneau') loops = [circleCurve(0, 0, R), circleCurve(0, 0, R * 0.42)];
+        else if (p.forme === 'losange') loops = [polyCurve([[R, 0], [0, R], [-R, 0], [0, -R]])];
+        else loops = [circleCurve(0, 0, R)];
+        out.push(region(0, loops, { even: true }));
+      }
+      return out;
+    }
+
+    // ——— Gestes au pointeur ———
+    function touch() {
+      lastUser = app.time;
+      if (p.boucle && clock / p.cycle > 1 - SKIM) newCycle();
+    }
+    // En pause, la boucle du kit ne tourne plus : on redessine une image fixe après chaque changement.
+    let stillReq = 0;
+    function idle() { if (!app.playing && !stillReq) stillReq = requestAnimationFrame(() => { stillReq = 0; render(app.time, 0); }); }
+    function newCycle() {
+      clock = 0; cycleIdx++;
+      if (p.varier) rebuild();
+      else { for (const o of prog) o.end = 1; ops = prog.slice(); recompute(); }
+    }
+    // Un geste interrompt le programme : ce qui était en cours s'arrête là où il en était.
+    function addUser(op) {
+      const phi = clock / p.cycle;
+      for (let j = ci; j < ops.length; j++) {
+        const o = ops[j];
+        if (o.user) { if (o.grow) o.grow = null; continue; }
+        if (o.bs > phi) break;
+        o.end = Math.min(o.end ?? 1, prOf(o, phi));
+      }
+      advance(phi);
+      op.user = true;
+      ops.splice(ci, 0, op);
+      advance(phi);
+      dirty = true;
+      return op;
+    }
+    const rnd = () => { if (!gestR) gestR = app.rng(9001); return gestR(); };
+    let inkIdx = 0;
+    function dropOp(P, r, spread) {
+      const c = (inkIdx++) % Math.max(1, inks().length);
+      return { k: 0, x: P[0], y: P[1], r, c, rgb: useImg() ? imgCol(P[0], P[1]) : null, grow: spread && app.playing ? { t0: app.time, dur: p.etalement } : null };
+    }
+    const vortexOp = (P, A, sig) => ({ k: 2, x: P[0], y: P[1], mode: 0, A, sig, R0: 0, s: 1, K: 1, alt: 0, lam: 1 });
+    const tip = () => Math.max(0.006, 0.9 * lamOf(p.viscosite) + 0.004);
+    function strokeTo(P) {
+      const sig = tip(), step = 0.45 * sig, comb = p.geste === 'peigne';
+      let dx = P[0] - G.last[0], dy = P[1] - G.last[1], L = Math.hypot(dx, dy);
+      while (L >= step) {
+        const ux = dx / L, uy = dy / L, nx = [G.last[0] + ux * step, G.last[1] + uy * step];
+        addUser({ k: 4, x: nx[0], y: nx[1], dx: ux * step, dy: uy * step, sig, kap: p.forceGeste, K: comb ? Math.round(p.dentsGeste) : 1, s: Math.max(p.ecart, sig * 1.5), nx: -uy, ny: ux });
+        G.last = nx; dx = P[0] - G.last[0]; dy = P[1] - G.last[1]; L = Math.hypot(dx, dy);
+      }
+    }
+    function sprinkle(P) {
+      const a = rnd() * TAU, j = rnd() * p.taille * 0.35;
+      const op = dropOp([P[0] + Math.cos(a) * j, P[1] + Math.sin(a) * j], p.taille * (0.35 + rnd() * 0.45), true);
+      op.c = Math.floor(rnd() * Math.max(1, inks().length));
+      addUser(op);
+    }
+    function sprinkleTo(P) {
+      const gap = p.taille * 1.2;
+      G.acc += Math.hypot(P[0] - G.last[0], P[1] - G.last[1]); G.last = P;
+      while (G.acc >= gap) { G.acc -= gap; sprinkle(P); }
+    }
+
+    // ——— Rendu ———
+    const toneCache = new Map();
+    function tones(col, V) {
+      const key = `${col}|${V}|${p.contraste}|${p.fond}`;
+      let T = toneCache.get(key);
+      if (!T) {
+        const dark = mixHex(col, '#000000', 0.25 * p.contraste), pale = mixHex(col, p.fond, 0.32 * p.contraste);
+        T = []; for (let k = 0; k <= V; k++) T.push(mixHex(dark, pale, k / V));
+        if (toneCache.size > 512) toneCache.clear();
+        toneCache.set(key, T);
+      }
+      return T;
+    }
+    const colorOf = (R) => (R.c < 0 ? p.fond : R.rgb || inks()[R.c % inks().length]);
+    const lineW = () => Math.max(p.lisere * 0.001, p.rendu === 'trait' ? 0.8 / unit() : 0);
+    function trace(loops) {
+      ctx.beginPath();
+      for (const c of loops) {
+        const x = c.x, y = c.y;
+        ctx.moveTo(x[0], y[0]);
+        for (let i = 1; i < c.n; i++) ctx.lineTo(x[i], y[i]);
+        ctx.closePath();
+      }
+    }
+    function paint(regs) {
+      const trait = p.rendu === 'trait', pig = p.rendu === 'pigment', lw = lineW();
+      ctx.lineJoin = 'round'; ctx.lineWidth = lw; ctx.strokeStyle = p.lisereCol;
+      for (const R of regs) {
+        trace(R.loops);
+        if (trait) { ctx.strokeStyle = R.c < 0 ? p.lisereCol : colorOf(R); ctx.stroke(); continue; }
+        const col = colorOf(R), rule = R.even ? 'evenodd' : 'nonzero';
+        if (pig && R.rings.length) {
+          const T = tones(col, R.rings.length);
+          ctx.fillStyle = T[0]; ctx.fill(rule);
+          if (lw > 0) ctx.stroke();
+          R.rings.forEach((c, k) => { trace([c]); ctx.fillStyle = T[k + 1]; ctx.fill(); });
+        } else { ctx.fillStyle = col; ctx.fill(rule); if (lw > 0) ctx.stroke(); }
+      }
+    }
+    function paperPattern() {
+      if (paperPat) return paperPat;
+      const N = 512, c = document.createElement('canvas'); c.width = c.height = N;
+      const x = c.getContext('2d'), R = app.rng(777), img = x.createImageData(N, N), d = img.data;
+      const lattice = (g) => Float32Array.from({ length: g * g }, () => R());
+      const L1 = lattice(6), L2 = lattice(24);
+      const smp = (Lt, g, u, v) => {
+        const X = u * g, Y = v * g, i = Math.floor(X), j = Math.floor(Y), sx = ease(X - i), sy = ease(Y - j);
+        const a = (ii, jj) => Lt[(jj % g) * g + (ii % g)];
+        return (a(i, j) * (1 - sx) + a(i + 1, j) * sx) * (1 - sy) + (a(i, j + 1) * (1 - sx) + a(i + 1, j + 1) * sx) * sy;
+      };
+      for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) {
+        const v = 128 + ((smp(L1, 6, i / N, j / N) * 0.6 + smp(L2, 24, i / N, j / N) * 0.4) - 0.5) * 50 + (R() - 0.5) * 26, o = (j * N + i) * 4;
+        d[o] = d[o + 1] = d[o + 2] = v; d[o + 3] = 255;
+      }
+      x.putImageData(img, 0, 0);
+      x.lineCap = 'round';
+      for (let f = 0; f < 900; f++) {
+        const fx = R() * N, fy = R() * N, a = (R() - 0.5) * 1.1, len = 6 + R() * 34, bend = (R() - 0.5) * 8;
+        x.strokeStyle = R() < 0.6 ? 'rgba(255,255,255,0.13)' : 'rgba(0,0,0,0.09)'; x.lineWidth = 0.5 + R() * 0.9;
+        for (const [ox, oy] of [[0, 0], [-N, 0], [N, 0], [0, -N], [0, N]]) {
+          x.beginPath(); x.moveTo(fx + ox, fy + oy);
+          x.quadraticCurveTo(fx + ox + Math.cos(a) * len / 2 - Math.sin(a) * bend, fy + oy + Math.sin(a) * len / 2 + Math.cos(a) * bend, fx + ox + Math.cos(a) * len, fy + oy + Math.sin(a) * len);
+          x.stroke();
+        }
+      }
+      paperPat = ctx.createPattern(c, 'repeat');
+      return paperPat;
+    }
+    function skim(phi) {
+      if (!p.boucle || phi < 1 - SKIM) return;
+      const { A, B } = geo, th = p.orientation * Math.PI / 180, cu = Math.cos(th), su = Math.sin(th);
+      const E = Math.abs(A * cu) + Math.abs(B * su), sw = 0.035, L = Math.hypot(A, B);
+      const sp = -E / 2 - sw + (E + 2 * sw) * ease((phi - (1 - SKIM)) / SKIM);
+      const P = (u, v) => [u * cu - v * su, u * su + v * cu];
+      ctx.save();
+      ctx.beginPath();
+      [P(-L, -L), P(sp, -L), P(sp, L), P(-L, L)].forEach((q, i) => (i ? ctx.lineTo(q[0], q[1]) : ctx.moveTo(q[0], q[1])));
+      ctx.clip();
+      ctx.fillStyle = p.fond; ctx.fillRect(-L, -L, 2 * L, 2 * L);
+      paint(baseInit);
+      // Le bord de la bande d'écrémage ramasse la pellicule d'encre : une ombre douce le souligne.
+      const g = ctx.createLinearGradient(...P(sp - sw, 0), ...P(sp, 0));
+      g.addColorStop(0, 'rgba(0,0,0,0)'); g.addColorStop(1, 'rgba(0,0,0,0.18)');
+      ctx.fillStyle = g; ctx.fillRect(-L, -L, 2 * L, 2 * L);
+      ctx.restore();
+    }
+    function draw(regs, phi) {
+      const { w, h, dpr } = app.size, S = unit() * dpr;
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.globalCompositeOperation = 'source-over'; ctx.globalAlpha = 1;
+      ctx.fillStyle = p.fond; ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.setTransform(S, 0, 0, S, w * dpr / 2, h * dpr / 2);
+      paint(regs);
+      skim(phi);
+      if (p.papier > 0) {
+        const pat = paperPattern(), k = S * 0.55 / 512;
+        pat.setTransform(new DOMMatrix([k, 0, 0, k, 0, 0]));
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.globalCompositeOperation = 'overlay'; ctx.globalAlpha = p.papier * 0.75;
+        ctx.fillStyle = pat; ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.globalCompositeOperation = 'source-over'; ctx.globalAlpha = 1;
+      }
+      app.finish(ctx);
+    }
+
+    function render(t, dt) {
+      if (!geo) return;
+      if (p.base === 'forme' && p.forme === 'logo' && (app.logoImg || null) !== logoSrc) recompute();
+      const force = dt === 0 || app.offline || app.recording || blank;
+      if (!settle(force ? Infinity : BUDGET)) return;
+      const T = p.cycle;
+      if (G.st === 'pending' && app.time - G.t0 > 0.18) {
+        G.st = 'drop';
+        G.op = addUser(Object.assign(dropOp(G.P0, p.taille * 0.45, false), { hold: true }));
+      }
+      if (G.st === 'drop' && G.op) { G.op.r = Math.min(p.taille * 3, p.taille * (0.45 + 0.7 * (app.time - G.t0))); dirty = true; }
+      const held = G.st || t - lastUser < REPRISE;
+      if (!held && dt > 0) {
+        clock = Math.min(clock + dt, p.boucle ? Infinity : (1 - SKIM) * T);
+        if (clock >= T) newCycle();
+      }
+      const phi = clock / T;
+      const moved = advance(phi), live = chain(phi);
+      const skimming = p.boucle && phi >= 1 - SKIM;
+      if (!force && !dirty && !moved && !live.length && !skimming && phi === lastPhi) return;
+      dirty = false; blank = false; lastPhi = phi;
+      draw(applyChain(regions, live), phi);
+    }
+
+    // ——— Export SVG : exactement les contours affichés ———
+    function exportSVG() {
+      settle();
+      const { w, h } = app.size, S = canvas.width / w, W = Math.round(w * S), H = Math.round(h * S), U = unit() * S;
+      const regs = current(clock / p.cycle), f = (v) => Math.round(v * 100) / 100;
+      const d = (loops) => loops.map((c) => { const a = []; for (let i = 0; i < c.n; i++) a.push(f(W / 2 + c.x[i] * U) + ',' + f(H / 2 + c.y[i] * U)); return 'M' + a.join('L') + 'Z'; }).join('');
+      const trait = p.rendu === 'trait', pig = p.rendu === 'pigment', lw = lineW() * U;
+      const st = lw > 0 ? ` stroke="${p.lisereCol}" stroke-width="${f(lw)}" stroke-linejoin="round"` : '';
+      const out = [];
+      for (const R of regs) {
+        const fr = R.even ? ' fill-rule="evenodd"' : '';
+        if (trait) { out.push(`<path fill="none" stroke="${R.c < 0 ? p.lisereCol : colorOf(R)}" stroke-width="${f(lw)}" stroke-linejoin="round"${fr} d="${d(R.loops)}"/>`); continue; }
+        const col = colorOf(R);
+        if (pig && R.rings.length) {
+          const T = tones(col, R.rings.length);
+          out.push(`<path fill="${T[0]}"${st}${fr} d="${d(R.loops)}"/>`);
+          R.rings.forEach((c, k) => out.push(`<path fill="${T[k + 1]}" d="${d([c])}"/>`));
+        } else out.push(`<path fill="${col}"${st}${fr} d="${d(R.loops)}"/>`);
+      }
+      return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}"><rect width="${W}" height="${H}" fill="${p.fond}"/>${out.join('')}</svg>`;
+    }
+
+    clock = startPhase() * p.cycle; curT = p.cycle;
+    rebuild();
+    lastShape = shape();
+    app.loop((t, dt) => render(t, dt));
+  </script>
+</body>
+</html>
