@@ -1,0 +1,17 @@
+{
+  "slug": "ebru",
+  "title": "Ebru",
+  "type": "pattern",
+  "description": "Papier marbré à la cuve selon le modèle exact de Jaffer : gouttes qui s'écartent, peignes et stylets qui les tirent en zigzags, tulipes et spirales, export SVG.",
+  "tags": ["marbrure", "encre", "fluide", "peigne", "motif", "svg"],
+  "inspiration": [
+    "Aubrey Jaffer — Mathematical Marbling (gouttes, traits et peignes comme transformations du plan)",
+    "Lu, Jaffer, Jin et al. — Mathematical Marbling, IEEE CG&A 2012 (contours vectoriels raffinés)",
+    "Ebru turc (battal, gel-git, taraklı, hatip, bülbül yuvası) et suminagashi japonais",
+    "Tourbillon de Lamb–Oseen — references/physique-maths.md (fluides)",
+    "Moodboard de Noé n° 20 et palettes biennale, kegelbahn, bitmap, papier-gris, salon, pyramides, good-room, papier-60"
+  ],
+  "author": "cursor",
+  "created": "2026-11-11",
+  "status": "finished"
+}
