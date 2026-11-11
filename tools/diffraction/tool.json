@@ -1,0 +1,16 @@
+{
+  "slug": "diffraction",
+  "title": "Diffraction",
+  "type": "generative",
+  "description": "Figure de diffraction d’un diaphragme : disque d’Airy, fentes de Young, tache d’Arago. Le logo est l’ouverture, la charte éclaire.",
+  "tags": ["diffraction", "lumiere", "optique", "logo", "fresnel"],
+  "inspiration": [
+    "physique-maths.md — diffraction de Fraunhofer, fentes de Young, logo comme ouverture",
+    "Tache d’Arago et principe de Babinet (Poisson, Fresnel, 1818)",
+    "Joseph von Fraunhofer — spectres de diffraction d’une ouverture",
+    "Palettes chladni, trame-nuit, menthe, papier-60, kegelbahn"
+  ],
+  "author": "cursor",
+  "created": "2026-11-11",
+  "status": "finished"
+}

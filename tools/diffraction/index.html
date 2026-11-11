@@ -1,0 +1,1061 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Diffraction</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="../../assets/ui/atelier.css">
+</head>
+<body>
+  <canvas></canvas>
+  <script src="../../assets/ui/atelier.js"></script>
+  <script>
+    // Diffraction de Fresnel–Fraunhofer d'une ouverture.
+    // L'amplitude diffractée est la transformée de Fourier de la transmission du diaphragme,
+    // multipliée par la phase quadratique π F (u²+v²) / a². F = a²/(λz) est le nombre de Fresnel :
+    // F = 0, champ lointain (Airy, Young, réseau) ; F plus grand, ombre, franges, tache d'Arago.
+    // La lumière blanche somme des longueurs d'onde : chaque figure est mise à l'échelle par λ.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d', { alpha: false, desynchronized: true });
+
+    const PAL = (k) => Atelier.PALETTES[k].colors;
+    const CH = PAL('chladni');
+    const NUIT = PAL('trame-nuit');
+    const MEN = PAL('menthe');
+    const KB = PAL('kegelbahn');
+    const P60 = PAL('papier-60');
+    const TH = PAL('thermique');
+
+    const N = 512;
+    const N2 = N >> 1;
+    const re = new Float32Array(N * N);
+    const im = new Float32Array(N * N);
+    const pow = new Float32Array(N * N);
+    const amp = new Float32Array(N * N);
+    const paint = new Float32Array(N * N);
+    const logoAmp = new Float32Array(N * N);
+    const rowRe = new Float32Array(N);
+    const rowIm = new Float32Array(N);
+    const colRe = new Float32Array(N);
+    const colIm = new Float32Array(N);
+    const jit = new Float32Array(48);
+    const phases = [0, 0];
+
+    let maskRev = 0;
+    let paintSum = 0;
+    let obsX = 0.12;
+    let obsY = -0.08;
+    let bakeKey = '';
+    let cacheKey = '';
+    let refI = 1;
+    let colorKey = '';
+    let lut = new Uint8ClampedArray(256 * 3);
+    let inkMode = false;
+    let fondRGB = [5, 5, 5];
+    let grab = null;
+    let painting = false;
+    let placing = false;
+
+    const logoCanvas = document.createElement('canvas');
+    logoCanvas.width = logoCanvas.height = N;
+    const logoCtx = logoCanvas.getContext('2d', { willReadFrequently: true });
+
+    const buf = document.createElement('canvas');
+    const bctx = buf.getContext('2d', { willReadFrequently: true });
+    let imgData = null;
+    const bloom = document.createElement('canvas');
+    const bloomCtx = bloom.getContext('2d');
+
+    const BAYER = new Float32Array([
+      0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5,
+    ]);
+
+    const isPoly = (p) => p.forme === 'polygone';
+    const isCount = (p) => p.forme === 'fentes' || p.forme === 'reseau';
+    const isThick = (p) => ['anneau', 'fente', 'fentes', 'rectangle', 'croix', 'reseau'].includes(p.forme);
+    const isGap = (p) => p.forme === 'fentes' || p.forme === 'reseau';
+    const isDraw = (p) => p.forme === 'dessin';
+    const isSpec = (p) => p.rendu === 'spectre';
+    const isLaser = (p) => p.rendu === 'laser';
+    const isPal = (p) => p.rendu === 'palette';
+
+    function fft1d(r, i) {
+      for (let a = 1, b = 0; a < N; a++) {
+        let bit = N2;
+        for (; b & bit; bit >>= 1) b ^= bit;
+        b ^= bit;
+        if (a < b) {
+          let t = r[a]; r[a] = r[b]; r[b] = t;
+          t = i[a]; i[a] = i[b]; i[b] = t;
+        }
+      }
+      for (let len = 2; len <= N; len <<= 1) {
+        const ang = -2 * Math.PI / len;
+        const wr = Math.cos(ang);
+        const wi = Math.sin(ang);
+        for (let o = 0; o < N; o += len) {
+          let vr = 1, vi = 0;
+          const half = len >> 1;
+          for (let k = 0; k < half; k++) {
+            const u = o + k;
+            const v = u + half;
+            const tr = r[v] * vr - i[v] * vi;
+            const ti = r[v] * vi + i[v] * vr;
+            r[v] = r[u] - tr;
+            i[v] = i[u] - ti;
+            r[u] += tr;
+            i[u] += ti;
+            const nr = vr * wr - vi * wi;
+            vi = vr * wi + vi * wr;
+            vr = nr;
+          }
+        }
+      }
+    }
+
+    function fft2() {
+      for (let y = 0; y < N; y++) {
+        const o = y * N;
+        rowRe.set(re.subarray(o, o + N));
+        rowIm.set(im.subarray(o, o + N));
+        fft1d(rowRe, rowIm);
+        re.set(rowRe, o);
+        im.set(rowIm, o);
+      }
+      for (let x = 0; x < N; x++) {
+        for (let y = 0; y < N; y++) {
+          colRe[y] = re[y * N + x];
+          colIm[y] = im[y * N + x];
+        }
+        fft1d(colRe, colIm);
+        for (let y = 0; y < N; y++) {
+          re[y * N + x] = colRe[y];
+          im[y * N + x] = colIm[y];
+        }
+      }
+    }
+
+    function sdBox(x, y, hx, hy) {
+      const dx = Math.abs(x) - hx;
+      const dy = Math.abs(y) - hy;
+      return Math.hypot(Math.max(dx, 0), Math.max(dy, 0)) + Math.min(Math.max(dx, dy), 0);
+    }
+
+    function sdPolygon(x, y, r, n) {
+      const an = Math.PI / n;
+      const ac = Math.cos(an);
+      const as = Math.sin(an);
+      let bn = Math.atan2(x, y) % (2 * an);
+      if (bn < 0) bn += 2 * an;
+      bn -= an;
+      const len = Math.hypot(x, y);
+      let px = len * Math.cos(bn) - r * ac;
+      let py = len * Math.abs(Math.sin(bn)) - r * as;
+      py += Math.min(Math.max(-py, 0), r * as);
+      return Math.hypot(px, py) * Math.sign(px || -1);
+    }
+
+    function transmit(d, w) {
+      const x = (w - d) / (2 * w);
+      if (x <= 0) return 0;
+      if (x >= 1) return 1;
+      return x * x * (3 - 2 * x);
+    }
+
+    function bilinear(arr, x, y) {
+      if (x < 0 || y < 0 || x > N - 1.001 || y > N - 1.001) return 0;
+      const x0 = x | 0;
+      const y0 = y | 0;
+      const x1 = Math.min(x0 + 1, N - 1);
+      const y1 = Math.min(y0 + 1, N - 1);
+      const tx = x - x0;
+      const ty = y - y0;
+      const a = arr[y0 * N + x0];
+      const b = arr[y0 * N + x1];
+      const c = arr[y1 * N + x0];
+      const d = arr[y1 * N + x1];
+      return (a + (b - a) * tx) * (1 - ty) + (c + (d - c) * tx) * ty;
+    }
+
+    function samplePow(fx, fy) {
+      const x = fx + N2;
+      const y = fy + N2;
+      if (x < 1 || y < 1 || x > N - 2 || y > N - 2) return 0;
+      const x0 = x | 0;
+      const y0 = y | 0;
+      const tx = x - x0;
+      const ty = y - y0;
+      const i = y0 * N + x0;
+      const a = pow[i];
+      const b = pow[i + 1];
+      const c = pow[i + N];
+      const d = pow[i + N + 1];
+      return (a + (b - a) * tx) * (1 - ty) + (c + (d - c) * tx) * ty;
+    }
+
+    function warp(u, v, p) {
+      let x = u / (1 + p.ellipticite * 0.82);
+      let y = v;
+      if (p.desordre > 0.001) {
+        const a = Math.atan2(y, x);
+        const wob = 1 + p.desordre * 0.34 * (0.62 * Math.sin(3 * a + phases[0]) + 0.38 * Math.sin(8 * a + phases[1]));
+        x /= wob;
+        y /= wob;
+      }
+      return [x, y];
+    }
+
+    function shapeSDF(x, y, p) {
+      const rho = p.ouverture;
+      const thick = Math.max(0.02, Math.min(0.92, p.epaisseur));
+      const n = Math.max(1, Math.round(p.nombre));
+      switch (p.forme) {
+        case 'disque':
+          return Math.hypot(x, y) - rho;
+        case 'anneau':
+          return Math.abs(Math.hypot(x, y) - rho) - rho * thick * 0.48;
+        case 'fente':
+          return sdBox(x, y, Math.max(0.004, rho * thick), rho);
+        case 'fentes': {
+          const gap = Math.max(0.02, p.ecart);
+          const hw = Math.max(0.0035, rho * thick);
+          let d = 8;
+          for (let i = 0; i < n; i++) {
+            const jx = p.desordre * jit[i] * gap * 0.45;
+            d = Math.min(d, sdBox(x - ((i - (n - 1) / 2) * gap + jx), y, hw, rho));
+          }
+          return d;
+        }
+        case 'polygone':
+          return sdPolygon(x, y, rho, Math.max(3, Math.round(p.cotes)));
+        case 'rectangle':
+          return sdBox(x, y, rho, Math.max(0.02, rho * thick));
+        case 'croix': {
+          const arm = Math.max(0.01, rho * thick);
+          return Math.min(sdBox(x, y, rho, arm), sdBox(x, y, arm, rho));
+        }
+        case 'reseau': {
+          const pitch = Math.max(0.035, p.ecart);
+          const hole = pitch * thick * 0.42;
+          const reach = pitch * (n - 1) / 2 + hole;
+          const rad = Math.max(rho, reach);
+          if (Math.hypot(x, y) > rad * 1.05) return 1;
+          const ix = Math.round(x / pitch);
+          const iy = Math.round(y / pitch);
+          const lim = (n - 1) / 2;
+          if (Math.abs(ix) > lim + 0.1 || Math.abs(iy) > lim + 0.1) return 1;
+          const j = (Math.abs(ix) + Math.abs(iy) * 3) % jit.length;
+          const cx = ix * pitch + p.desordre * jit[j] * pitch * 0.28;
+          const cy = iy * pitch + p.desordre * jit[(j + 7) % jit.length] * pitch * 0.28;
+          return Math.hypot(x - cx, y - cy) - hole;
+        }
+        case 'poisson':
+          return Math.hypot(x, y) - rho;
+        default:
+          return 1;
+      }
+    }
+
+    function sdMark(x, y) {
+      const r = Math.hypot(x, y);
+      const ring = Math.abs(r - 0.58) - 0.15;
+      const bite = Math.hypot(x - 0.36, y + 0.02) - 0.46;
+      const bar = sdBox(x + 0.02, y, 0.4, 0.075);
+      return Math.min(Math.max(ring, -bite), bar);
+    }
+
+    function rasterLogo(img) {
+      logoAmp.fill(0);
+      if (!img || !img.width) return;
+      const g = logoCtx;
+      g.setTransform(1, 0, 0, 1, 0, 0);
+      g.clearRect(0, 0, N, N);
+      const side = N * 0.84;
+      const sc = side / Math.max(img.width, img.height);
+      const w = img.width * sc;
+      const h = img.height * sc;
+      g.drawImage(img, (N - w) / 2, (N - h) / 2, w, h);
+      const data = g.getImageData(0, 0, N, N).data;
+      let alphaN = 0;
+      let lumSum = 0;
+      let count = 0;
+      for (let i = 0; i < data.length; i += 16) {
+        if (data[i + 3] < 245) alphaN++;
+        lumSum += data[i] * 0.2126 + data[i + 1] * 0.7152 + data[i + 2] * 0.0722;
+        count++;
+      }
+      const useAlpha = alphaN > 8;
+      const invert = !useAlpha && lumSum / count > 150;
+      for (let p = 0, i = 0; p < N * N; p++, i += 4) {
+        const a = data[i + 3] / 255;
+        const lum = (data[i] * 0.2126 + data[i + 1] * 0.7152 + data[i + 2] * 0.0722) / 255;
+        logoAmp[p] = useAlpha ? a : (invert ? 1 - lum : lum);
+      }
+    }
+
+    function stamp(u, v, rad, val) {
+      const cx = (u * 0.5 + 0.5) * (N - 1);
+      const cy = (v * 0.5 + 0.5) * (N - 1);
+      const r = Math.max(1.2, rad * 0.5 * N);
+      const x0 = Math.max(0, Math.floor(cx - r - 1));
+      const x1 = Math.min(N - 1, Math.ceil(cx + r + 1));
+      const y0 = Math.max(0, Math.floor(cy - r - 1));
+      const y1 = Math.min(N - 1, Math.ceil(cy + r + 1));
+      for (let y = y0; y <= y1; y++) {
+        for (let x = x0; x <= x1; x++) {
+          const d = Math.hypot(x - cx, y - cy) / r;
+          if (d >= 1) continue;
+          const t = 1 - d * d;
+          const k = y * N + x;
+          const add = val * t * t;
+          paint[k] = val > 0 ? Math.min(1, paint[k] + add) : Math.max(0, paint[k] + add);
+        }
+      }
+      paintSum = val > 0 ? paintSum + 1 : Math.max(0, paintSum - 1);
+      maskRev++;
+    }
+
+    function openingAt(u, v, p) {
+      const rho = Math.max(0.02, p.ouverture);
+      const w = Math.max(2 / N, rho * (0.012 + p.douceur * 0.16));
+      let t = 0;
+      if (p.forme === 'dessin') {
+        const x = (u / rho) * 0.5 + 0.5;
+        const y = (v / rho) * 0.5 + 0.5;
+        t = (x < 0 || y < 0 || x > 1 || y > 1) ? 0 : bilinear(paint, x * (N - 1), y * (N - 1));
+      } else if (p.forme === 'logo' || p.forme === 'cache') {
+        const [x, y] = warp(u, v, p);
+        if (logoAmp[0] === 0 && logoAmp[N * N >> 1] === 0 && !app.params.image) {
+          t = transmit(sdMark(x / rho, y / rho), 0.04);
+        } else {
+          const sx = (x / rho) * 0.5 + 0.5;
+          const sy = (y / rho) * 0.5 + 0.5;
+          t = (sx < 0 || sy < 0 || sx > 1 || sy > 1) ? 0 : bilinear(logoAmp, sx * (N - 1), sy * (N - 1));
+        }
+        if (p.forme === 'cache') {
+          const beam = Math.exp(-Math.pow(Math.hypot(u, v) / 0.78, 8));
+          t = beam * (1 - t);
+        }
+      } else if (p.forme === 'poisson') {
+        const beam = Math.exp(-Math.pow(Math.hypot(u, v) / (rho * 1.55), 3.2));
+        const [x, y] = warp(u, v, p);
+        t = beam * (1 - transmit(Math.hypot(x, y) - rho, w));
+      } else if (p.forme === 'reseau') {
+        const [x, y] = warp(u, v, p);
+        const d = shapeSDF(x, y, p);
+        const pitch = Math.max(0.035, p.ecart);
+        const n = Math.max(1, Math.round(p.nombre));
+        const rad = Math.max(rho, pitch * (n - 1) / 2 + pitch * 0.3);
+        const env = Math.exp(-Math.pow(Math.hypot(x, y) / rad, 8));
+        t = transmit(d, w) * env;
+      } else {
+        const [x, y] = warp(u, v, p);
+        t = transmit(shapeSDF(x, y, p), w);
+      }
+      if (p.obstacle > 0.004 && p.forme !== 'poisson') {
+        const od = Math.hypot(u - obsX, v - obsY) - p.obstacle;
+        t *= 1 - transmit(od, Math.max(w, 0.01));
+      }
+      return t;
+    }
+
+    function reseedNoise() {
+      const rnd = app.rng(11);
+      phases[0] = rnd() * Math.PI * 2;
+      phases[1] = rnd() * Math.PI * 2;
+      for (let i = 0; i < jit.length; i++) jit[i] = rnd() * 2 - 1;
+      bakeKey = '';
+    }
+
+    function effFresnel(p, t) {
+      const T = Math.max(0.5, p.boucle);
+      const tau = ((t % T) + T) % T / T;
+      const wob = Math.sin(tau * Math.PI * 2);
+      return Math.max(0, p.fresnel * (1 + p.balayage * wob));
+    }
+
+    function poseOf(p, t) {
+      const T = Math.max(0.5, p.boucle);
+      const tau = ((t % T) + T) % T / T;
+      return {
+        tau,
+        breathe: 1 + p.respiration * Math.sin(tau * Math.PI * 2),
+        rotation: p.rotation + p.tours * tau * 360,
+        fresnel: effFresnel(p, t),
+      };
+    }
+
+    function bake(p, F) {
+      if (p.forme === 'dessin' && paintSum <= 0) {
+        const rnd = app.rng(29);
+        stamp(0, 0, 0.11, 1);
+        stamp(-0.16, 0.08, 0.05, 1);
+        stamp(0.18, -0.06, 0.045, 1);
+        stamp((rnd() - 0.5) * 0.2, (rnd() - 0.5) * 0.2, 0.03, 1);
+      }
+      if ((p.forme === 'logo' || p.forme === 'cache') && p.image) rasterLogo(p.image);
+      const rho = Math.max(0.02, p.ouverture);
+      const chirp = F > 0.015;
+      const safe = Math.max(0.4, (N * rho) / 6.5);
+      const Fuse = Math.min(F, safe);
+      const pk = chirp ? (Math.PI * Fuse) / (rho * rho) : 0;
+      const c0 = (N - 1) / 2;
+      re.fill(0);
+      im.fill(0);
+      for (let j = 0; j < N; j++) {
+        const v = (j - c0) / N2;
+        for (let i = 0; i < N; i++) {
+          const u = (i - c0) / N2;
+          const t = openingAt(u, v, p);
+          const k = j * N + i;
+          amp[k] = t;
+          if (t <= 0) continue;
+          if (chirp) {
+            const ph = pk * (u * u + v * v);
+            re[k] = t * Math.cos(ph);
+            im[k] = t * Math.sin(ph);
+          } else {
+            re[k] = t;
+          }
+        }
+      }
+      fft2();
+      let peak = 1e-8;
+      let center = 0;
+      for (let j = 0; j < N; j++) {
+        const sj = (j + N2) & (N - 1);
+        for (let i = 0; i < N; i++) {
+          const si = (i + N2) & (N - 1);
+          const k = j * N + i;
+          const m = re[k] * re[k] + im[k] * im[k];
+          pow[sj * N + si] = m;
+          if (m > peak) peak = m;
+        }
+      }
+      softenPow();
+      peak = 1e-8;
+      for (let i = 0; i < pow.length; i++) if (pow[i] > peak) peak = pow[i];
+      center = 0;
+      for (let y = N2 - 2; y <= N2 + 2; y++) {
+        for (let x = N2 - 2; x <= N2 + 2; x++) center = Math.max(center, pow[y * N + x]);
+      }
+      refI = Math.max(center, peak * 0.42, 1e-8);
+    }
+
+    function hex(c) {
+      const n = parseInt(String(c).replace('#', ''), 16);
+      if (!Number.isFinite(n)) return [255, 255, 255];
+      return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+    }
+    function luma(rgb) { return rgb[0] * 0.2126 + rgb[1] * 0.7152 + rgb[2] * 0.0722; }
+    function mix(a, b, t) {
+      return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+    }
+    function lin(c) {
+      c /= 255;
+      return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+    }
+    function unlin(c) {
+      c = Math.min(1, Math.max(0, c));
+      return Math.round((c <= 0.0031308 ? 12.92 * c : 1.055 * c ** (1 / 2.4) - 0.055) * 255);
+    }
+    function toLab(rgb) {
+      const r = lin(rgb[0]), g = lin(rgb[1]), b = lin(rgb[2]);
+      const l = Math.cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b);
+      const m = Math.cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b);
+      const s = Math.cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b);
+      return [
+        0.2104542553 * l + 0.793617785 * m - 0.0040720468 * s,
+        1.9779984951 * l - 2.428592205 * m + 0.4505937099 * s,
+        0.0259040371 * l + 0.7827717662 * m - 0.808675766 * s,
+      ];
+    }
+    function fromLab(L, a, b) {
+      const l_ = L + 0.3963377774 * a + 0.2158037573 * b;
+      const m_ = L - 0.1055613458 * a - 0.0638541728 * b;
+      const s_ = L - 0.0894841775 * a - 1.291485548 * b;
+      const l = l_ * l_ * l_, m = m_ * m_ * m_, s = s_ * s_ * s_;
+      return [
+        unlin(4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s),
+        unlin(-1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s),
+        unlin(-0.0041960863 * l - 0.7034186147 * m + 1.707614701 * s),
+      ];
+    }
+    function ramp(stops, t) {
+      if (t <= stops[0].t) return fromLab(...stops[0].lab);
+      for (let i = 1; i < stops.length; i++) {
+        if (t <= stops[i].t) {
+          const a = stops[i - 1];
+          const b = stops[i];
+          const u = (t - a.t) / Math.max(1e-4, b.t - a.t);
+          return fromLab(
+            a.lab[0] + (b.lab[0] - a.lab[0]) * u,
+            a.lab[1] + (b.lab[1] - a.lab[1]) * u,
+            a.lab[2] + (b.lab[2] - a.lab[2]) * u,
+          );
+        }
+      }
+      return fromLab(...stops[stops.length - 1].lab);
+    }
+
+    function buildLUT(p) {
+      const fond = hex(p.fond);
+      const teinte = hex(p.teinte);
+      const white = [255, 250, 244];
+      let stops;
+      if (p.rendu === 'palette') {
+        const cols = [fond, ...(p.palette || []).map(hex)];
+        stops = cols.map((c, i) => ({ t: cols.length === 1 ? 0 : i / (cols.length - 1), rgb: c }));
+      } else if (luma(teinte) + 12 < luma(fond)) {
+        stops = [
+          { t: 0, rgb: fond },
+          { t: 0.42, rgb: mix(fond, teinte, 0.38) },
+          { t: 1, rgb: teinte },
+        ];
+      } else {
+        stops = [
+          { t: 0, rgb: fond },
+          { t: 0.16, rgb: mix(fond, teinte, 0.22) },
+          { t: 0.4, rgb: mix(fond, teinte, 0.72) },
+          { t: 0.68, rgb: teinte },
+          { t: 0.86, rgb: mix(teinte, white, 0.5) },
+          { t: 1, rgb: mix(teinte, white, 0.88) },
+        ];
+      }
+      const labs = stops.map((s) => ({ t: s.t, lab: toLab(s.rgb) }));
+      for (let i = 0; i < 256; i++) {
+        const c = ramp(labs, i / 255);
+        lut[i * 3] = c[0];
+        lut[i * 3 + 1] = c[1];
+        lut[i * 3 + 2] = c[2];
+      }
+      fondRGB = fond;
+      const hot = stops[stops.length - 1].rgb;
+      inkMode = luma(hot) + 8 < luma(fond);
+    }
+
+    function wlRGB(nm) {
+      let r = 0, g = 0, b = 0;
+      if (nm < 440) { r = (440 - nm) / 60; b = 1; }
+      else if (nm < 490) { g = (nm - 440) / 50; b = 1; }
+      else if (nm < 510) { g = 1; b = (510 - nm) / 20; }
+      else if (nm < 580) { r = (nm - 510) / 70; g = 1; }
+      else if (nm < 645) { r = 1; g = (645 - nm) / 65; }
+      else { r = 1; }
+      let f = 1;
+      if (nm < 420) f = 0.3 + 0.7 * (nm - 380) / 40;
+      else if (nm > 700) f = 0.3 + 0.7 * (780 - nm) / 80;
+      return [r * f, g * f, b * f];
+    }
+
+    const BANDS = [445, 475, 505, 535, 570, 605, 640];
+    function spectrum(p) {
+      const sigma = 12 + p.etalement * p.etalement * 210;
+      const acc = BANDS.map((nm) => {
+        const w = Math.exp(-0.5 * ((nm - p.lambda) / sigma) ** 2);
+        const c = wlRGB(nm);
+        return [w * c[0], w * c[1], w * c[2], 550 / nm];
+      });
+      let sr = 0, sg = 0, sb = 0;
+      for (const a of acc) { sr += a[0]; sg += a[1]; sb += a[2]; }
+      sr = sr || 1; sg = sg || 1; sb = sb || 1;
+      return acc.map((a) => [a[0] / sr, a[1] / sg, a[2] / sb, a[3]]);
+    }
+
+    const TONE_N = 2048;
+    const toneLUT = new Float32Array(TONE_N);
+    let toneExp = -1;
+    let toneGamma = -1;
+
+    function tone(r, exp, gamma) {
+      if (r <= 0) return 0;
+      const y = Math.log1p(r * exp) / Math.log1p(exp);
+      return y > 0 ? y ** gamma : 0;
+    }
+
+    function softenPow() {
+      const tmp = re;
+      for (let y = 0; y < N; y++) {
+        const o = y * N;
+        for (let x = 0; x < N; x++) {
+          const xm = (x + N - 1) & (N - 1);
+          const xp = (x + 1) & (N - 1);
+          tmp[o + x] = pow[o + xm] * 0.22 + pow[o + x] * 0.56 + pow[o + xp] * 0.22;
+        }
+      }
+      for (let y = 0; y < N; y++) {
+        const ym = ((y + N - 1) & (N - 1)) * N;
+        const yp = ((y + 1) & (N - 1)) * N;
+        const o = y * N;
+        for (let x = 0; x < N; x++) {
+          pow[o + x] = tmp[ym + x] * 0.22 + tmp[o + x] * 0.56 + tmp[yp + x] * 0.22;
+        }
+      }
+    }
+
+    function prepareTone(exp, gamma) {
+      if (exp === toneExp && gamma === toneGamma) return;
+      toneExp = exp;
+      toneGamma = gamma;
+      for (let i = 0; i < TONE_N; i++) toneLUT[i] = tone((i / (TONE_N - 1)) * 8, exp, gamma);
+    }
+
+    function toneOf(r) {
+      if (r <= 0) return 0;
+      if (r >= 8) return toneLUT[TONE_N - 1];
+      const f = (r / 8) * (TONE_N - 1);
+      const i = f | 0;
+      const u = f - i;
+      return toneLUT[i] * (1 - u) + toneLUT[i + 1] * u;
+    }
+
+    // Image carrée de la figure, sans rotation : on la tourne au dessin.
+    // half = demi-largeur en bins de Fourier. La respiration et l'angle sont hors cache.
+    function renderCache(p, pix, half) {
+      if (buf.width !== pix || buf.height !== pix) {
+        buf.width = buf.height = pix;
+        imgData = bctx.createImageData(pix, pix);
+      }
+      prepareTone(p.exposition, p.gamma);
+      const data = imgData.data;
+      const spectral = p.rendu === 'spectre';
+      const bands = spectral ? spectrum(p) : null;
+      const fr = fondRGB[0];
+      const fg = fondRGB[1];
+      const fb = fondRGB[2];
+      const cx = (pix - 1) * 0.5;
+      const step = (2 * half) / pix;
+      const inv = 1 / refI;
+      for (let y = 0; y < pix; y++) {
+        const fy = (y - cx) * step;
+        const row = y * pix * 4;
+        const by = (y & 3) << 2;
+        for (let x = 0; x < pix; x++) {
+          const fx = (x - cx) * step;
+          const o = row + x * 4;
+            const dith = (BAYER[by + (x & 3)] - 8) * 0.09;
+          if (spectral) {
+            let R = 0, G = 0, B = 0;
+            for (let i = 0; i < bands.length; i++) {
+              const s = bands[i];
+              const I = samplePow(fx * s[3], fy * s[3]) * inv;
+              R += I * s[0];
+              G += I * s[1];
+              B += I * s[2];
+            }
+            const Y = R * 0.2126 + G * 0.7152 + B * 0.0722;
+            const sat = 0.55;
+            R = Y + (R - Y) * sat;
+            G = Y + (G - Y) * sat;
+            B = Y + (B - Y) * sat;
+            data[o] = Math.max(0, Math.min(255, fr + (255 - fr) * toneOf(R) + dith));
+            data[o + 1] = Math.max(0, Math.min(255, fg + (255 - fg) * toneOf(G) + dith));
+            data[o + 2] = Math.max(0, Math.min(255, fb + (255 - fb) * toneOf(B) + dith));
+          } else {
+            const k = Math.max(0, Math.min(255, (toneOf(samplePow(fx, fy) * inv) * 255 + dith) | 0));
+            data[o] = lut[k * 3];
+            data[o + 1] = lut[k * 3 + 1];
+            data[o + 2] = lut[k * 3 + 2];
+          }
+          data[o + 3] = 255;
+        }
+      }
+      bctx.setTransform(1, 0, 0, 1, 0, 0);
+      bctx.putImageData(imgData, 0, 0);
+      if (!inkMode && p.eclat > 0.01) {
+        const s1 = Math.max(10, pix >> 4);
+        bloom.width = s1;
+        bloom.height = s1;
+        bloomCtx.imageSmoothingEnabled = true;
+        bloomCtx.drawImage(buf, 0, 0, s1, s1);
+        bctx.save();
+        bctx.globalCompositeOperation = 'lighter';
+        bctx.globalAlpha = p.eclat * 0.7;
+        bctx.drawImage(bloom, 0, 0, pix, pix);
+        bctx.globalAlpha = p.eclat * 0.32;
+        bctx.drawImage(bloom, 0, 0, s1 * 0.4, s1 * 0.4, 0, 0, pix, pix);
+        bctx.restore();
+      }
+    }
+
+    function drawSeal(w, h, p) {
+      const s = Math.min(w, h) * 0.2 * p.sceau;
+      if (s < 8) return;
+      const m = Math.min(w, h) * 0.055;
+      const x = m + s / 2;
+      const y = h - m - s / 2;
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.rotate(poseHold * Math.PI / 180);
+      ctx.strokeStyle = inkMode ? p.teinte : 'rgba(255,250,244,0.88)';
+      ctx.fillStyle = ctx.strokeStyle;
+      ctx.lineWidth = Math.max(1, s * 0.018);
+      ctx.globalAlpha = 0.92;
+      ctx.beginPath();
+      ctx.arc(0, 0, s * 0.48, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.globalAlpha = 0.95;
+      traceShape(s * 0.34, p);
+      ctx.restore();
+    }
+
+    let poseHold = 0;
+
+    function traceShape(r, p) {
+      const n = Math.max(3, Math.round(p.cotes));
+      const thick = Math.max(0.08, p.epaisseur);
+      ctx.beginPath();
+      if (p.forme === 'disque' || p.forme === 'poisson' || p.forme === 'dessin') {
+        ctx.arc(0, 0, r, 0, Math.PI * 2);
+        ctx.fill();
+      } else if (p.forme === 'anneau') {
+        ctx.arc(0, 0, r, 0, Math.PI * 2);
+        ctx.arc(0, 0, r * (1 - thick * 0.7), 0, Math.PI * 2, true);
+        ctx.fill('evenodd');
+      } else if (p.forme === 'polygone' || p.forme === 'logo' || p.forme === 'cache') {
+        for (let i = 0; i <= n; i++) {
+          const a = -Math.PI / 2 + (i * 2 * Math.PI) / (p.forme === 'polygone' ? n : 6);
+          const px = Math.cos(a) * r;
+          const py = Math.sin(a) * r;
+          if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+        }
+        ctx.fill();
+      } else if (p.forme === 'fente' || p.forme === 'fentes') {
+        const count = p.forme === 'fente' ? 1 : Math.max(1, Math.round(p.nombre));
+        const gap = r * 0.42;
+        const hw = r * thick * 0.28;
+        for (let i = 0; i < count; i++) {
+          const cx = (i - (count - 1) / 2) * gap;
+          ctx.rect(cx - hw, -r, hw * 2, r * 2);
+        }
+        ctx.fill();
+      } else if (p.forme === 'rectangle') {
+        ctx.rect(-r, -r * thick, r * 2, r * thick * 2);
+        ctx.fill();
+      } else if (p.forme === 'croix') {
+        const a = r * thick * 0.55;
+        ctx.rect(-r, -a, r * 2, a * 2);
+        ctx.rect(-a, -r, a * 2, r * 2);
+        ctx.fill();
+      } else if (p.forme === 'reseau') {
+        const count = Math.max(1, Math.round(p.nombre));
+        const pitch = (r * 1.6) / count;
+        const hr = pitch * thick * 0.28;
+        for (let j = 0; j < count; j++) {
+          for (let i = 0; i < count; i++) {
+            ctx.moveTo((i - (count - 1) / 2) * pitch + hr, (j - (count - 1) / 2) * pitch);
+            ctx.arc((i - (count - 1) / 2) * pitch, (j - (count - 1) / 2) * pitch, hr, 0, Math.PI * 2);
+          }
+        }
+        ctx.fill();
+      }
+    }
+
+    function draw(t) {
+      const p = app.params;
+      const pose = poseOf(p, t);
+      poseHold = pose.rotation;
+      const key = [
+        p.forme, p.cotes, p.nombre, p.ouverture, p.epaisseur, p.ecart, p.douceur,
+        p.ellipticite, p.desordre, p.obstacle, obsX.toFixed(3), obsY.toFixed(3),
+        pose.fresnel.toFixed(3), app.seed, maskRev,
+        (p.forme === 'logo' || p.forme === 'cache') ? (p.image && p.image.src) || 'mark' : '',
+      ].join('|');
+      if (key !== bakeKey) {
+        bake(p, pose.fresnel);
+        bakeKey = key;
+      }
+      const ck = [p.rendu, p.fond, p.teinte, (p.palette || []).join(','), p.lambda, p.etalement].join('|');
+      if (ck !== colorKey) {
+        buildLUT(p);
+        colorKey = ck;
+        cacheKey = '';
+      }
+      const { w, h, dpr } = app.size;
+      if (w < 2 || h < 2) return;
+      const short = Math.min(w, h);
+      const cssD = Math.hypot(w, h) * 1.42;
+      const half = Math.min(N2 - 6, p.champ * (cssD / short));
+      const cap = p.balayage > 0.02 ? 520 : (p.rendu === 'spectre' ? 640 : 920);
+      const pix = Math.max(96, Math.min(cap, Math.round(Math.min(cssD * dpr, cap))));
+      const rk = [bakeKey, ck, p.exposition, p.gamma, p.eclat, half.toFixed(2), pix].join('|');
+      if (rk !== cacheKey) {
+        renderCache(p, pix, half);
+        cacheKey = rk;
+      }
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = 'medium';
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = p.fond;
+      ctx.fillRect(0, 0, w, h);
+      ctx.save();
+      ctx.translate(w / 2, h / 2);
+      ctx.rotate(pose.rotation * Math.PI / 180);
+      const s = 1 / Math.max(0.4, pose.breathe);
+      ctx.scale(s, s);
+      ctx.drawImage(buf, -cssD / 2, -cssD / 2, cssD, cssD);
+      ctx.restore();
+      if (p.sceau > 0.02) drawSeal(w, h, p);
+      app.finish(ctx);
+    }
+
+    function wrapDeg(a) {
+      return ((a + 180) % 360 + 360) % 360 - 180;
+    }
+    function polar(p) {
+      const w = app.size.w, h = app.size.h;
+      const dx = p.x - w / 2, dy = p.y - h / 2;
+      return { ang: Math.atan2(dy, dx), dist: Math.hypot(dx, dy) };
+    }
+
+    function diaphragmSVG() {
+      const p = app.params;
+      const rho = p.ouverture;
+      const n = Math.max(3, Math.round(p.cotes));
+      let body = '';
+      const poly = (sides, r) => {
+        const pts = [];
+        for (let i = 0; i < sides; i++) {
+          const a = -Math.PI / 2 + (i * 2 * Math.PI) / sides;
+          pts.push(`${(Math.cos(a) * r).toFixed(4)},${(Math.sin(a) * r).toFixed(4)}`);
+        }
+        return `<polygon points="${pts.join(' ')}"/>`;
+      };
+      if (p.forme === 'anneau') {
+        const t = rho * Math.max(0.05, p.epaisseur) * 0.45;
+        body = `<path fill-rule="evenodd" d="M0,${-rho} A${rho},${rho} 0 1 1 0,${rho} A${rho},${rho} 0 1 1 0,${-rho} M0,${-(rho - t)} A${rho - t},${rho - t} 0 1 0 0,${rho - t} A${rho - t},${rho - t} 0 1 0 0,${-(rho - t)}"/>`;
+      } else if (p.forme === 'polygone') body = poly(n, rho);
+      else if (p.forme === 'rectangle') {
+        const hy = rho * Math.max(0.05, p.epaisseur);
+        body = `<rect x="${-rho}" y="${-hy}" width="${rho * 2}" height="${hy * 2}"/>`;
+      } else if (p.forme === 'croix') {
+        const a = rho * Math.max(0.05, p.epaisseur);
+        body = `<rect x="${-rho}" y="${-a}" width="${rho * 2}" height="${a * 2}"/><rect x="${-a}" y="${-rho}" width="${a * 2}" height="${rho * 2}"/>`;
+      } else if (p.forme === 'fente' || p.forme === 'fentes') {
+        const count = p.forme === 'fente' ? 1 : Math.max(1, Math.round(p.nombre));
+        const hw = Math.max(0.004, rho * p.epaisseur);
+        const gap = p.ecart;
+        for (let i = 0; i < count; i++) {
+          const cx = (i - (count - 1) / 2) * gap;
+          body += `<rect x="${cx - hw}" y="${-rho}" width="${hw * 2}" height="${rho * 2}"/>`;
+        }
+      } else body = `<circle cx="0" cy="0" r="${rho}"/>`;
+      return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="-1.05 -1.05 2.1 2.1" fill="#111">${body}</svg>`;
+    }
+
+    const app = Atelier.app({
+      stage: canvas,
+      animate: true,
+      seed: 12,
+      finish: { grain: 0.08, vignette: 0.26 },
+      hint: 'Glissez pour tourner et ouvrir le diaphragme · Maj : un obstacle · molette : le champ',
+      notes: 'Champ lointain : l’amplitude est la transformée de Fourier de l’ouverture (Fraunhofer). F = a²/(λz) est le nombre de Fresnel ; F = 0 donne le disque d’Airy, les fentes de Young et le réseau. Plus F monte, plus on s’approche de l’ombre géométrique et de la tache d’Arago. La lumière blanche somme des longueurs d’onde, chacune à l’échelle de λ. Le SVG exporte le diaphragme, pas la figure.',
+      params: {
+        'Diaphragme': {
+          forme: {
+            type: 'select', label: 'Ouverture', value: 'polygone',
+            options: {
+              disque: 'Disque', anneau: 'Anneau', fente: 'Fente', fentes: 'Fentes',
+              polygone: 'Polygone', rectangle: 'Rectangle', croix: 'Croix', reseau: 'Réseau',
+              poisson: 'Tache', logo: 'Logo', cache: 'Cache', dessin: 'Dessin',
+            },
+          },
+          cotes: { type: 'range', label: 'Côtés', min: 3, max: 8, step: 1, value: 3, show: isPoly },
+          nombre: { type: 'range', label: 'Nombre', min: 1, max: 11, step: 1, value: 2, show: isCount },
+          ouverture: { type: 'range', label: 'Ouverture a', min: 0.045, max: 0.42, step: 0.005, value: 0.09 },
+          epaisseur: { type: 'range', label: 'Épaisseur', min: 0.04, max: 0.9, step: 0.01, value: 0.16, show: isThick },
+          ecart: { type: 'range', label: 'Écart', min: 0.03, max: 0.42, step: 0.005, value: 0.15, show: isGap },
+          douceur: { type: 'range', label: 'Douceur du bord', min: 0, max: 1, step: 0.01, value: 0 },
+          ellipticite: { type: 'range', label: 'Ellipticité', min: -0.85, max: 0.85, step: 0.01, value: 0 },
+          desordre: { type: 'range', label: 'Désordre du bord', min: 0, max: 1, step: 0.01, value: 0 },
+          obstacle: { type: 'range', label: 'Obstacle', min: 0, max: 0.4, step: 0.005, value: 0 },
+          image: { type: 'file', label: 'Logo ou image', accept: 'image/*' },
+        },
+        'Propagation': {
+          fresnel: { type: 'range', label: 'Nombre de Fresnel F', min: 0, max: 9, step: 0.01, value: 0 },
+          balayage: { type: 'range', label: 'Balayage de F', min: 0, max: 1, step: 0.01, value: 0 },
+          champ: { type: 'range', label: 'Champ', min: 14, max: 160, step: 1, value: 132 },
+          rotation: { type: 'range', label: 'Rotation (°)', min: -180, max: 180, step: 1, value: 8 },
+          tours: { type: 'range', label: 'Tours par boucle', min: 0, max: 3, step: 1, value: 1 },
+          respiration: { type: 'range', label: 'Respiration', min: 0, max: 0.45, step: 0.01, value: 0.04 },
+          boucle: { type: 'range', label: 'Durée de boucle (s)', min: 4, max: 20, step: 0.5, value: 12 },
+        },
+        'Lumière': {
+          rendu: { type: 'segmented', label: 'Rendu', options: { laser: 'Laser', palette: 'Palette', spectre: 'Spectre' }, value: 'palette' },
+          lambda: { type: 'range', label: 'Longueur d’onde λ (nm)', min: 430, max: 680, step: 1, value: 550, show: isSpec },
+          etalement: { type: 'range', label: 'Largeur spectrale', min: 0, max: 1, step: 0.01, value: 1, show: isSpec },
+          teinte: { type: 'color', label: 'Teinte', value: CH[1], show: isLaser },
+          fond: { type: 'color', label: 'Fond', value: KB[0] },
+          palette: { type: 'palette', label: 'Palette', value: [KB[5], KB[1], KB[2], KB[3]], show: isPal },
+          exposition: { type: 'range', label: 'Exposition', min: 2, max: 80, step: 0.5, value: 42 },
+          gamma: { type: 'range', label: 'Gamma', min: 0.4, max: 1.7, step: 0.01, value: 0.6 },
+          eclat: { type: 'range', label: 'Éclat', min: 0, max: 1.5, step: 0.01, value: 0.02 },
+          sceau: { type: 'range', label: 'Sceau', min: 0, max: 1, step: 0.01, value: 0 },
+        },
+        'Geste': {
+          pinceau: { type: 'range', label: 'Pinceau', min: 0.015, max: 0.2, step: 0.005, value: 0.055, show: isDraw },
+          effacer: {
+            type: 'button', label: 'Effacer le dessin', show: isDraw, explore: false,
+            action: () => { paint.fill(0); paintSum = 0; maskRev++; },
+          },
+        },
+      },
+      presets: {
+        'Diaphragme': {
+          seed: 12, forme: 'polygone', cotes: 3, ouverture: 0.086, douceur: 0,
+          champ: 124, tours: 1, respiration: 0.03, rotation: 8,
+          rendu: 'laser', fond: CH[0], teinte: CH[1],
+          exposition: 52, gamma: 0.78, eclat: 0.03,
+          grain: 0.16, vignette: 0.4,
+        },
+        'Airy': {
+          seed: 4, forme: 'disque', ouverture: 0.1, douceur: 0.008, champ: 36, tours: 0,
+          respiration: 0.04, rotation: 0, rendu: 'spectre', lambda: 540, etalement: 0.9,
+          exposition: 64, gamma: 0.72, eclat: 0.14,
+          fond: CH[0], grain: 0.1, vignette: 0.42,
+        },
+        'Fentes': {
+          seed: 9, forme: 'fentes', nombre: 2, ouverture: 0.046, epaisseur: 0.22, ecart: 0.34,
+          douceur: 0.012, champ: 28, tours: 0, respiration: 0, rotation: 90,
+          rendu: 'laser', fond: CH[0], teinte: '#f4f1ea',
+          exposition: 22, gamma: 0.74, eclat: 0.05,
+          grain: 0.12, vignette: 0.32,
+        },
+        'Réseau': {
+          seed: 18, forme: 'reseau', nombre: 7, ecart: 0.078, epaisseur: 0.46, ouverture: 0.34,
+          douceur: 0.02, champ: 102, tours: 1, respiration: 0, rotation: 0,
+          rendu: 'laser', fond: NUIT[0], teinte: NUIT[1], exposition: 38, gamma: 0.9, eclat: 0.04,
+          grain: 0.14, vignette: 0.46,
+        },
+        'Fresnel': {
+          seed: 7, forme: 'polygone', cotes: 6, ouverture: 0.22, douceur: 0.012,
+          fresnel: 4.2, balayage: 0.4, champ: 78, tours: 0, respiration: 0, rotation: 0,
+          rendu: 'palette', fond: MEN[1], palette: [MEN[3], MEN[2], '#e7fff3'],
+          exposition: 12, gamma: 1.22, eclat: 0.02,
+          grain: 0.08, vignette: 0.3,
+        },
+        'Poisson': {
+          seed: 3, forme: 'poisson', ouverture: 0.28, douceur: 0.01,
+          fresnel: 2.8, balayage: 0.12, champ: 30, tours: 0, respiration: 0,
+          rendu: 'palette', fond: KB[0], palette: [KB[5], KB[1], KB[2], KB[3]],
+          exposition: 11, gamma: 1.4, eclat: 0.08,
+          grain: 0.1, vignette: 0.5,
+        },
+        'Affiche': {
+          seed: 21, forme: 'polygone', cotes: 5, ouverture: 0.078, douceur: 0,
+          champ: 68, tours: 0, respiration: 0, rotation: -8,
+          rendu: 'palette', fond: KB[0], palette: [KB[5], KB[1], KB[2], KB[3]],
+          exposition: 48, gamma: 0.56, eclat: 0.015,
+          grain: 0.07, vignette: 0.22,
+        },
+        'Encre': {
+          seed: 6, forme: 'disque', ouverture: 0.1, douceur: 0.008, champ: 76,
+          tours: 0, respiration: 0.03, rendu: 'laser', fond: P60[0], teinte: P60[1],
+          exposition: 62, gamma: 0.76, eclat: 0,
+          grain: 0.28, vignette: 0.06,
+        },
+      },
+      brand(colors) {
+        const fond = colors[0];
+        const rest = colors.slice(1);
+        return {
+          fond,
+          teinte: rest[0] || '#f2f2f2',
+          palette: rest.length ? rest : ['#ffffff'],
+        };
+      },
+      onSeed() { reseedNoise(); },
+      onChange(key) {
+        if (key === 'image' && app.params.image && app.params.forme !== 'logo' && app.params.forme !== 'cache') {
+          app.set('forme', 'logo');
+        }
+        if (key === 'fond' || key === 'teinte' || key === 'palette' || key === 'rendu' || key === 'lambda' || key === 'etalement' || key === '*') {
+          colorKey = '';
+        }
+        if (key === '*') bakeKey = '';
+      },
+      pointer: {
+        down(p) {
+          const q = app.params;
+          if (q.forme === 'dessin' && !p.shift) {
+            painting = true;
+            const u = (p.x - app.size.w / 2) / (Math.min(app.size.w, app.size.h) * 0.42);
+            const v = (p.y - app.size.h / 2) / (Math.min(app.size.w, app.size.h) * 0.42);
+            stamp(u, v, q.pinceau, p.alt ? -1 : 1);
+            return;
+          }
+          if (p.shift) {
+            placing = true;
+            placeObstacle(p);
+            return;
+          }
+          const pol = polar(p);
+          const pose = poseOf(q, app.time);
+          grab = { a0: pol.ang, r0: pose.rotation, d0: Math.max(28, pol.dist), o0: q.ouverture };
+        },
+        drag(p) {
+          const q = app.params;
+          if (painting) {
+            const u = (p.x - app.size.w / 2) / (Math.min(app.size.w, app.size.h) * 0.42);
+            const v = (p.y - app.size.h / 2) / (Math.min(app.size.w, app.size.h) * 0.42);
+            stamp(u, v, q.pinceau, p.alt ? -1 : 1);
+            return;
+          }
+          if (placing) { placeObstacle(p); return; }
+          if (!grab) return;
+          const pol = polar(p);
+          const disp = grab.r0 + (pol.ang - grab.a0) * 180 / Math.PI;
+          const tau = poseOf(q, app.time).tau;
+          app.set('rotation', wrapDeg(disp - q.tours * tau * 360));
+          const ou = Math.min(0.42, Math.max(0.045, grab.o0 * (pol.dist / grab.d0)));
+          app.set('ouverture', Math.round(ou * 200) / 200);
+        },
+        up() { painting = false; placing = false; grab = null; },
+        wheel(_p, dy) {
+          const c = app.params.champ * Math.exp(-dy * 0.0011);
+          app.set('champ', Math.round(Math.min(160, Math.max(14, c))));
+        },
+      },
+      export: {
+        svg: () => diaphragmSVG(),
+        extra: {
+          'Ouverture PNG': () => {
+            const c = document.createElement('canvas');
+            c.width = c.height = N;
+            const g = c.getContext('2d');
+            const imd = g.createImageData(N, N);
+            for (let i = 0; i < amp.length; i++) {
+              const v = Math.round(Math.max(0, Math.min(1, amp[i])) * 255);
+              imd.data[i * 4] = imd.data[i * 4 + 1] = imd.data[i * 4 + 2] = v;
+              imd.data[i * 4 + 3] = 255;
+            }
+            g.putImageData(imd, 0, 0);
+            c.toBlob((b) => app.download(`ouverture-${app.seed}.png`, b));
+          },
+        },
+      },
+    });
+
+    function placeObstacle(p) {
+      const q = app.params;
+      const m = Math.min(app.size.w, app.size.h);
+      const dx = p.x - app.size.w / 2;
+      const dy = p.y - app.size.h / 2;
+      const beta = Math.atan2(dy, dx);
+      const theta = poseOf(q, app.time).rotation * Math.PI / 180;
+      const alpha = beta - theta;
+      const rad = Math.min(1, Math.hypot(dx, dy) / (m * 0.42)) * q.ouverture;
+      obsX = Math.cos(alpha) * rad;
+      obsY = Math.sin(alpha) * rad;
+      if (q.obstacle < 0.02) app.set('obstacle', 0.07);
+      else bakeKey = '';
+    }
+
+    reseedNoise();
+    app.loop((t) => draw(t));
+  </script>
+</body>
+</html>
